@@ -76,6 +76,15 @@ impl WorldState {
             .insert(account.address.as_str().to_string(), account);
     }
 
+    /// Credits an address directly — for genesis setup and test scaffolding only.
+    pub fn credit_for_test(&mut self, address: Address, amount: Amount) {
+        let acc = self
+            .accounts
+            .entry(address.as_str().to_string())
+            .or_insert_with(|| Account::new(address));
+        acc.balance = acc.balance.saturating_add(amount);
+    }
+
     /// Applies a single transaction, validating signature and business rules.
     pub fn apply_transaction(&mut self, tx: &Transaction) -> Result<(), CoreError> {
         if tx.tx_type != TransactionType::Emission {

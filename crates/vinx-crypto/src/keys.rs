@@ -3,6 +3,7 @@ use ed25519_dalek::{Signer, Verifier};
 use rand::rngs::OsRng;
 use serde::{Deserialize, Deserializer, Serialize, Serializer};
 
+#[derive(Clone)]
 pub struct KeyPair {
     signing_key: ed25519_dalek::SigningKey,
 }

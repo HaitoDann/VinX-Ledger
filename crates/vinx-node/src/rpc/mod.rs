@@ -1,0 +1,21 @@
+pub mod handlers;
+pub mod types;
+
+use axum::{
+    routing::{get, post},
+    Router,
+};
+use std::sync::Arc;
+
+use crate::Node;
+
+pub fn router(node: Arc<Node>) -> Router {
+    Router::new()
+        .route("/health", get(handlers::health))
+        .route("/chain/height", get(handlers::get_height))
+        .route("/account/:address", get(handlers::get_account))
+        .route("/tx/submit", post(handlers::submit_tx))
+        .route("/block/:height", get(handlers::get_block))
+        .route("/mempool/size", get(handlers::get_mempool))
+        .with_state(node)
+}
