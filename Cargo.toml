@@ -1,0 +1,28 @@
+[workspace]
+members = [
+    "crates/vinx-crypto",
+    "crates/vinx-core",
+    "crates/vinx-state",
+    "crates/vinx-node",
+    "crates/vinx-wallet",
+]
+resolver = "2"
+
+[workspace.package]
+version = "0.1.0"
+edition = "2021"
+authors = ["VinX Labs"]
+
+[workspace.dependencies]
+ed25519-dalek = { version = "2", features = ["rand_core"] }
+rand = "0.8"
+sha2 = "0.10"
+bech32 = "0.9"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+hex = "0.4"
+thiserror = "1"
+tokio = { version = "1", features = ["full"] }
+axum = "0.7"
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }

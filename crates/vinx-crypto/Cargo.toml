@@ -1,0 +1,14 @@
+[package]
+name = "vinx-crypto"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+
+[dependencies]
+ed25519-dalek = { workspace = true }
+rand = { workspace = true }
+sha2 = { workspace = true }
+bech32 = { workspace = true }
+serde = { workspace = true }
+hex = { workspace = true }
+thiserror = { workspace = true }

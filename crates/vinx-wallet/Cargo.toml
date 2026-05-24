@@ -1,0 +1,20 @@
+[package]
+name = "vinx-wallet"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+
+[[bin]]
+name = "vinx-wallet"
+path = "src/main.rs"
+
+[dependencies]
+vinx-crypto = { path = "../vinx-crypto" }
+vinx-core = { path = "../vinx-core" }
+tokio = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+hex = { workspace = true }
+thiserror = { workspace = true }
+clap = { version = "4", features = ["derive"] }
+reqwest = { version = "0.12", features = ["json"] }
