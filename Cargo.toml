@@ -4,6 +4,7 @@ members = [
     "crates/vinx-core",
     "crates/vinx-state",
     "crates/vinx-node",
+    "crates/vinx-wallet",
 ]
 resolver = "2"
 
