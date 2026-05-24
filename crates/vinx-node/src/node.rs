@@ -66,14 +66,20 @@ impl Node {
             .rpc_listen
             .parse()
             .map_err(|e: std::net::AddrParseError| NodeError::Config(e.to_string()))?;
-
-        let app = crate::rpc::router(Arc::clone(&self));
-
-        tracing::info!(listen = %addr, "RPC server starting");
         let listener = tokio::net::TcpListener::bind(addr)
             .await
             .map_err(|e| NodeError::Rpc(e.to_string()))?;
+        self.run_rpc_on(listener).await
+    }
 
+    /// Serves the RPC on an already-bound listener.
+    /// Used by integration tests to bind on port 0 without a race condition.
+    pub async fn run_rpc_on(
+        self: Arc<Self>,
+        listener: tokio::net::TcpListener,
+    ) -> Result<(), NodeError> {
+        let app = crate::rpc::router(Arc::clone(&self));
+        tracing::info!(listen = %listener.local_addr().unwrap(), "RPC server starting");
         axum::serve(listener, app)
             .await
             .map_err(|e| NodeError::Rpc(e.to_string()))
