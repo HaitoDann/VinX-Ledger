@@ -353,12 +353,19 @@ function showWallet() {
 async function refreshWalletBalance() {
   if (!wallet) return;
   try {
-    const a = await (await fetch(`${BASE}/account/${wallet.address}`)).json();
+    const resp = await fetch(`${BASE}/account/${wallet.address}`);
+    if (!resp.ok) {
+      document.getElementById('w-bal').textContent = 'Compte non trouvé (envoyez des VINX d\'abord)';
+      document.getElementById('w-nonce').textContent = 'Nonce: 0';
+      wallet.nonce = 0;
+      return;
+    }
+    const a = await resp.json();
     document.getElementById('w-bal').textContent = a.balance;
     document.getElementById('w-nonce').textContent = `Nonce: ${a.nonce}`;
     wallet.nonce = a.nonce;
   } catch {
-    document.getElementById('w-bal').textContent = 'Compte introuvable';
+    document.getElementById('w-bal').textContent = 'Erreur de connexion';
     wallet.nonce = 0;
   }
 }
@@ -473,7 +480,13 @@ async function lookupAccount() {
   if (!addr) return;
   out.innerHTML = `<p class="msg">Chargement…</p>`;
   try {
-    const a = await (await fetch(`${BASE}/account/${addr}`)).json();
+    const resp = await fetch(`${BASE}/account/${addr}`);
+    if (!resp.ok) {
+      const j = await resp.json().catch(() => ({}));
+      out.innerHTML = `<p class="msg err">Compte introuvable — ce compte n'a pas encore reçu de VINX.</p>`;
+      return;
+    }
+    const a = await resp.json();
     out.innerHTML = `
       <div class="rg">
         <div class="ri full"><div class="l">Adresse</div><div class="v mono">${a.address}</div></div>
