@@ -1,3 +1,84 @@
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use vinx_crypto::{Address, KeyPair};
+
+    fn staker(state: &mut WorldState, stake: Amount) -> Address {
+        let addr = Address::from_public_key(&KeyPair::generate().public_key());
+        state.set_staked_for_test(&addr, stake);
+        addr
+    }
+
+    #[test]
+    fn test_no_stakers_pool_unchanged() {
+        let mut s = WorldState::new();
+        s.staking_pool = Amount::from_vinx(100);
+        let distributed = s.distribute_staking_rewards();
+        assert_eq!(distributed, Amount::ZERO);
+        assert_eq!(s.staking_pool, Amount::from_vinx(100));
+    }
+
+    #[test]
+    fn test_empty_pool_distributes_nothing() {
+        let mut s = WorldState::new();
+        let addr = staker(&mut s, Amount::from_vinx(1_000));
+        s.staking_pool = Amount::ZERO;
+        let distributed = s.distribute_staking_rewards();
+        assert_eq!(distributed, Amount::ZERO);
+        assert_eq!(s.accounts[addr.as_str()].balance, Amount::ZERO);
+    }
+
+    #[test]
+    fn test_single_staker_receives_full_pool() {
+        let mut s = WorldState::new();
+        let addr = staker(&mut s, Amount::from_vinx(1_000));
+        s.staking_pool = Amount::from_vinx(50);
+        let distributed = s.distribute_staking_rewards();
+        assert_eq!(distributed, Amount::from_vinx(50));
+        assert_eq!(s.staking_pool, Amount::ZERO);
+        assert_eq!(s.accounts[addr.as_str()].balance, Amount::from_vinx(50));
+    }
+
+    #[test]
+    fn test_two_stakers_proportional() {
+        // Alice: 1 000 staked, Bob: 3 000 staked, pool: 400 → Alice 100, Bob 300
+        let mut s = WorldState::new();
+        let alice = staker(&mut s, Amount::from_vinx(1_000));
+        let bob = staker(&mut s, Amount::from_vinx(3_000));
+        s.staking_pool = Amount::from_vinx(400);
+        s.distribute_staking_rewards();
+        assert_eq!(s.accounts[alice.as_str()].balance, Amount::from_vinx(100));
+        assert_eq!(s.accounts[bob.as_str()].balance, Amount::from_vinx(300));
+        assert_eq!(s.staking_pool, Amount::ZERO);
+    }
+
+    #[test]
+    fn test_remainder_stays_in_pool() {
+        // 2 equal stakers, 3 atoms in pool → each gets 1, 1 stays in pool
+        let mut s = WorldState::new();
+        let a = staker(&mut s, Amount::from_vinx(1_000));
+        let b = staker(&mut s, Amount::from_vinx(1_000));
+        s.staking_pool = Amount::from_atoms(3);
+        s.distribute_staking_rewards();
+        assert_eq!(s.accounts[a.as_str()].balance, Amount::from_atoms(1));
+        assert_eq!(s.accounts[b.as_str()].balance, Amount::from_atoms(1));
+        assert_eq!(s.staking_pool, Amount::from_atoms(1));
+    }
+
+    #[test]
+    fn test_non_stakers_receive_nothing() {
+        let mut s = WorldState::new();
+        let _staker_addr = staker(&mut s, Amount::from_vinx(1_000));
+        // A second account with balance but no stake
+        let idle = Address::from_public_key(&KeyPair::generate().public_key());
+        s.credit_for_test(idle.clone(), Amount::from_vinx(5_000));
+        s.staking_pool = Amount::from_vinx(100);
+        s.distribute_staking_rewards();
+        // Idle account's balance should be unchanged at 5_000 VINX
+        assert_eq!(s.accounts[idle.as_str()].balance, Amount::from_vinx(5_000));
+    }
+}
+
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use vinx_core::{
@@ -233,6 +314,52 @@ impl WorldState {
         Ok(())
     }
 
+    /// Distributes the accumulated staking pool to all accounts with `staked > 0`,
+    /// proportionally to their staked share. The integer-division remainder stays in
+    /// the pool and rolls over to the next block.
+    /// Returns the total amount distributed.
+    pub fn distribute_staking_rewards(&mut self) -> Amount {
+        if self.staking_pool == Amount::ZERO {
+            return Amount::ZERO;
+        }
+
+        let total_staked: u128 = self.accounts.values().map(|a| a.staked.atoms()).sum();
+        if total_staked == 0 {
+            return Amount::ZERO;
+        }
+
+        let pool = self.staking_pool.atoms();
+        let mut distributed = 0u128;
+
+        for account in self.accounts.values_mut() {
+            if account.staked == Amount::ZERO {
+                continue;
+            }
+            // reward = floor(pool * staked / total_staked)
+            // checked_mul guards against overflow; fallback scales down by 10^9
+            // (loses < 1 VINX precision) for extreme values.
+            let reward = pool
+                .checked_mul(account.staked.atoms())
+                .map(|p| p / total_staked)
+                .unwrap_or_else(|| {
+                    let p = pool / 1_000_000_000;
+                    let t = (total_staked / 1_000_000_000).max(1);
+                    p.saturating_mul(account.staked.atoms()) / t
+                });
+            if reward > 0 {
+                account.balance = account.balance.saturating_add(Amount::from_atoms(reward));
+                distributed = distributed.saturating_add(reward);
+            }
+        }
+
+        self.staking_pool = self
+            .staking_pool
+            .checked_sub(Amount::from_atoms(distributed))
+            .unwrap_or(Amount::ZERO);
+
+        Amount::from_atoms(distributed)
+    }
+
     fn apply_freeze(&mut self, tx: &Transaction) -> Result<(), CoreError> {
         let account = self
             .accounts
@@ -247,6 +374,16 @@ impl WorldState {
             account.frozen = false;
         }
         Ok(())
+    }
+
+    #[cfg(test)]
+    fn set_staked_for_test(&mut self, address: &Address, staked: Amount) {
+        let acc = self
+            .accounts
+            .entry(address.as_str().to_string())
+            .or_insert_with(|| vinx_core::Account::new(address.clone()));
+        acc.balance = Amount::ZERO;
+        acc.staked = staked;
     }
 
     fn apply_emission(&mut self, tx: &Transaction) -> Result<(), CoreError> {

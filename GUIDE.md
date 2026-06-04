@@ -4,13 +4,41 @@
 
 - **Rust** ≥ 1.75 — installer via [rustup.rs](https://rustup.rs)
 - **Git**
-- Un terminal (Linux / macOS / WSL)
+- Un terminal (Linux / macOS / WSL / PowerShell / cmd.exe)
 
 Vérifier l'installation :
 ```bash
 rustc --version   # rustc 1.75.0 ou supérieur
 cargo --version
 ```
+
+---
+
+## Note importante — le séparateur `--`
+
+Toutes les commandes `cargo run -p vinx-wallet` **exigent** un `--` entre les
+arguments de cargo et ceux du wallet.
+
+```
+cargo run -p vinx-wallet -- <sous-commande> [options]
+                          ^^
+                   obligatoire
+```
+
+Sans le `--`, cargo intercepte les flags (`-output`, `--amount`, etc.) et
+affiche une erreur du type `unexpected argument 'my-wallet.json' found`.
+
+---
+
+## Syntaxe multi-lignes selon le terminal
+
+Les exemples ci-dessous proposent des variantes pour chaque système.
+
+| Terminal | Continuation de ligne |
+|---|---|
+| Linux / macOS / WSL (bash/zsh) | `\` en fin de ligne |
+| PowerShell (Windows) | `` ` `` (backtick) en fin de ligne |
+| cmd.exe (Windows) | `^` en fin de ligne |
 
 ---
 
@@ -51,9 +79,6 @@ Au premier démarrage, le nœud génère les identités et affiche :
              500,000,000.00 VINX — clé dans devnet/admin.json
   Validator : vinx1yyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyy
   Pool      : vinx1zzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzz
-
-  Générer un wallet :
-    cargo run -p vinx-wallet -- keygen --output my-wallet.json
   ...
 ════════════════════════════════════════════════════════
 ```
@@ -88,11 +113,33 @@ cargo run -p vinx-wallet -- address --wallet my-wallet.json
 
 L'admin dispose de **500 000 000 VINX** au genesis. Sa clé est dans `devnet/admin.json`.
 
+**Linux / macOS / WSL :**
 ```bash
 cargo run -p vinx-wallet -- transfer \
   --wallet devnet/admin.json \
   --to <VOTRE_ADRESSE> \
   --amount 10000
+```
+
+**PowerShell :**
+```powershell
+cargo run -p vinx-wallet -- transfer `
+  --wallet devnet/admin.json `
+  --to <VOTRE_ADRESSE> `
+  --amount 10000
+```
+
+**cmd.exe :**
+```cmd
+cargo run -p vinx-wallet -- transfer ^
+  --wallet devnet/admin.json ^
+  --to <VOTRE_ADRESSE> ^
+  --amount 10000
+```
+
+**En une seule ligne (universel) :**
+```bash
+cargo run -p vinx-wallet -- transfer --wallet devnet/admin.json --to <VOTRE_ADRESSE> --amount 10000
 ```
 
 Sortie :
@@ -138,12 +185,9 @@ cargo run -p vinx-wallet -- address --wallet alice.json
 # → vinx1alice...
 ```
 
-Envoyer depuis son propre wallet :
+Envoyer depuis son propre wallet (**une seule ligne**) :
 ```bash
-cargo run -p vinx-wallet -- transfer \
-  --wallet my-wallet.json \
-  --to <ADRESSE_ALICE> \
-  --amount 500
+cargo run -p vinx-wallet -- transfer --wallet my-wallet.json --to <ADRESSE_ALICE> --amount 500
 ```
 
 ---
@@ -154,17 +198,13 @@ Le staking accumule 80% des frais de toutes les transactions du réseau.
 
 ```bash
 # Staker 1000 VINX
-cargo run -p vinx-wallet -- stake \
-  --wallet my-wallet.json \
-  --amount 1000
+cargo run -p vinx-wallet -- stake --wallet my-wallet.json --amount 1000
 
 # Vérifier : la colonne "Staked" augmente
 cargo run -p vinx-wallet -- balance <VOTRE_ADRESSE>
 
 # Récupérer ses tokens
-cargo run -p vinx-wallet -- unstake \
-  --wallet my-wallet.json \
-  --amount 1000
+cargo run -p vinx-wallet -- unstake --wallet my-wallet.json --amount 1000
 ```
 
 ---
@@ -256,6 +296,12 @@ VinX-Ledger/
 
 ## 12. Dépannage
 
+**`unexpected argument '...' found` ou `error: Found argument '-output'`**
+→ Le `--` entre `cargo run -p vinx-wallet` et la sous-commande est **obligatoire**.
+  Correct : `cargo run -p vinx-wallet -- keygen --output my-wallet.json`
+  Incorrect : `cargo run -p vinx-wallet keygen --output my-wallet.json`
+  Incorrect : `cargo run -p vinx-wallet -output my-wallet.json`
+
 **Le solde ne change pas après le transfer**
 → Attendre le prochain bloc (~3s). Le nœud doit être démarré.
 
@@ -267,8 +313,18 @@ VinX-Ledger/
 
 **Repartir de zéro**
 → Supprimer le dossier `devnet/`. Le nœud génère de nouvelles identités au prochain démarrage.
+
+Linux/macOS/WSL :
 ```bash
 rm -rf devnet/
+```
+Windows (PowerShell) :
+```powershell
+Remove-Item -Recurse -Force devnet\
+```
+Windows (cmd.exe) :
+```cmd
+rmdir /s /q devnet
 ```
 
 **Lancer les tests d'intégration seuls**

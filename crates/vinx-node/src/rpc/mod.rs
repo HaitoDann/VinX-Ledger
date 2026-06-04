@@ -1,5 +1,6 @@
 pub mod handlers;
 pub mod types;
+pub mod ui;
 
 use axum::{
     routing::{get, post},
@@ -11,6 +12,7 @@ use crate::Node;
 
 pub fn router(node: Arc<Node>) -> Router {
     Router::new()
+        .route("/", get(ui::index))
         .route("/health", get(handlers::health))
         .route("/chain/height", get(handlers::get_height))
         .route("/account/:address", get(handlers::get_account))

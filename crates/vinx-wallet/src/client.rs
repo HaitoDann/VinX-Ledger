@@ -8,9 +8,11 @@ use vinx_core::Transaction;
 pub struct AccountInfo {
     pub address: String,
     pub balance: String,
+    #[allow(dead_code)]
     pub balance_atoms: String,
     pub nonce: u64,
     pub staked: String,
+    #[allow(dead_code)]
     pub staked_atoms: String,
     pub frozen: bool,
 }
@@ -26,8 +28,10 @@ pub struct TxInfo {
     pub tx_type: String,
     pub from: String,
     pub to: String,
+    #[allow(dead_code)]
     pub amount: String,
     pub fee: String,
+    #[allow(dead_code)]
     pub nonce: u64,
     pub hash: String,
 }

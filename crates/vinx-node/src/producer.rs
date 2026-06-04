@@ -46,6 +46,12 @@ pub fn produce_block(
         tracing::warn!(rejected, "Transactions dropped from block");
     }
 
+    // Distribute accumulated staking fees to all stakers proportionally
+    let rewards = state.distribute_staking_rewards();
+    if rewards > Amount::ZERO {
+        tracing::debug!(rewards = %rewards, height = next_height, "Staking rewards distributed");
+    }
+
     let header = BlockHeader {
         height: next_height,
         prev_hash,
