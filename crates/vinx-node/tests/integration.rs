@@ -350,3 +350,58 @@ async fn test_sequential_transfers_respect_nonces() {
     assert_eq!(alice_acc["balance_atoms"].as_str().unwrap(), alice_atoms.to_string());
     assert_eq!(bob_acc["balance_atoms"].as_str().unwrap(), bob_atoms.to_string());
 }
+
+#[tokio::test]
+async fn test_staking_rewards_distributed_after_block() {
+    let s = TestSetup::new().await;
+
+    // Fund the staker from admin (admin nonce 0)
+    let staker_kp = KeyPair::generate();
+    let staker = Address::from_public_key(&staker_kp.public_key());
+    s.submit_transfer(&staker, Amount::from_vinx(10_000), 0).await;
+    s.node.tick().await.unwrap(); // block 1: transfer included
+
+    // Stake 5 000 VINX (staker nonce 0, fee-free)
+    let stake_tx = Transaction::new_stake(
+        &staker_kp,
+        Amount::from_vinx(5_000),
+        Amount::ZERO,
+        0,
+    );
+    let stake_resp = s.post_json("/tx/submit", &stake_tx).await;
+    assert_eq!(stake_resp.status(), 200);
+    s.node.tick().await.unwrap(); // block 2: stake included
+
+    // Snapshot staker balance before reward block
+    let before: u128 = s
+        .get_json(&format!("/account/{}", staker))
+        .await["balance_atoms"]
+        .as_str()
+        .unwrap()
+        .parse()
+        .unwrap();
+
+    // Admin sends 10 000 VINX → generates fee → 80% goes to staking pool
+    let receiver = Address::from_public_key(&KeyPair::generate().public_key());
+    s.submit_transfer(&receiver, Amount::from_vinx(10_000), 1).await;
+    s.node.tick().await.unwrap(); // block 3: transfer + reward distribution
+
+    // Staker's balance must have grown (received staking reward)
+    let after: u128 = s
+        .get_json(&format!("/account/{}", staker))
+        .await["balance_atoms"]
+        .as_str()
+        .unwrap()
+        .parse()
+        .unwrap();
+
+    assert!(
+        after > before,
+        "Staker should have received rewards: before={before}, after={after}"
+    );
+
+    // Fee for 10 000 VINX transfer = 0.05% = 5 VINX; 80% staking = 4 VINX
+    // Staker holds 100% of staked supply → receives 4 VINX exactly
+    let expected_reward = Amount::from_vinx(4).atoms();
+    assert_eq!(after - before, expected_reward);
+}
