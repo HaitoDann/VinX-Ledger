@@ -1,6 +1,8 @@
+use serde::{Deserialize, Serialize};
 use vinx_core::{block::GENESIS_PREV_HASH, Block, BlockHeader};
 use vinx_crypto::{Address, Hash32};
 
+#[derive(Serialize, Deserialize)]
 pub struct Chain {
     /// Stored as (block_hash, block) indexed by height.
     blocks: Vec<(Hash32, Block)>,

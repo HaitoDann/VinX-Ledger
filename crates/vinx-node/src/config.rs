@@ -1,3 +1,4 @@
+use std::path::PathBuf;
 use vinx_crypto::{Address, KeyPair};
 
 #[derive(Clone)]
@@ -12,6 +13,8 @@ pub struct NodeConfig {
     pub max_block_txs: usize,
     /// HTTP listen address for the RPC server.
     pub rpc_listen: String,
+    /// Directory for persistent chain and state data. `None` = in-memory only.
+    pub data_dir: Option<PathBuf>,
 }
 
 impl NodeConfig {
@@ -23,6 +26,7 @@ impl NodeConfig {
             block_time_secs: 10,
             max_block_txs: 1_000,
             rpc_listen: "127.0.0.1:8545".to_string(),
+            data_dir: None,
         }
     }
 
@@ -33,6 +37,11 @@ impl NodeConfig {
 
     pub fn with_rpc_listen(mut self, addr: impl Into<String>) -> Self {
         self.rpc_listen = addr.into();
+        self
+    }
+
+    pub fn with_data_dir(mut self, dir: impl Into<PathBuf>) -> Self {
+        self.data_dir = Some(dir.into());
         self
     }
 }

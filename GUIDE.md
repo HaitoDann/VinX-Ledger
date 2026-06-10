@@ -59,7 +59,7 @@ Vérifier que tout compile et passe avant de démarrer :
 cargo test --workspace
 ```
 
-Résultat attendu : **115 tests, 0 failures**.
+Résultat attendu : **118 tests, 0 failures**.
 
 ---
 
@@ -74,6 +74,7 @@ Au premier démarrage, le nœud génère les identités et affiche :
 ```
 ════════════════════════════════════════════════════════
   VinX Ledger — DEVNET  (block time: 3s | RPC: :8545)
+  Nouveau genesis
 ════════════════════════════════════════════════════════
   Admin     : vinx1xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx
              21,000,000.00 VINX — clé dans devnet/admin.json
@@ -82,7 +83,16 @@ Au premier démarrage, le nœud génère les identités et affiche :
 ```
 
 Les clés sont sauvegardées dans `devnet/` et rechargées à chaque redémarrage.
-**Le nœud produit un bloc toutes les 3 secondes.**
+**Le nœud produit un bloc toutes les 3 secondes et sauvegarde l'état sur disque (`devnet/state.bin`, `devnet/chain.bin`).**
+
+Aux redémarrages suivants, le nœud reprend là où il s'est arrêté :
+
+```
+════════════════════════════════════════════════════════
+  VinX Ledger — DEVNET  (block time: 3s | RPC: :8545)
+  Reprise depuis le bloc 42
+════════════════════════════════════════════════════════
+```
 
 > Laisser ce terminal ouvert. Ouvrir un second terminal pour la suite.
 

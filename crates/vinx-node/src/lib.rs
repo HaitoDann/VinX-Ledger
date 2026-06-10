@@ -4,6 +4,7 @@ pub mod mempool;
 pub mod node;
 pub mod producer;
 pub mod rpc;
+pub mod storage;
 
 pub use config::NodeConfig;
 pub use node::Node;

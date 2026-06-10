@@ -7,6 +7,7 @@ use crate::{
     config::NodeConfig,
     mempool::Mempool,
     producer::produce_block,
+    storage::Storage,
     NodeError,
 };
 use vinx_core::Block;
@@ -17,15 +18,18 @@ pub struct Node {
     pub mempool: Arc<RwLock<Mempool>>,
     pub chain: Arc<RwLock<Chain>>,
     pub config: NodeConfig,
+    storage: Option<Storage>,
 }
 
 impl Node {
     pub fn new(state: WorldState, chain: Chain, config: NodeConfig) -> Arc<Self> {
+        let storage = config.data_dir.as_ref().map(|p| Storage::new(p.clone()));
         Arc::new(Self {
             state: Arc::new(RwLock::new(state)),
             mempool: Arc::new(RwLock::new(Mempool::default())),
             chain: Arc::new(RwLock::new(chain)),
             config,
+            storage,
         })
     }
 
@@ -43,18 +47,32 @@ impl Node {
         produce_block(&mut state, &mut chain, &mut mempool, &self.config, timestamp)
     }
 
-    /// Background task: produce a block every `block_time_secs`.
+    /// Background task: produce a block every `block_time_secs`, then persist.
     pub async fn run_block_producer(self: Arc<Self>) {
         let interval = std::time::Duration::from_secs(self.config.block_time_secs);
         loop {
             tokio::time::sleep(interval).await;
             match self.tick().await {
-                Ok(block) => tracing::info!(
-                    height = block.header.height,
-                    txs = block.header.tx_count,
-                    "Block sealed"
-                ),
+                Ok(block) => {
+                    tracing::info!(
+                        height = block.header.height,
+                        txs = block.header.tx_count,
+                        "Block sealed"
+                    );
+                    self.persist().await;
+                }
                 Err(e) => tracing::error!(error = %e, "Block production failed"),
+            }
+        }
+    }
+
+    /// Writes chain and state to disk (no-op if no data_dir configured).
+    async fn persist(&self) {
+        if let Some(ref storage) = self.storage {
+            let state = self.state.read().await;
+            let chain = self.chain.read().await;
+            if let Err(e) = storage.save(&state, &chain) {
+                tracing::warn!(error = %e, "Failed to persist state to disk");
             }
         }
     }

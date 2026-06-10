@@ -1,7 +1,7 @@
 use std::path::{Path, PathBuf};
 use tracing_subscriber::EnvFilter;
 use vinx_crypto::{Address, KeyPair};
-use vinx_node::{chain::Chain, config::NodeConfig};
+use vinx_node::{chain::Chain, config::NodeConfig, storage::Storage};
 use vinx_state::{create_genesis_state, GenesisConfig};
 
 // Keystore JSON — same format as vinx-wallet so keys are directly usable
@@ -60,17 +60,28 @@ async fn main() {
         .unwrap()
         .as_secs();
 
-    let state = create_genesis_state(&GenesisConfig {
-        admin_address: admin_addr.clone(),
-    });
-
-    let (chain, _genesis) = Chain::new_with_genesis(validator_addr.clone(), timestamp);
+    let storage = Storage::new(&devnet_dir);
+    let (state, chain, resumed) = match storage.load() {
+        Some((s, c)) => {
+            let height = s.block_height;
+            tracing::info!(height, "Resuming from persisted state");
+            (s, c, true)
+        }
+        None => {
+            let state = create_genesis_state(&GenesisConfig {
+                admin_address: admin_addr.clone(),
+            });
+            let (chain, _genesis) = Chain::new_with_genesis(validator_addr.clone(), timestamp);
+            (state, chain, false)
+        }
+    };
 
     let config = NodeConfig::new(validator_kp)
         .with_block_time(3)
-        .with_rpc_listen("0.0.0.0:8545");
+        .with_rpc_listen("0.0.0.0:8545")
+        .with_data_dir(devnet_dir.clone());
 
-    print_banner(&admin_kf.address, &validator_kf.address);
+    print_banner(&admin_kf.address, &validator_kf.address, state.block_height, resumed);
 
     let node = vinx_node::Node::new(state, chain, config);
 
@@ -83,10 +94,16 @@ async fn main() {
     }
 }
 
-fn print_banner(admin: &str, validator: &str) {
+fn print_banner(admin: &str, validator: &str, height: u64, resumed: bool) {
     let line = "═".repeat(60);
+    let mode = if resumed {
+        format!("Reprise depuis le bloc {height}")
+    } else {
+        "Nouveau genesis".to_string()
+    };
     println!("\n{line}");
     println!("  VinX Ledger — DEVNET  (block time: 3s | RPC: :8545)");
+    println!("  {mode}");
     println!("{line}");
     println!("  Admin     : {admin}");
     println!("             21,000,000.00 VINX — clé dans devnet/admin.json");
@@ -95,10 +112,7 @@ fn print_banner(admin: &str, validator: &str) {
     println!("  Générer un wallet :");
     println!("    cargo run -p vinx-wallet -- keygen --output my-wallet.json");
     println!();
-    println!("  Vérifier l'adresse :");
-    println!("    cargo run -p vinx-wallet -- address --wallet my-wallet.json");
-    println!();
-    println!("  Envoyer des VINX depuis l'admin vers votre wallet :");
+    println!("  Envoyer des VINX depuis l'admin :");
     println!("    cargo run -p vinx-wallet -- transfer \\");
     println!("      --wallet devnet/admin.json \\");
     println!("      --to <VOTRE_ADRESSE> \\");
