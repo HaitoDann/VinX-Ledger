@@ -13,6 +13,7 @@ mod tests {
     fn test_no_stakers_pool_unchanged() {
         let mut s = WorldState::new();
         s.staking_pool = Amount::from_vinx(100);
+        s.block_height = 100;
         let distributed = s.distribute_staking_rewards();
         assert_eq!(distributed, Amount::ZERO);
         assert_eq!(s.staking_pool, Amount::from_vinx(100));
@@ -23,6 +24,7 @@ mod tests {
         let mut s = WorldState::new();
         let addr = staker(&mut s, Amount::from_vinx(1_000));
         s.staking_pool = Amount::ZERO;
+        s.block_height = 100;
         let distributed = s.distribute_staking_rewards();
         assert_eq!(distributed, Amount::ZERO);
         assert_eq!(s.accounts[addr.as_str()].balance, Amount::ZERO);
@@ -33,6 +35,7 @@ mod tests {
         let mut s = WorldState::new();
         let addr = staker(&mut s, Amount::from_vinx(1_000));
         s.staking_pool = Amount::from_vinx(50);
+        s.block_height = 100;
         let distributed = s.distribute_staking_rewards();
         assert_eq!(distributed, Amount::from_vinx(50));
         assert_eq!(s.staking_pool, Amount::ZERO);
@@ -46,6 +49,7 @@ mod tests {
         let alice = staker(&mut s, Amount::from_vinx(1_000));
         let bob = staker(&mut s, Amount::from_vinx(3_000));
         s.staking_pool = Amount::from_vinx(400);
+        s.block_height = 100;
         s.distribute_staking_rewards();
         assert_eq!(s.accounts[alice.as_str()].balance, Amount::from_vinx(100));
         assert_eq!(s.accounts[bob.as_str()].balance, Amount::from_vinx(300));
@@ -59,6 +63,7 @@ mod tests {
         let a = staker(&mut s, Amount::from_vinx(1_000));
         let b = staker(&mut s, Amount::from_vinx(1_000));
         s.staking_pool = Amount::from_atoms(3);
+        s.block_height = 100;
         s.distribute_staking_rewards();
         assert_eq!(s.accounts[a.as_str()].balance, Amount::from_atoms(1));
         assert_eq!(s.accounts[b.as_str()].balance, Amount::from_atoms(1));
@@ -69,13 +74,42 @@ mod tests {
     fn test_non_stakers_receive_nothing() {
         let mut s = WorldState::new();
         let _staker_addr = staker(&mut s, Amount::from_vinx(1_000));
-        // A second account with balance but no stake
         let idle = Address::from_public_key(&KeyPair::generate().public_key());
         s.credit_for_test(idle.clone(), Amount::from_vinx(5_000));
         s.staking_pool = Amount::from_vinx(100);
+        s.block_height = 100;
         s.distribute_staking_rewards();
-        // Idle account's balance should be unchanged at 5_000 VINX
         assert_eq!(s.accounts[idle.as_str()].balance, Amount::from_vinx(5_000));
+    }
+
+    #[test]
+    fn test_no_distribution_outside_interval() {
+        let mut s = WorldState::new();
+        let addr = staker(&mut s, Amount::from_vinx(1_000));
+        s.staking_pool = Amount::from_vinx(50);
+        s.block_height = 99; // not a multiple of STAKING_DISTRIBUTION_INTERVAL
+        let distributed = s.distribute_staking_rewards();
+        assert_eq!(distributed, Amount::ZERO);
+        assert_eq!(s.staking_pool, Amount::from_vinx(50)); // pool unchanged
+        assert_eq!(s.accounts[addr.as_str()].balance, Amount::ZERO);
+    }
+
+    #[test]
+    fn test_min_stake_enforced() {
+        use vinx_core::{amount::DECIMAL_FACTOR, Transaction};
+        let mut s = WorldState::new();
+        let kp = KeyPair::generate();
+        let addr = Address::from_public_key(&kp.public_key());
+        s.credit_for_test(addr.clone(), Amount::from_vinx(10));
+        // Stake less than 1 VINX should fail
+        let below_min = Amount::from_atoms(DECIMAL_FACTOR - 1);
+        let tx = Transaction::new_stake(&kp, below_min, Amount::ZERO, 0);
+        assert_eq!(
+            s.apply_transaction(&tx),
+            Err(vinx_core::CoreError::InvalidTransaction(
+                "stake amount below minimum 1 VINX".to_string()
+            ))
+        );
     }
 }
 
@@ -83,8 +117,7 @@ use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use vinx_core::{
     amount::{
-        Amount, DEFAULT_FEE_FLOOR_ATOMS, EMISSION_PER_BLOCK_ATOMS, EMISSION_TOTAL_BLOCKS,
-        RESERVE_ALLOCATION_ATOMS,
+        Amount, DEFAULT_FEE_FLOOR_ATOMS, MIN_STAKE_ATOMS, STAKING_DISTRIBUTION_INTERVAL,
     },
     Account, CoreError, Transaction, TransactionType,
 };
@@ -95,17 +128,17 @@ use vinx_crypto::Address;
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct WorldState {
     pub(crate) accounts: HashMap<String, Account>,
-    /// Tokens in circulation (admin allocation + total emitted so far).
+    /// Tokens in circulation (admin allocation + any future unlocks).
     pub circulating_supply: Amount,
     pub block_height: u64,
-    /// Accumulated staking rewards waiting to be distributed.
+    /// Accumulated staking rewards waiting to be distributed every 100 blocks.
     pub staking_pool: Amount,
     /// VinX Labs treasury from fees.
     pub treasury: Amount,
     /// Minimum fee per transaction; adjustable by VinX Labs governance.
     pub fee_floor: Amount,
-    /// Remaining protocol reserve (decreases by EMISSION_PER_BLOCK_ATOMS each block).
-    pub protocol_reserve: Amount,
+    /// Coffre Maturité: locked until 3 governance conditions are met.
+    pub coffre_maturity: Amount,
 }
 
 impl Default for WorldState {
@@ -123,7 +156,7 @@ impl WorldState {
             staking_pool: Amount::ZERO,
             treasury: Amount::ZERO,
             fee_floor: Amount::from_atoms(DEFAULT_FEE_FLOOR_ATOMS),
-            protocol_reserve: Amount::ZERO,
+            coffre_maturity: Amount::ZERO,
         }
     }
 
@@ -184,21 +217,9 @@ impl WorldState {
             TransactionType::Unstake => self.apply_unstake(tx),
             TransactionType::FreezeAccount => self.apply_freeze(tx),
             TransactionType::UnfreezeAccount => self.apply_unfreeze(tx),
-            TransactionType::Emission => self.apply_emission(tx),
-        }
-    }
-
-    /// Returns the emission amount for the given block height.
-    /// The last block emits whatever atoms remain in the reserve.
-    pub fn emission_amount_for_block(block_height: u64) -> Amount {
-        if block_height == EMISSION_TOTAL_BLOCKS {
-            // Last block: emit the remainder to avoid leaving dust in the reserve
-            let emitted_so_far = EMISSION_PER_BLOCK_ATOMS * (EMISSION_TOTAL_BLOCKS - 1) as u128;
-            Amount::from_atoms(RESERVE_ALLOCATION_ATOMS - emitted_so_far)
-        } else if block_height < EMISSION_TOTAL_BLOCKS {
-            Amount::from_atoms(EMISSION_PER_BLOCK_ATOMS)
-        } else {
-            Amount::ZERO // emission period is over
+            TransactionType::Emission => Err(CoreError::InvalidTransaction(
+                "emission disabled in Phase 1".to_string(),
+            )),
         }
     }
 
@@ -263,6 +284,11 @@ impl WorldState {
     }
 
     fn apply_stake(&mut self, tx: &Transaction) -> Result<(), CoreError> {
+        if tx.amount.atoms() < MIN_STAKE_ATOMS {
+            return Err(CoreError::InvalidTransaction(
+                "stake amount below minimum 1 VINX".to_string(),
+            ));
+        }
         let account = self
             .accounts
             .get_mut(tx.from.as_str())
@@ -278,6 +304,10 @@ impl WorldState {
         }
         if account.balance < tx.amount {
             return Err(CoreError::InsufficientBalance);
+        }
+        // Record when staking began (only on first stake; adding to existing stake keeps original timestamp)
+        if account.staked == Amount::ZERO {
+            account.stake_since = self.block_height;
         }
         account.balance = account.balance.checked_sub(tx.amount).unwrap();
         account.staked = account
@@ -310,15 +340,24 @@ impl WorldState {
             .balance
             .checked_add(tx.amount)
             .ok_or(CoreError::AmountOverflow)?;
+        // Reset stake timestamp when fully unstaked
+        if account.staked == Amount::ZERO {
+            account.stake_since = 0;
+        }
         account.nonce += 1;
         Ok(())
     }
 
     /// Distributes the accumulated staking pool to all accounts with `staked > 0`,
-    /// proportionally to their staked share. The integer-division remainder stays in
-    /// the pool and rolls over to the next block.
+    /// proportionally to their staked share. Only fires every STAKING_DISTRIBUTION_INTERVAL
+    /// blocks. The integer-division remainder stays in the pool and rolls over.
     /// Returns the total amount distributed.
     pub fn distribute_staking_rewards(&mut self) -> Amount {
+        if self.block_height == 0
+            || self.block_height % STAKING_DISTRIBUTION_INTERVAL != 0
+        {
+            return Amount::ZERO;
+        }
         if self.staking_pool == Amount::ZERO {
             return Amount::ZERO;
         }
@@ -337,7 +376,6 @@ impl WorldState {
             }
             // reward = floor(pool * staked / total_staked)
             // checked_mul guards against overflow; fallback scales down by 10^9
-            // (loses < 1 VINX precision) for extreme values.
             let reward = pool
                 .checked_mul(account.staked.atoms())
                 .map(|p| p / total_staked)
@@ -384,31 +422,6 @@ impl WorldState {
             .or_insert_with(|| vinx_core::Account::new(address.clone()));
         acc.balance = Amount::ZERO;
         acc.staked = staked;
-    }
-
-    fn apply_emission(&mut self, tx: &Transaction) -> Result<(), CoreError> {
-        let new_supply = self
-            .circulating_supply
-            .checked_add(tx.amount)
-            .ok_or(CoreError::AmountOverflow)?;
-        if new_supply > Amount::MAX_SUPPLY {
-            return Err(CoreError::SupplyCapExceeded);
-        }
-        self.protocol_reserve = self
-            .protocol_reserve
-            .checked_sub(tx.amount)
-            .ok_or(CoreError::InsufficientBalance)?;
-
-        let pool = self
-            .accounts
-            .entry(tx.to.as_str().to_string())
-            .or_insert_with(|| Account::new(tx.to.clone()));
-        pool.balance = pool
-            .balance
-            .checked_add(tx.amount)
-            .ok_or(CoreError::AmountOverflow)?;
-
-        self.circulating_supply = new_supply;
-        Ok(())
+        acc.stake_since = 0;
     }
 }

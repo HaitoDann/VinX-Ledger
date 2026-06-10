@@ -59,7 +59,7 @@ Vérifier que tout compile et passe avant de démarrer :
 cargo test --workspace
 ```
 
-Résultat attendu : **114 tests, 0 failures**.
+Résultat attendu : **115 tests, 0 failures**.
 
 ---
 
@@ -76,10 +76,8 @@ Au premier démarrage, le nœud génère les identités et affiche :
   VinX Ledger — DEVNET  (block time: 3s | RPC: :8545)
 ════════════════════════════════════════════════════════
   Admin     : vinx1xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx
-             500,000,000.00 VINX — clé dans devnet/admin.json
+             21,000,000.00 VINX — clé dans devnet/admin.json
   Validator : vinx1yyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyy
-  Pool      : vinx1zzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzz
-  ...
 ════════════════════════════════════════════════════════
 ```
 
@@ -111,7 +109,7 @@ cargo run -p vinx-wallet -- address --wallet my-wallet.json
 
 ## 5. Recevoir des VINX depuis l'admin
 
-L'admin dispose de **500 000 000 VINX** au genesis. Sa clé est dans `devnet/admin.json`.
+L'admin dispose de **21 000 000 VINX** au genesis (Sandbox Phase 1). Sa clé est dans `devnet/admin.json`.
 
 **Linux / macOS / WSL :**
 ```bash

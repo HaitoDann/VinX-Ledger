@@ -5,7 +5,7 @@ use std::sync::Arc;
 use tokio::time::{sleep, Duration};
 
 use vinx_core::{
-    amount::{Amount, DEFAULT_FEE_FLOOR_ATOMS, EMISSION_PER_BLOCK_ATOMS},
+    amount::{Amount, DEFAULT_FEE_FLOOR_ATOMS},
     Transaction,
 };
 use vinx_crypto::{Address, KeyPair};
@@ -18,14 +18,13 @@ struct TestSetup {
     node: Arc<Node>,
     http: reqwest::Client,
     base_url: String,
-    /// Has 500M VINX at genesis.
+    /// Has 21M VINX at genesis.
     admin_kp: KeyPair,
     admin_addr: Address,
 }
 
 impl TestSetup {
     async fn new() -> Self {
-        // Bind on port 0 — OS assigns a free port, no race condition.
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
             .await
             .unwrap();
@@ -33,20 +32,16 @@ impl TestSetup {
 
         let admin_kp = KeyPair::generate();
         let validator_kp = KeyPair::generate();
-        let pool_kp = KeyPair::generate();
 
         let admin_addr = Address::from_public_key(&admin_kp.public_key());
         let validator_addr = Address::from_public_key(&validator_kp.public_key());
-        let pool_addr = Address::from_public_key(&pool_kp.public_key());
 
         let state = create_genesis_state(&GenesisConfig {
             admin_address: admin_addr.clone(),
-            reserve_address: validator_addr.clone(),
         });
         let (chain, _) = Chain::new_with_genesis(validator_addr.clone(), 0);
 
-        // block_time = 9999 → background loop never fires; we call tick() manually.
-        let config = NodeConfig::new(validator_kp, pool_addr)
+        let config = NodeConfig::new(validator_kp)
             .with_block_time(9999)
             .with_rpc_listen(addr.to_string());
 
@@ -56,7 +51,6 @@ impl TestSetup {
             let _ = rpc_node.run_rpc_on(listener).await;
         });
 
-        // Wait until the server is accepting connections.
         let http = reqwest::Client::new();
         let health_url = format!("http://{}/health", addr);
         for _ in 0..40 {
@@ -99,7 +93,6 @@ impl TestSetup {
             .unwrap()
     }
 
-    /// Builds a signed Transfer from admin to `to` and submits it.
     async fn submit_transfer(
         &self,
         to: &Address,
@@ -139,7 +132,7 @@ async fn test_get_genesis_block() {
     let s = TestSetup::new().await;
     let resp = s.get_json("/block/0").await;
     assert_eq!(resp["height"], 0);
-    assert!(resp["hash"].as_str().unwrap().len() == 64); // 32 bytes hex
+    assert!(resp["hash"].as_str().unwrap().len() == 64);
     assert_eq!(resp["tx_count"], 0);
 }
 
@@ -156,14 +149,14 @@ async fn test_get_nonexistent_block_returns_404() {
 }
 
 #[tokio::test]
-async fn test_admin_account_has_500m_vinx() {
+async fn test_admin_account_has_21m_vinx() {
     let s = TestSetup::new().await;
     let resp = s
         .get_json(&format!("/account/{}", s.admin_addr))
         .await;
     assert_eq!(resp["address"].as_str().unwrap(), s.admin_addr.as_str());
-    // 500M VinX = 500_000_000 * 10^18 atoms
-    let expected: u128 = 500_000_000 * 1_000_000_000_000_000_000;
+    // 21M VinX = 21_000_000 * 10^18 atoms
+    let expected: u128 = 21_000_000 * 1_000_000_000_000_000_000;
     assert_eq!(
         resp["balance_atoms"].as_str().unwrap(),
         expected.to_string()
@@ -175,7 +168,6 @@ async fn test_admin_account_has_500m_vinx() {
 #[tokio::test]
 async fn test_get_unknown_account_returns_404() {
     let s = TestSetup::new().await;
-    // A valid bech32 address that has no account
     let unknown = Address::from_public_key(&KeyPair::generate().public_key());
     let resp = s
         .http
@@ -212,7 +204,6 @@ async fn test_submit_missing_pubkey_rejected() {
     let amount = Amount::from_vinx(1);
     let fee = amount.calculate_fee(Amount::from_atoms(DEFAULT_FEE_FLOOR_ATOMS));
 
-    // Build transaction without pub_key
     let tx = Transaction {
         tx_type: vinx_core::TransactionType::Transfer,
         from: s.admin_addr.clone(),
@@ -235,7 +226,6 @@ async fn test_submit_tampered_amount_rejected() {
     let amount = Amount::from_vinx(1);
     let fee = amount.calculate_fee(Amount::from_atoms(DEFAULT_FEE_FLOOR_ATOMS));
 
-    // Sign a tx for 1 VINX, then inflate the amount before submission
     let mut tx = Transaction::new_transfer(&s.admin_kp, receiver, amount, fee, 0);
     tx.amount = Amount::from_vinx(999_999_999);
 
@@ -251,7 +241,6 @@ async fn test_submit_wrong_pubkey_rejected() {
     let amount = Amount::from_vinx(1);
     let fee = amount.calculate_fee(Amount::from_atoms(DEFAULT_FEE_FLOOR_ATOMS));
 
-    // Signed by admin but pub_key replaced with attacker's
     let mut tx = Transaction::new_transfer(&s.admin_kp, receiver, amount, fee, 0);
     tx.pub_key = Some(attacker_kp.public_key());
 
@@ -272,19 +261,12 @@ async fn test_block_production_increments_height() {
 }
 
 #[tokio::test]
-async fn test_block_contains_emission_tx() {
+async fn test_first_block_has_no_transactions() {
     let s = TestSetup::new().await;
     s.node.tick().await.unwrap();
 
     let block = s.get_json("/block/1").await;
-    assert_eq!(block["tx_count"], 1);
-    let txs = block["transactions"].as_array().unwrap();
-    assert_eq!(txs[0]["tx_type"], "Emission");
-    // Emission amount should match EMISSION_PER_BLOCK_ATOMS
-    assert_eq!(
-        txs[0]["amount_atoms"].as_str().unwrap(),
-        EMISSION_PER_BLOCK_ATOMS.to_string()
-    );
+    assert_eq!(block["tx_count"], 0);
 }
 
 #[tokio::test]
@@ -294,11 +276,9 @@ async fn test_transfer_included_in_block_and_balance_updated() {
     let receiver = Address::from_public_key(&receiver_kp.public_key());
     let amount = Amount::from_vinx(5_000);
 
-    // Submit transfer
     let submit_resp = s.submit_transfer(&receiver, amount, 0).await;
     assert_eq!(submit_resp["accepted"], true);
 
-    // Receiver has no account yet
     let pre = s
         .http
         .get(s.url(&format!("/account/{}", receiver)))
@@ -307,13 +287,10 @@ async fn test_transfer_included_in_block_and_balance_updated() {
         .unwrap();
     assert_eq!(pre.status(), 404);
 
-    // Produce a block
     s.node.tick().await.unwrap();
 
-    // Mempool should now be empty
     assert_eq!(s.get_json("/mempool/size").await["pending"], 0);
 
-    // Receiver balance should be 5_000 VINX
     let acc = s
         .get_json(&format!("/account/{}", receiver))
         .await;
@@ -323,7 +300,6 @@ async fn test_transfer_included_in_block_and_balance_updated() {
         expected_atoms.to_string()
     );
 
-    // Admin nonce should be 1
     let admin = s
         .get_json(&format!("/account/{}", s.admin_addr))
         .await;
@@ -336,7 +312,6 @@ async fn test_sequential_transfers_respect_nonces() {
     let alice = Address::from_public_key(&KeyPair::generate().public_key());
     let bob = Address::from_public_key(&KeyPair::generate().public_key());
 
-    // Two transfers: nonce 0 and nonce 1
     s.submit_transfer(&alice, Amount::from_vinx(1_000), 0).await;
     s.submit_transfer(&bob, Amount::from_vinx(2_000), 1).await;
 
@@ -352,16 +327,17 @@ async fn test_sequential_transfers_respect_nonces() {
 }
 
 #[tokio::test]
-async fn test_staking_rewards_distributed_after_block() {
+async fn test_staking_rewards_distributed_at_block_100() {
     let s = TestSetup::new().await;
 
-    // Fund the staker from admin (admin nonce 0)
     let staker_kp = KeyPair::generate();
     let staker = Address::from_public_key(&staker_kp.public_key());
-    s.submit_transfer(&staker, Amount::from_vinx(10_000), 0).await;
-    s.node.tick().await.unwrap(); // block 1: transfer included
 
-    // Stake 5 000 VINX (staker nonce 0, fee-free)
+    // Block 1: fund staker from admin (nonce 0)
+    s.submit_transfer(&staker, Amount::from_vinx(10_000), 0).await;
+    s.node.tick().await.unwrap();
+
+    // Block 2: staker stakes 5 000 VINX
     let stake_tx = Transaction::new_stake(
         &staker_kp,
         Amount::from_vinx(5_000),
@@ -370,9 +346,18 @@ async fn test_staking_rewards_distributed_after_block() {
     );
     let stake_resp = s.post_json("/tx/submit", &stake_tx).await;
     assert_eq!(stake_resp.status(), 200);
-    s.node.tick().await.unwrap(); // block 2: stake included
+    s.node.tick().await.unwrap();
 
-    // Snapshot staker balance before reward block
+    // Block 3: admin sends 10 000 VINX to generate a fee
+    // Fee = 0.05% of 10 000 = 5 VINX; 80% = 4 VINX to staking pool
+    let receiver = Address::from_public_key(&KeyPair::generate().public_key());
+    s.submit_transfer(&receiver, Amount::from_vinx(10_000), 1).await;
+    s.node.tick().await.unwrap();
+
+    // Also the block 1 transfer generated a fee: 5 VINX, 80% = 4 VINX to pool
+    // Pool total = 4 (block 1) + 4 (block 3) = 8 VINX
+
+    // Snapshot balance before distribution window
     let before: u128 = s
         .get_json(&format!("/account/{}", staker))
         .await["balance_atoms"]
@@ -381,12 +366,22 @@ async fn test_staking_rewards_distributed_after_block() {
         .parse()
         .unwrap();
 
-    // Admin sends 10 000 VINX → generates fee → 80% goes to staking pool
-    let receiver = Address::from_public_key(&KeyPair::generate().public_key());
-    s.submit_transfer(&receiver, Amount::from_vinx(10_000), 1).await;
-    s.node.tick().await.unwrap(); // block 3: transfer + reward distribution
+    // Blocks 4..=99 — no transactions, no distribution yet
+    for _ in 4..=99 {
+        s.node.tick().await.unwrap();
+    }
+    let mid: u128 = s
+        .get_json(&format!("/account/{}", staker))
+        .await["balance_atoms"]
+        .as_str()
+        .unwrap()
+        .parse()
+        .unwrap();
+    assert_eq!(mid, before, "No distribution should occur before block 100");
 
-    // Staker's balance must have grown (received staking reward)
+    // Block 100: distribution fires — staker owns 100% of stake → gets all 8 VINX
+    s.node.tick().await.unwrap();
+
     let after: u128 = s
         .get_json(&format!("/account/{}", staker))
         .await["balance_atoms"]
@@ -395,13 +390,10 @@ async fn test_staking_rewards_distributed_after_block() {
         .parse()
         .unwrap();
 
-    assert!(
-        after > before,
-        "Staker should have received rewards: before={before}, after={after}"
+    let expected_reward = Amount::from_vinx(8).atoms();
+    assert_eq!(
+        after - before,
+        expected_reward,
+        "Staker should receive 8 VINX at block 100 (before={before}, after={after})"
     );
-
-    // Fee for 10 000 VINX transfer = 0.05% = 5 VINX; 80% staking = 4 VINX
-    // Staker holds 100% of staked supply → receives 4 VINX exactly
-    let expected_reward = Amount::from_vinx(4).atoms();
-    assert_eq!(after - before, expected_reward);
 }

@@ -51,12 +51,9 @@ async fn main() {
         KeyFile::load_or_generate(&devnet_dir.join("admin.json"));
     let (validator_kf, validator_kp) =
         KeyFile::load_or_generate(&devnet_dir.join("validator.json"));
-    let (pool_kf, _pool_kp) =
-        KeyFile::load_or_generate(&devnet_dir.join("pool.json"));
 
     let admin_addr: Address = admin_kf.address.parse().expect("admin address");
     let validator_addr: Address = validator_kf.address.parse().expect("validator address");
-    let pool_addr: Address = pool_kf.address.parse().expect("pool address");
 
     let timestamp = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
@@ -65,16 +62,15 @@ async fn main() {
 
     let state = create_genesis_state(&GenesisConfig {
         admin_address: admin_addr.clone(),
-        reserve_address: validator_addr.clone(),
     });
 
     let (chain, _genesis) = Chain::new_with_genesis(validator_addr.clone(), timestamp);
 
-    let config = NodeConfig::new(validator_kp, pool_addr.clone())
+    let config = NodeConfig::new(validator_kp)
         .with_block_time(3)
         .with_rpc_listen("0.0.0.0:8545");
 
-    print_banner(&admin_kf.address, &validator_kf.address, &pool_kf.address);
+    print_banner(&admin_kf.address, &validator_kf.address);
 
     let node = vinx_node::Node::new(state, chain, config);
 
@@ -87,15 +83,14 @@ async fn main() {
     }
 }
 
-fn print_banner(admin: &str, validator: &str, pool: &str) {
+fn print_banner(admin: &str, validator: &str) {
     let line = "═".repeat(60);
     println!("\n{line}");
     println!("  VinX Ledger — DEVNET  (block time: 3s | RPC: :8545)");
     println!("{line}");
     println!("  Admin     : {admin}");
-    println!("             500,000,000.00 VINX — clé dans devnet/admin.json");
+    println!("             21,000,000.00 VINX — clé dans devnet/admin.json");
     println!("  Validator : {validator}");
-    println!("  Pool      : {pool}");
     println!("{line}");
     println!("  Générer un wallet :");
     println!("    cargo run -p vinx-wallet -- keygen --output my-wallet.json");

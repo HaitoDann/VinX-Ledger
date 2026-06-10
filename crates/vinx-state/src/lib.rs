@@ -8,8 +8,8 @@ pub use world_state::WorldState;
 mod tests {
     use super::*;
     use vinx_core::{
-        amount::{Amount, DEFAULT_FEE_FLOOR_ATOMS, EMISSION_PER_BLOCK_ATOMS, RESERVE_ALLOCATION_ATOMS},
-        Transaction, TransactionType,
+        amount::{Amount, DEFAULT_FEE_FLOOR_ATOMS},
+        Transaction,
     };
     use vinx_crypto::{Address, KeyPair};
 
@@ -18,11 +18,9 @@ mod tests {
     fn funded_state() -> (WorldState, KeyPair, Address) {
         let sender_kp = KeyPair::generate();
         let sender_addr = Address::from_public_key(&sender_kp.public_key());
-        let reserve_addr = Address::from_public_key(&KeyPair::generate().public_key());
 
         let state = create_genesis_state(&GenesisConfig {
             admin_address: sender_addr.clone(),
-            reserve_address: reserve_addr,
         });
         (state, sender_kp, sender_addr)
     }
@@ -31,7 +29,6 @@ mod tests {
         Amount::from_atoms(DEFAULT_FEE_FLOOR_ATOMS)
     }
 
-    /// Computes the correct protocol fee for a given transfer amount.
     fn fee_for(amount: Amount) -> Amount {
         amount.calculate_fee(floor())
     }
@@ -73,8 +70,8 @@ mod tests {
     fn test_transfer_insufficient_balance() {
         let (mut state, sender_kp, _) = funded_state();
         let receiver = Address::from_public_key(&KeyPair::generate().public_key());
-        // Try to send more than total admin allocation (500M)
-        let too_much = Amount::from_vinx(600_000_000);
+        // Try to send more than total admin allocation (21M)
+        let too_much = Amount::from_vinx(22_000_000);
         let tx = Transaction::new_transfer(&sender_kp, receiver, too_much, fee_for(too_much), 0);
 
         let result = state.apply_transaction(&tx);
@@ -86,7 +83,6 @@ mod tests {
         let (mut state, sender_kp, sender_addr) = funded_state();
         let receiver = Address::from_public_key(&KeyPair::generate().public_key());
 
-        // Manually mark as frozen (admin multi-sig logic lives in governance layer)
         state.accounts.get_mut(sender_addr.as_str()).unwrap().frozen = true;
 
         let amount = Amount::from_vinx(1);
@@ -102,7 +98,6 @@ mod tests {
         let (mut state, sender_kp, _) = funded_state();
         let receiver = Address::from_public_key(&KeyPair::generate().public_key());
         let amount = Amount::from_vinx(1);
-        // Use nonce 1 but account nonce is 0
         let tx = Transaction::new_transfer(&sender_kp, receiver, amount, fee_for(amount), 1);
 
         assert!(matches!(
@@ -130,7 +125,7 @@ mod tests {
     fn test_transfer_fee_split() {
         let (mut state, sender_kp, _) = funded_state();
         let receiver = Address::from_public_key(&KeyPair::generate().public_key());
-        let amount = Amount::from_vinx(10_000); // 0.05% of 10_000 = 5 VinX fee
+        let amount = Amount::from_vinx(10_000);
         let fee = fee_for(amount);
 
         let tx = Transaction::new_transfer(&sender_kp, receiver, amount, fee, 0);
@@ -149,7 +144,6 @@ mod tests {
         let receiver = Address::from_public_key(&KeyPair::generate().public_key());
         let amount = Amount::from_vinx(1);
         let mut tx = Transaction::new_transfer(&sender_kp, receiver, amount, fee_for(amount), 0);
-        // Tamper with the amount after signing
         tx.amount = Amount::from_vinx(999_999_999);
 
         assert_eq!(
@@ -167,7 +161,6 @@ mod tests {
         let receiver = Address::from_public_key(&KeyPair::generate().public_key());
         let amount = Amount::from_vinx(1);
         let mut tx = Transaction::new_transfer(&sender_kp, receiver, amount, fee_for(amount), 0);
-        // Replace pub_key with attacker's key
         tx.pub_key = Some(attacker_kp.public_key());
 
         assert_eq!(
@@ -225,83 +218,18 @@ mod tests {
         );
     }
 
-    // ─── emission ───────────────────────────────────────────────────────────────
-
     #[test]
-    fn test_emission_increases_circulating_supply() {
-        let (mut state, _, _) = funded_state();
-        let before = state.circulating_supply;
-        let pool = Address::from_public_key(&KeyPair::generate().public_key());
-        let reserve = Address::from_public_key(&KeyPair::generate().public_key());
-        let emit_amount = Amount::from_atoms(EMISSION_PER_BLOCK_ATOMS);
-
-        let tx = Transaction::new_emission(pool, emit_amount, reserve);
-        state.apply_transaction(&tx).unwrap();
-
-        assert_eq!(
-            state.circulating_supply,
-            before.checked_add(emit_amount).unwrap()
-        );
-    }
-
-    #[test]
-    fn test_emission_credits_pool_account() {
-        let (mut state, _, _) = funded_state();
-        let pool = Address::from_public_key(&KeyPair::generate().public_key());
-        let reserve = Address::from_public_key(&KeyPair::generate().public_key());
-        let emit_amount = Amount::from_atoms(EMISSION_PER_BLOCK_ATOMS);
-
-        let tx = Transaction::new_emission(pool.clone(), emit_amount, reserve);
-        state.apply_transaction(&tx).unwrap();
-
-        assert_eq!(state.account_balance(&pool), emit_amount);
-    }
-
-    #[test]
-    fn test_emission_decreases_reserve() {
-        let (mut state, _, _) = funded_state();
-        let before_reserve = state.protocol_reserve;
-        let pool = Address::from_public_key(&KeyPair::generate().public_key());
-        let reserve = Address::from_public_key(&KeyPair::generate().public_key());
-        let emit_amount = Amount::from_atoms(EMISSION_PER_BLOCK_ATOMS);
-
-        let tx = Transaction::new_emission(pool, emit_amount, reserve);
-        state.apply_transaction(&tx).unwrap();
-
-        assert_eq!(
-            state.protocol_reserve,
-            before_reserve.checked_sub(emit_amount).unwrap()
-        );
-    }
-
-    #[test]
-    fn test_emission_cannot_exceed_supply_cap() {
-        let (mut state, _, _) = funded_state();
-        // Force circulating supply near the cap
-        state.circulating_supply = Amount::MAX_SUPPLY;
-        let pool = Address::from_public_key(&KeyPair::generate().public_key());
-        let reserve = Address::from_public_key(&KeyPair::generate().public_key());
-        let tx = Transaction::new_emission(
-            pool,
-            Amount::from_atoms(EMISSION_PER_BLOCK_ATOMS),
-            reserve,
-        );
+    fn test_stake_below_minimum_rejected() {
+        let (mut state, sender_kp, _) = funded_state();
+        use vinx_core::amount::DECIMAL_FACTOR;
+        let below_min = Amount::from_atoms(DECIMAL_FACTOR - 1);
+        let tx = Transaction::new_stake(&sender_kp, below_min, Amount::ZERO, 0);
         assert_eq!(
             state.apply_transaction(&tx),
-            Err(vinx_core::CoreError::SupplyCapExceeded)
+            Err(vinx_core::CoreError::InvalidTransaction(
+                "stake amount below minimum 1 VINX".to_string()
+            ))
         );
-    }
-
-    #[test]
-    fn test_emission_amount_per_block() {
-        let amount = WorldState::emission_amount_for_block(1);
-        assert_eq!(amount.atoms(), EMISSION_PER_BLOCK_ATOMS);
-    }
-
-    #[test]
-    fn test_emission_zero_after_period() {
-        let amount = WorldState::emission_amount_for_block(40_000_000);
-        assert_eq!(amount, Amount::ZERO);
     }
 
     // ─── freeze / unfreeze ──────────────────────────────────────────────────────
@@ -309,6 +237,7 @@ mod tests {
     #[test]
     fn test_freeze_and_unfreeze() {
         let (mut state, sender_kp, sender_addr) = funded_state();
+        let _ = sender_kp;
         assert!(!state.is_frozen(&sender_addr));
 
         state.accounts.get_mut(sender_addr.as_str()).unwrap().frozen = true;

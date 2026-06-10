@@ -6,27 +6,27 @@ pub const DECIMAL_FACTOR: u128 = 1_000_000_000_000_000_000; // 10^18
 
 /// Absolute supply cap: 100 billion VinX — immutable by protocol.
 pub const MAX_SUPPLY_ATOMS: u128 = 100_000_000_000 * DECIMAL_FACTOR;
-/// Genesis allocation to VinX Labs admin account: 500 million VinX.
-pub const ADMIN_ALLOCATION_ATOMS: u128 = 500_000_000 * DECIMAL_FACTOR;
-/// Protocol reserve for linear emission over 10 years: 99.5 billion VinX.
-pub const RESERVE_ALLOCATION_ATOMS: u128 = 99_500_000_000 * DECIMAL_FACTOR;
-
-/// 10 years × 365 days × 24h × 60min × 6 blocks/min (10s block time).
-pub const EMISSION_TOTAL_BLOCKS: u64 = 31_536_000;
-/// Atoms emitted per block (integer division; the last block emits the remainder).
-pub const EMISSION_PER_BLOCK_ATOMS: u128 =
-    RESERVE_ALLOCATION_ATOMS / EMISSION_TOTAL_BLOCKS as u128;
+/// Genesis allocation to VinX Labs admin account: 21 million VinX (Sandbox Phase 1).
+pub const ADMIN_ALLOCATION_ATOMS: u128 = 21_000_000 * DECIMAL_FACTOR;
+/// Coffre Maturité: 99.979 billion VinX locked until 3 governance conditions are met.
+pub const COFFRE_MATURITY_ATOMS: u128 = 99_979_000_000 * DECIMAL_FACTOR;
 
 /// Transaction fee: 0.05% = 5 / 10_000.
 pub const FEE_NUMERATOR: u128 = 5;
 pub const FEE_DENOMINATOR: u128 = 10_000;
 
-/// Default fee floor: 0.01 VinX.
-pub const DEFAULT_FEE_FLOOR_ATOMS: u128 = DECIMAL_FACTOR / 100;
+/// Default fee floor: 0.0001 VinX.
+pub const DEFAULT_FEE_FLOOR_ATOMS: u128 = DECIMAL_FACTOR / 10_000;
 
 /// Fee split: 80% to staking pool, 20% to VinX Labs treasury.
 pub const STAKING_SHARE_NUMERATOR: u128 = 80;
 pub const STAKING_SHARE_DENOMINATOR: u128 = 100;
+
+/// Staking rewards distributed every N blocks (~17 minutes at 10s/block).
+pub const STAKING_DISTRIBUTION_INTERVAL: u64 = 100;
+
+/// Minimum amount that can be staked: 1 VinX.
+pub const MIN_STAKE_ATOMS: u128 = DECIMAL_FACTOR;
 
 /// Internal token amount stored as an integer in the smallest unit (10^-18 VinX).
 /// All arithmetic uses checked operations to prevent overflow or underflow.
@@ -87,7 +87,6 @@ impl Amount {
 impl fmt::Display for Amount {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         let whole = self.0 / DECIMAL_FACTOR;
-        // Extract the first 2 displayed decimal digits
         let sub = self.0 % DECIMAL_FACTOR;
         let cents = sub / (DECIMAL_FACTOR / 100);
         write!(f, "{}.{:02} VINX", whole, cents)
@@ -113,27 +112,9 @@ mod tests {
     #[test]
     fn test_allocations_sum_to_max_supply() {
         let admin = Amount::from_atoms(ADMIN_ALLOCATION_ATOMS);
-        let reserve = Amount::from_atoms(RESERVE_ALLOCATION_ATOMS);
-        let total = admin.checked_add(reserve).unwrap();
+        let coffre = Amount::from_atoms(COFFRE_MATURITY_ATOMS);
+        let total = admin.checked_add(coffre).unwrap();
         assert_eq!(total, Amount::MAX_SUPPLY);
-    }
-
-    #[test]
-    fn test_emission_per_block_atoms() {
-        // ~3155 VinX per block
-        let per_block = Amount::from_atoms(EMISSION_PER_BLOCK_ATOMS);
-        assert!(per_block > Amount::from_vinx(3_100));
-        assert!(per_block < Amount::from_vinx(3_200));
-    }
-
-    #[test]
-    fn test_emission_total_within_reserve() {
-        let total_emitted = EMISSION_PER_BLOCK_ATOMS * EMISSION_TOTAL_BLOCKS as u128;
-        // Must not exceed reserve (integer division floors it)
-        assert!(total_emitted <= RESERVE_ALLOCATION_ATOMS);
-        // Must be very close (within one block emission of the reserve)
-        let remainder = RESERVE_ALLOCATION_ATOMS - total_emitted;
-        assert!(remainder < EMISSION_PER_BLOCK_ATOMS);
     }
 
     #[test]
@@ -167,14 +148,14 @@ mod tests {
     fn test_fee_uses_percentage_for_large_amount() {
         // 0.05% of 1000 VinX = 0.5 VinX
         let amount = Amount::from_vinx(1_000);
-        let floor = Amount::from_atoms(DEFAULT_FEE_FLOOR_ATOMS); // 0.01 VinX
+        let floor = Amount::from_atoms(DEFAULT_FEE_FLOOR_ATOMS); // 0.0001 VinX
         let fee = amount.calculate_fee(floor);
         assert_eq!(fee, Amount::from_atoms(DECIMAL_FACTOR / 2)); // 0.5 VinX
     }
 
     #[test]
     fn test_fee_uses_floor_for_small_amount() {
-        // 0.05% of 0.001 VinX = 0.0000005 VinX < floor of 0.01 VinX
+        // 0.05% of 0.001 VinX = 0.0000005 VinX < floor of 0.0001 VinX
         let amount = Amount::from_atoms(DECIMAL_FACTOR / 1_000);
         let floor = Amount::from_atoms(DEFAULT_FEE_FLOOR_ATOMS);
         let fee = amount.calculate_fee(floor);
@@ -188,7 +169,6 @@ mod tests {
         let treasury = Amount::treasury_share(fee);
         assert_eq!(staking, Amount::from_vinx(80));
         assert_eq!(treasury, Amount::from_vinx(20));
-        // No atoms lost in the split
         assert_eq!(staking.checked_add(treasury).unwrap(), fee);
     }
 
@@ -199,7 +179,6 @@ mod tests {
 
     #[test]
     fn test_display_with_cents() {
-        // 1.5 VinX = 1.5 * 10^18 atoms
         let amount = Amount::from_atoms(DECIMAL_FACTOR + DECIMAL_FACTOR / 2);
         assert_eq!(format!("{}", amount), "1.50 VINX");
     }
