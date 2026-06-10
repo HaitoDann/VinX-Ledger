@@ -41,13 +41,16 @@ pub fn produce_block(
         tracing::debug!(rewards = %rewards, height = next_height, "Staking rewards distributed");
     }
 
+    // Compute Merkle root over all account states after all mutations
+    let state_root = state.compute_state_root();
+
     let header = BlockHeader {
         height: next_height,
         prev_hash,
         timestamp,
         validator: config.validator_address.clone(),
         tx_count: block_txs.len() as u32,
-        state_root: [0u8; 32],
+        state_root,
     };
     let block = Block {
         header,
@@ -164,5 +167,34 @@ mod tests {
         let b1 = produce_block(&mut state, &mut chain, &mut mempool, &config, 10).unwrap();
         let b2 = produce_block(&mut state, &mut chain, &mut mempool, &config, 20).unwrap();
         assert_eq!(b2.header.prev_hash, b1.hash());
+    }
+
+    #[test]
+    fn test_state_root_is_non_zero_after_block() {
+        let (mut state, mut chain, mut mempool, config) = setup();
+        // Even an empty block has accounts in genesis → root must be non-zero
+        let block = produce_block(&mut state, &mut chain, &mut mempool, &config, 1_000).unwrap();
+        assert_ne!(block.header.state_root, [0u8; 32]);
+    }
+
+    #[test]
+    fn test_state_root_changes_after_transfer() {
+        let (mut state, mut chain, mut mempool, config) = setup();
+
+        let b1 = produce_block(&mut state, &mut chain, &mut mempool, &config, 1_000).unwrap();
+        let root_before = b1.header.state_root;
+
+        // Inject a transfer into the mempool
+        let sender_kp = KeyPair::generate();
+        let sender_addr = Address::from_public_key(&sender_kp.public_key());
+        let receiver = Address::from_public_key(&KeyPair::generate().public_key());
+        state.credit_for_test(sender_addr.clone(), Amount::from_vinx(1_000));
+
+        let amount = Amount::from_vinx(100);
+        let fee = amount.calculate_fee(Amount::from_atoms(DEFAULT_FEE_FLOOR_ATOMS));
+        mempool.add(vinx_core::Transaction::new_transfer(&sender_kp, receiver, amount, fee, 0)).unwrap();
+
+        let b2 = produce_block(&mut state, &mut chain, &mut mempool, &config, 2_000).unwrap();
+        assert_ne!(b2.header.state_root, root_before);
     }
 }

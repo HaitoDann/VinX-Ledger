@@ -1,3 +1,15 @@
+fn hash_account(account: &Account) -> Hash32 {
+    let addr = account.address.as_str().as_bytes();
+    let mut buf = Vec::with_capacity(addr.len() + 16 + 8 + 16 + 1 + 8);
+    buf.extend_from_slice(addr);
+    buf.extend_from_slice(&account.balance.atoms().to_be_bytes());
+    buf.extend_from_slice(&account.nonce.to_be_bytes());
+    buf.extend_from_slice(&account.staked.atoms().to_be_bytes());
+    buf.push(account.frozen as u8);
+    buf.extend_from_slice(&account.stake_since.to_be_bytes());
+    sha256(&buf)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -95,6 +107,50 @@ mod tests {
     }
 
     #[test]
+    fn test_state_root_empty_is_zero() {
+        let s = WorldState::new();
+        assert_eq!(s.compute_state_root(), [0u8; 32]);
+    }
+
+    #[test]
+    fn test_state_root_is_deterministic() {
+        let mut s = WorldState::new();
+        let addr = Address::from_public_key(&KeyPair::generate().public_key());
+        s.credit_for_test(addr, Amount::from_vinx(100));
+        assert_eq!(s.compute_state_root(), s.compute_state_root());
+    }
+
+    #[test]
+    fn test_state_root_changes_on_balance_change() {
+        let mut s = WorldState::new();
+        let addr = Address::from_public_key(&KeyPair::generate().public_key());
+        s.credit_for_test(addr.clone(), Amount::from_vinx(100));
+        let root_before = s.compute_state_root();
+        s.credit_for_test(addr, Amount::from_vinx(1));
+        let root_after = s.compute_state_root();
+        assert_ne!(root_before, root_after);
+    }
+
+    #[test]
+    fn test_state_root_order_independent_of_insertion() {
+        // Same accounts inserted in different order → same root
+        let kp1 = KeyPair::generate();
+        let kp2 = KeyPair::generate();
+        let addr1 = Address::from_public_key(&kp1.public_key());
+        let addr2 = Address::from_public_key(&kp2.public_key());
+
+        let mut s1 = WorldState::new();
+        s1.credit_for_test(addr1.clone(), Amount::from_vinx(50));
+        s1.credit_for_test(addr2.clone(), Amount::from_vinx(200));
+
+        let mut s2 = WorldState::new();
+        s2.credit_for_test(addr2, Amount::from_vinx(200));
+        s2.credit_for_test(addr1, Amount::from_vinx(50));
+
+        assert_eq!(s1.compute_state_root(), s2.compute_state_root());
+    }
+
+    #[test]
     fn test_min_stake_enforced() {
         use vinx_core::{amount::DECIMAL_FACTOR, Transaction};
         let mut s = WorldState::new();
@@ -121,7 +177,7 @@ use vinx_core::{
     },
     Account, CoreError, Transaction, TransactionType,
 };
-use vinx_crypto::Address;
+use vinx_crypto::{merkle_root, sha256, Address, Hash32};
 
 /// In-memory representation of the full chain state.
 /// Each call to `apply_transaction` mutates the state atomically.
@@ -396,6 +452,20 @@ impl WorldState {
             .unwrap_or(Amount::ZERO);
 
         Amount::from_atoms(distributed)
+    }
+
+    /// Computes the Merkle root of the account state.
+    ///
+    /// Each account is hashed as:
+    ///   SHA-256(address_utf8 || balance_be128 || nonce_be64 || staked_be128 || frozen_u8 || stake_since_be64)
+    ///
+    /// Accounts are sorted deterministically by address string before building the tree.
+    pub fn compute_state_root(&self) -> Hash32 {
+        let mut entries: Vec<&Account> = self.accounts.values().collect();
+        entries.sort_by_key(|a| a.address.as_str());
+
+        let leaves: Vec<Hash32> = entries.iter().map(|a| hash_account(a)).collect();
+        merkle_root(&leaves)
     }
 
     fn apply_freeze(&mut self, tx: &Transaction) -> Result<(), CoreError> {
