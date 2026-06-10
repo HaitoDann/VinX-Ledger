@@ -1,6 +1,6 @@
 # VinX Ledger — Livre Blanc
 
-**Version :** 2.3
+**Version :** 2.4
 **Date :** Juin 2026
 **Éditeur :** VinX Labs
 
@@ -21,8 +21,8 @@ Cohérent avec cette philosophie, VinX est développé sur un **protocole Rust e
 ## 2. Architecture Technique
 
 - **Langage** : Rust, implémentation propriétaire de bout en bout
-- **Vitesse** : Blocs de 10 secondes, finalité déterministe immédiate via le consensus FBA
-- **Performance** : Cible de 1 500 transactions par seconde (TPS)
+- **Vitesse** : Blocs de 10 secondes, finalité déterministe immédiate via le consensus PoA Threshold
+- **Performance** : Cible de 4 000 transactions par seconde (TPS)
 - **Précision** : 18 décimales internes, 2 décimales affichées à l'utilisateur
 - **Adresses** : Format Bech32 avec préfixe `vinx1`
 - **Cryptographie** : Ed25519 (signatures), SHA-256 (hachage), Bech32 (adresses)
@@ -36,7 +36,7 @@ VinX Ledger est implémenté sans framework blockchain tiers. Ce choix garantit 
 - **Alignement avec la vision** — une monnaie artisanale mérite une implémentation artisanale
 - **Stabilité à long terme** — aucune dépendance upstream susceptible de casser l'API
 
-Les briques P2P (libp2p Rust), consensus FBA et mises à jour forkless sont développées nativement dans le projet.
+Les briques P2P (libp2p Rust), consensus PoA Threshold et mises à jour forkless sont développées nativement dans le projet.
 
 ---
 
@@ -121,13 +121,15 @@ Ce cycle continue **perpétuellement**, garantissant la pérennité économique 
 
 ## 6. Infrastructure : Validateurs & Full Nodes
 
-### 6.1 Validateurs Core (FBA)
+### 6.1 Validateurs Core (PoA Threshold)
 
-Liste restreinte de nœuds sélectionnés et opérés par VinX Labs et des partenaires de confiance.
+Liste restreinte de nœuds sélectionnés, opérés par VinX Labs et des partenaires de confiance, **légalement identifiés et responsables**.
 
-**Rôle** : signer techniquement les blocs, maintenir le consensus, protéger contre les attaques byzantines.
+**Rôle** : proposer et co-signer les blocs, maintenir le consensus, garantir la disponibilité du réseau.
 
-**Mécanisme** : Federated Byzantine Agreement (FBA) — un bloc est finalisé lorsque **80% des validateurs de la UNL (Unique Node List)** l'ont accepté. La finalité est déterministe et immédiate.
+**Mécanisme** : Proof of Authority Threshold — à chaque bloc, le validateur désigné (rotation déterministe) propose un bloc. Ce bloc est finalisé lorsque **plus de 66% des validateurs actifs** (≥ 14 sur 21 à maturité) l'ont co-signé. La finalité est déterministe et immédiate : un bloc signé ne peut jamais être réorganisé.
+
+**Tolérance aux pannes** : le réseau reste opérationnel tant que 66% des validateurs sont en ligne. Jusqu'à 33% de validateurs hors-ligne ou défaillants sont tolérés sans interruption du service.
 
 **Évolution** : 1 (dev) → 5 (lancement) → 9 (stabilisation) → 21 (maturité). Les validateurs ne sont **pas rémunérés directement** — leur incitation est la légitimité, l'influence et l'utilité stratégique.
 
@@ -173,7 +175,7 @@ Les éléments suivants **ne peuvent jamais être modifiés**, par aucun mécani
 
 1. **Cap de 100 milliards** de VinX (jamais augmenté)
 2. **Architecture des deux compartiments** (Sandbox 21M + Coffre Maturité 99,979 Md)
-3. **Consensus FBA** (pas de switch vers PoS ou PoW)
+3. **Consensus permissionné** (pas de switch vers PoW anonyme ou PoS ouvert)
 4. **Aucun burn** (jamais)
 5. **Propriété des comptes** (gel possible uniquement sur décision judiciaire, unfreeze automatique à 12 mois)
 6. **Conditions de déverrouillage du Coffre Maturité** (3 conditions cumulatives strictes)
@@ -201,7 +203,7 @@ Lorsque le Coffre Maturité sera déverrouillé, VinX Labs aura obtenu son statu
 Sans calendrier engagé, par phases :
 
 - **Phase 1** : MVP et Sandbox active (21M VinX en circulation progressive)
-- **Phase 2** : Testnet public étendu, audit, communauté minimale
+- **Phase 2** : Testnet public étendu, multi-validateurs PoA, audit, communauté minimale
 - **Phase 3** : Mainnet et déverrouillage progressif du Coffre Maturité (sous conditions strictes)
 
 VinX Ledger n'a pas de pression d'agenda. Le projet avance à son rythme.
@@ -216,9 +218,9 @@ VinX Ledger n'a pas de pression d'agenda. Le projet avance à son rythme.
 | Stack | Rust, implémentation propriétaire |
 | Cryptographie | Ed25519, SHA-256, Bech32 (`vinx1`) |
 | Bloc | 10 secondes |
-| TPS Phase 1 | 1 500 |
-| Consensus | FBA custom, seuil 80%, finalité déterministe |
-| Validateurs | 1→5→9→21, sélectionnés VinX Labs, non rémunérés |
+| TPS Phase 1 | 4 000 |
+| Consensus | PoA Threshold, seuil 66%, finalité déterministe |
+| Validateurs | 1→5→9→21, sélectionnés VinX Labs, légalement identifiés |
 | Full nodes | Ouverts à tous, sans rémunération en Phase 1 |
 | Supply totale | 100 milliards VinX (immuable) |
 | Sandbox active | 21 millions VinX (Phase 1) |
@@ -234,4 +236,4 @@ VinX Ledger n'a pas de pression d'agenda. Le projet avance à son rythme.
 
 ---
 
-*VinX Labs, juin 2026 — Document de référence v2.3*
+*VinX Labs, juin 2026 — Document de référence v2.4*
