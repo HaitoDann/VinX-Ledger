@@ -1,5 +1,5 @@
 use serde::Serialize;
-use vinx_core::{Account, Block, Transaction};
+use vinx_core::{Account, Block, ProtocolVersion, ScheduledUpgrade, Transaction, ValidatorSet};
 use vinx_crypto::Hash32;
 
 fn hash_to_hex(h: &Hash32) -> String {
@@ -87,11 +87,16 @@ pub struct BlockResponse {
     pub timestamp: u64,
     pub validator: String,
     pub tx_count: u32,
+    pub state_root: String,
+    /// Number of valid co-signatures from registered validators.
+    pub signatures_count: usize,
+    /// True when signatures_count >= quorum.
+    pub finalized: bool,
     pub transactions: Vec<TxResponse>,
 }
 
 impl BlockResponse {
-    pub fn from_block(block: &Block) -> Self {
+    pub fn from_block(block: &Block, validator_set: &ValidatorSet) -> Self {
         Self {
             height: block.header.height,
             hash: hash_to_hex(&block.hash()),
@@ -99,6 +104,9 @@ impl BlockResponse {
             timestamp: block.header.timestamp,
             validator: block.header.validator.to_string(),
             tx_count: block.header.tx_count,
+            state_root: hash_to_hex(&block.header.state_root),
+            signatures_count: block.valid_signer_count(validator_set),
+            finalized: block.is_finalized(validator_set),
             transactions: block.transactions.iter().map(TxResponse::from_tx).collect(),
         }
     }
@@ -107,6 +115,49 @@ impl BlockResponse {
 #[derive(Serialize)]
 pub struct MempoolResponse {
     pub pending: usize,
+}
+
+#[derive(Serialize)]
+pub struct ValidatorSetResponse {
+    pub count: usize,
+    pub quorum: usize,
+    pub validators: Vec<String>,
+}
+
+impl ValidatorSetResponse {
+    pub fn from_validator_set(vs: &ValidatorSet) -> Self {
+        Self {
+            count: vs.len(),
+            quorum: vs.quorum(),
+            validators: vs.validators().iter().map(|a| a.to_string()).collect(),
+        }
+    }
+}
+
+#[derive(Serialize)]
+pub struct ProtocolStatusResponse {
+    pub current_version: String,
+    pub pending_upgrade: Option<PendingUpgradeResponse>,
+}
+
+#[derive(Serialize)]
+pub struct PendingUpgradeResponse {
+    pub version: String,
+    pub activation_height: u64,
+    pub announced_at: u64,
+}
+
+impl ProtocolStatusResponse {
+    pub fn new(version: &ProtocolVersion, upgrade: Option<&ScheduledUpgrade>) -> Self {
+        Self {
+            current_version: version.to_string(),
+            pending_upgrade: upgrade.map(|u| PendingUpgradeResponse {
+                version: u.version.to_string(),
+                activation_height: u.activation_height,
+                announced_at: u.announced_at,
+            }),
+        }
+    }
 }
 
 #[derive(Serialize)]

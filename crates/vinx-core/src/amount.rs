@@ -28,6 +28,14 @@ pub const STAKING_DISTRIBUTION_INTERVAL: u64 = 100;
 /// Minimum amount that can be staked: 1 VinX.
 pub const MIN_STAKE_ATOMS: u128 = DECIMAL_FACTOR;
 
+/// Judicial freeze duration before mandatory auto-unfreeze: 365 days at 10 s/block.
+pub const FREEZE_DURATION_BLOCKS: u64 = 365 * 24 * 360; // 3_153_600 blocks ≈ 1 year
+
+/// Announcement lead-time minimums by upgrade type.
+pub const UPGRADE_NOTICE_PATCH_BLOCKS: u64 = 7 * 24 * 360;  //  7 days
+pub const UPGRADE_NOTICE_MINOR_BLOCKS: u64 = 30 * 24 * 360; // 30 days
+pub const UPGRADE_NOTICE_MAJOR_BLOCKS: u64 = 90 * 24 * 360; // 90 days
+
 /// Internal token amount stored as an integer in the smallest unit (10^-18 VinX).
 /// All arithmetic uses checked operations to prevent overflow or underflow.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Default, Serialize, Deserialize)]

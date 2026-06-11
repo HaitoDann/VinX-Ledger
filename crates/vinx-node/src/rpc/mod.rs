@@ -19,5 +19,7 @@ pub fn router(node: Arc<Node>) -> Router {
         .route("/tx/submit", post(handlers::submit_tx))
         .route("/block/:height", get(handlers::get_block))
         .route("/mempool/size", get(handlers::get_mempool))
+        .route("/validators", get(handlers::get_validators))
+        .route("/protocol/version", get(handlers::get_protocol_status))
         .with_state(node)
 }

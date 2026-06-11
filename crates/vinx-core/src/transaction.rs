@@ -1,4 +1,5 @@
 use crate::amount::Amount;
+use crate::protocol::ProtocolVersion;
 use serde::{Deserialize, Serialize};
 use vinx_crypto::{sha256, Address, Hash32, KeyPair, PublicKey, VinxSignature};
 
@@ -9,6 +10,8 @@ pub enum TransactionType {
     Unstake,
     FreezeAccount,
     UnfreezeAccount,
+    /// Admin-only: schedule a protocol upgrade at a future block height.
+    AnnounceUpgrade,
     /// Protocol-internal: moves tokens from reserve to the public sale pool each block.
     Emission,
 }
@@ -21,7 +24,8 @@ impl TransactionType {
             TransactionType::Unstake => 0x03,
             TransactionType::FreezeAccount => 0x04,
             TransactionType::UnfreezeAccount => 0x05,
-            TransactionType::Emission => 0x06,
+            TransactionType::AnnounceUpgrade => 0x06,
+            TransactionType::Emission => 0x07,
         }
     }
 }
@@ -35,6 +39,9 @@ pub struct Transaction {
     /// Fee the sender explicitly agrees to pay (validated against protocol minimum).
     pub fee: Amount,
     pub nonce: u64,
+    /// Extra typed data for specialized transactions (empty for standard ops).
+    /// AnnounceUpgrade: 14 bytes = major(2) || minor(2) || patch(2) || activation_height(8)
+    pub payload: Vec<u8>,
     /// Sender's public key — used to verify `from` ownership.
     pub pub_key: Option<PublicKey>,
     pub signature: Option<VinxSignature>,
@@ -54,6 +61,9 @@ impl Transaction {
         bytes.extend_from_slice(&self.amount.atoms().to_be_bytes());
         bytes.extend_from_slice(&self.fee.atoms().to_be_bytes());
         bytes.extend_from_slice(&self.nonce.to_be_bytes());
+        if !self.payload.is_empty() {
+            bytes.extend_from_slice(&self.payload);
+        }
         bytes
     }
 
@@ -86,6 +96,7 @@ impl Transaction {
             amount,
             fee,
             nonce,
+            payload: vec![],
             pub_key: Some(pk),
             signature: None,
         };
@@ -97,7 +108,7 @@ impl Transaction {
     pub fn new_stake(keypair: &KeyPair, amount: Amount, fee: Amount, nonce: u64) -> Self {
         let pk = keypair.public_key();
         let from = Address::from_public_key(&pk);
-        let to = from.clone(); // stake to self
+        let to = from.clone();
         let mut tx = Self {
             tx_type: TransactionType::Stake,
             from,
@@ -105,6 +116,7 @@ impl Transaction {
             amount,
             fee,
             nonce,
+            payload: vec![],
             pub_key: Some(pk),
             signature: None,
         };
@@ -124,11 +136,98 @@ impl Transaction {
             amount,
             fee,
             nonce,
+            payload: vec![],
             pub_key: Some(pk),
             signature: None,
         };
         tx.signature = Some(keypair.sign(&tx.signing_bytes()));
         tx
+    }
+
+    /// Constructs and signs a FreezeAccount transaction (admin only).
+    pub fn new_freeze(keypair: &KeyPair, target: Address, nonce: u64) -> Self {
+        let pk = keypair.public_key();
+        let from = Address::from_public_key(&pk);
+        let mut tx = Self {
+            tx_type: TransactionType::FreezeAccount,
+            from,
+            to: target,
+            amount: Amount::ZERO,
+            fee: Amount::ZERO,
+            nonce,
+            payload: vec![],
+            pub_key: Some(pk),
+            signature: None,
+        };
+        tx.signature = Some(keypair.sign(&tx.signing_bytes()));
+        tx
+    }
+
+    /// Constructs and signs an UnfreezeAccount transaction (admin only).
+    pub fn new_unfreeze(keypair: &KeyPair, target: Address, nonce: u64) -> Self {
+        let pk = keypair.public_key();
+        let from = Address::from_public_key(&pk);
+        let mut tx = Self {
+            tx_type: TransactionType::UnfreezeAccount,
+            from,
+            to: target,
+            amount: Amount::ZERO,
+            fee: Amount::ZERO,
+            nonce,
+            payload: vec![],
+            pub_key: Some(pk),
+            signature: None,
+        };
+        tx.signature = Some(keypair.sign(&tx.signing_bytes()));
+        tx
+    }
+
+    /// Constructs and signs an AnnounceUpgrade transaction (admin only).
+    ///
+    /// The `activation_height` must be far enough in the future based on the upgrade type
+    /// (patch ≥ 7 days, minor ≥ 30 days, major ≥ 90 days). Validation is enforced by WorldState.
+    pub fn new_announce_upgrade(
+        keypair: &KeyPair,
+        version: ProtocolVersion,
+        activation_height: u64,
+        nonce: u64,
+    ) -> Self {
+        let pk = keypair.public_key();
+        let from = Address::from_public_key(&pk);
+        // Payload: major(2) || minor(2) || patch(2) || activation_height(8) = 14 bytes
+        let mut payload = Vec::with_capacity(14);
+        payload.extend_from_slice(&version.major.to_be_bytes());
+        payload.extend_from_slice(&version.minor.to_be_bytes());
+        payload.extend_from_slice(&version.patch.to_be_bytes());
+        payload.extend_from_slice(&activation_height.to_be_bytes());
+        let mut tx = Self {
+            tx_type: TransactionType::AnnounceUpgrade,
+            from: from.clone(),
+            to: from,
+            amount: Amount::ZERO,
+            fee: Amount::ZERO,
+            nonce,
+            payload,
+            pub_key: Some(pk),
+            signature: None,
+        };
+        tx.signature = Some(keypair.sign(&tx.signing_bytes()));
+        tx
+    }
+
+    /// Decodes version + activation_height from the payload of an AnnounceUpgrade transaction.
+    /// Returns None if the payload is malformed.
+    pub fn decode_upgrade_payload(&self) -> Option<(ProtocolVersion, u64)> {
+        if self.payload.len() != 14 {
+            return None;
+        }
+        let major = u16::from_be_bytes([self.payload[0], self.payload[1]]);
+        let minor = u16::from_be_bytes([self.payload[2], self.payload[3]]);
+        let patch = u16::from_be_bytes([self.payload[4], self.payload[5]]);
+        let activation_height = u64::from_be_bytes(
+            self.payload[6..14].try_into().ok()?
+        );
+        Some((ProtocolVersion::new(major, minor, patch), activation_height))
     }
 
     /// Constructs an Emission transaction (no signature — protocol-only).
@@ -140,6 +239,7 @@ impl Transaction {
             amount,
             fee: Amount::ZERO,
             nonce: 0,
+            payload: vec![],
             pub_key: None,
             signature: None,
         }
@@ -171,7 +271,6 @@ mod tests {
     fn test_signing_bytes_include_all_fields() {
         let (_, tx) = make_transfer();
         let bytes = tx.signing_bytes();
-        // type discriminant + from + to + amount(16) + fee(16) + nonce(8)
         assert!(!bytes.is_empty());
         assert_eq!(bytes[0], 0x01); // Transfer discriminant
     }
@@ -186,7 +285,6 @@ mod tests {
     fn test_different_txs_different_hashes() {
         let (_, tx1) = make_transfer();
         let (_, tx2) = make_transfer();
-        // Different keypairs → different from addresses → different hashes
         assert_ne!(tx1.hash(), tx2.hash());
     }
 
@@ -217,5 +315,34 @@ mod tests {
         let tx1 = Transaction::new_transfer(&sender, to, Amount::from_vinx(10), fee, 1);
         assert_ne!(tx0.signing_bytes(), tx1.signing_bytes());
         assert_ne!(tx0.hash(), tx1.hash());
+    }
+
+    #[test]
+    fn test_announce_upgrade_payload_roundtrip() {
+        let kp = KeyPair::generate();
+        let version = ProtocolVersion::new(1, 1, 0);
+        let activation = 500_000u64;
+        let tx = Transaction::new_announce_upgrade(&kp, version.clone(), activation, 0);
+        let (decoded_ver, decoded_height) = tx.decode_upgrade_payload().unwrap();
+        assert_eq!(decoded_ver, version);
+        assert_eq!(decoded_height, activation);
+    }
+
+    #[test]
+    fn test_freeze_tx_has_correct_type() {
+        let kp = KeyPair::generate();
+        let target = Address::from_public_key(&KeyPair::generate().public_key());
+        let tx = Transaction::new_freeze(&kp, target, 0);
+        assert_eq!(tx.tx_type, TransactionType::FreezeAccount);
+        assert_eq!(tx.amount, Amount::ZERO);
+        assert_eq!(tx.fee, Amount::ZERO);
+    }
+
+    #[test]
+    fn test_unfreeze_tx_has_correct_type() {
+        let kp = KeyPair::generate();
+        let target = Address::from_public_key(&KeyPair::generate().public_key());
+        let tx = Transaction::new_unfreeze(&kp, target, 1);
+        assert_eq!(tx.tx_type, TransactionType::UnfreezeAccount);
     }
 }

@@ -1,144 +1,33 @@
-#[cfg(test)]
-mod tests {
-    use super::*;
-    use vinx_crypto::{Address, KeyPair};
-
-    fn staker(state: &mut WorldState, stake: Amount) -> Address {
-        let addr = Address::from_public_key(&KeyPair::generate().public_key());
-        state.set_staked_for_test(&addr, stake);
-        addr
-    }
-
-    #[test]
-    fn test_no_stakers_pool_unchanged() {
-        let mut s = WorldState::new();
-        s.staking_pool = Amount::from_vinx(100);
-        s.block_height = 100;
-        let distributed = s.distribute_staking_rewards();
-        assert_eq!(distributed, Amount::ZERO);
-        assert_eq!(s.staking_pool, Amount::from_vinx(100));
-    }
-
-    #[test]
-    fn test_empty_pool_distributes_nothing() {
-        let mut s = WorldState::new();
-        let addr = staker(&mut s, Amount::from_vinx(1_000));
-        s.staking_pool = Amount::ZERO;
-        s.block_height = 100;
-        let distributed = s.distribute_staking_rewards();
-        assert_eq!(distributed, Amount::ZERO);
-        assert_eq!(s.accounts[addr.as_str()].balance, Amount::ZERO);
-    }
-
-    #[test]
-    fn test_single_staker_receives_full_pool() {
-        let mut s = WorldState::new();
-        let addr = staker(&mut s, Amount::from_vinx(1_000));
-        s.staking_pool = Amount::from_vinx(50);
-        s.block_height = 100;
-        let distributed = s.distribute_staking_rewards();
-        assert_eq!(distributed, Amount::from_vinx(50));
-        assert_eq!(s.staking_pool, Amount::ZERO);
-        assert_eq!(s.accounts[addr.as_str()].balance, Amount::from_vinx(50));
-    }
-
-    #[test]
-    fn test_two_stakers_proportional() {
-        // Alice: 1 000 staked, Bob: 3 000 staked, pool: 400 → Alice 100, Bob 300
-        let mut s = WorldState::new();
-        let alice = staker(&mut s, Amount::from_vinx(1_000));
-        let bob = staker(&mut s, Amount::from_vinx(3_000));
-        s.staking_pool = Amount::from_vinx(400);
-        s.block_height = 100;
-        s.distribute_staking_rewards();
-        assert_eq!(s.accounts[alice.as_str()].balance, Amount::from_vinx(100));
-        assert_eq!(s.accounts[bob.as_str()].balance, Amount::from_vinx(300));
-        assert_eq!(s.staking_pool, Amount::ZERO);
-    }
-
-    #[test]
-    fn test_remainder_stays_in_pool() {
-        // 2 equal stakers, 3 atoms in pool → each gets 1, 1 stays in pool
-        let mut s = WorldState::new();
-        let a = staker(&mut s, Amount::from_vinx(1_000));
-        let b = staker(&mut s, Amount::from_vinx(1_000));
-        s.staking_pool = Amount::from_atoms(3);
-        s.block_height = 100;
-        s.distribute_staking_rewards();
-        assert_eq!(s.accounts[a.as_str()].balance, Amount::from_atoms(1));
-        assert_eq!(s.accounts[b.as_str()].balance, Amount::from_atoms(1));
-        assert_eq!(s.staking_pool, Amount::from_atoms(1));
-    }
-
-    #[test]
-    fn test_non_stakers_receive_nothing() {
-        let mut s = WorldState::new();
-        let _staker_addr = staker(&mut s, Amount::from_vinx(1_000));
-        let idle = Address::from_public_key(&KeyPair::generate().public_key());
-        s.credit_for_test(idle.clone(), Amount::from_vinx(5_000));
-        s.staking_pool = Amount::from_vinx(100);
-        s.block_height = 100;
-        s.distribute_staking_rewards();
-        assert_eq!(s.accounts[idle.as_str()].balance, Amount::from_vinx(5_000));
-    }
-
-    #[test]
-    fn test_no_distribution_outside_interval() {
-        let mut s = WorldState::new();
-        let addr = staker(&mut s, Amount::from_vinx(1_000));
-        s.staking_pool = Amount::from_vinx(50);
-        s.block_height = 99; // not a multiple of STAKING_DISTRIBUTION_INTERVAL
-        let distributed = s.distribute_staking_rewards();
-        assert_eq!(distributed, Amount::ZERO);
-        assert_eq!(s.staking_pool, Amount::from_vinx(50)); // pool unchanged
-        assert_eq!(s.accounts[addr.as_str()].balance, Amount::ZERO);
-    }
-
-    #[test]
-    fn test_min_stake_enforced() {
-        use vinx_core::{amount::DECIMAL_FACTOR, Transaction};
-        let mut s = WorldState::new();
-        let kp = KeyPair::generate();
-        let addr = Address::from_public_key(&kp.public_key());
-        s.credit_for_test(addr.clone(), Amount::from_vinx(10));
-        // Stake less than 1 VINX should fail
-        let below_min = Amount::from_atoms(DECIMAL_FACTOR - 1);
-        let tx = Transaction::new_stake(&kp, below_min, Amount::ZERO, 0);
-        assert_eq!(
-            s.apply_transaction(&tx),
-            Err(vinx_core::CoreError::InvalidTransaction(
-                "stake amount below minimum 1 VINX".to_string()
-            ))
-        );
-    }
-}
-
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use vinx_core::{
     amount::{
-        Amount, DEFAULT_FEE_FLOOR_ATOMS, MIN_STAKE_ATOMS, STAKING_DISTRIBUTION_INTERVAL,
+        Amount, DEFAULT_FEE_FLOOR_ATOMS, FREEZE_DURATION_BLOCKS, MIN_STAKE_ATOMS,
+        STAKING_DISTRIBUTION_INTERVAL,
     },
+    protocol::{ProtocolVersion, ScheduledUpgrade},
     Account, CoreError, Transaction, TransactionType,
 };
-use vinx_crypto::Address;
+use vinx_crypto::{merkle_root, sha256, Address, Hash32};
 
 /// In-memory representation of the full chain state.
-/// Each call to `apply_transaction` mutates the state atomically.
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct WorldState {
     pub(crate) accounts: HashMap<String, Account>,
-    /// Tokens in circulation (admin allocation + any future unlocks).
     pub circulating_supply: Amount,
     pub block_height: u64,
-    /// Accumulated staking rewards waiting to be distributed every 100 blocks.
     pub staking_pool: Amount,
-    /// VinX Labs treasury from fees.
     pub treasury: Amount,
-    /// Minimum fee per transaction; adjustable by VinX Labs governance.
     pub fee_floor: Amount,
     /// Coffre Maturité: locked until 3 governance conditions are met.
     pub coffre_maturity: Amount,
+    /// Address that may issue admin transactions (freeze, upgrade announcements).
+    /// None = no admin restrictions (dev/test mode).
+    pub admin_address: Option<Address>,
+    /// Currently running protocol version.
+    pub current_version: ProtocolVersion,
+    /// Upgrade scheduled but not yet activated.
+    pub pending_upgrade: Option<ScheduledUpgrade>,
 }
 
 impl Default for WorldState {
@@ -157,6 +46,9 @@ impl WorldState {
             treasury: Amount::ZERO,
             fee_floor: Amount::from_atoms(DEFAULT_FEE_FLOOR_ATOMS),
             coffre_maturity: Amount::ZERO,
+            admin_address: None,
+            current_version: ProtocolVersion::GENESIS,
+            pending_upgrade: None,
         }
     }
 
@@ -190,7 +82,6 @@ impl WorldState {
             .insert(account.address.as_str().to_string(), account);
     }
 
-    /// Credits an address directly — for genesis setup and test scaffolding only.
     pub fn credit_for_test(&mut self, address: Address, amount: Amount) {
         let acc = self
             .accounts
@@ -199,7 +90,6 @@ impl WorldState {
         acc.balance = acc.balance.saturating_add(amount);
     }
 
-    /// Applies a single transaction, validating signature and business rules.
     pub fn apply_transaction(&mut self, tx: &Transaction) -> Result<(), CoreError> {
         if tx.tx_type != TransactionType::Emission {
             let pk = tx.pub_key.as_ref().ok_or(CoreError::InvalidSignature)?;
@@ -217,10 +107,20 @@ impl WorldState {
             TransactionType::Unstake => self.apply_unstake(tx),
             TransactionType::FreezeAccount => self.apply_freeze(tx),
             TransactionType::UnfreezeAccount => self.apply_unfreeze(tx),
+            TransactionType::AnnounceUpgrade => self.apply_announce_upgrade(tx),
             TransactionType::Emission => Err(CoreError::InvalidTransaction(
                 "emission disabled in Phase 1".to_string(),
             )),
         }
+    }
+
+    fn check_admin(&self, tx: &Transaction) -> Result<(), CoreError> {
+        if let Some(ref admin) = self.admin_address {
+            if &tx.from != admin {
+                return Err(CoreError::Unauthorized);
+            }
+        }
+        Ok(())
     }
 
     fn apply_transfer(&mut self, tx: &Transaction) -> Result<(), CoreError> {
@@ -236,7 +136,6 @@ impl WorldState {
             .checked_add(tx.fee)
             .ok_or(CoreError::AmountOverflow)?;
 
-        // Validate and debit sender
         {
             let sender = self
                 .accounts
@@ -258,7 +157,6 @@ impl WorldState {
             sender.nonce += 1;
         }
 
-        // Credit receiver (create account if new)
         let receiver = self
             .accounts
             .entry(tx.to.as_str().to_string())
@@ -268,7 +166,6 @@ impl WorldState {
             .checked_add(tx.amount)
             .ok_or(CoreError::AmountOverflow)?;
 
-        // Distribute fee: 80% staking pool, 20% treasury
         let staking = Amount::staking_share(tx.fee);
         let treasury = Amount::treasury_share(tx.fee);
         self.staking_pool = self
@@ -305,7 +202,6 @@ impl WorldState {
         if account.balance < tx.amount {
             return Err(CoreError::InsufficientBalance);
         }
-        // Record when staking began (only on first stake; adding to existing stake keeps original timestamp)
         if account.staked == Amount::ZERO {
             account.stake_since = self.block_height;
         }
@@ -340,7 +236,6 @@ impl WorldState {
             .balance
             .checked_add(tx.amount)
             .ok_or(CoreError::AmountOverflow)?;
-        // Reset stake timestamp when fully unstaked
         if account.staked == Amount::ZERO {
             account.stake_since = 0;
         }
@@ -348,10 +243,150 @@ impl WorldState {
         Ok(())
     }
 
-    /// Distributes the accumulated staking pool to all accounts with `staked > 0`,
-    /// proportionally to their staked share. Only fires every STAKING_DISTRIBUTION_INTERVAL
-    /// blocks. The integer-division remainder stays in the pool and rolls over.
-    /// Returns the total amount distributed.
+    fn apply_freeze(&mut self, tx: &Transaction) -> Result<(), CoreError> {
+        self.check_admin(tx)?;
+        let sender = self
+            .accounts
+            .get_mut(tx.from.as_str())
+            .ok_or(CoreError::InsufficientBalance)?;
+        if sender.nonce != tx.nonce {
+            return Err(CoreError::InvalidNonce {
+                expected: sender.nonce,
+                got: tx.nonce,
+            });
+        }
+        sender.nonce += 1;
+
+        let target = self
+            .accounts
+            .get_mut(tx.to.as_str())
+            .ok_or(CoreError::InvalidTransaction("target account does not exist".to_string()))?;
+        if target.frozen {
+            return Err(CoreError::InvalidTransaction(
+                "account is already frozen".to_string(),
+            ));
+        }
+        target.frozen = true;
+        target.frozen_since = self.block_height;
+        Ok(())
+    }
+
+    fn apply_unfreeze(&mut self, tx: &Transaction) -> Result<(), CoreError> {
+        self.check_admin(tx)?;
+        let sender = self
+            .accounts
+            .get_mut(tx.from.as_str())
+            .ok_or(CoreError::InsufficientBalance)?;
+        if sender.nonce != tx.nonce {
+            return Err(CoreError::InvalidNonce {
+                expected: sender.nonce,
+                got: tx.nonce,
+            });
+        }
+        sender.nonce += 1;
+
+        let target = self
+            .accounts
+            .get_mut(tx.to.as_str())
+            .ok_or(CoreError::InvalidTransaction("target account does not exist".to_string()))?;
+        target.frozen = false;
+        target.frozen_since = 0;
+        Ok(())
+    }
+
+    fn apply_announce_upgrade(&mut self, tx: &Transaction) -> Result<(), CoreError> {
+        self.check_admin(tx)?;
+
+        if self.pending_upgrade.is_some() {
+            return Err(CoreError::UpgradeViolation(
+                "an upgrade is already scheduled".to_string(),
+            ));
+        }
+
+        let (new_version, activation_height) = tx
+            .decode_upgrade_payload()
+            .ok_or_else(|| CoreError::UpgradeViolation("malformed upgrade payload".to_string()))?;
+
+        let upgrade_type = self.current_version.upgrade_type(&new_version);
+        let min_notice = upgrade_type.min_notice_blocks();
+        let announcement_height = self.block_height;
+
+        if activation_height < announcement_height.saturating_add(min_notice) {
+            return Err(CoreError::UpgradeViolation(format!(
+                "{:?} upgrade requires {} blocks notice (announcement at {}, requested activation at {})",
+                upgrade_type, min_notice, announcement_height, activation_height
+            )));
+        }
+
+        let sender = self
+            .accounts
+            .get_mut(tx.from.as_str())
+            .ok_or(CoreError::InsufficientBalance)?;
+        if sender.nonce != tx.nonce {
+            return Err(CoreError::InvalidNonce {
+                expected: sender.nonce,
+                got: tx.nonce,
+            });
+        }
+        sender.nonce += 1;
+
+        self.pending_upgrade = Some(ScheduledUpgrade {
+            version: new_version,
+            activation_height,
+            announced_at: announcement_height,
+        });
+
+        tracing::info!(
+            version = %self.pending_upgrade.as_ref().unwrap().version,
+            activation_height,
+            "Protocol upgrade scheduled"
+        );
+
+        Ok(())
+    }
+
+    /// Checks for accounts that have been frozen longer than FREEZE_DURATION_BLOCKS
+    /// and automatically unfreezes them. Called by the block producer on every block.
+    pub fn check_auto_unfreeze(&mut self) {
+        let height = self.block_height;
+        for account in self.accounts.values_mut() {
+            if account.frozen
+                && height.saturating_sub(account.frozen_since) >= FREEZE_DURATION_BLOCKS
+            {
+                account.frozen = false;
+                account.frozen_since = 0;
+                tracing::info!(
+                    address = %account.address,
+                    height,
+                    "Account automatically unfrozen (12-month limit reached)"
+                );
+            }
+        }
+    }
+
+    /// Checks whether a pending upgrade should activate at the current block height
+    /// and applies the version change if so.
+    pub fn check_upgrade_activation(&mut self) {
+        let should_activate = self
+            .pending_upgrade
+            .as_ref()
+            .map(|u| self.block_height >= u.activation_height)
+            .unwrap_or(false);
+
+        if should_activate {
+            let upgrade = self.pending_upgrade.take().unwrap();
+            let old = self.current_version.clone();
+            self.current_version = upgrade.version.clone();
+            tracing::info!(
+                from = %old,
+                to = %upgrade.version,
+                height = self.block_height,
+                "Protocol upgrade activated"
+            );
+        }
+    }
+
+    /// Distributes staking pool every STAKING_DISTRIBUTION_INTERVAL blocks.
     pub fn distribute_staking_rewards(&mut self) -> Amount {
         if self.block_height == 0
             || self.block_height % STAKING_DISTRIBUTION_INTERVAL != 0
@@ -374,8 +409,6 @@ impl WorldState {
             if account.staked == Amount::ZERO {
                 continue;
             }
-            // reward = floor(pool * staked / total_staked)
-            // checked_mul guards against overflow; fallback scales down by 10^9
             let reward = pool
                 .checked_mul(account.staked.atoms())
                 .map(|p| p / total_staked)
@@ -398,20 +431,12 @@ impl WorldState {
         Amount::from_atoms(distributed)
     }
 
-    fn apply_freeze(&mut self, tx: &Transaction) -> Result<(), CoreError> {
-        let account = self
-            .accounts
-            .entry(tx.to.as_str().to_string())
-            .or_insert_with(|| Account::new(tx.to.clone()));
-        account.frozen = true;
-        Ok(())
-    }
-
-    fn apply_unfreeze(&mut self, tx: &Transaction) -> Result<(), CoreError> {
-        if let Some(account) = self.accounts.get_mut(tx.to.as_str()) {
-            account.frozen = false;
-        }
-        Ok(())
+    /// Merkle root of the account state after sorting accounts by address.
+    pub fn compute_state_root(&self) -> Hash32 {
+        let mut entries: Vec<&Account> = self.accounts.values().collect();
+        entries.sort_by_key(|a| a.address.as_str());
+        let leaves: Vec<Hash32> = entries.iter().map(|a| hash_account(a)).collect();
+        merkle_root(&leaves)
     }
 
     #[cfg(test)]
@@ -423,5 +448,342 @@ impl WorldState {
         acc.balance = Amount::ZERO;
         acc.staked = staked;
         acc.stake_since = 0;
+    }
+}
+
+fn hash_account(account: &Account) -> Hash32 {
+    let addr = account.address.as_str().as_bytes();
+    let mut buf = Vec::with_capacity(addr.len() + 16 + 8 + 16 + 1 + 8 + 8);
+    buf.extend_from_slice(addr);
+    buf.extend_from_slice(&account.balance.atoms().to_be_bytes());
+    buf.extend_from_slice(&account.nonce.to_be_bytes());
+    buf.extend_from_slice(&account.staked.atoms().to_be_bytes());
+    buf.push(account.frozen as u8);
+    buf.extend_from_slice(&account.stake_since.to_be_bytes());
+    buf.extend_from_slice(&account.frozen_since.to_be_bytes());
+    sha256(&buf)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use vinx_core::{protocol::ProtocolVersion, Transaction};
+    use vinx_crypto::{Address, KeyPair};
+
+    fn staker(state: &mut WorldState, stake: Amount) -> Address {
+        let addr = Address::from_public_key(&KeyPair::generate().public_key());
+        state.set_staked_for_test(&addr, stake);
+        addr
+    }
+
+    fn admin_state() -> (WorldState, KeyPair, Address) {
+        let admin_kp = KeyPair::generate();
+        let admin_addr = Address::from_public_key(&admin_kp.public_key());
+        let mut state = WorldState::new();
+        state.admin_address = Some(admin_addr.clone());
+        state.credit_for_test(admin_addr.clone(), Amount::from_vinx(1_000));
+        (state, admin_kp, admin_addr)
+    }
+
+    // ─── staking distribution ────────────────────────────────────────────────
+
+    #[test]
+    fn test_no_stakers_pool_unchanged() {
+        let mut s = WorldState::new();
+        s.staking_pool = Amount::from_vinx(100);
+        s.block_height = 100;
+        let distributed = s.distribute_staking_rewards();
+        assert_eq!(distributed, Amount::ZERO);
+        assert_eq!(s.staking_pool, Amount::from_vinx(100));
+    }
+
+    #[test]
+    fn test_empty_pool_distributes_nothing() {
+        let mut s = WorldState::new();
+        let addr = staker(&mut s, Amount::from_vinx(1_000));
+        s.staking_pool = Amount::ZERO;
+        s.block_height = 100;
+        let distributed = s.distribute_staking_rewards();
+        assert_eq!(distributed, Amount::ZERO);
+        assert_eq!(s.accounts[addr.as_str()].balance, Amount::ZERO);
+    }
+
+    #[test]
+    fn test_single_staker_receives_full_pool() {
+        let mut s = WorldState::new();
+        let addr = staker(&mut s, Amount::from_vinx(1_000));
+        s.staking_pool = Amount::from_vinx(50);
+        s.block_height = 100;
+        let distributed = s.distribute_staking_rewards();
+        assert_eq!(distributed, Amount::from_vinx(50));
+        assert_eq!(s.staking_pool, Amount::ZERO);
+        assert_eq!(s.accounts[addr.as_str()].balance, Amount::from_vinx(50));
+    }
+
+    #[test]
+    fn test_two_stakers_proportional() {
+        let mut s = WorldState::new();
+        let alice = staker(&mut s, Amount::from_vinx(1_000));
+        let bob = staker(&mut s, Amount::from_vinx(3_000));
+        s.staking_pool = Amount::from_vinx(400);
+        s.block_height = 100;
+        s.distribute_staking_rewards();
+        assert_eq!(s.accounts[alice.as_str()].balance, Amount::from_vinx(100));
+        assert_eq!(s.accounts[bob.as_str()].balance, Amount::from_vinx(300));
+        assert_eq!(s.staking_pool, Amount::ZERO);
+    }
+
+    #[test]
+    fn test_remainder_stays_in_pool() {
+        let mut s = WorldState::new();
+        let a = staker(&mut s, Amount::from_vinx(1_000));
+        let b = staker(&mut s, Amount::from_vinx(1_000));
+        s.staking_pool = Amount::from_atoms(3);
+        s.block_height = 100;
+        s.distribute_staking_rewards();
+        assert_eq!(s.accounts[a.as_str()].balance, Amount::from_atoms(1));
+        assert_eq!(s.accounts[b.as_str()].balance, Amount::from_atoms(1));
+        assert_eq!(s.staking_pool, Amount::from_atoms(1));
+    }
+
+    #[test]
+    fn test_non_stakers_receive_nothing() {
+        let mut s = WorldState::new();
+        let _staker_addr = staker(&mut s, Amount::from_vinx(1_000));
+        let idle = Address::from_public_key(&KeyPair::generate().public_key());
+        s.credit_for_test(idle.clone(), Amount::from_vinx(5_000));
+        s.staking_pool = Amount::from_vinx(100);
+        s.block_height = 100;
+        s.distribute_staking_rewards();
+        assert_eq!(s.accounts[idle.as_str()].balance, Amount::from_vinx(5_000));
+    }
+
+    #[test]
+    fn test_no_distribution_outside_interval() {
+        let mut s = WorldState::new();
+        let addr = staker(&mut s, Amount::from_vinx(1_000));
+        s.staking_pool = Amount::from_vinx(50);
+        s.block_height = 99;
+        let distributed = s.distribute_staking_rewards();
+        assert_eq!(distributed, Amount::ZERO);
+        assert_eq!(s.staking_pool, Amount::from_vinx(50));
+        assert_eq!(s.accounts[addr.as_str()].balance, Amount::ZERO);
+    }
+
+    // ─── freeze / unfreeze via transaction ──────────────────────────────────
+
+    #[test]
+    fn test_admin_can_freeze_account() {
+        let (mut state, admin_kp, admin_addr) = admin_state();
+        let target_kp = KeyPair::generate();
+        let target_addr = Address::from_public_key(&target_kp.public_key());
+        state.credit_for_test(target_addr.clone(), Amount::from_vinx(100));
+
+        let tx = Transaction::new_freeze(&admin_kp, target_addr.clone(), 0);
+        state.apply_transaction(&tx).unwrap();
+
+        assert!(state.is_frozen(&target_addr));
+        assert_eq!(state.accounts[target_addr.as_str()].frozen_since, 0); // block_height=0
+        assert_eq!(state.accounts[admin_addr.as_str()].nonce, 1);
+    }
+
+    #[test]
+    fn test_non_admin_cannot_freeze() {
+        let (mut state, _, _) = admin_state();
+        let attacker_kp = KeyPair::generate();
+        let attacker_addr = Address::from_public_key(&attacker_kp.public_key());
+        let target_addr = Address::from_public_key(&KeyPair::generate().public_key());
+        state.credit_for_test(attacker_addr, Amount::from_vinx(100));
+        state.credit_for_test(target_addr.clone(), Amount::from_vinx(100));
+
+        let tx = Transaction::new_freeze(&attacker_kp, target_addr.clone(), 0);
+        assert_eq!(state.apply_transaction(&tx), Err(CoreError::Unauthorized));
+        assert!(!state.is_frozen(&target_addr));
+    }
+
+    #[test]
+    fn test_admin_can_unfreeze_account() {
+        let (mut state, admin_kp, _) = admin_state();
+        let target_kp = KeyPair::generate();
+        let target_addr = Address::from_public_key(&target_kp.public_key());
+        state.credit_for_test(target_addr.clone(), Amount::from_vinx(100));
+
+        state.apply_transaction(&Transaction::new_freeze(&admin_kp, target_addr.clone(), 0)).unwrap();
+        assert!(state.is_frozen(&target_addr));
+
+        state.apply_transaction(&Transaction::new_unfreeze(&admin_kp, target_addr.clone(), 1)).unwrap();
+        assert!(!state.is_frozen(&target_addr));
+        assert_eq!(state.accounts[target_addr.as_str()].frozen_since, 0);
+    }
+
+    #[test]
+    fn test_auto_unfreeze_after_duration() {
+        let (mut state, _, _) = admin_state();
+        let addr = Address::from_public_key(&KeyPair::generate().public_key());
+        state.credit_for_test(addr.clone(), Amount::from_vinx(100));
+
+        // Freeze at block 0
+        state.accounts.get_mut(addr.as_str()).unwrap().frozen = true;
+        state.accounts.get_mut(addr.as_str()).unwrap().frozen_since = 0;
+
+        // Not yet expired at block FREEZE_DURATION_BLOCKS - 1
+        state.block_height = FREEZE_DURATION_BLOCKS - 1;
+        state.check_auto_unfreeze();
+        assert!(state.is_frozen(&addr));
+
+        // Expires exactly at FREEZE_DURATION_BLOCKS
+        state.block_height = FREEZE_DURATION_BLOCKS;
+        state.check_auto_unfreeze();
+        assert!(!state.is_frozen(&addr));
+        assert_eq!(state.accounts[addr.as_str()].frozen_since, 0);
+    }
+
+    #[test]
+    fn test_freeze_nonexistent_account_rejected() {
+        let (mut state, admin_kp, _) = admin_state();
+        let ghost = Address::from_public_key(&KeyPair::generate().public_key());
+        let tx = Transaction::new_freeze(&admin_kp, ghost, 0);
+        assert!(state.apply_transaction(&tx).is_err());
+    }
+
+    // ─── protocol upgrades ───────────────────────────────────────────────────
+
+    #[test]
+    fn test_admin_can_schedule_patch_upgrade() {
+        let (mut state, admin_kp, _) = admin_state();
+        let notice = vinx_core::amount::UPGRADE_NOTICE_PATCH_BLOCKS;
+        let activation = state.block_height + notice + 100;
+
+        let tx = Transaction::new_announce_upgrade(
+            &admin_kp,
+            ProtocolVersion::new(1, 0, 1),
+            activation,
+            0,
+        );
+        state.apply_transaction(&tx).unwrap();
+
+        let upgrade = state.pending_upgrade.as_ref().unwrap();
+        assert_eq!(upgrade.version, ProtocolVersion::new(1, 0, 1));
+        assert_eq!(upgrade.activation_height, activation);
+    }
+
+    #[test]
+    fn test_upgrade_too_soon_rejected() {
+        let (mut state, admin_kp, _) = admin_state();
+        // 1 block is way too short
+        let tx = Transaction::new_announce_upgrade(
+            &admin_kp,
+            ProtocolVersion::new(2, 0, 0),
+            1,
+            0,
+        );
+        assert!(matches!(
+            state.apply_transaction(&tx),
+            Err(CoreError::UpgradeViolation(_))
+        ));
+    }
+
+    #[test]
+    fn test_upgrade_activates_at_correct_height() {
+        let (mut state, admin_kp, _) = admin_state();
+        let notice = vinx_core::amount::UPGRADE_NOTICE_PATCH_BLOCKS;
+        let activation = notice + 1;
+
+        state.apply_transaction(&Transaction::new_announce_upgrade(
+            &admin_kp,
+            ProtocolVersion::new(1, 0, 1),
+            activation,
+            0,
+        )).unwrap();
+
+        // Not yet activated
+        state.block_height = activation - 1;
+        state.check_upgrade_activation();
+        assert_eq!(state.current_version, ProtocolVersion::GENESIS);
+        assert!(state.pending_upgrade.is_some());
+
+        // Activates exactly at activation_height
+        state.block_height = activation;
+        state.check_upgrade_activation();
+        assert_eq!(state.current_version, ProtocolVersion::new(1, 0, 1));
+        assert!(state.pending_upgrade.is_none());
+    }
+
+    #[test]
+    fn test_non_admin_cannot_schedule_upgrade() {
+        let (mut state, _, _) = admin_state();
+        let attacker = KeyPair::generate();
+        let attacker_addr = Address::from_public_key(&attacker.public_key());
+        state.credit_for_test(attacker_addr, Amount::from_vinx(100));
+
+        let notice = vinx_core::amount::UPGRADE_NOTICE_MAJOR_BLOCKS;
+        let tx = Transaction::new_announce_upgrade(
+            &attacker,
+            ProtocolVersion::new(2, 0, 0),
+            notice + 1,
+            0,
+        );
+        assert_eq!(state.apply_transaction(&tx), Err(CoreError::Unauthorized));
+    }
+
+    // ─── Merkle state root ───────────────────────────────────────────────────
+
+    #[test]
+    fn test_state_root_empty_is_zero() {
+        let s = WorldState::new();
+        assert_eq!(s.compute_state_root(), [0u8; 32]);
+    }
+
+    #[test]
+    fn test_state_root_is_deterministic() {
+        let mut s = WorldState::new();
+        let addr = Address::from_public_key(&KeyPair::generate().public_key());
+        s.credit_for_test(addr, Amount::from_vinx(100));
+        assert_eq!(s.compute_state_root(), s.compute_state_root());
+    }
+
+    #[test]
+    fn test_state_root_changes_on_balance_change() {
+        let mut s = WorldState::new();
+        let addr = Address::from_public_key(&KeyPair::generate().public_key());
+        s.credit_for_test(addr.clone(), Amount::from_vinx(100));
+        let root_before = s.compute_state_root();
+        s.credit_for_test(addr, Amount::from_vinx(1));
+        assert_ne!(root_before, s.compute_state_root());
+    }
+
+    #[test]
+    fn test_state_root_order_independent_of_insertion() {
+        let kp1 = KeyPair::generate();
+        let kp2 = KeyPair::generate();
+        let addr1 = Address::from_public_key(&kp1.public_key());
+        let addr2 = Address::from_public_key(&kp2.public_key());
+
+        let mut s1 = WorldState::new();
+        s1.credit_for_test(addr1.clone(), Amount::from_vinx(50));
+        s1.credit_for_test(addr2.clone(), Amount::from_vinx(200));
+
+        let mut s2 = WorldState::new();
+        s2.credit_for_test(addr2, Amount::from_vinx(200));
+        s2.credit_for_test(addr1, Amount::from_vinx(50));
+
+        assert_eq!(s1.compute_state_root(), s2.compute_state_root());
+    }
+
+    #[test]
+    fn test_min_stake_enforced() {
+        use vinx_core::amount::DECIMAL_FACTOR;
+        let mut s = WorldState::new();
+        let kp = KeyPair::generate();
+        let addr = Address::from_public_key(&kp.public_key());
+        s.credit_for_test(addr.clone(), Amount::from_vinx(10));
+        let below_min = Amount::from_atoms(DECIMAL_FACTOR - 1);
+        let tx = Transaction::new_stake(&kp, below_min, Amount::ZERO, 0);
+        assert_eq!(
+            s.apply_transaction(&tx),
+            Err(CoreError::InvalidTransaction(
+                "stake amount below minimum 1 VINX".to_string()
+            ))
+        );
     }
 }

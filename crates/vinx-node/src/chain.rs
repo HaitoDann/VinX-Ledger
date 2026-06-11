@@ -20,6 +20,7 @@ impl Chain {
                 state_root: [0u8; 32],
             },
             transactions: vec![],
+            signatures: vec![],
         };
         let hash = genesis.hash();
         let chain = Self {
@@ -51,6 +52,22 @@ impl Chain {
     /// Number of blocks (= tip_height + 1).
     pub fn len(&self) -> usize {
         self.blocks.len()
+    }
+
+    /// Adds a co-signature to an already-stored block.
+    /// Returns `true` if the block is now finalized (≥ quorum valid signatures).
+    /// Does nothing and returns `false` if the height is out of range.
+    pub fn add_co_signature(
+        &mut self,
+        height: u64,
+        signature: vinx_core::BlockSignature,
+        validator_set: &vinx_core::ValidatorSet,
+    ) -> bool {
+        if let Some((_, block)) = self.blocks.get_mut(height as usize) {
+            block.signatures.push(signature);
+            return block.is_finalized(validator_set);
+        }
+        false
     }
 }
 

@@ -1,9 +1,12 @@
 use crate::{chain::Chain, config::NodeConfig, mempool::Mempool, NodeError};
-use vinx_core::{amount::Amount, Block, BlockHeader};
+use vinx_core::{amount::Amount, Block, BlockHeader, BlockSignature};
 use vinx_state::WorldState;
 
 /// Produces the next block: applies mempool transactions, distributes staking rewards,
 /// commits to the chain, and updates the world state.
+///
+/// The producing node must be the expected round-robin leader for `next_height`.
+/// The block is signed by the proposer (counts as one co-signature toward quorum).
 pub fn produce_block(
     state: &mut WorldState,
     chain: &mut Chain,
@@ -13,6 +16,14 @@ pub fn produce_block(
 ) -> Result<Block, NodeError> {
     let next_height = chain.tip_height() + 1;
     let prev_hash = chain.tip_hash();
+
+    // Verify this node is the round-robin leader for the upcoming block
+    let expected_leader = config.validator_set.leader_at(next_height);
+    if expected_leader != &config.validator_address {
+        return Err(NodeError::Consensus(format!(
+            "not the leader for block {next_height}: expected {expected_leader}"
+        )));
+    }
 
     let mut block_txs: Vec<vinx_core::Transaction> = Vec::new();
 
@@ -35,11 +46,20 @@ pub fn produce_block(
     // Advance block height before distributing so the interval check sees the new height
     state.block_height = next_height;
 
+    // Auto-unfreeze accounts whose 12-month judicial freeze has expired
+    state.check_auto_unfreeze();
+
+    // Activate any pending protocol upgrade whose height has been reached
+    state.check_upgrade_activation();
+
     // Distribute accumulated staking fees every STAKING_DISTRIBUTION_INTERVAL blocks
     let rewards = state.distribute_staking_rewards();
     if rewards > Amount::ZERO {
         tracing::debug!(rewards = %rewards, height = next_height, "Staking rewards distributed");
     }
+
+    // Compute Merkle root over all account states after all mutations
+    let state_root = state.compute_state_root();
 
     let header = BlockHeader {
         height: next_height,
@@ -47,12 +67,21 @@ pub fn produce_block(
         timestamp,
         validator: config.validator_address.clone(),
         tx_count: block_txs.len() as u32,
-        state_root: [0u8; 32],
+        state_root,
     };
-    let block = Block {
+    let mut block = Block {
         header,
         transactions: block_txs,
+        signatures: Vec::new(),
     };
+
+    // Proposer signs the block header hash (counts as one co-signature)
+    let header_hash = block.hash();
+    block.signatures.push(BlockSignature {
+        validator: config.validator_address.clone(),
+        pub_key: config.validator_keypair.public_key(),
+        signature: config.validator_keypair.sign(&header_hash),
+    });
 
     chain.push(block.clone());
 

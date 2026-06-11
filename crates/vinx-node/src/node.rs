@@ -6,6 +6,7 @@ use crate::{
     chain::Chain,
     config::NodeConfig,
     mempool::Mempool,
+    p2p::P2pHandle,
     producer::produce_block,
     storage::Storage,
     NodeError,
@@ -19,6 +20,8 @@ pub struct Node {
     pub chain: Arc<RwLock<Chain>>,
     pub config: NodeConfig,
     storage: Option<Storage>,
+    /// P2P handle — present when p2p_listen is configured.
+    pub p2p: Option<P2pHandle>,
 }
 
 impl Node {
@@ -30,6 +33,43 @@ impl Node {
             chain: Arc::new(RwLock::new(chain)),
             config,
             storage,
+            p2p: None,
+        })
+    }
+
+    /// Creates a node and immediately starts the P2P layer (if configured).
+    pub async fn new_with_p2p(
+        state: WorldState,
+        chain: Chain,
+        config: NodeConfig,
+    ) -> Arc<Self> {
+        let storage = config.data_dir.as_ref().map(|p| Storage::new(p.clone()));
+        let state_arc = Arc::new(RwLock::new(state));
+        let chain_arc = Arc::new(RwLock::new(chain));
+        let mempool_arc = Arc::new(RwLock::new(Mempool::default()));
+
+        let p2p = if config.p2p_listen.is_some() {
+            match crate::p2p::start(&config, Arc::clone(&chain_arc), Arc::clone(&mempool_arc)).await {
+                Ok(handle) => {
+                    tracing::info!(peer_id = %handle.local_peer_id, "P2P layer active");
+                    Some(handle)
+                }
+                Err(e) => {
+                    tracing::warn!(error = %e, "P2P layer failed to start, continuing without it");
+                    None
+                }
+            }
+        } else {
+            None
+        };
+
+        Arc::new(Self {
+            state: state_arc,
+            mempool: mempool_arc,
+            chain: chain_arc,
+            config,
+            storage,
+            p2p,
         })
     }
 
@@ -44,7 +84,14 @@ impl Node {
         let mut chain = self.chain.write().await;
         let mut mempool = self.mempool.write().await;
 
-        produce_block(&mut state, &mut chain, &mut mempool, &self.config, timestamp)
+        let block = produce_block(&mut state, &mut chain, &mut mempool, &self.config, timestamp)?;
+
+        // Broadcast the new block via P2P so co-validators can sign it
+        if let Some(ref p2p) = self.p2p {
+            p2p.broadcast_block(&block);
+        }
+
+        Ok(block)
     }
 
     /// Background task: produce a block every `block_time_secs`, then persist.
@@ -91,7 +138,6 @@ impl Node {
     }
 
     /// Serves the RPC on an already-bound listener.
-    /// Used by integration tests to bind on port 0 without a race condition.
     pub async fn run_rpc_on(
         self: Arc<Self>,
         listener: tokio::net::TcpListener,

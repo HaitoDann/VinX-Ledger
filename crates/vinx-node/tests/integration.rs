@@ -211,6 +211,7 @@ async fn test_submit_missing_pubkey_rejected() {
         amount,
         fee,
         nonce: 0,
+        payload: vec![],
         pub_key: None,
         signature: None,
     };

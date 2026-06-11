@@ -27,6 +27,8 @@ pub fn create_genesis_state(config: &GenesisConfig) -> WorldState {
     // Circulating supply at genesis = only the admin Sandbox allocation
     state.circulating_supply = Amount::from_atoms(ADMIN_ALLOCATION_ATOMS);
     state.block_height = 0;
+    // Admin address is stored on-chain for governance operations (freeze, upgrades)
+    state.admin_address = Some(config.admin_address.clone());
 
     state
 }
