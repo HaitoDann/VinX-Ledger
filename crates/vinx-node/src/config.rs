@@ -1,4 +1,5 @@
 use std::path::PathBuf;
+use vinx_core::ValidatorSet;
 use vinx_crypto::{Address, KeyPair};
 
 #[derive(Clone)]
@@ -7,6 +8,8 @@ pub struct NodeConfig {
     pub validator_keypair: KeyPair,
     /// Address of the validator derived from the keypair.
     pub validator_address: Address,
+    /// Authorized validator set used for leader selection and quorum checks.
+    pub validator_set: ValidatorSet,
     /// Target block time in seconds (10 for mainnet, lower for testing).
     pub block_time_secs: u64,
     /// Maximum transactions per block.
@@ -18,16 +21,24 @@ pub struct NodeConfig {
 }
 
 impl NodeConfig {
+    /// Creates a single-validator (dev) config.
     pub fn new(validator_keypair: KeyPair) -> Self {
         let validator_address = Address::from_public_key(&validator_keypair.public_key());
+        let validator_set = ValidatorSet::single(validator_address.clone());
         Self {
             validator_keypair,
             validator_address,
+            validator_set,
             block_time_secs: 10,
             max_block_txs: 1_000,
             rpc_listen: "127.0.0.1:8545".to_string(),
             data_dir: None,
         }
+    }
+
+    pub fn with_validator_set(mut self, validator_set: ValidatorSet) -> Self {
+        self.validator_set = validator_set;
+        self
     }
 
     pub fn with_block_time(mut self, secs: u64) -> Self {

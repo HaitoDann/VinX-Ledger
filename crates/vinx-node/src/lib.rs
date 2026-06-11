@@ -1,5 +1,6 @@
 pub mod chain;
 pub mod config;
+pub mod consensus;
 pub mod mempool;
 pub mod node;
 pub mod producer;
@@ -15,6 +16,8 @@ use thiserror::Error;
 pub enum NodeError {
     #[error("Block production error: {0}")]
     BlockProduction(String),
+    #[error("Consensus error: {0}")]
+    Consensus(String),
     #[error("RPC error: {0}")]
     Rpc(String),
     #[error("Config error: {0}")]

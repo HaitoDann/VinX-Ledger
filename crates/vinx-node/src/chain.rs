@@ -20,6 +20,7 @@ impl Chain {
                 state_root: [0u8; 32],
             },
             transactions: vec![],
+            signatures: vec![],
         };
         let hash = genesis.hash();
         let chain = Self {

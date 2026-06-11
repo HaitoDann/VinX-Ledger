@@ -103,7 +103,7 @@ pub async fn get_block(
 ) -> ApiResult<BlockResponse> {
     let chain = node.chain.read().await;
     match chain.get_block(height) {
-        Some(block) => Ok(Json(BlockResponse::from_block(block))),
+        Some(block) => Ok(Json(BlockResponse::from_block(block, &node.config.validator_set))),
         None => Err(ApiError::NotFound(format!("Block {} not found", height))),
     }
 }
@@ -111,4 +111,10 @@ pub async fn get_block(
 pub async fn get_mempool(State(node): State<Arc<Node>>) -> ApiResult<MempoolResponse> {
     let pending = node.mempool.read().await.size();
     Ok(Json(MempoolResponse { pending }))
+}
+
+pub async fn get_validators(State(node): State<Arc<Node>>) -> ApiResult<ValidatorSetResponse> {
+    Ok(Json(ValidatorSetResponse::from_validator_set(
+        &node.config.validator_set,
+    )))
 }
