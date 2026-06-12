@@ -212,6 +212,7 @@ pub struct NetworkStatsResponse {
     pub base_fee_atoms: String,
     pub staking_pool: String,
     pub melt_pool: String,
+    pub distribution_pool: String,
     pub circulating_supply: String,
 }
 

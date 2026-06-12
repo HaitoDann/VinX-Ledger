@@ -350,6 +350,7 @@ pub async fn get_network_stats(State(node): State<Arc<Node>>) -> ApiResult<Netwo
         base_fee_atoms: state.base_fee.atoms().to_string(),
         staking_pool: state.staking_pool.to_string(),
         melt_pool: state.melt_pool.to_string(),
+        distribution_pool: state.distribution_pool.to_string(),
         circulating_supply: state.circulating_supply.to_string(),
     }))
 }

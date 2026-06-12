@@ -19,9 +19,12 @@ pub struct WorldState {
     pub circulating_supply: Amount,
     pub block_height: u64,
     pub staking_pool: Amount,
-    /// Accumulated melt fees — redistribution pool (not a burn, does not reduce supply).
-    /// 30% of every transaction fee goes here.
+    /// Accumulated melt fees waiting to be redistributed — 30% of every fee goes here.
     pub melt_pool: Amount,
+    /// Pool des jetons à distribuer — tokens released from melt via ReleaseMeltToDistribution,
+    /// and the Coffre Maturité when unlocked. Not staking rewards.
+    #[serde(default)]
+    pub distribution_pool: Amount,
     /// Static minimum fee floor; dynamic base_fee is always >= this.
     pub fee_floor: Amount,
     /// Dynamic fee floor, updated each block from mempool pressure.
@@ -70,6 +73,7 @@ impl WorldState {
             block_height: 0,
             staking_pool: Amount::ZERO,
             melt_pool: Amount::ZERO,
+            distribution_pool: Amount::ZERO,
             fee_floor,
             base_fee: fee_floor,
             validator_fee_pool: Amount::ZERO,
@@ -666,11 +670,11 @@ impl WorldState {
                     tracing::info!(activation_height, "Admin: upgrade scheduled");
                 }
             }
-            GovernanceAction::ReleaseMeltToStaking { amount } => {
+            GovernanceAction::ReleaseMeltToDistribution { amount } => {
                 if self.melt_pool >= amount {
                     self.melt_pool = self.melt_pool.checked_sub(amount).unwrap_or(Amount::ZERO);
-                    self.staking_pool = self.staking_pool.saturating_add(amount);
-                    tracing::info!(%amount, "Admin: melt released to staking pool");
+                    self.distribution_pool = self.distribution_pool.saturating_add(amount);
+                    tracing::info!(%amount, "Admin: melt released to distribution pool");
                 }
             }
             GovernanceAction::RotateAdmin(new_admin) => {
@@ -688,10 +692,10 @@ impl WorldState {
             GovernanceAction::UnlockCoffre => {
                 if self.coffre_mica_casp && self.coffre_external_audit && self.coffre_public_policy {
                     let amount = self.coffre_maturity;
-                    self.staking_pool = self.staking_pool.saturating_add(amount);
+                    self.distribution_pool = self.distribution_pool.saturating_add(amount);
                     self.circulating_supply = self.circulating_supply.saturating_add(amount);
                     self.coffre_maturity = Amount::ZERO;
-                    tracing::info!(%amount, "Admin: Coffre Maturité unlocked");
+                    tracing::info!(%amount, "Admin: Coffre Maturité unlocked → distribution pool");
                 } else {
                     return Err(CoreError::InvalidTransaction(
                         "UnlockCoffre rejected: not all 3 conditions are met".to_string()

@@ -80,6 +80,7 @@ export interface NetworkStatsResponse {
   base_fee_atoms: string;
   staking_pool: string;
   melt_pool: string;
+  distribution_pool: string;
   circulating_supply: string;
 }
 
@@ -98,41 +99,6 @@ export interface ChainSyncResponse {
   from: number;
   count: number;
   blocks: BlockResponse[];
-}
-
-export interface ProposalActionAddValidator { AddValidator: string }
-export interface ProposalActionRemoveValidator { RemoveValidator: string }
-export interface ProposalActionUpdateFeeFloor { UpdateFeeFloor: { atoms: string } }
-export interface ProposalActionScheduleUpgrade { ScheduleUpgrade: { version: string; activation_height: number } }
-export interface ProposalActionReleaseMelt { ReleaseMeltToStaking: { amount: string } }
-export interface ProposalActionRotateAdmin { RotateAdmin: string }
-export interface ProposalActionMarkCoffre { MarkCoffreCondition: string }
-export interface ProposalActionUnlockCoffre { UnlockCoffre: Record<string, never> }
-
-export type ProposalAction =
-  | ProposalActionAddValidator
-  | ProposalActionRemoveValidator
-  | ProposalActionUpdateFeeFloor
-  | ProposalActionScheduleUpgrade
-  | ProposalActionReleaseMelt
-  | ProposalActionRotateAdmin
-  | ProposalActionMarkCoffre
-  | ProposalActionUnlockCoffre;
-
-export interface ProposalResponse {
-  id: number;
-  proposer: string;
-  description: string;
-  action: ProposalAction;
-  submitted_at: number;
-  voting_ends_at: number;
-  yes_votes: string[];
-  no_votes: string[];
-  status: "Active" | "Passed" | "Rejected" | "Executed";
-}
-
-export interface ProposalListResponse {
-  proposals: ProposalResponse[];
 }
 
 // ─── Transaction payload ──────────────────────────────────────────────────────
@@ -244,16 +210,6 @@ export class VinxClient {
   /** Sync a range of blocks from the node (useful for light clients). */
   chainSync(from: number, limit = 100): Promise<ChainSyncResponse> {
     return this.get(`/chain/sync?from=${from}&limit=${limit}`);
-  }
-
-  /** Get all governance proposals. */
-  proposals(): Promise<ProposalListResponse> {
-    return this.get("/governance/proposals");
-  }
-
-  /** Get a single governance proposal by ID. */
-  proposal(id: number): Promise<ProposalResponse> {
-    return this.get(`/governance/proposal/${id}`);
   }
 
   /**

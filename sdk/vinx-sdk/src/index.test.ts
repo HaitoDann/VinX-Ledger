@@ -172,39 +172,6 @@ describe('VinxClient.chainSync()', () => {
   });
 });
 
-describe('VinxClient.proposals()', () => {
-  it('calls GET /governance/proposals', async () => {
-    const payload = { proposals: [] };
-    const spy = mockFetch(payload);
-    const client = new VinxClient(BASE);
-    const result = await client.proposals();
-    expect(spy).toHaveBeenCalledWith(`${BASE}/governance/proposals`);
-    expect(result.proposals).toEqual([]);
-  });
-});
-
-describe('VinxClient.proposal()', () => {
-  it('calls GET /governance/proposal/:id', async () => {
-    const proposal = {
-      id: 0,
-      proposer: 'vinx1a',
-      description: 'Add validator',
-      action: { AddValidator: 'vinx1new' },
-      submitted_at: 10,
-      voting_ends_at: 100,
-      yes_votes: [],
-      no_votes: [],
-      status: 'Active' as const,
-    };
-    const spy = mockFetch(proposal);
-    const client = new VinxClient(BASE);
-    const result = await client.proposal(0);
-    expect(spy).toHaveBeenCalledWith(`${BASE}/governance/proposal/0`);
-    expect(result.id).toBe(0);
-    expect(result.status).toBe('Active');
-  });
-});
-
 describe('VinxClient error handling', () => {
   it('throws on non-ok response', async () => {
     jest.spyOn(globalThis, 'fetch').mockResolvedValueOnce({

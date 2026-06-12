@@ -11,8 +11,8 @@ pub enum GovernanceAction {
     RemoveValidator(Address),
     UpdateFeeFloor { atoms: u64 },
     ScheduleUpgrade { version: ProtocolVersion, activation_height: u64 },
-    /// Transfer an amount from the melt pool back to the staking pool.
-    ReleaseMeltToStaking { amount: Amount },
+    /// Transfer an amount from the melt pool to the distribution pool (pool des jetons à distribuer).
+    ReleaseMeltToDistribution { amount: Amount },
     /// Rotate the admin key to a new address.
     RotateAdmin(Address),
     /// Mark one of the 3 Coffre Maturité unlock conditions as met.
