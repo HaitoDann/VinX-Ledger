@@ -35,3 +35,8 @@
 #   "/ip4/192.168.1.10/tcp/9000",
 #   "/ip4/192.168.1.11/tcp/9000",
 # ]
+
+# ─── Synchronisation de chaîne ────────────────────────────────────────────────
+# URL RPC d'un pair de confiance depuis lequel rattraper les blocs au démarrage.
+# Utile pour rejoindre un testnet existant sans télécharger le snapshot complet.
+# sync_peer_rpc = "http://192.168.1.10:8545"

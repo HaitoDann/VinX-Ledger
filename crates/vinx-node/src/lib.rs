@@ -7,6 +7,7 @@ pub mod p2p;
 pub mod producer;
 pub mod rpc;
 pub mod storage;
+pub mod sync;
 
 pub use config::NodeConfig;
 pub use node::Node;

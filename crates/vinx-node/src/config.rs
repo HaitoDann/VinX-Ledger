@@ -22,6 +22,8 @@ pub struct NodeConfig {
     pub p2p_listen: Option<String>,
     /// Bootstrap peer multiaddrs to dial on startup.
     pub peer_addrs: Vec<String>,
+    /// RPC URL of a trusted peer to sync blocks from on startup. `None` = no sync.
+    pub sync_peer_rpc: Option<String>,
 }
 
 impl NodeConfig {
@@ -39,6 +41,7 @@ impl NodeConfig {
             data_dir: None,
             p2p_listen: None,
             peer_addrs: vec![],
+            sync_peer_rpc: None,
         }
     }
 
@@ -69,6 +72,11 @@ impl NodeConfig {
 
     pub fn with_data_dir(mut self, dir: impl Into<PathBuf>) -> Self {
         self.data_dir = Some(dir.into());
+        self
+    }
+
+    pub fn with_sync_peer(mut self, url: impl Into<String>) -> Self {
+        self.sync_peer_rpc = Some(url.into());
         self
     }
 }

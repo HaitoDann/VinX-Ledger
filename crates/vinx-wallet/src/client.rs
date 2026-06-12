@@ -68,6 +68,15 @@ pub struct TxWithBlockInfo {
 }
 
 #[derive(Deserialize)]
+pub struct AccountTxsInfo {
+    pub address: String,
+    pub total: usize,
+    #[allow(dead_code)]
+    pub offset: usize,
+    pub txs: Vec<TxWithBlockInfo>,
+}
+
+#[derive(Deserialize)]
 pub struct ValidatorsInfo {
     pub count: usize,
     pub quorum: usize,
@@ -132,6 +141,15 @@ impl RpcClient {
 
     pub async fn get_protocol_status(&self) -> Result<ProtocolStatusInfo, WalletError> {
         self.get("/protocol/version").await
+    }
+
+    pub async fn get_account_txs(
+        &self,
+        address: &str,
+        limit: usize,
+        offset: usize,
+    ) -> Result<AccountTxsInfo, WalletError> {
+        self.get(&format!("/account/{}/txs?limit={}&offset={}", address, limit, offset)).await
     }
 
     pub async fn submit_tx(&self, tx: &Transaction) -> Result<TxSubmitResponse, WalletError> {

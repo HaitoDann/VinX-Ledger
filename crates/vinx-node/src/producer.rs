@@ -1,4 +1,4 @@
-use crate::{chain::Chain, config::NodeConfig, mempool::Mempool, NodeError};
+use crate::{chain::Chain, config::NodeConfig, mempool::{is_future_nonce, Mempool}, NodeError};
 use vinx_core::{amount::Amount, Block, BlockHeader, BlockSignature};
 use vinx_state::WorldState;
 
@@ -30,14 +30,23 @@ pub fn produce_block(
     // Pull pending transactions from mempool and apply them
     let pending = mempool.drain(config.max_block_txs);
     let mut rejected = 0usize;
+    let mut requeue_buf: Vec<vinx_core::Transaction> = Vec::new();
     for tx in pending {
         match state.apply_transaction(&tx) {
             Ok(()) => block_txs.push(tx),
             Err(e) => {
                 tracing::debug!(error = %e, "Transaction rejected during block production");
-                rejected += 1;
+                if is_future_nonce(&e) {
+                    requeue_buf.push(tx);
+                } else {
+                    rejected += 1;
+                }
             }
         }
+    }
+    if !requeue_buf.is_empty() {
+        tracing::debug!(count = requeue_buf.len(), "Requeueing future-nonce transactions");
+        mempool.requeue(requeue_buf);
     }
     if rejected > 0 {
         tracing::warn!(rejected, "Transactions dropped from block");

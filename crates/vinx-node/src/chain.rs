@@ -11,6 +11,9 @@ pub struct Chain {
     /// Maps hex-encoded tx hash -> (block_height, tx_position). Not persisted.
     #[serde(skip)]
     tx_index: HashMap<String, (u64, u32)>,
+    /// Maps bech32 address -> ordered list of tx hashes (oldest first). Not persisted.
+    #[serde(skip)]
+    account_tx_index: HashMap<String, Vec<String>>,
 }
 
 impl Chain {
@@ -31,6 +34,7 @@ impl Chain {
         let chain = Self {
             blocks: vec![(hash, genesis.clone())],
             tx_index: HashMap::new(),
+            account_tx_index: HashMap::new(),
         };
         (chain, genesis)
     }
@@ -52,22 +56,70 @@ impl Chain {
     pub fn push(&mut self, block: Block) -> Hash32 {
         let height = block.header.height;
         for (idx, tx) in block.transactions.iter().enumerate() {
-            let hash = hex::encode(tx.hash());
-            self.tx_index.insert(hash, (height, idx as u32));
+            let hash_hex = hex::encode(tx.hash());
+            self.tx_index.insert(hash_hex.clone(), (height, idx as u32));
+            self.account_tx_index
+                .entry(tx.from.to_string())
+                .or_default()
+                .push(hash_hex.clone());
+            // Only record recipient for transfers (to != from)
+            if tx.to != tx.from {
+                self.account_tx_index
+                    .entry(tx.to.to_string())
+                    .or_default()
+                    .push(hash_hex);
+            }
         }
         let hash = block.hash();
         self.blocks.push((hash, block));
         hash
     }
 
-    /// Clears and repopulates the tx_index from all stored blocks.
+    /// Clears and repopulates both tx indexes from all stored blocks.
     pub fn rebuild_tx_index(&mut self) {
         self.tx_index.clear();
+        self.account_tx_index.clear();
         for (_, block) in &self.blocks {
             let height = block.header.height;
             for (idx, tx) in block.transactions.iter().enumerate() {
-                let hash = hex::encode(tx.hash());
-                self.tx_index.insert(hash, (height, idx as u32));
+                let hash_hex = hex::encode(tx.hash());
+                self.tx_index.insert(hash_hex.clone(), (height, idx as u32));
+                self.account_tx_index
+                    .entry(tx.from.to_string())
+                    .or_default()
+                    .push(hash_hex.clone());
+                if tx.to != tx.from {
+                    self.account_tx_index
+                        .entry(tx.to.to_string())
+                        .or_default()
+                        .push(hash_hex);
+                }
+            }
+        }
+    }
+
+    /// Total number of transactions involving this address.
+    pub fn account_tx_count(&self, addr: &str) -> usize {
+        self.account_tx_index.get(addr).map_or(0, |v| v.len())
+    }
+
+    /// Returns tx hashes for the given address, newest-first, with pagination.
+    pub fn get_account_txs(&self, addr: &str, limit: usize, offset: usize) -> Vec<String> {
+        match self.account_tx_index.get(addr) {
+            None => vec![],
+            Some(hashes) => {
+                let len = hashes.len();
+                if offset >= len {
+                    return vec![];
+                }
+                // Newest first: reverse iterate
+                hashes
+                    .iter()
+                    .rev()
+                    .skip(offset)
+                    .take(limit)
+                    .cloned()
+                    .collect()
             }
         }
     }

@@ -17,6 +17,7 @@ struct NodeConfigFile {
     peers: Option<Vec<String>>,
     validator_key_file: Option<PathBuf>,
     admin_key_file: Option<PathBuf>,
+    sync_peer_rpc: Option<String>,
 }
 
 impl NodeConfigFile {
@@ -60,6 +61,9 @@ struct Args {
     /// Bootstrap peer multiaddrs (overrides config, repeatable)
     #[arg(long, num_args = 0..)]
     peers: Vec<String>,
+    /// RPC URL of a trusted peer to sync from on startup, e.g. http://1.2.3.4:8545
+    #[arg(long)]
+    sync_peer: Option<String>,
 }
 
 // ─── Key file helpers ─────────────────────────────────────────────────────────
@@ -124,6 +128,7 @@ async fn main() {
         .unwrap_or_else(|| PathBuf::from("devnet"));
     let peers = if !args.peers.is_empty() { args.peers } else { file_cfg.peers.unwrap_or_default() };
     let max_block_txs = file_cfg.max_block_txs.unwrap_or(1_000);
+    let sync_peer_rpc = args.sync_peer.or(file_cfg.sync_peer_rpc);
 
     std::fs::create_dir_all(&data_dir).expect("create data dir");
 
@@ -144,7 +149,7 @@ async fn main() {
         .as_secs();
 
     let storage = Storage::new(&data_dir);
-    let (state, chain, resumed) = match storage.load() {
+    let (mut state, mut chain, resumed) = match storage.load() {
         Some((s, c)) => {
             let height = s.block_height;
             tracing::info!(height, "Resuming from persisted state");
@@ -170,7 +175,26 @@ async fn main() {
     if !peers.is_empty() {
         config = config.with_peers(peers);
     }
+    if let Some(ref url) = sync_peer_rpc {
+        config = config.with_sync_peer(url.clone());
+    }
     config.max_block_txs = max_block_txs;
+
+    // Startup chain sync from trusted peer (if configured)
+    if let Some(ref peer_url) = sync_peer_rpc {
+        tracing::info!(peer = %peer_url, "Starting chain sync from peer");
+        let applied = vinx_node::sync::sync_from_peer(
+            peer_url,
+            &mut state,
+            &mut chain,
+            &config.validator_set,
+        ).await;
+        if applied > 0 {
+            tracing::info!(applied, tip = chain.tip_height(), "Chain sync complete");
+        } else {
+            tracing::info!("Chain sync: already up to date");
+        }
+    }
 
     print_banner(&admin_kf.address, &validator_kf.address, state.block_height, resumed, &rpc_listen);
 

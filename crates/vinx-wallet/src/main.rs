@@ -143,6 +143,19 @@ enum Commands {
         #[arg(long, default_value = "http://127.0.0.1:8545")]
         node: String,
     },
+    /// Show transaction history for an address
+    History {
+        /// Bech32 address (vinx1...)
+        address: String,
+        /// Maximum transactions to show
+        #[arg(long, default_value = "20")]
+        limit: usize,
+        /// Skip the first N transactions
+        #[arg(long, default_value = "0")]
+        offset: usize,
+        #[arg(long, default_value = "http://127.0.0.1:8545")]
+        node: String,
+    },
 }
 
 // ─── Entry point ─────────────────────────────────────────────────────────────
@@ -176,6 +189,9 @@ async fn run(cmd: Commands) -> Result<(), WalletError> {
         }
         Commands::Validators { node } => cmd_validators(&node).await,
         Commands::Protocol { node } => cmd_protocol(&node).await,
+        Commands::History { address, limit, offset, node } => {
+            cmd_history(&address, limit, offset, &node).await
+        }
     }
 }
 
@@ -445,6 +461,45 @@ async fn cmd_protocol(node: &str) -> Result<(), WalletError> {
             println!("Upgrade  : {} at block {}", u.version, u.activation_height);
             println!("Announced: block {}", u.announced_at);
         }
+    }
+    Ok(())
+}
+
+async fn cmd_history(
+    address: &str,
+    limit: usize,
+    offset: usize,
+    node: &str,
+) -> Result<(), WalletError> {
+    let client = RpcClient::new(node);
+    let info = client.get_account_txs(address, limit, offset).await?;
+    println!("Address  : {}", info.address);
+    println!("Total    : {} transactions", info.total);
+    if info.txs.is_empty() {
+        println!("(no transactions found)");
+        return Ok(());
+    }
+    println!();
+    println!("{:<8} {:<12} {:<16} {:<20} {}",
+        "Block", "Type", "Amount", "Fee", "Hash");
+    println!("{}", "-".repeat(80));
+    for tx in &info.txs {
+        println!("{:<8} {:<12} {:<16} {:<20} {}",
+            tx.block_height,
+            tx.tx_type,
+            tx.amount,
+            tx.fee,
+            &tx.hash[..16],
+        );
+    }
+    if info.total > offset + info.txs.len() {
+        println!();
+        println!("Showing {}-{} of {}. Use --offset {} to see more.",
+            offset + 1,
+            offset + info.txs.len(),
+            info.total,
+            offset + limit,
+        );
     }
     Ok(())
 }

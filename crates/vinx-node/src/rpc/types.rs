@@ -179,6 +179,21 @@ impl ProtocolStatusResponse {
 }
 
 #[derive(Serialize)]
+pub struct AccountTxsResponse {
+    pub address: String,
+    pub total: usize,
+    pub offset: usize,
+    pub txs: Vec<TxWithBlockResponse>,
+}
+
+#[derive(Serialize)]
+pub struct ChainSyncResponse {
+    pub from: u64,
+    pub count: usize,
+    pub blocks: Vec<BlockResponse>,
+}
+
+#[derive(Serialize)]
 pub struct ErrorResponse {
     pub error: String,
 }

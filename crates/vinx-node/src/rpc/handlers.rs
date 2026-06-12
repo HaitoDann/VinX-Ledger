@@ -1,6 +1,6 @@
 use axum::{
-    extract::{Path, State},
-    http::StatusCode,
+    extract::{Path, Query, State},
+    http::{header, StatusCode},
     response::{IntoResponse, Response},
     Json,
 };
@@ -136,4 +136,102 @@ pub async fn get_tx_by_hash(
         Some((height, block, tx)) => Ok(Json(TxWithBlockResponse::new(height, &block.hash(), tx))),
         None => Err(ApiError::NotFound(format!("Transaction {} not found", hash))),
     }
+}
+
+#[derive(serde::Deserialize)]
+pub struct PaginationParams {
+    #[serde(default = "default_limit")]
+    pub limit: usize,
+    #[serde(default)]
+    pub offset: usize,
+}
+
+fn default_limit() -> usize {
+    50
+}
+
+pub async fn get_account_txs(
+    State(node): State<Arc<Node>>,
+    Path(raw_address): Path<String>,
+    Query(params): Query<PaginationParams>,
+) -> ApiResult<AccountTxsResponse> {
+    let address =
+        Address::from_bech32(&raw_address).map_err(|e| ApiError::BadRequest(e.to_string()))?;
+    let addr_str = address.to_string();
+    let limit = params.limit.min(200);
+
+    let chain = node.chain.read().await;
+    let tx_hashes = chain.get_account_txs(&addr_str, limit, params.offset);
+    let total = chain.account_tx_count(&addr_str);
+
+    let mut txs = Vec::with_capacity(tx_hashes.len());
+    for hash in &tx_hashes {
+        if let Some((height, block, tx)) = chain.get_tx_by_hash(hash) {
+            txs.push(TxWithBlockResponse::new(height, &block.hash(), tx));
+        }
+    }
+
+    Ok(Json(AccountTxsResponse {
+        address: addr_str,
+        total,
+        offset: params.offset,
+        txs,
+    }))
+}
+
+#[derive(serde::Deserialize)]
+pub struct SyncParams {
+    #[serde(default)]
+    pub from: u64,
+    #[serde(default = "default_sync_limit")]
+    pub limit: usize,
+}
+
+fn default_sync_limit() -> usize {
+    100
+}
+
+pub async fn get_chain_sync(
+    State(node): State<Arc<Node>>,
+    Query(params): Query<SyncParams>,
+) -> ApiResult<ChainSyncResponse> {
+    let limit = params.limit.min(500);
+    let chain = node.chain.read().await;
+    let tip = chain.tip_height();
+
+    let start = params.from;
+    if start > tip {
+        return Ok(Json(ChainSyncResponse { from: start, count: 0, blocks: vec![] }));
+    }
+
+    let end = (start + limit as u64).min(tip + 1);
+    let mut blocks = Vec::new();
+    for h in start..end {
+        if let Some(block) = chain.get_block(h) {
+            blocks.push(BlockResponse::from_block(block, &node.config.validator_set));
+        }
+    }
+    let count = blocks.len();
+    Ok(Json(ChainSyncResponse { from: start, count, blocks }))
+}
+
+/// Returns node metrics in Prometheus text format.
+pub async fn get_metrics(State(node): State<Arc<Node>>) -> impl IntoResponse {
+    let height = node.chain.read().await.tip_height();
+    let mempool_size = node.mempool.read().await.size();
+
+    let body = format!(
+        "# HELP vinx_chain_height Current chain tip height\n\
+         # TYPE vinx_chain_height gauge\n\
+         vinx_chain_height {height}\n\
+         # HELP vinx_mempool_size Number of transactions pending in mempool\n\
+         # TYPE vinx_mempool_size gauge\n\
+         vinx_mempool_size {mempool_size}\n"
+    );
+
+    (
+        StatusCode::OK,
+        [(header::CONTENT_TYPE, "text/plain; version=0.0.4; charset=utf-8")],
+        body,
+    )
 }
