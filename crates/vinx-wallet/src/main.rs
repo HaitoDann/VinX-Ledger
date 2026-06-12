@@ -143,6 +143,26 @@ enum Commands {
         #[arg(long, default_value = "http://127.0.0.1:8545")]
         node: String,
     },
+    /// Add a new validator to the PoA set (admin only)
+    AddValidator {
+        /// Address of the new validator (vinx1...)
+        #[arg(long)]
+        validator: String,
+        #[arg(short, long, default_value = "wallet.json")]
+        wallet: PathBuf,
+        #[arg(long, default_value = "http://127.0.0.1:8545")]
+        node: String,
+    },
+    /// Remove a validator from the PoA set (admin only)
+    RemoveValidator {
+        /// Address of the validator to remove (vinx1...)
+        #[arg(long)]
+        validator: String,
+        #[arg(short, long, default_value = "wallet.json")]
+        wallet: PathBuf,
+        #[arg(long, default_value = "http://127.0.0.1:8545")]
+        node: String,
+    },
     /// Show transaction history for an address
     History {
         /// Bech32 address (vinx1...)
@@ -186,6 +206,12 @@ async fn run(cmd: Commands) -> Result<(), WalletError> {
         Commands::Unfreeze { target, wallet, node } => cmd_unfreeze(&target, &wallet, &node).await,
         Commands::AnnounceUpgrade { version, activation_height, wallet, node } => {
             cmd_announce_upgrade(&version, activation_height, &wallet, &node).await
+        }
+        Commands::AddValidator { validator, wallet, node } => {
+            cmd_add_validator(&validator, &wallet, &node).await
+        }
+        Commands::RemoveValidator { validator, wallet, node } => {
+            cmd_remove_validator(&validator, &wallet, &node).await
         }
         Commands::Validators { node } => cmd_validators(&node).await,
         Commands::Protocol { node } => cmd_protocol(&node).await,
@@ -428,6 +454,66 @@ async fn cmd_announce_upgrade(
     println!("New version       : {}", version);
     println!("Activation height : {}", activation_height);
     println!("Nonce             : {}", nonce);
+
+    let resp = client.submit_tx(&tx).await?;
+    if resp.accepted {
+        println!("Status  : accepted");
+        println!("Tx hash : {}", resp.tx_hash);
+    } else {
+        println!("Status  : rejected");
+    }
+    Ok(())
+}
+
+async fn cmd_add_validator(
+    validator_str: &str,
+    wallet: &PathBuf,
+    node: &str,
+) -> Result<(), WalletError> {
+    let ks = KeyStore::load(wallet)?;
+    let kp = ks.to_keypair()?;
+    let validator_addr = Address::from_bech32(validator_str)?;
+
+    let client = RpcClient::new(node);
+    let acc = client.get_account(ks.address()).await?;
+    let nonce = acc.nonce;
+
+    let tx = Transaction::new_add_validator(&kp, validator_addr, nonce);
+
+    println!("Admin     : {}", ks.address());
+    println!("Validator : {}", validator_str);
+    println!("Action    : add-validator");
+    println!("Nonce     : {}", nonce);
+
+    let resp = client.submit_tx(&tx).await?;
+    if resp.accepted {
+        println!("Status  : accepted");
+        println!("Tx hash : {}", resp.tx_hash);
+    } else {
+        println!("Status  : rejected");
+    }
+    Ok(())
+}
+
+async fn cmd_remove_validator(
+    validator_str: &str,
+    wallet: &PathBuf,
+    node: &str,
+) -> Result<(), WalletError> {
+    let ks = KeyStore::load(wallet)?;
+    let kp = ks.to_keypair()?;
+    let validator_addr = Address::from_bech32(validator_str)?;
+
+    let client = RpcClient::new(node);
+    let acc = client.get_account(ks.address()).await?;
+    let nonce = acc.nonce;
+
+    let tx = Transaction::new_remove_validator(&kp, validator_addr, nonce);
+
+    println!("Admin     : {}", ks.address());
+    println!("Validator : {}", validator_str);
+    println!("Action    : remove-validator");
+    println!("Nonce     : {}", nonce);
 
     let resp = client.submit_tx(&tx).await?;
     if resp.accepted {

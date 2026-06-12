@@ -1,5 +1,5 @@
 use crate::{chain::Chain, config::NodeConfig, mempool::{is_future_nonce, Mempool}, NodeError};
-use vinx_core::{amount::Amount, Block, BlockHeader, BlockSignature};
+use vinx_core::{amount::Amount, Block, BlockHeader, BlockSignature, ValidatorSet};
 use vinx_state::WorldState;
 
 /// Produces the next block: applies mempool transactions, distributes staking rewards,
@@ -12,13 +12,14 @@ pub fn produce_block(
     chain: &mut Chain,
     mempool: &mut Mempool,
     config: &NodeConfig,
+    validator_set: &ValidatorSet,
     timestamp: u64,
 ) -> Result<Block, NodeError> {
     let next_height = chain.tip_height() + 1;
     let prev_hash = chain.tip_hash();
 
     // Verify this node is the round-robin leader for the upcoming block
-    let expected_leader = config.validator_set.leader_at(next_height);
+    let expected_leader = validator_set.leader_at(next_height);
     if expected_leader != &config.validator_address {
         return Err(NodeError::Consensus(format!(
             "not the leader for block {next_height}: expected {expected_leader}"
@@ -92,6 +93,9 @@ pub fn produce_block(
         signature: config.validator_keypair.sign(&header_hash),
     });
 
+    // Sync state's validator set back into WorldState (AddValidator/RemoveValidator txs)
+    // The caller (Node::tick) handles syncing to the Arc<RwLock<ValidatorSet>>.
+
     chain.push(block.clone());
 
     tracing::info!(
@@ -120,6 +124,7 @@ mod tests {
 
         let state = create_genesis_state(&GenesisConfig {
             admin_address: admin_addr,
+            validator_address: validator_addr.clone(),
         });
 
         let (chain, _) = Chain::new_with_genesis(validator_addr.clone(), 0);
@@ -132,14 +137,14 @@ mod tests {
     #[test]
     fn test_produce_first_block_height() {
         let (mut state, mut chain, mut mempool, config) = setup();
-        let block = produce_block(&mut state, &mut chain, &mut mempool, &config, 1_000).unwrap();
+        let block = produce_block(&mut state, &mut chain, &mut mempool, &config, &config.validator_set,1_000).unwrap();
         assert_eq!(block.header.height, 1);
     }
 
     #[test]
     fn test_first_block_has_no_transactions() {
         let (mut state, mut chain, mut mempool, config) = setup();
-        let block = produce_block(&mut state, &mut chain, &mut mempool, &config, 1_000).unwrap();
+        let block = produce_block(&mut state, &mut chain, &mut mempool, &config, &config.validator_set,1_000).unwrap();
         assert_eq!(block.transactions.len(), 0);
     }
 
@@ -147,7 +152,7 @@ mod tests {
     fn test_produce_consecutive_blocks() {
         let (mut state, mut chain, mut mempool, config) = setup();
         for i in 1..=5 {
-            let block = produce_block(&mut state, &mut chain, &mut mempool, &config, i * 10).unwrap();
+            let block = produce_block(&mut state, &mut chain, &mut mempool, &config, &config.validator_set,i * 10).unwrap();
             assert_eq!(block.header.height, i);
         }
         assert_eq!(chain.tip_height(), 5);
@@ -170,7 +175,7 @@ mod tests {
 
         mempool.add(tx).unwrap();
 
-        let block = produce_block(&mut state, &mut chain, &mut mempool, &config, 1_000).unwrap();
+        let block = produce_block(&mut state, &mut chain, &mut mempool, &config, &config.validator_set,1_000).unwrap();
 
         assert_eq!(block.header.tx_count, 1);
         assert_eq!(state.account_balance(&receiver_addr), amount);
@@ -189,7 +194,7 @@ mod tests {
 
         mempool.add(bad_tx).unwrap();
 
-        let block = produce_block(&mut state, &mut chain, &mut mempool, &config, 1_000).unwrap();
+        let block = produce_block(&mut state, &mut chain, &mut mempool, &config, &config.validator_set,1_000).unwrap();
 
         // Bad tx dropped — empty block
         assert_eq!(block.header.tx_count, 0);
@@ -199,8 +204,8 @@ mod tests {
     #[test]
     fn test_prev_hash_links_blocks() {
         let (mut state, mut chain, mut mempool, config) = setup();
-        let b1 = produce_block(&mut state, &mut chain, &mut mempool, &config, 10).unwrap();
-        let b2 = produce_block(&mut state, &mut chain, &mut mempool, &config, 20).unwrap();
+        let b1 = produce_block(&mut state, &mut chain, &mut mempool, &config, &config.validator_set,10).unwrap();
+        let b2 = produce_block(&mut state, &mut chain, &mut mempool, &config, &config.validator_set,20).unwrap();
         assert_eq!(b2.header.prev_hash, b1.hash());
     }
 }

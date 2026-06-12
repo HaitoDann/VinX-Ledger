@@ -43,6 +43,7 @@ fn test_storage_roundtrip() {
 
     let state = create_genesis_state(&GenesisConfig {
         admin_address: admin.clone(),
+        validator_address: validator.clone(),
     });
     let (chain, _) = Chain::new_with_genesis(validator.clone(), 0);
 
@@ -76,6 +77,7 @@ async fn test_state_persists_across_node_restarts() {
     {
         let state = create_genesis_state(&GenesisConfig {
             admin_address: admin_addr.clone(),
+            validator_address: validator_addr.clone(),
         });
         let (chain, _) = Chain::new_with_genesis(validator_addr.clone(), 0);
         let config = NodeConfig::new(validator_kp.clone())

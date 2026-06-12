@@ -56,6 +56,29 @@ impl ValidatorSet {
     pub fn is_empty(&self) -> bool {
         self.validators.is_empty()
     }
+
+    /// Appends a new validator. Returns false if the address is already present.
+    pub fn add(&mut self, addr: Address) -> bool {
+        if self.validators.contains(&addr) {
+            return false;
+        }
+        self.validators.push(addr);
+        true
+    }
+
+    /// Removes a validator by address. Returns false if not found.
+    /// Will not remove the last validator (preserves the invariant of non-empty set).
+    pub fn remove(&mut self, addr: &Address) -> bool {
+        if self.validators.len() <= 1 {
+            return false;
+        }
+        if let Some(pos) = self.validators.iter().position(|a| a == addr) {
+            self.validators.remove(pos);
+            true
+        } else {
+            false
+        }
+    }
 }
 
 #[cfg(test)]

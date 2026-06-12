@@ -1,4 +1,4 @@
-use std::collections::{BTreeMap, HashMap, HashSet};
+use std::collections::{BTreeMap, BinaryHeap, HashMap, HashSet};
 use vinx_core::{CoreError, Transaction};
 use vinx_crypto::Hash32;
 
@@ -47,32 +47,44 @@ impl Mempool {
         Ok(())
     }
 
-    /// Returns up to `limit` transactions in per-account nonce order.
-    /// For each account, nonces are emitted lowest-first; accounts are
-    /// interleaved in round-robin fashion.
+    /// Returns up to `limit` transactions ordered by fee (highest first), with
+    /// nonce order preserved within each sender account.
+    ///
+    /// Algorithm: maintain a max-heap keyed on the fee of each account's
+    /// lowest-nonce (ready) tx.  On each step, pop the highest-fee head, emit
+    /// it, then push the next head from the same account if one exists.
     pub fn drain(&mut self, limit: usize) -> Vec<Transaction> {
         let mut result = Vec::with_capacity(limit);
 
-        // Snapshot the address list to drive the round-robin.
-        let addrs: Vec<String> = self.queues.keys().cloned().collect();
+        // (fee_atoms, addr) — BinaryHeap is a max-heap, so highest fee first.
+        // For equal fees the addr tiebreaks deterministically.
+        let mut heap: BinaryHeap<(u128, String)> = self
+            .queues
+            .iter()
+            .filter_map(|(addr, queue)| {
+                queue.values().next().map(|tx| (tx.fee.atoms(), addr.clone()))
+            })
+            .collect();
 
-        let mut made_progress = true;
-        while made_progress && result.len() < limit {
-            made_progress = false;
-            for addr in &addrs {
-                if result.len() >= limit {
-                    break;
-                }
-                if let Some(queue) = self.queues.get_mut(addr) {
-                    if let Some((&nonce, _)) = queue.iter().next() {
-                        let tx = queue.remove(&nonce).unwrap();
-                        self.seen.remove(&tx.hash());
-                        self.pending_count -= 1;
-                        result.push(tx);
-                        made_progress = true;
-                    }
-                }
+        while result.len() < limit {
+            let Some((_, addr)) = heap.pop() else { break };
+
+            let queue = match self.queues.get_mut(&addr) {
+                Some(q) if !q.is_empty() => q,
+                _ => continue,
+            };
+
+            let (&nonce, _) = queue.iter().next().unwrap();
+            let tx = queue.remove(&nonce).unwrap();
+            self.seen.remove(&tx.hash());
+            self.pending_count -= 1;
+
+            // Push next head from the same account if available
+            if let Some(next_tx) = queue.values().next() {
+                heap.push((next_tx.fee.atoms(), addr.clone()));
             }
+
+            result.push(tx);
         }
 
         self.queues.retain(|_, q| !q.is_empty());
@@ -218,6 +230,46 @@ mod tests {
         mp.add(tx.clone()).unwrap();
         mp.requeue(vec![tx]); // already in queue
         assert_eq!(mp.size(), 1);
+    }
+
+    fn make_tx_with_fee(kp: &KeyPair, to: Address, nonce: u64, fee_vinx: u64) -> Transaction {
+        let amount = Amount::from_vinx(1);
+        let fee = Amount::from_vinx(fee_vinx);
+        vinx_core::Transaction::new_transfer(kp, to, amount, fee, nonce)
+    }
+
+    #[test]
+    fn test_fee_priority_higher_fee_first() {
+        let mut mp = Mempool::new(10);
+        let kp_a = KeyPair::generate();
+        let kp_b = KeyPair::generate();
+        let to = Address::from_public_key(&KeyPair::generate().public_key());
+
+        // A pays fee 1, B pays fee 10 — B should come first
+        mp.add(make_tx_with_fee(&kp_a, to.clone(), 0, 1)).unwrap();
+        mp.add(make_tx_with_fee(&kp_b, to.clone(), 0, 10)).unwrap();
+
+        let drained = mp.drain(10);
+        assert_eq!(drained.len(), 2);
+        assert_eq!(drained[0].fee, Amount::from_vinx(10)); // B first
+        assert_eq!(drained[1].fee, Amount::from_vinx(1));  // A second
+    }
+
+    #[test]
+    fn test_fee_priority_nonce_order_preserved() {
+        let mut mp = Mempool::new(10);
+        let kp = KeyPair::generate();
+        let to = Address::from_public_key(&KeyPair::generate().public_key());
+
+        // Same sender, nonces 0 and 1 with different fees
+        // Nonce order must be respected regardless of fee
+        mp.add(make_tx_with_fee(&kp, to.clone(), 0, 5)).unwrap();
+        mp.add(make_tx_with_fee(&kp, to.clone(), 1, 100)).unwrap(); // higher fee but nonce=1
+
+        let drained = mp.drain(10);
+        assert_eq!(drained.len(), 2);
+        assert_eq!(drained[0].nonce, 0); // nonce 0 must come first
+        assert_eq!(drained[1].nonce, 1);
     }
 
     #[test]

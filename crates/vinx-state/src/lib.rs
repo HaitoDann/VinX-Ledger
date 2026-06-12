@@ -19,8 +19,11 @@ mod tests {
         let sender_kp = KeyPair::generate();
         let sender_addr = Address::from_public_key(&sender_kp.public_key());
 
+        let validator_kp = KeyPair::generate();
+        let validator_addr = Address::from_public_key(&validator_kp.public_key());
         let state = create_genesis_state(&GenesisConfig {
             admin_address: sender_addr.clone(),
+            validator_address: validator_addr,
         });
         (state, sender_kp, sender_addr)
     }

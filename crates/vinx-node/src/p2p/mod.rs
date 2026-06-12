@@ -12,11 +12,12 @@ use libp2p::{
 };
 use futures::StreamExt;
 use tokio::sync::{mpsc, RwLock};
-use tracing::{debug, info};
+use tracing::{debug, info, warn};
 
 use crate::{chain::Chain, config::NodeConfig, mempool::Mempool, NodeError};
 use messages::P2pMessage;
-use vinx_core::{Block, BlockSignature, Transaction};
+use vinx_core::{Block, BlockSignature, Transaction, ValidatorSet};
+use vinx_state::WorldState;
 
 /// Commands sent from the rest of the node to the P2P event loop.
 pub enum P2pCommand {
@@ -65,22 +66,20 @@ struct VinxBehaviour {
 const TOPICS: &[&str] = &["vinx/blocks/1", "vinx/txs/1", "vinx/sigs/1"];
 
 /// Starts the P2P service and returns a handle.
-///
-/// The event loop runs in a background tokio task and dispatches received
-/// messages directly to the shared node state (mempool / chain).
 pub async fn start(
     config: &NodeConfig,
     chain: Arc<RwLock<Chain>>,
     mempool: Arc<RwLock<Mempool>>,
+    state: Arc<RwLock<WorldState>>,
+    validator_set: Arc<RwLock<ValidatorSet>>,
 ) -> Result<P2pHandle, NodeError> {
     let (cmd_tx, cmd_rx) = mpsc::unbounded_channel::<P2pCommand>();
 
     let validator_secret = config.validator_keypair.secret_bytes();
     let p2p_secret = {
         use vinx_crypto::sha256;
-        // Deterministically derive a libp2p identity from the validator key
         let mut derived = sha256(&validator_secret);
-        derived[0] &= 0xf8; // Clamp for Ed25519 scalar
+        derived[0] &= 0xf8;
         derived[31] = (derived[31] & 0x1f) | 0x40;
         derived
     };
@@ -123,7 +122,6 @@ pub async fn start(
         .map_err(|e| NodeError::Config(format!("P2P behaviour setup failed: {e}")))?
         .build();
 
-    // Subscribe to all topics
     let _topic_map: Vec<(TopicHash, IdentTopic)> = TOPICS
         .iter()
         .map(|t| {
@@ -141,7 +139,6 @@ pub async fn start(
         .listen_on(listen_addr.clone())
         .map_err(|e| NodeError::Config(format!("P2P listen failed: {e}")))?;
 
-    // Dial bootstrap peers
     for peer_addr in &config.peer_addrs {
         if let Ok(addr) = peer_addr.parse::<Multiaddr>() {
             let _ = swarm.dial(addr);
@@ -150,17 +147,16 @@ pub async fn start(
 
     info!(peer_id = %local_peer_id, listen = %listen_addr, "P2P service started");
 
-    let validator_set = config.validator_set.clone();
     let local_kp = config.validator_keypair.clone();
     let local_addr = config.validator_address.clone();
 
-    // Spawn the event loop
     tokio::spawn(async move {
         run_event_loop(
             swarm,
             cmd_rx,
             chain,
             mempool,
+            state,
             validator_set,
             local_kp,
             local_addr,
@@ -176,13 +172,13 @@ async fn run_event_loop(
     mut cmd_rx: mpsc::UnboundedReceiver<P2pCommand>,
     chain: Arc<RwLock<Chain>>,
     mempool: Arc<RwLock<Mempool>>,
-    validator_set: vinx_core::ValidatorSet,
+    state: Arc<RwLock<WorldState>>,
+    validator_set: Arc<RwLock<ValidatorSet>>,
     local_kp: vinx_crypto::KeyPair,
     local_addr: vinx_crypto::Address,
 ) {
     loop {
         tokio::select! {
-            // Outbound commands from the node
             cmd = cmd_rx.recv() => {
                 match cmd {
                     Some(P2pCommand::Broadcast(msg)) => {
@@ -199,13 +195,13 @@ async fn run_event_loop(
                 }
             }
 
-            // Inbound swarm events
             event = swarm.next() => {
                 if let Some(event) = event {
                     handle_swarm_event(
                         event,
                         &chain,
                         &mempool,
+                        &state,
                         &validator_set,
                         &local_kp,
                         &local_addr,
@@ -222,7 +218,8 @@ async fn handle_swarm_event(
     event: SwarmEvent<VinxBehaviourEvent>,
     chain: &Arc<RwLock<Chain>>,
     mempool: &Arc<RwLock<Mempool>>,
-    validator_set: &vinx_core::ValidatorSet,
+    state: &Arc<RwLock<WorldState>>,
+    validator_set: &Arc<RwLock<ValidatorSet>>,
     local_kp: &vinx_crypto::KeyPair,
     local_addr: &vinx_crypto::Address,
     swarm: &mut libp2p::Swarm<VinxBehaviour>,
@@ -241,7 +238,7 @@ async fn handle_swarm_event(
             gossipsub::Event::Message { message, .. },
         )) => {
             let Some(msg) = P2pMessage::decode(&message.data) else { return };
-            dispatch_message(msg, chain, mempool, validator_set, local_kp, local_addr, swarm).await;
+            dispatch_message(msg, chain, mempool, state, validator_set, local_kp, local_addr, swarm).await;
         }
         SwarmEvent::Behaviour(VinxBehaviourEvent::Identify(identify::Event::Received {
             peer_id,
@@ -262,7 +259,8 @@ async fn dispatch_message(
     msg: P2pMessage,
     chain: &Arc<RwLock<Chain>>,
     mempool: &Arc<RwLock<Mempool>>,
-    validator_set: &vinx_core::ValidatorSet,
+    state: &Arc<RwLock<WorldState>>,
+    validator_set: &Arc<RwLock<ValidatorSet>>,
     local_kp: &vinx_crypto::KeyPair,
     local_addr: &vinx_crypto::Address,
     swarm: &mut libp2p::Swarm<VinxBehaviour>,
@@ -278,37 +276,112 @@ async fn dispatch_message(
 
         P2pMessage::NewBlock(block) => {
             let height = block.header.height;
-            // If we are a co-validator for this block, sign it and broadcast our signature
-            if validator_set.contains(local_addr) {
-                let expected = validator_set.leader_at(height);
-                if expected == &block.header.validator {
-                    let header_hash = block.hash();
-                    let sig = BlockSignature {
-                        validator: local_addr.clone(),
-                        pub_key: local_kp.public_key(),
-                        signature: local_kp.sign(&header_hash),
-                    };
-                    let co_sig_msg = P2pMessage::BlockCoSignature {
-                        height,
-                        signature: sig.clone(),
-                    };
-                    let topic = IdentTopic::new(co_sig_msg.topic());
-                    let _ = swarm.behaviour_mut().gossipsub.publish(topic, co_sig_msg.encode());
-                    debug!(height, "Co-signed block and broadcast signature");
+            let vs = validator_set.read().await.clone();
 
-                    // Add signature to local chain
-                    let mut c = chain.write().await;
-                    let finalized = c.add_co_signature(height, sig, validator_set);
-                    if finalized {
-                        info!(height, "Block finalized after co-signing");
+            // --- Point 1: Full block validation ---
+            {
+                let chain_guard = chain.read().await;
+                let expected_height = chain_guard.tip_height() + 1;
+
+                // Ignore blocks we already have or that are too far ahead
+                if height != expected_height {
+                    debug!(height, expected = expected_height, "P2P block height mismatch, ignoring");
+                    return;
+                }
+
+                // Verify hash linkage
+                let expected_prev = chain_guard.tip_hash();
+                if block.header.prev_hash != expected_prev {
+                    warn!(height, "P2P block has wrong prev_hash, rejecting");
+                    return;
+                }
+            }
+
+            // Verify round-robin proposer
+            let expected_leader = vs.leader_at(height);
+            if expected_leader != &block.header.validator {
+                warn!(height, expected = %expected_leader, got = %block.header.validator,
+                      "P2P block wrong proposer, rejecting");
+                return;
+            }
+
+            // Apply all transactions to a state snapshot first — rollback if state_root mismatches
+            let applied = {
+                let mut state_guard = state.write().await;
+                let snapshot = state_guard.clone();
+
+                let mut ok = true;
+                for tx in &block.transactions {
+                    if let Err(e) = state_guard.apply_transaction(tx) {
+                        warn!(height, error = %e, "P2P block tx rejected, rolling back block");
+                        *state_guard = snapshot.clone();
+                        ok = false;
+                        break;
                     }
+                }
+
+                if ok {
+                    state_guard.block_height = height;
+                    state_guard.check_auto_unfreeze();
+                    state_guard.check_upgrade_activation();
+                    let _rewards = state_guard.distribute_staking_rewards();
+
+                    // Verify state root
+                    let computed_root = state_guard.compute_state_root();
+                    if computed_root != block.header.state_root {
+                        warn!(height, "P2P block state_root mismatch, rolling back");
+                        *state_guard = snapshot;
+                        ok = false;
+                    } else {
+                        // Sync validator set from updated state
+                        let new_vs = state_guard.validator_set.clone();
+                        drop(state_guard);
+                        *validator_set.write().await = new_vs;
+                    }
+                }
+                ok
+            };
+
+            if !applied {
+                return;
+            }
+
+            // Push the validated block to the chain
+            {
+                let mut chain_guard = chain.write().await;
+                chain_guard.push(block.clone());
+                info!(height, "P2P: block validated and applied");
+            }
+
+            // Co-sign the block if we are a registered validator
+            let vs = validator_set.read().await.clone();
+            if vs.contains(local_addr) {
+                let header_hash = block.hash();
+                let sig = BlockSignature {
+                    validator: local_addr.clone(),
+                    pub_key: local_kp.public_key(),
+                    signature: local_kp.sign(&header_hash),
+                };
+                let co_sig_msg = P2pMessage::BlockCoSignature {
+                    height,
+                    signature: sig.clone(),
+                };
+                let topic = IdentTopic::new(co_sig_msg.topic());
+                let _ = swarm.behaviour_mut().gossipsub.publish(topic, co_sig_msg.encode());
+                debug!(height, "Co-signed and broadcast block signature");
+
+                let mut c = chain.write().await;
+                let finalized = c.add_co_signature(height, sig, &vs);
+                if finalized {
+                    info!(height, "Block finalized after co-signing");
                 }
             }
         }
 
         P2pMessage::BlockCoSignature { height, signature } => {
+            let vs = validator_set.read().await.clone();
             let mut c = chain.write().await;
-            let finalized = c.add_co_signature(height, signature, validator_set);
+            let finalized = c.add_co_signature(height, signature, &vs);
             if finalized {
                 info!(height, "Block finalized via P2P signature collection");
             }

@@ -346,8 +346,31 @@ async function refreshStatus() {
     document.getElementById('hs').textContent = 'Nœud injoignable';
   }
 }
-setInterval(refreshStatus, 3000);
+setInterval(refreshStatus, 10000);
 refreshStatus();
+
+// ─── SSE real-time block updates ─────────────────────────────────────────────
+(function startSSE() {
+  let es;
+  function connect() {
+    es = new EventSource('/events');
+    es.onmessage = function(e) {
+      try {
+        const evt = JSON.parse(e.data);
+        if (evt.type === 'new_block') {
+          netHeight = evt.height;
+          document.getElementById('s-h').textContent = evt.height.toLocaleString();
+          refreshStatus();
+        }
+      } catch {}
+    };
+    es.onerror = function() {
+      es.close();
+      setTimeout(connect, 5000); // reconnect after 5s
+    };
+  }
+  connect();
+})();
 
 // ─── Wallet ───────────────────────────────────────────────────────────────────
 function onWalletFile(input) {

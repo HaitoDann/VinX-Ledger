@@ -1,10 +1,13 @@
 use axum::{
     extract::{Path, Query, State},
     http::{header, StatusCode},
-    response::{IntoResponse, Response},
+    response::{sse::{Event, KeepAlive, Sse}, IntoResponse, Response},
     Json,
 };
-use std::sync::Arc;
+use futures::stream::{self, Stream};
+use std::{convert::Infallible, sync::Arc};
+use tokio_stream::wrappers::BroadcastStream;
+use tokio_stream::StreamExt as _;
 use vinx_core::Transaction;
 use vinx_crypto::Address;
 
@@ -103,7 +106,7 @@ pub async fn get_block(
 ) -> ApiResult<BlockResponse> {
     let chain = node.chain.read().await;
     match chain.get_block(height) {
-        Some(block) => Ok(Json(BlockResponse::from_block(block, &node.config.validator_set))),
+        Some(block) => Ok(Json(BlockResponse::from_block(block, &*node.validator_set.read().await))),
         None => Err(ApiError::NotFound(format!("Block {} not found", height))),
     }
 }
@@ -115,7 +118,7 @@ pub async fn get_mempool(State(node): State<Arc<Node>>) -> ApiResult<MempoolResp
 
 pub async fn get_validators(State(node): State<Arc<Node>>) -> ApiResult<ValidatorSetResponse> {
     Ok(Json(ValidatorSetResponse::from_validator_set(
-        &node.config.validator_set,
+        &*node.validator_set.read().await,
     )))
 }
 
@@ -208,11 +211,49 @@ pub async fn get_chain_sync(
     let mut blocks = Vec::new();
     for h in start..end {
         if let Some(block) = chain.get_block(h) {
-            blocks.push(BlockResponse::from_block(block, &node.config.validator_set));
+            blocks.push(BlockResponse::from_block(block, &*node.validator_set.read().await));
         }
     }
     let count = blocks.len();
     Ok(Json(ChainSyncResponse { from: start, count, blocks }))
+}
+
+/// Server-Sent Events stream: sends a JSON event on every new block.
+pub async fn sse_events(
+    State(node): State<Arc<Node>>,
+) -> Sse<impl Stream<Item = Result<Event, Infallible>>> {
+    let rx = node.block_events.subscribe();
+    let stream = BroadcastStream::new(rx).filter_map(|result| {
+        result.ok().map(|evt| {
+            let data = serde_json::json!({
+                "type": "new_block",
+                "height": evt.height,
+                "tx_count": evt.tx_count,
+                "hash": evt.hash_hex,
+            });
+            Ok(Event::default().data(data.to_string()))
+        })
+    });
+    let stream = stream::StreamExt::map(stream, |x: Result<Event, Infallible>| x);
+    Sse::new(stream).keep_alive(KeepAlive::default())
+}
+
+pub async fn get_snapshot(State(node): State<Arc<Node>>) -> impl IntoResponse {
+    let state_guard = node.state.read().await;
+    let chain_guard = node.chain.read().await;
+    let height = chain_guard.tip_height();
+    let tip_hash = hex::encode(chain_guard.tip_hash());
+
+    match serde_json::to_value(&*state_guard) {
+        Ok(state_json) => {
+            let snap = SnapshotResponse { height, tip_hash, state: state_json };
+            (StatusCode::OK, Json(snap)).into_response()
+        }
+        Err(e) => (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(ErrorResponse { error: e.to_string() }),
+        ).into_response(),
+    }
 }
 
 /// Returns node metrics in Prometheus text format.

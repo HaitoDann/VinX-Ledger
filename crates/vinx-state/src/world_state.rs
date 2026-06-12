@@ -6,7 +6,7 @@ use vinx_core::{
         STAKING_DISTRIBUTION_INTERVAL,
     },
     protocol::{ProtocolVersion, ScheduledUpgrade},
-    Account, CoreError, Transaction, TransactionType,
+    Account, CoreError, Transaction, TransactionType, ValidatorSet,
 };
 use vinx_crypto::{merkle_root, sha256, Address, Hash32};
 
@@ -28,6 +28,8 @@ pub struct WorldState {
     pub current_version: ProtocolVersion,
     /// Upgrade scheduled but not yet activated.
     pub pending_upgrade: Option<ScheduledUpgrade>,
+    /// Active PoA validator set. Admin can add/remove validators via governance txs.
+    pub validator_set: ValidatorSet,
 }
 
 impl Default for WorldState {
@@ -49,6 +51,8 @@ impl WorldState {
             admin_address: None,
             current_version: ProtocolVersion::GENESIS,
             pending_upgrade: None,
+            // Placeholder — always overwritten by create_genesis_state before use.
+            validator_set: ValidatorSet::single(Address::zero()),
         }
     }
 
@@ -108,6 +112,8 @@ impl WorldState {
             TransactionType::FreezeAccount => self.apply_freeze(tx),
             TransactionType::UnfreezeAccount => self.apply_unfreeze(tx),
             TransactionType::AnnounceUpgrade => self.apply_announce_upgrade(tx),
+            TransactionType::AddValidator => self.apply_add_validator(tx),
+            TransactionType::RemoveValidator => self.apply_remove_validator(tx),
             TransactionType::Emission => Err(CoreError::InvalidTransaction(
                 "emission disabled in Phase 1".to_string(),
             )),
@@ -342,6 +348,51 @@ impl WorldState {
             "Protocol upgrade scheduled"
         );
 
+        Ok(())
+    }
+
+    fn apply_add_validator(&mut self, tx: &Transaction) -> Result<(), CoreError> {
+        self.check_admin(tx)?;
+        if self.validator_set.contains(&tx.to) {
+            return Err(CoreError::InvalidTransaction(
+                "address is already a validator".to_string(),
+            ));
+        }
+        let sender = self
+            .accounts
+            .get_mut(tx.from.as_str())
+            .ok_or(CoreError::InsufficientBalance)?;
+        if sender.nonce != tx.nonce {
+            return Err(CoreError::InvalidNonce { expected: sender.nonce, got: tx.nonce });
+        }
+        sender.nonce += 1;
+        self.validator_set.add(tx.to.clone());
+        tracing::info!(validator = %tx.to, "Validator added to set");
+        Ok(())
+    }
+
+    fn apply_remove_validator(&mut self, tx: &Transaction) -> Result<(), CoreError> {
+        self.check_admin(tx)?;
+        if self.validator_set.len() <= 1 {
+            return Err(CoreError::InvalidTransaction(
+                "cannot remove the last validator".to_string(),
+            ));
+        }
+        if !self.validator_set.contains(&tx.to) {
+            return Err(CoreError::InvalidTransaction(
+                "address is not a validator".to_string(),
+            ));
+        }
+        let sender = self
+            .accounts
+            .get_mut(tx.from.as_str())
+            .ok_or(CoreError::InsufficientBalance)?;
+        if sender.nonce != tx.nonce {
+            return Err(CoreError::InvalidNonce { expected: sender.nonce, got: tx.nonce });
+        }
+        sender.nonce += 1;
+        self.validator_set.remove(&tx.to);
+        tracing::info!(validator = %tx.to, "Validator removed from set");
         Ok(())
     }
 

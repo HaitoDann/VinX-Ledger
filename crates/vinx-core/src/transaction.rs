@@ -14,6 +14,10 @@ pub enum TransactionType {
     AnnounceUpgrade,
     /// Protocol-internal: moves tokens from reserve to the public sale pool each block.
     Emission,
+    /// Admin-only: add a new address to the PoA validator set. `to` = new validator.
+    AddValidator,
+    /// Admin-only: remove an address from the PoA validator set. `to` = validator to remove.
+    RemoveValidator,
 }
 
 impl TransactionType {
@@ -26,6 +30,8 @@ impl TransactionType {
             TransactionType::UnfreezeAccount => 0x05,
             TransactionType::AnnounceUpgrade => 0x06,
             TransactionType::Emission => 0x07,
+            TransactionType::AddValidator => 0x08,
+            TransactionType::RemoveValidator => 0x09,
         }
     }
 }
@@ -228,6 +234,44 @@ impl Transaction {
             self.payload[6..14].try_into().ok()?
         );
         Some((ProtocolVersion::new(major, minor, patch), activation_height))
+    }
+
+    /// Constructs and signs an AddValidator transaction (admin only).
+    pub fn new_add_validator(keypair: &KeyPair, validator: Address, nonce: u64) -> Self {
+        let pk = keypair.public_key();
+        let from = Address::from_public_key(&pk);
+        let mut tx = Self {
+            tx_type: TransactionType::AddValidator,
+            from,
+            to: validator,
+            amount: Amount::ZERO,
+            fee: Amount::ZERO,
+            nonce,
+            payload: vec![],
+            pub_key: Some(pk),
+            signature: None,
+        };
+        tx.signature = Some(keypair.sign(&tx.signing_bytes()));
+        tx
+    }
+
+    /// Constructs and signs a RemoveValidator transaction (admin only).
+    pub fn new_remove_validator(keypair: &KeyPair, validator: Address, nonce: u64) -> Self {
+        let pk = keypair.public_key();
+        let from = Address::from_public_key(&pk);
+        let mut tx = Self {
+            tx_type: TransactionType::RemoveValidator,
+            from,
+            to: validator,
+            amount: Amount::ZERO,
+            fee: Amount::ZERO,
+            nonce,
+            payload: vec![],
+            pub_key: Some(pk),
+            signature: None,
+        };
+        tx.signature = Some(keypair.sign(&tx.signing_bytes()));
+        tx
     }
 
     /// Constructs an Emission transaction (no signature — protocol-only).

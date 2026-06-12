@@ -1,4 +1,4 @@
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 use vinx_core::{Account, Block, ProtocolVersion, ScheduledUpgrade, Transaction, ValidatorSet};
 use vinx_crypto::Hash32;
 
@@ -191,6 +191,16 @@ pub struct ChainSyncResponse {
     pub from: u64,
     pub count: usize,
     pub blocks: Vec<BlockResponse>,
+}
+
+#[derive(Serialize, Deserialize)]
+pub struct SnapshotResponse {
+    /// Chain tip height at snapshot time.
+    pub height: u64,
+    /// Hex-encoded tip block hash.
+    pub tip_hash: String,
+    /// Full serialized world state (serde_json).
+    pub state: serde_json::Value,
 }
 
 #[derive(Serialize)]
