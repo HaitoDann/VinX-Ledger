@@ -6,6 +6,13 @@ use crate::amount::Amount;
 /// Voting period: ~72 hours at 10 s/block.
 pub const GOVERNANCE_VOTING_PERIOD_BLOCKS: u64 = 25_920;
 
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
+pub enum CoffreCondition {
+    MicaCasp,
+    ExternalAudit,
+    PublicPolicy,
+}
+
 /// Action to execute when a governance proposal passes.
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
 pub enum GovernanceAction {
@@ -15,6 +22,12 @@ pub enum GovernanceAction {
     ScheduleUpgrade { version: ProtocolVersion, activation_height: u64 },
     /// Allocate some of the melt pool back into the staking pool.
     ReleaseMeltToStaking { amount: Amount },
+    /// Rotate the admin key to a new address. Requires governance quorum.
+    RotateAdmin(Address),
+    /// Mark one of the 3 Coffre Maturité unlock conditions as met.
+    MarkCoffreCondition(CoffreCondition),
+    /// Transfer Coffre Maturité to staking pool. Requires all 3 conditions to be met.
+    UnlockCoffre,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]

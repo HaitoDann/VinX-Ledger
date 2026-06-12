@@ -24,6 +24,8 @@ pub struct NodeConfig {
     pub peer_addrs: Vec<String>,
     /// RPC URL of a trusted peer to sync blocks from on startup. `None` = no sync.
     pub sync_peer_rpc: Option<String>,
+    /// Bearer token required for admin routes. `None` = no auth required.
+    pub admin_token: Option<String>,
 }
 
 impl NodeConfig {
@@ -42,6 +44,7 @@ impl NodeConfig {
             p2p_listen: None,
             peer_addrs: vec![],
             sync_peer_rpc: None,
+            admin_token: None,
         }
     }
 
@@ -77,6 +80,11 @@ impl NodeConfig {
 
     pub fn with_sync_peer(mut self, url: impl Into<String>) -> Self {
         self.sync_peer_rpc = Some(url.into());
+        self
+    }
+
+    pub fn with_admin_token(mut self, token: impl Into<String>) -> Self {
+        self.admin_token = Some(token.into());
         self
     }
 }

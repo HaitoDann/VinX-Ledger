@@ -18,6 +18,7 @@ struct NodeConfigFile {
     validator_key_file: Option<PathBuf>,
     admin_key_file: Option<PathBuf>,
     sync_peer_rpc: Option<String>,
+    admin_token: Option<String>,
 }
 
 impl NodeConfigFile {
@@ -178,6 +179,9 @@ async fn main() {
     }
     if let Some(ref url) = sync_peer_rpc {
         config = config.with_sync_peer(url.clone());
+    }
+    if let Some(token) = file_cfg.admin_token {
+        config = config.with_admin_token(token);
     }
     config.max_block_txs = max_block_txs;
 

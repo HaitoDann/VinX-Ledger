@@ -1,5 +1,6 @@
 use axum::{
     extract::{Path, Query, State},
+    extract::ws::{Message, WebSocket, WebSocketUpgrade},
     http::{header, StatusCode},
     response::{sse::{Event, KeepAlive, Sse}, IntoResponse, Response},
     Json,
@@ -15,12 +16,22 @@ use crate::{rpc::types::*, Node};
 
 pub type ApiResult<T> = Result<Json<T>, ApiError>;
 
+fn check_admin_auth(headers: &axum::http::HeaderMap, expected: Option<&str>) -> bool {
+    let Some(token) = expected else { return true }; // auth disabled
+    headers
+        .get(axum::http::header::AUTHORIZATION)
+        .and_then(|v| v.to_str().ok())
+        .and_then(|s| s.strip_prefix("Bearer "))
+        == Some(token)
+}
+
 // ─── Error type ─────────────────────────────────────────────────────────────
 
 pub enum ApiError {
     NotFound(String),
     BadRequest(String),
     Internal(String),
+    Unauthorized(String),
 }
 
 impl IntoResponse for ApiError {
@@ -29,6 +40,7 @@ impl IntoResponse for ApiError {
             ApiError::NotFound(m) => (StatusCode::NOT_FOUND, m),
             ApiError::BadRequest(m) => (StatusCode::BAD_REQUEST, m),
             ApiError::Internal(m) => (StatusCode::INTERNAL_SERVER_ERROR, m),
+            ApiError::Unauthorized(m) => (StatusCode::UNAUTHORIZED, m),
         };
         (status, Json(ErrorResponse { error: msg })).into_response()
     }
@@ -238,7 +250,48 @@ pub async fn sse_events(
     Sse::new(stream).keep_alive(KeepAlive::default())
 }
 
-pub async fn get_snapshot(State(node): State<Arc<Node>>) -> impl IntoResponse {
+/// WebSocket endpoint — streams new-block events as JSON messages.
+/// Connect with `ws://host:port/ws`. Each message is a JSON object:
+/// `{"type":"new_block","height":N,"tx_count":N,"hash":"hex"}`
+pub async fn ws_events(
+    ws: WebSocketUpgrade,
+    State(node): State<Arc<Node>>,
+) -> impl IntoResponse {
+    ws.on_upgrade(|socket| handle_ws_client(socket, node))
+}
+
+async fn handle_ws_client(mut socket: WebSocket, node: Arc<Node>) {
+    let mut rx = node.block_events.subscribe();
+    loop {
+        match rx.recv().await {
+            Ok(evt) => {
+                let msg = serde_json::json!({
+                    "type": "new_block",
+                    "height": evt.height,
+                    "tx_count": evt.tx_count,
+                    "hash": evt.hash_hex,
+                });
+                if socket
+                    .send(Message::Text(msg.to_string().into()))
+                    .await
+                    .is_err()
+                {
+                    break;
+                }
+            }
+            Err(tokio::sync::broadcast::error::RecvError::Closed) => break,
+            Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => continue,
+        }
+    }
+}
+
+pub async fn get_snapshot(
+    headers: axum::http::HeaderMap,
+    State(node): State<Arc<Node>>,
+) -> impl IntoResponse {
+    if !check_admin_auth(&headers, node.config.admin_token.as_deref()) {
+        return (StatusCode::UNAUTHORIZED, Json(ErrorResponse { error: "unauthorized".to_string() })).into_response();
+    }
     let state_guard = node.state.read().await;
     let chain_guard = node.chain.read().await;
     let height = chain_guard.tip_height();
@@ -303,9 +356,13 @@ pub async fn get_network_stats(State(node): State<Arc<Node>>) -> ApiResult<Netwo
 
 /// Compacts transaction data from blocks older than `keep_last` blocks.
 pub async fn post_compact(
+    headers: axum::http::HeaderMap,
     State(node): State<Arc<Node>>,
     axum::extract::Query(params): axum::extract::Query<CompactParams>,
 ) -> ApiResult<CompactResponse> {
+    if !check_admin_auth(&headers, node.config.admin_token.as_deref()) {
+        return Err(ApiError::Unauthorized("unauthorized".to_string()));
+    }
     let keep_last = params.keep_last.unwrap_or(1000);
     let mut chain = node.chain.write().await;
     let tip = chain.tip_height();

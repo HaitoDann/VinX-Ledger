@@ -33,6 +33,7 @@ pub fn router(node: Arc<Node>) -> Router {
         .route("/network/stats", get(handlers::get_network_stats))
         .route("/snapshot", get(handlers::get_snapshot))
         .route("/events", get(handlers::sse_events))
+        .route("/ws", get(handlers::ws_events))
         .route("/admin/compact", post(handlers::post_compact))
         .route("/governance/proposals", get(handlers::get_proposals))
         .route("/governance/proposal/:id", get(handlers::get_proposal))

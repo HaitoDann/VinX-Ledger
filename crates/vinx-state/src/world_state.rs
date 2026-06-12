@@ -6,7 +6,7 @@ use vinx_core::{
         STAKING_DISTRIBUTION_INTERVAL,
     },
     block::SlashEvidence,
-    governance::{GovernanceAction, Proposal, ProposalStatus, SubmitProposalPayload, VotePayload, GOVERNANCE_VOTING_PERIOD_BLOCKS},
+    governance::{CoffreCondition, GovernanceAction, Proposal, ProposalStatus, SubmitProposalPayload, VotePayload, GOVERNANCE_VOTING_PERIOD_BLOCKS},
     protocol::{ProtocolVersion, ScheduledUpgrade},
     Account, CoreError, Transaction, TransactionType, ValidatorSet,
 };
@@ -34,6 +34,12 @@ pub struct WorldState {
     pub validator_fee_pool: Amount,
     /// Coffre Maturité: locked until 3 governance conditions are met.
     pub coffre_maturity: Amount,
+    #[serde(default)]
+    pub coffre_mica_casp: bool,
+    #[serde(default)]
+    pub coffre_external_audit: bool,
+    #[serde(default)]
+    pub coffre_public_policy: bool,
     /// Address that may issue admin transactions (freeze, upgrade announcements).
     /// None = no admin restrictions (dev/test mode).
     pub admin_address: Option<Address>,
@@ -74,6 +80,9 @@ impl WorldState {
             base_fee: fee_floor,
             validator_fee_pool: Amount::ZERO,
             coffre_maturity: Amount::ZERO,
+            coffre_mica_casp: false,
+            coffre_external_audit: false,
+            coffre_public_policy: false,
             admin_address: None,
             current_version: ProtocolVersion::GENESIS,
             pending_upgrade: None,
@@ -780,6 +789,33 @@ impl WorldState {
                     tracing::info!(%amount, "Governance: melt released to staking pool");
                 }
                 true
+            }
+            GovernanceAction::RotateAdmin(new_admin) => {
+                self.admin_address = Some(new_admin.clone());
+                tracing::info!(%new_admin, "Governance: admin key rotated");
+                true
+            }
+            GovernanceAction::MarkCoffreCondition(condition) => {
+                match condition {
+                    CoffreCondition::MicaCasp => self.coffre_mica_casp = true,
+                    CoffreCondition::ExternalAudit => self.coffre_external_audit = true,
+                    CoffreCondition::PublicPolicy => self.coffre_public_policy = true,
+                }
+                tracing::info!(?condition, "Governance: Coffre condition marked");
+                true
+            }
+            GovernanceAction::UnlockCoffre => {
+                if self.coffre_mica_casp && self.coffre_external_audit && self.coffre_public_policy {
+                    let amount = self.coffre_maturity;
+                    self.staking_pool = self.staking_pool.saturating_add(amount);
+                    self.circulating_supply = self.circulating_supply.saturating_add(amount);
+                    self.coffre_maturity = Amount::ZERO;
+                    tracing::info!(%amount, "Governance: Coffre Maturité unlocked");
+                    true
+                } else {
+                    tracing::warn!("Governance: UnlockCoffre rejected — not all conditions met");
+                    false
+                }
             }
         };
 
