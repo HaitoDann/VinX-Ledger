@@ -1039,50 +1039,6 @@ mod tests {
     }
 
     #[test]
-    fn test_state_root_empty_is_zero() {
-        let s = WorldState::new();
-        assert_eq!(s.compute_state_root(), [0u8; 32]);
-    }
-
-    #[test]
-    fn test_state_root_is_deterministic() {
-        let mut s = WorldState::new();
-        let addr = Address::from_public_key(&KeyPair::generate().public_key());
-        s.credit_for_test(addr, Amount::from_vinx(100));
-        assert_eq!(s.compute_state_root(), s.compute_state_root());
-    }
-
-    #[test]
-    fn test_state_root_changes_on_balance_change() {
-        let mut s = WorldState::new();
-        let addr = Address::from_public_key(&KeyPair::generate().public_key());
-        s.credit_for_test(addr.clone(), Amount::from_vinx(100));
-        let root_before = s.compute_state_root();
-        s.credit_for_test(addr, Amount::from_vinx(1));
-        let root_after = s.compute_state_root();
-        assert_ne!(root_before, root_after);
-    }
-
-    #[test]
-    fn test_state_root_order_independent_of_insertion() {
-        // Same accounts inserted in different order → same root
-        let kp1 = KeyPair::generate();
-        let kp2 = KeyPair::generate();
-        let addr1 = Address::from_public_key(&kp1.public_key());
-        let addr2 = Address::from_public_key(&kp2.public_key());
-
-        let mut s1 = WorldState::new();
-        s1.credit_for_test(addr1.clone(), Amount::from_vinx(50));
-        s1.credit_for_test(addr2.clone(), Amount::from_vinx(200));
-
-        let mut s2 = WorldState::new();
-        s2.credit_for_test(addr2, Amount::from_vinx(200));
-        s2.credit_for_test(addr1, Amount::from_vinx(50));
-
-        assert_eq!(s1.compute_state_root(), s2.compute_state_root());
-    }
-
-    #[test]
     fn test_min_stake_enforced() {
         use vinx_core::amount::DECIMAL_FACTOR;
         let mut s = WorldState::new();

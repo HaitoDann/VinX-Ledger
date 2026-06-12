@@ -134,21 +134,6 @@ mod tests {
         }
     }
 
-    fn make_block(height: u64, proposer: Address) -> Block {
-        Block {
-            header: BlockHeader {
-                height,
-                prev_hash: [0u8; 32],
-                timestamp: 0,
-                validator: proposer,
-                tx_count: 0,
-                state_root: [0u8; 32],
-            },
-            transactions: vec![],
-            signatures: vec![],
-        }
-    }
-
     #[test]
     fn test_block_hash_is_deterministic() {
         let h = make_genesis_header();
