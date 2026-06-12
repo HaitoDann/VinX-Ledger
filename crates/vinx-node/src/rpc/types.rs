@@ -242,3 +242,19 @@ pub struct MerkleProofStepResponse {
     pub sibling: String,
     pub sibling_is_right: bool,
 }
+
+// ─── Faucet ──────────────────────────────────────────────────────────────────
+
+#[derive(serde::Deserialize)]
+pub struct FaucetRequest {
+    pub address: String,
+}
+
+#[derive(Serialize)]
+pub struct FaucetResponse {
+    pub accepted: bool,
+    pub tx_hash: String,
+    /// Atoms sent as a string to avoid JSON precision loss.
+    pub amount_atoms: String,
+    pub to: String,
+}

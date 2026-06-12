@@ -9,7 +9,7 @@ use futures::stream::{self, Stream};
 use std::{convert::Infallible, sync::Arc};
 use tokio_stream::wrappers::BroadcastStream;
 use tokio_stream::StreamExt as _;
-use vinx_core::Transaction;
+use vinx_core::{amount::Amount, Transaction};
 use vinx_crypto::Address;
 
 use crate::{rpc::types::*, Node};
@@ -374,6 +374,65 @@ pub async fn post_compact(
 #[derive(serde::Deserialize)]
 pub struct CompactParams {
     pub keep_last: Option<u64>,
+}
+
+// ─── Faucet handler ──────────────────────────────────────────────────────────
+
+pub async fn faucet_request(
+    State(node): State<Arc<Node>>,
+    Json(req): Json<crate::rpc::types::FaucetRequest>,
+) -> ApiResult<crate::rpc::types::FaucetResponse> {
+    let faucet_kp = node.config.faucet_keypair.as_ref()
+        .ok_or_else(|| ApiError::BadRequest("Faucet is not enabled on this node".to_string()))?;
+
+    let to_addr = Address::from_bech32(&req.address)
+        .map_err(|e| ApiError::BadRequest(format!("Invalid address: {}", e)))?;
+
+    let faucet_addr = Address::from_public_key(&faucet_kp.public_key());
+
+    // Lock serializes concurrent requests and enforces per-address cooldown.
+    let mut cooldowns = node.faucet_cooldowns.lock().await;
+
+    let cooldown = std::time::Duration::from_secs(node.config.faucet_cooldown_secs);
+    if let Some(&last_at) = cooldowns.get(req.address.as_str()) {
+        let elapsed = last_at.elapsed();
+        if elapsed < cooldown {
+            let remaining = (cooldown - elapsed).as_secs();
+            return Err(ApiError::BadRequest(format!(
+                "Rate limited: wait {} seconds before requesting again",
+                remaining
+            )));
+        }
+    }
+
+    // Nonce = highest confirmed nonce or next pending nonce (whichever is larger).
+    let confirmed_nonce = node.state.read().await
+        .get_account(&faucet_addr)
+        .map(|a| a.nonce)
+        .unwrap_or(0);
+    let nonce = {
+        let mempool = node.mempool.read().await;
+        mempool.next_nonce_for(&faucet_addr).unwrap_or(confirmed_nonce)
+    };
+
+    let amount = Amount::from_atoms(node.config.faucet_amount_atoms);
+    let fee = amount.calculate_fee(node.state.read().await.base_fee);
+
+    let tx = Transaction::new_transfer(faucet_kp, to_addr, amount, fee, nonce);
+    let tx_hash = hex::encode(tx.hash());
+
+    node.mempool.write().await
+        .add(tx)
+        .map_err(|e| ApiError::BadRequest(e.to_string()))?;
+
+    cooldowns.insert(req.address.clone(), std::time::Instant::now());
+
+    Ok(Json(crate::rpc::types::FaucetResponse {
+        accepted: true,
+        tx_hash,
+        amount_atoms: amount.atoms().to_string(),
+        to: req.address,
+    }))
 }
 
 // ─── Merkle proof handler ────────────────────────────────────────────────────

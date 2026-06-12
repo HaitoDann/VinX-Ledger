@@ -1,6 +1,7 @@
+use std::collections::HashMap;
 use std::sync::Arc;
-use std::time::{SystemTime, UNIX_EPOCH};
-use tokio::sync::{broadcast, RwLock};
+use std::time::{Instant, SystemTime, UNIX_EPOCH};
+use tokio::sync::{broadcast, Mutex, RwLock};
 
 use crate::{
     chain::Chain,
@@ -34,6 +35,8 @@ pub struct Node {
     pub validator_set: Arc<RwLock<ValidatorSet>>,
     /// Broadcast channel for new-block SSE events.
     pub block_events: broadcast::Sender<BlockEvent>,
+    /// Per-address faucet cooldown tracker + serialization lock for faucet requests.
+    pub faucet_cooldowns: Arc<Mutex<HashMap<String, Instant>>>,
 }
 
 impl Node {
@@ -50,6 +53,7 @@ impl Node {
             storage,
             p2p: None,
             block_events,
+            faucet_cooldowns: Arc::new(Mutex::new(HashMap::new())),
         })
     }
 
@@ -97,6 +101,7 @@ impl Node {
             storage,
             p2p,
             block_events,
+            faucet_cooldowns: Arc::new(Mutex::new(HashMap::new())),
         })
     }
 

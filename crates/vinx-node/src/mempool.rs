@@ -155,6 +155,15 @@ impl Mempool {
         self.pending_count
     }
 
+    /// Returns the next nonce to use for `addr`, accounting for pending transactions.
+    /// Returns `None` if there are no pending transactions (caller should use confirmed nonce).
+    pub fn next_nonce_for(&self, addr: &Address) -> Option<u64> {
+        self.queues
+            .get(&addr.to_string())
+            .and_then(|q| q.keys().last())
+            .map(|&n| n + 1)
+    }
+
     /// Verifies a transaction's cryptographic signature without holding &mut self.
     fn verify_sig_static(tx: &Transaction) -> bool {
         let Some(pk) = &tx.pub_key else { return false };
