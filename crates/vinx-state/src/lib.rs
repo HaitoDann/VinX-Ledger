@@ -19,8 +19,11 @@ mod tests {
         let sender_kp = KeyPair::generate();
         let sender_addr = Address::from_public_key(&sender_kp.public_key());
 
+        let validator_kp = KeyPair::generate();
+        let validator_addr = Address::from_public_key(&validator_kp.public_key());
         let state = create_genesis_state(&GenesisConfig {
             admin_address: sender_addr.clone(),
+            validator_address: validator_addr,
         });
         (state, sender_kp, sender_addr)
     }
@@ -70,8 +73,8 @@ mod tests {
     fn test_transfer_insufficient_balance() {
         let (mut state, sender_kp, _) = funded_state();
         let receiver = Address::from_public_key(&KeyPair::generate().public_key());
-        // Try to send more than total admin allocation (21M)
-        let too_much = Amount::from_vinx(22_000_000);
+        // Try to send more than total admin allocation (21B)
+        let too_much = Amount::from_vinx(22_000_000_000);
         let tx = Transaction::new_transfer(&sender_kp, receiver, too_much, fee_for(too_much), 0);
 
         let result = state.apply_transaction(&tx);
@@ -132,10 +135,12 @@ mod tests {
         state.apply_transaction(&tx).unwrap();
 
         let staking = Amount::staking_share(fee);
-        let treasury = Amount::treasury_share(fee);
+        let validator = Amount::validator_share(fee);
+        let melt = Amount::melt_share(fee);
         assert_eq!(state.staking_pool, staking);
-        assert_eq!(state.treasury, treasury);
-        assert_eq!(staking.checked_add(treasury).unwrap(), fee);
+        assert_eq!(state.validator_fee_pool, validator);
+        assert_eq!(state.melt_pool, melt);
+        assert_eq!(staking.checked_add(validator).unwrap().checked_add(melt).unwrap(), fee);
     }
 
     #[test]

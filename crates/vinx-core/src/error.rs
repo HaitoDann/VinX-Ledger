@@ -20,6 +20,10 @@ pub enum CoreError {
     InvalidTransaction(String),
     #[error("Crypto error: {0}")]
     Crypto(String),
+    #[error("Unauthorized: only the admin account may perform this operation")]
+    Unauthorized,
+    #[error("Upgrade violation: {0}")]
+    UpgradeViolation(String),
 }
 
 impl From<vinx_crypto::CryptoError> for CoreError {

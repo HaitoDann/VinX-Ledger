@@ -1,5 +1,5 @@
-use serde::Serialize;
-use vinx_core::{Account, Block, Transaction, ValidatorSet};
+use serde::{Deserialize, Serialize};
+use vinx_core::{Account, Block, ProtocolVersion, ScheduledUpgrade, Transaction, ValidatorSet};
 use vinx_crypto::Hash32;
 
 fn hash_to_hex(h: &Hash32) -> String {
@@ -88,6 +88,8 @@ pub struct BlockResponse {
     pub validator: String,
     pub tx_count: u32,
     pub state_root: String,
+    /// Dynamic fee floor (in atoms) at block production time.
+    pub base_fee: u64,
     /// Number of valid co-signatures from registered validators.
     pub signatures_count: usize,
     /// True when signatures_count >= quorum.
@@ -105,6 +107,7 @@ impl BlockResponse {
             validator: block.header.validator.to_string(),
             tx_count: block.header.tx_count,
             state_root: hash_to_hex(&block.header.state_root),
+            base_fee: block.header.base_fee,
             signatures_count: block.valid_signer_count(validator_set),
             finalized: block.is_finalized(validator_set),
             transactions: block.transactions.iter().map(TxResponse::from_tx).collect(),
@@ -115,6 +118,24 @@ impl BlockResponse {
 #[derive(Serialize)]
 pub struct MempoolResponse {
     pub pending: usize,
+}
+
+#[derive(Serialize)]
+pub struct TxWithBlockResponse {
+    pub block_height: u64,
+    pub block_hash: String,
+    #[serde(flatten)]
+    pub tx: TxResponse,
+}
+
+impl TxWithBlockResponse {
+    pub fn new(height: u64, block_hash: &Hash32, tx: &Transaction) -> Self {
+        Self {
+            block_height: height,
+            block_hash: hash_to_hex(block_hash),
+            tx: TxResponse::from_tx(tx),
+        }
+    }
 }
 
 #[derive(Serialize)]
@@ -135,6 +156,89 @@ impl ValidatorSetResponse {
 }
 
 #[derive(Serialize)]
+pub struct ProtocolStatusResponse {
+    pub current_version: String,
+    pub pending_upgrade: Option<PendingUpgradeResponse>,
+}
+
+#[derive(Serialize)]
+pub struct PendingUpgradeResponse {
+    pub version: String,
+    pub activation_height: u64,
+    pub announced_at: u64,
+}
+
+impl ProtocolStatusResponse {
+    pub fn new(version: &ProtocolVersion, upgrade: Option<&ScheduledUpgrade>) -> Self {
+        Self {
+            current_version: version.to_string(),
+            pending_upgrade: upgrade.map(|u| PendingUpgradeResponse {
+                version: u.version.to_string(),
+                activation_height: u.activation_height,
+                announced_at: u.announced_at,
+            }),
+        }
+    }
+}
+
+#[derive(Serialize)]
+pub struct AccountTxsResponse {
+    pub address: String,
+    pub total: usize,
+    pub offset: usize,
+    pub txs: Vec<TxWithBlockResponse>,
+}
+
+#[derive(Serialize)]
+pub struct ChainSyncResponse {
+    pub from: u64,
+    pub count: usize,
+    pub blocks: Vec<BlockResponse>,
+}
+
+#[derive(Serialize, Deserialize)]
+pub struct SnapshotResponse {
+    /// Chain tip height at snapshot time.
+    pub height: u64,
+    /// Hex-encoded tip block hash.
+    pub tip_hash: String,
+    /// Full serialized world state (serde_json).
+    pub state: serde_json::Value,
+}
+
+/// Economic network stats — exposed via GET /network/stats
+#[derive(Serialize)]
+pub struct NetworkStatsResponse {
+    pub base_fee_atoms: String,
+    pub staking_pool: String,
+    pub melt_pool: String,
+    pub distribution_pool: String,
+    pub circulating_supply: String,
+}
+
+#[derive(Serialize)]
+pub struct CompactResponse {
+    pub compacted: bool,
+    pub kept_last: u64,
+    pub tip_height: u64,
+}
+
+#[derive(Serialize)]
 pub struct ErrorResponse {
     pub error: String,
+}
+
+#[derive(Serialize)]
+pub struct MerkleProofResponse {
+    pub address: String,
+    pub leaf_hash: String,
+    pub state_root: String,
+    pub proof: Vec<MerkleProofStepResponse>,
+    pub valid: bool,
+}
+
+#[derive(Serialize)]
+pub struct MerkleProofStepResponse {
+    pub sibling: String,
+    pub sibling_is_right: bool,
 }

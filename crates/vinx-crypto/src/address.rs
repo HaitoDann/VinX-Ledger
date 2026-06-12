@@ -20,6 +20,15 @@ impl Address {
         Address(encoded)
     }
 
+    /// Returns the canonical all-zeros placeholder address (`vinx1qqqq...`).
+    /// Useful as a sentinel / uninitialized value.  Never holds real funds.
+    pub fn zero() -> Self {
+        let payload = [0u8; 20];
+        let encoded = bech32::encode(BECH32_HRP, payload.to_base32(), Variant::Bech32)
+            .expect("bech32 encoding is infallible");
+        Address(encoded)
+    }
+
     pub fn from_bech32(s: &str) -> Result<Self, CryptoError> {
         let (hrp, data_u5, variant) =
             bech32::decode(s).map_err(|e| CryptoError::InvalidAddress(e.to_string()))?;

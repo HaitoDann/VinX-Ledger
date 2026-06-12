@@ -60,9 +60,10 @@ impl Storage {
         let state: WorldState = bincode::deserialize(&state_bytes)
             .map_err(|e| tracing::warn!("Cannot deserialize state: {e}"))
             .ok()?;
-        let chain: Chain = bincode::deserialize(&chain_bytes)
+        let mut chain: Chain = bincode::deserialize(&chain_bytes)
             .map_err(|e| tracing::warn!("Cannot deserialize chain: {e}"))
             .ok()?;
+        chain.rebuild_tx_index();
 
         Some((state, chain))
     }

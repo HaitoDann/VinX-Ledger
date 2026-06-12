@@ -1,10 +1,14 @@
 use axum::{
-    extract::{Path, State},
-    http::StatusCode,
-    response::{IntoResponse, Response},
+    extract::{Path, Query, State},
+    extract::ws::{Message, WebSocket, WebSocketUpgrade},
+    http::{header, StatusCode},
+    response::{sse::{Event, KeepAlive, Sse}, IntoResponse, Response},
     Json,
 };
-use std::sync::Arc;
+use futures::stream::{self, Stream};
+use std::{convert::Infallible, sync::Arc};
+use tokio_stream::wrappers::BroadcastStream;
+use tokio_stream::StreamExt as _;
 use vinx_core::Transaction;
 use vinx_crypto::Address;
 
@@ -12,12 +16,22 @@ use crate::{rpc::types::*, Node};
 
 pub type ApiResult<T> = Result<Json<T>, ApiError>;
 
+fn check_admin_auth(headers: &axum::http::HeaderMap, expected: Option<&str>) -> bool {
+    let Some(token) = expected else { return true }; // auth disabled
+    headers
+        .get(axum::http::header::AUTHORIZATION)
+        .and_then(|v| v.to_str().ok())
+        .and_then(|s| s.strip_prefix("Bearer "))
+        == Some(token)
+}
+
 // ─── Error type ─────────────────────────────────────────────────────────────
 
 pub enum ApiError {
     NotFound(String),
     BadRequest(String),
     Internal(String),
+    Unauthorized(String),
 }
 
 impl IntoResponse for ApiError {
@@ -26,6 +40,7 @@ impl IntoResponse for ApiError {
             ApiError::NotFound(m) => (StatusCode::NOT_FOUND, m),
             ApiError::BadRequest(m) => (StatusCode::BAD_REQUEST, m),
             ApiError::Internal(m) => (StatusCode::INTERNAL_SERVER_ERROR, m),
+            ApiError::Unauthorized(m) => (StatusCode::UNAUTHORIZED, m),
         };
         (status, Json(ErrorResponse { error: msg })).into_response()
     }
@@ -103,7 +118,7 @@ pub async fn get_block(
 ) -> ApiResult<BlockResponse> {
     let chain = node.chain.read().await;
     match chain.get_block(height) {
-        Some(block) => Ok(Json(BlockResponse::from_block(block, &node.config.validator_set))),
+        Some(block) => Ok(Json(BlockResponse::from_block(block, &*node.validator_set.read().await))),
         None => Err(ApiError::NotFound(format!("Block {} not found", height))),
     }
 }
@@ -115,6 +130,299 @@ pub async fn get_mempool(State(node): State<Arc<Node>>) -> ApiResult<MempoolResp
 
 pub async fn get_validators(State(node): State<Arc<Node>>) -> ApiResult<ValidatorSetResponse> {
     Ok(Json(ValidatorSetResponse::from_validator_set(
-        &node.config.validator_set,
+        &*node.validator_set.read().await,
     )))
+}
+
+pub async fn get_protocol_status(State(node): State<Arc<Node>>) -> ApiResult<ProtocolStatusResponse> {
+    let state = node.state.read().await;
+    Ok(Json(ProtocolStatusResponse::new(
+        &state.current_version,
+        state.pending_upgrade.as_ref(),
+    )))
+}
+
+pub async fn get_tx_by_hash(
+    State(node): State<Arc<Node>>,
+    Path(hash): Path<String>,
+) -> ApiResult<TxWithBlockResponse> {
+    let chain = node.chain.read().await;
+    match chain.get_tx_by_hash(&hash) {
+        Some((height, block, tx)) => Ok(Json(TxWithBlockResponse::new(height, &block.hash(), tx))),
+        None => Err(ApiError::NotFound(format!("Transaction {} not found", hash))),
+    }
+}
+
+#[derive(serde::Deserialize)]
+pub struct PaginationParams {
+    #[serde(default = "default_limit")]
+    pub limit: usize,
+    #[serde(default)]
+    pub offset: usize,
+}
+
+fn default_limit() -> usize {
+    50
+}
+
+pub async fn get_account_txs(
+    State(node): State<Arc<Node>>,
+    Path(raw_address): Path<String>,
+    Query(params): Query<PaginationParams>,
+) -> ApiResult<AccountTxsResponse> {
+    let address =
+        Address::from_bech32(&raw_address).map_err(|e| ApiError::BadRequest(e.to_string()))?;
+    let addr_str = address.to_string();
+    let limit = params.limit.min(200);
+
+    let chain = node.chain.read().await;
+    let tx_hashes = chain.get_account_txs(&addr_str, limit, params.offset);
+    let total = chain.account_tx_count(&addr_str);
+
+    let mut txs = Vec::with_capacity(tx_hashes.len());
+    for hash in &tx_hashes {
+        if let Some((height, block, tx)) = chain.get_tx_by_hash(hash) {
+            txs.push(TxWithBlockResponse::new(height, &block.hash(), tx));
+        }
+    }
+
+    Ok(Json(AccountTxsResponse {
+        address: addr_str,
+        total,
+        offset: params.offset,
+        txs,
+    }))
+}
+
+#[derive(serde::Deserialize)]
+pub struct SyncParams {
+    #[serde(default)]
+    pub from: u64,
+    #[serde(default = "default_sync_limit")]
+    pub limit: usize,
+}
+
+fn default_sync_limit() -> usize {
+    100
+}
+
+pub async fn get_chain_sync(
+    State(node): State<Arc<Node>>,
+    Query(params): Query<SyncParams>,
+) -> ApiResult<ChainSyncResponse> {
+    let limit = params.limit.min(500);
+    let chain = node.chain.read().await;
+    let tip = chain.tip_height();
+
+    let start = params.from;
+    if start > tip {
+        return Ok(Json(ChainSyncResponse { from: start, count: 0, blocks: vec![] }));
+    }
+
+    let end = (start + limit as u64).min(tip + 1);
+    let mut blocks = Vec::new();
+    for h in start..end {
+        if let Some(block) = chain.get_block(h) {
+            blocks.push(BlockResponse::from_block(block, &*node.validator_set.read().await));
+        }
+    }
+    let count = blocks.len();
+    Ok(Json(ChainSyncResponse { from: start, count, blocks }))
+}
+
+/// Server-Sent Events stream: sends a JSON event on every new block.
+pub async fn sse_events(
+    State(node): State<Arc<Node>>,
+) -> Sse<impl Stream<Item = Result<Event, Infallible>>> {
+    let rx = node.block_events.subscribe();
+    let stream = BroadcastStream::new(rx).filter_map(|result| {
+        result.ok().map(|evt| {
+            let data = serde_json::json!({
+                "type": "new_block",
+                "height": evt.height,
+                "tx_count": evt.tx_count,
+                "hash": evt.hash_hex,
+            });
+            Ok(Event::default().data(data.to_string()))
+        })
+    });
+    let stream = stream::StreamExt::map(stream, |x: Result<Event, Infallible>| x);
+    Sse::new(stream).keep_alive(KeepAlive::default())
+}
+
+/// WebSocket endpoint — streams new-block events as JSON messages.
+/// Connect with `ws://host:port/ws`. Each message is a JSON object:
+/// `{"type":"new_block","height":N,"tx_count":N,"hash":"hex"}`
+pub async fn ws_events(
+    ws: WebSocketUpgrade,
+    State(node): State<Arc<Node>>,
+) -> impl IntoResponse {
+    ws.on_upgrade(|socket| handle_ws_client(socket, node))
+}
+
+async fn handle_ws_client(mut socket: WebSocket, node: Arc<Node>) {
+    let mut rx = node.block_events.subscribe();
+    loop {
+        match rx.recv().await {
+            Ok(evt) => {
+                let msg = serde_json::json!({
+                    "type": "new_block",
+                    "height": evt.height,
+                    "tx_count": evt.tx_count,
+                    "hash": evt.hash_hex,
+                });
+                if socket
+                    .send(Message::Text(msg.to_string().into()))
+                    .await
+                    .is_err()
+                {
+                    break;
+                }
+            }
+            Err(tokio::sync::broadcast::error::RecvError::Closed) => break,
+            Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => continue,
+        }
+    }
+}
+
+pub async fn get_snapshot(
+    headers: axum::http::HeaderMap,
+    State(node): State<Arc<Node>>,
+) -> impl IntoResponse {
+    if !check_admin_auth(&headers, node.config.admin_token.as_deref()) {
+        return (StatusCode::UNAUTHORIZED, Json(ErrorResponse { error: "unauthorized".to_string() })).into_response();
+    }
+    let state_guard = node.state.read().await;
+    let chain_guard = node.chain.read().await;
+    let height = chain_guard.tip_height();
+    let tip_hash = hex::encode(chain_guard.tip_hash());
+
+    match serde_json::to_value(&*state_guard) {
+        Ok(state_json) => {
+            let snap = SnapshotResponse { height, tip_hash, state: state_json };
+            (StatusCode::OK, Json(snap)).into_response()
+        }
+        Err(e) => (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(ErrorResponse { error: e.to_string() }),
+        ).into_response(),
+    }
+}
+
+/// Returns node metrics in Prometheus text format.
+pub async fn get_metrics(State(node): State<Arc<Node>>) -> impl IntoResponse {
+    let height = node.chain.read().await.tip_height();
+    let mempool_size = node.mempool.read().await.size();
+    let state = node.state.read().await;
+    let base_fee = state.base_fee.atoms();
+    let melt_pool = state.melt_pool.atoms();
+    let staking_pool = state.staking_pool.atoms();
+
+    let body = format!(
+        "# HELP vinx_chain_height Current chain tip height\n\
+         # TYPE vinx_chain_height gauge\n\
+         vinx_chain_height {height}\n\
+         # HELP vinx_mempool_size Number of transactions pending in mempool\n\
+         # TYPE vinx_mempool_size gauge\n\
+         vinx_mempool_size {mempool_size}\n\
+         # HELP vinx_base_fee Current dynamic fee floor in atoms\n\
+         # TYPE vinx_base_fee gauge\n\
+         vinx_base_fee {base_fee}\n\
+         # HELP vinx_melt_pool Total melted fees in atoms\n\
+         # TYPE vinx_melt_pool counter\n\
+         vinx_melt_pool {melt_pool}\n\
+         # HELP vinx_staking_pool Current staking reward pool in atoms\n\
+         # TYPE vinx_staking_pool gauge\n\
+         vinx_staking_pool {staking_pool}\n"
+    );
+
+    (
+        StatusCode::OK,
+        [(header::CONTENT_TYPE, "text/plain; version=0.0.4; charset=utf-8")],
+        body,
+    )
+}
+
+/// Returns economic network statistics (base_fee, staking pool, melt pool).
+pub async fn get_network_stats(State(node): State<Arc<Node>>) -> ApiResult<NetworkStatsResponse> {
+    let state = node.state.read().await;
+    Ok(Json(NetworkStatsResponse {
+        base_fee_atoms: state.base_fee.atoms().to_string(),
+        staking_pool: state.staking_pool.to_string(),
+        melt_pool: state.melt_pool.to_string(),
+        distribution_pool: state.distribution_pool.to_string(),
+        circulating_supply: state.circulating_supply.to_string(),
+    }))
+}
+
+/// Compacts transaction data from blocks older than `keep_last` blocks.
+pub async fn post_compact(
+    headers: axum::http::HeaderMap,
+    State(node): State<Arc<Node>>,
+    axum::extract::Query(params): axum::extract::Query<CompactParams>,
+) -> ApiResult<CompactResponse> {
+    if !check_admin_auth(&headers, node.config.admin_token.as_deref()) {
+        return Err(ApiError::Unauthorized("unauthorized".to_string()));
+    }
+    let keep_last = params.keep_last.unwrap_or(1000);
+    let mut chain = node.chain.write().await;
+    let tip = chain.tip_height();
+    chain.compact_old_txs(keep_last);
+    Ok(Json(CompactResponse { compacted: true, kept_last: keep_last, tip_height: tip }))
+}
+
+#[derive(serde::Deserialize)]
+pub struct CompactParams {
+    pub keep_last: Option<u64>,
+}
+
+// ─── Merkle proof handler ────────────────────────────────────────────────────
+
+pub async fn get_account_proof(
+    State(node): State<Arc<Node>>,
+    Path(raw_address): Path<String>,
+) -> ApiResult<MerkleProofResponse> {
+    use vinx_crypto::{merkle_proof_for, verify_merkle_proof, sha256};
+
+    let address = Address::from_bech32(&raw_address)
+        .map_err(|e| ApiError::BadRequest(e.to_string()))?;
+
+    let state = node.state.read().await;
+
+    // Build sorted leaf list (same order as compute_state_root)
+    let entries = state.accounts_sorted();
+
+    let index = entries.iter().position(|a| a.address == address)
+        .ok_or_else(|| ApiError::NotFound(format!("Account {} not found", raw_address)))?;
+
+    let leaves: Vec<vinx_crypto::Hash32> = entries.iter().map(|a| {
+        let addr = a.address.as_str().as_bytes();
+        let mut buf = Vec::with_capacity(addr.len() + 48);
+        buf.extend_from_slice(addr);
+        buf.extend_from_slice(&a.balance.atoms().to_be_bytes());
+        buf.extend_from_slice(&a.nonce.to_be_bytes());
+        buf.extend_from_slice(&a.staked.atoms().to_be_bytes());
+        buf.push(a.frozen as u8);
+        buf.extend_from_slice(&a.stake_since.to_be_bytes());
+        buf.extend_from_slice(&a.frozen_since.to_be_bytes());
+        sha256(&buf)
+    }).collect();
+
+    let state_root = state.compute_state_root();
+    let leaf_hash = leaves[index];
+    let proof = merkle_proof_for(&leaves, index)
+        .ok_or_else(|| ApiError::Internal("proof generation failed".to_string()))?;
+
+    let valid = verify_merkle_proof(&leaf_hash, &proof, &state_root);
+
+    Ok(Json(MerkleProofResponse {
+        address: raw_address,
+        leaf_hash: hex::encode(leaf_hash),
+        state_root: hex::encode(state_root),
+        proof: proof.iter().map(|s| MerkleProofStepResponse {
+            sibling: hex::encode(s.sibling),
+            sibling_is_right: s.sibling_is_right,
+        }).collect(),
+        valid,
+    }))
 }

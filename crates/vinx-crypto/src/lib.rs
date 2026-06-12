@@ -6,7 +6,7 @@ pub mod merkle;
 pub use hash::{sha256, Hash32};
 pub use keys::{KeyPair, PublicKey, VinxSignature};
 pub use address::Address;
-pub use merkle::merkle_root;
+pub use merkle::{merkle_root, merkle_proof_for, verify_merkle_proof, MerkleProofStep};
 
 use thiserror::Error;
 

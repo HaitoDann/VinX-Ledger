@@ -18,6 +18,14 @@ pub struct NodeConfig {
     pub rpc_listen: String,
     /// Directory for persistent chain and state data. `None` = in-memory only.
     pub data_dir: Option<PathBuf>,
+    /// P2P listen address (e.g. "/ip4/0.0.0.0/tcp/9000"). `None` = P2P disabled.
+    pub p2p_listen: Option<String>,
+    /// Bootstrap peer multiaddrs to dial on startup.
+    pub peer_addrs: Vec<String>,
+    /// RPC URL of a trusted peer to sync blocks from on startup. `None` = no sync.
+    pub sync_peer_rpc: Option<String>,
+    /// Bearer token required for admin routes. `None` = no auth required.
+    pub admin_token: Option<String>,
 }
 
 impl NodeConfig {
@@ -33,11 +41,25 @@ impl NodeConfig {
             max_block_txs: 1_000,
             rpc_listen: "127.0.0.1:8545".to_string(),
             data_dir: None,
+            p2p_listen: None,
+            peer_addrs: vec![],
+            sync_peer_rpc: None,
+            admin_token: None,
         }
     }
 
     pub fn with_validator_set(mut self, validator_set: ValidatorSet) -> Self {
         self.validator_set = validator_set;
+        self
+    }
+
+    pub fn with_p2p(mut self, listen: impl Into<String>) -> Self {
+        self.p2p_listen = Some(listen.into());
+        self
+    }
+
+    pub fn with_peers(mut self, peers: Vec<String>) -> Self {
+        self.peer_addrs = peers;
         self
     }
 
@@ -53,6 +75,16 @@ impl NodeConfig {
 
     pub fn with_data_dir(mut self, dir: impl Into<PathBuf>) -> Self {
         self.data_dir = Some(dir.into());
+        self
+    }
+
+    pub fn with_sync_peer(mut self, url: impl Into<String>) -> Self {
+        self.sync_peer_rpc = Some(url.into());
+        self
+    }
+
+    pub fn with_admin_token(mut self, token: impl Into<String>) -> Self {
+        self.admin_token = Some(token.into());
         self
     }
 }

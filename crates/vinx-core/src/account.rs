@@ -11,6 +11,9 @@ pub struct Account {
     pub frozen: bool,
     /// Block height when this account first staked. Reset to 0 on full unstake.
     pub stake_since: u64,
+    /// Block height at which this account was judicially frozen. 0 = never frozen.
+    /// Used for automatic unfreeze after FREEZE_DURATION_BLOCKS.
+    pub frozen_since: u64,
 }
 
 impl Account {
@@ -22,6 +25,7 @@ impl Account {
             staked: Amount::ZERO,
             frozen: false,
             stake_since: 0,
+            frozen_since: 0,
         }
     }
 
@@ -33,6 +37,7 @@ impl Account {
             staked: Amount::ZERO,
             frozen: false,
             stake_since: 0,
+            frozen_since: 0,
         }
     }
 

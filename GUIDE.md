@@ -1,341 +1,274 @@
-# Guide de démarrage VinX Ledger
+# VinX Ledger — Guide d'utilisation
 
-## Prérequis
+## Sommaire
 
-- **Rust** ≥ 1.75 — installer via [rustup.rs](https://rustup.rs)
-- **Git**
-- Un terminal (Linux / macOS / WSL / PowerShell / cmd.exe)
-
-Vérifier l'installation :
-```bash
-rustc --version   # rustc 1.75.0 ou supérieur
-cargo --version
-```
-
----
-
-## Note importante — le séparateur `--`
-
-Toutes les commandes `cargo run -p vinx-wallet` **exigent** un `--` entre les
-arguments de cargo et ceux du wallet.
-
-```
-cargo run -p vinx-wallet -- <sous-commande> [options]
-                          ^^
-                   obligatoire
-```
-
-Sans le `--`, cargo intercepte les flags (`-output`, `--amount`, etc.) et
-affiche une erreur du type `unexpected argument 'my-wallet.json' found`.
+1. [Démarrage rapide](#1-démarrage-rapide)
+2. [Wallet — commandes de base](#2-wallet--commandes-de-base)
+3. [Staking](#3-staking)
+4. [Admin — gel et dégel de comptes](#4-admin--gel-et-dégel-de-comptes)
+5. [Admin — mise à jour du protocole](#5-admin--mise-à-jour-du-protocole)
+6. [Explorateur via le wallet CLI](#6-explorateur-via-le-wallet-cli)
+7. [Interface web (port 8545)](#7-interface-web-port-8545)
+8. [Configuration avancée du nœud](#8-configuration-avancée-du-nœud)
+9. [Réseau P2P multi-nœuds](#9-réseau-p2p-multi-nœuds)
+10. [Référence des endpoints RPC](#10-référence-des-endpoints-rpc)
 
 ---
 
-## Syntaxe multi-lignes selon le terminal
-
-Les exemples ci-dessous proposent des variantes pour chaque système.
-
-| Terminal | Continuation de ligne |
-|---|---|
-| Linux / macOS / WSL (bash/zsh) | `\` en fin de ligne |
-| PowerShell (Windows) | `` ` `` (backtick) en fin de ligne |
-| cmd.exe (Windows) | `^` en fin de ligne |
-
----
-
-## 1. Cloner le projet
+## 1. Démarrage rapide
 
 ```bash
 git clone https://github.com/HaitoDann/VinX-Ledger.git
 cd VinX-Ledger
-```
 
----
+# Compiler tout
+cargo build --release
 
-## 2. Lancer les tests
-
-Vérifier que tout compile et passe avant de démarrer :
-
-```bash
-cargo test --workspace
-```
-
-Résultat attendu : **118 tests, 0 failures**.
-
----
-
-## 3. Démarrer le nœud (devnet)
-
-```bash
+# Lancer le nœud (crée devnet/ avec les clés au premier démarrage)
 cargo run -p vinx-node
+
+# Dans un autre terminal — créer un wallet utilisateur
+cargo run -p vinx-wallet -- keygen --output my-wallet.json
+
+# Vérifier le solde du wallet admin (adresse dans devnet/admin.json)
+cargo run -p vinx-wallet -- balance <ADRESSE_ADMIN>
 ```
 
-Au premier démarrage, le nœud génère les identités et affiche :
-
-```
-════════════════════════════════════════════════════════
-  VinX Ledger — DEVNET  (block time: 3s | RPC: :8545)
-  Nouveau genesis
-════════════════════════════════════════════════════════
-  Admin     : vinx1xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx
-             21,000,000.00 VINX — clé dans devnet/admin.json
-  Validator : vinx1yyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyy
-════════════════════════════════════════════════════════
-```
-
-Les clés sont sauvegardées dans `devnet/` et rechargées à chaque redémarrage.
-**Le nœud produit un bloc toutes les 3 secondes et sauvegarde l'état sur disque (`devnet/state.bin`, `devnet/chain.bin`).**
-
-Aux redémarrages suivants, le nœud reprend là où il s'est arrêté :
-
-```
-════════════════════════════════════════════════════════
-  VinX Ledger — DEVNET  (block time: 3s | RPC: :8545)
-  Reprise depuis le bloc 42
-════════════════════════════════════════════════════════
-```
-
-> Laisser ce terminal ouvert. Ouvrir un second terminal pour la suite.
+L'interface web est disponible sur **http://localhost:8545**.
 
 ---
 
-## 4. Créer son wallet
+## 2. Wallet — commandes de base
+
+### Générer un nouveau wallet
 
 ```bash
 cargo run -p vinx-wallet -- keygen --output my-wallet.json
 ```
 
-Sortie :
-```
-Address : vinx1aabbccddee...
-Saved   : my-wallet.json
-```
+Affiche l'adresse (`vinx1…`) et sauvegarde la clé secrète dans `my-wallet.json`.  
+⚠️ Ce fichier contient votre clé secrète — ne le partagez jamais.
 
-Afficher son adresse à tout moment :
+### Afficher l'adresse d'un wallet
+
 ```bash
 cargo run -p vinx-wallet -- address --wallet my-wallet.json
 ```
 
----
+### Vérifier un solde
 
-## 5. Recevoir des VINX depuis l'admin
+```bash
+cargo run -p vinx-wallet -- balance vinx1abc...xyz
+```
 
-L'admin dispose de **21 000 000 VINX** au genesis (Sandbox Phase 1). Sa clé est dans `devnet/admin.json`.
+Affiche : solde, montant staké, nonce, statut (actif / gelé).
 
-**Linux / macOS / WSL :**
+### Envoyer des VINX
+
 ```bash
 cargo run -p vinx-wallet -- transfer \
-  --wallet devnet/admin.json \
-  --to <VOTRE_ADRESSE> \
-  --amount 10000
+  --wallet my-wallet.json \
+  --to vinx1destinataire... \
+  --amount 100.50
 ```
 
-**PowerShell :**
-```powershell
-cargo run -p vinx-wallet -- transfer `
-  --wallet devnet/admin.json `
-  --to <VOTRE_ADRESSE> `
-  --amount 10000
-```
+Le fee (0,05% avec plancher 0,0001 VINX) est calculé automatiquement.
 
-**cmd.exe :**
-```cmd
-cargo run -p vinx-wallet -- transfer ^
-  --wallet devnet/admin.json ^
-  --to <VOTRE_ADRESSE> ^
-  --amount 10000
-```
+### Statut du nœud
 
-**En une seule ligne (universel) :**
-```bash
-cargo run -p vinx-wallet -- transfer --wallet devnet/admin.json --to <VOTRE_ADRESSE> --amount 10000
-```
-
-Sortie :
-```
-From    : vinx1xxxxxxx... (admin)
-To      : vinx1aabbcc... (vous)
-Amount  : 10000.00 VINX
-Fee     : 5.00 VINX
-Nonce   : 0
-Status  : accepted
-Tx hash : 3f8a1b2c...
-```
-
-La transaction est dans le **mempool**. Elle sera incluse dans le prochain bloc (~3s).
-
----
-
-## 6. Vérifier son solde
-
-```bash
-cargo run -p vinx-wallet -- balance <VOTRE_ADRESSE>
-```
-
-Sortie (après le prochain bloc) :
-```
-Address : vinx1aabbcc...
-Balance : 10000.00 VINX
-Staked  : 0.00 VINX
-Nonce   : 0
-Frozen  : no
-```
-
-> Si le solde est encore à 0, attendre quelques secondes le prochain bloc.
-
----
-
-## 7. Envoyer des VINX à une autre adresse
-
-Créer un second wallet :
-```bash
-cargo run -p vinx-wallet -- keygen --output alice.json
-cargo run -p vinx-wallet -- address --wallet alice.json
-# → vinx1alice...
-```
-
-Envoyer depuis son propre wallet (**une seule ligne**) :
-```bash
-cargo run -p vinx-wallet -- transfer --wallet my-wallet.json --to <ADRESSE_ALICE> --amount 500
-```
-
----
-
-## 8. Staker des VINX
-
-Le staking accumule 80% des frais de toutes les transactions du réseau.
-
-```bash
-# Staker 1000 VINX
-cargo run -p vinx-wallet -- stake --wallet my-wallet.json --amount 1000
-
-# Vérifier : la colonne "Staked" augmente
-cargo run -p vinx-wallet -- balance <VOTRE_ADRESSE>
-
-# Récupérer ses tokens
-cargo run -p vinx-wallet -- unstake --wallet my-wallet.json --amount 1000
-```
-
----
-
-## 9. Explorer la chaîne
-
-**Statut du nœud :**
 ```bash
 cargo run -p vinx-wallet -- status
 ```
-```
-Node    : http://127.0.0.1:8545
-Status  : ok
-Height  : 12
-Mempool : 0 pending
+
+---
+
+## 3. Staking
+
+Les stakers reçoivent 80% des frais collectés, distribués toutes les 100 blocs.
+
+### Staker des VINX
+
+```bash
+cargo run -p vinx-wallet -- stake \
+  --wallet my-wallet.json \
+  --amount 5000
 ```
 
-**Détails d'un bloc :**
-```bash
-cargo run -p vinx-wallet -- block 1
-```
-```
-Height    : 1
-Hash      : 4e9f2a...
-Prev hash : 000000...
-Timestamp : 1748736003
-Validator : vinx1yyy...
-Tx count  : 1
-Transactions:
-  Emission  abc123...  vinx1yyy...  →  vinx1zzz...  fee 0.00 VINX
-```
+Minimum : 1 VINX. Les VINX stakés sont bloqués jusqu'à unstake.
 
-**Via curl (API brute) :**
+### Récupérer des VINX stakés
+
 ```bash
-curl http://localhost:8545/health
-curl http://localhost:8545/chain/height
-curl http://localhost:8545/account/<ADRESSE>
-curl http://localhost:8545/block/0
-curl http://localhost:8545/mempool/size
+cargo run -p vinx-wallet -- unstake \
+  --wallet my-wallet.json \
+  --amount 5000
 ```
 
 ---
 
-## 10. Référence des commandes
+## 4. Admin — gel et dégel de comptes
 
-### `vinx-wallet`
+Seul le wallet admin (créé au genesis dans `devnet/admin.json`) peut geler ou dégeler des comptes.
 
-| Commande | Description |
+### Geler un compte
+
+```bash
+cargo run -p vinx-wallet -- freeze \
+  --wallet devnet/admin.json \
+  --target vinx1compte_a_geler...
+```
+
+Un compte gelé ne peut plus émettre de transactions. Le gel est automatiquement levé après **12 mois** (~3 153 600 blocs à 10s/bloc).
+
+### Dégeler un compte manuellement
+
+```bash
+cargo run -p vinx-wallet -- unfreeze \
+  --wallet devnet/admin.json \
+  --target vinx1compte_a_degeler...
+```
+
+---
+
+## 5. Admin — mise à jour du protocole
+
+Les mises à jour de protocole nécessitent un préavis minimum :
+
+| Type | Préavis minimum |
 |---|---|
-| `keygen --output <fichier>` | Génère une paire de clés Ed25519 |
-| `address --wallet <fichier>` | Affiche l'adresse du wallet |
-| `balance <adresse>` | Solde, staked, nonce, frozen |
-| `transfer --wallet <f> --to <addr> --amount <n>` | Envoyer des VINX |
-| `stake --wallet <f> --amount <n>` | Staker des VINX |
-| `unstake --wallet <f> --amount <n>` | Récupérer des VINX stakés |
-| `block <hauteur>` | Détails d'un bloc |
-| `status` | État du nœud (hauteur, mempool) |
+| Patch (x.y.**Z**) | 7 jours (~60 480 blocs) |
+| Minor (x.**Y**.0) | 30 jours (~259 200 blocs) |
+| Major (**X**.0.0) | 90 jours (~777 600 blocs) |
 
-Toutes les commandes réseau acceptent `--node <url>` (défaut : `http://127.0.0.1:8545`).
+### Annoncer une mise à jour
 
-### Endpoints RPC
+```bash
+cargo run -p vinx-wallet -- announce-upgrade \
+  --wallet devnet/admin.json \
+  --version 1.1.0 \
+  --activation-height 300000
+```
 
-| Méthode | Route | Description |
+La mise à jour s'active automatiquement au bloc indiqué.
+
+### Vérifier l'état du protocole
+
+```bash
+cargo run -p vinx-wallet -- protocol
+```
+
+---
+
+## 6. Explorateur via le wallet CLI
+
+### Détails d'un bloc
+
+```bash
+cargo run -p vinx-wallet -- block 42
+```
+
+### Détails d'une transaction
+
+```bash
+cargo run -p vinx-wallet -- tx a1b2c3d4...
+```
+
+Affiche : type, bloc, de, vers, montant, fee, nonce.
+
+### Liste des validateurs
+
+```bash
+cargo run -p vinx-wallet -- validators
+```
+
+Affiche le nombre de validateurs, le quorum requis et la liste des adresses.
+
+---
+
+## 7. Interface web (port 8545)
+
+Ouvrez **http://localhost:8545** dans votre navigateur.
+
+- **Réseau** : hauteur de bloc, statut, mempool — rafraîchi toutes les 3 s
+- **Wallet** : chargez votre `.json` — la clé ne quitte jamais le navigateur (Ed25519 local)
+- **Envoyer / Staker** : transfer, stake, unstake depuis l'interface
+- **Compte** : consulter n'importe quelle adresse
+- **Explorateur de blocs** : state root, signatures, finalisation
+- **Transaction** : recherche par hash hexadécimal
+- **Validateurs** : liste en temps réel
+- **Protocole** : version actuelle et upgrade en attente
+
+---
+
+## 8. Configuration avancée du nœud
+
+```bash
+cp config.example.toml config.toml
+# Éditez config.toml
+cargo run -p vinx-node -- --config config.toml
+```
+
+Les flags CLI ont priorité sur le fichier de config :
+
+```bash
+cargo run -p vinx-node -- \
+  --block-time 10 \
+  --rpc-listen 0.0.0.0:9000 \
+  --data-dir /var/lib/vinx
+```
+
+### Options disponibles
+
+| Option CLI | Config TOML | Défaut |
 |---|---|---|
-| `GET` | `/health` | Statut, hauteur, mempool |
-| `GET` | `/chain/height` | Hauteur du dernier bloc |
-| `GET` | `/account/:address` | Compte (balance, nonce, staked, frozen) |
-| `POST` | `/tx/submit` | Soumettre une transaction JSON signée |
-| `GET` | `/block/:height` | Bloc et ses transactions |
-| `GET` | `/mempool/size` | Transactions en attente |
+| `--block-time` | `block_time_secs` | 3 |
+| — | `max_block_txs` | 1000 |
+| `--rpc-listen` | `rpc_listen` | `0.0.0.0:8545` |
+| `--p2p-listen` | `p2p_listen` | désactivé |
+| `--data-dir` | `data_dir` | `devnet` |
+| — | `validator_key_file` | `devnet/validator.json` |
+| — | `admin_key_file` | `devnet/admin.json` |
+| `--peers` | `peers` | aucun |
 
 ---
 
-## 11. Structure du projet
+## 9. Réseau P2P multi-nœuds
 
+### Nœud 1
+
+```toml
+# config-node1.toml
+data_dir        = "node1"
+rpc_listen      = "0.0.0.0:8545"
+p2p_listen      = "/ip4/0.0.0.0/tcp/9000"
+block_time_secs = 10
 ```
-VinX-Ledger/
-├── crates/
-│   ├── vinx-crypto/   Ed25519, adresses Bech32, SHA-256
-│   ├── vinx-core/     Amount, Account, Transaction, Block
-│   ├── vinx-state/    WorldState, genesis, apply_transaction
-│   ├── vinx-node/     Nœud, mempool, RPC HTTP, producteur de blocs
-│   └── vinx-wallet/   CLI wallet
-├── devnet/            Clés générées au premier démarrage (gitignorées)
-└── README.md          Spécification du protocole
+
+### Nœud 2 (se connecte au nœud 1)
+
+```toml
+# config-node2.toml
+data_dir        = "node2"
+rpc_listen      = "0.0.0.0:8546"
+p2p_listen      = "/ip4/0.0.0.0/tcp/9001"
+block_time_secs = 10
+peers = ["/ip4/127.0.0.1/tcp/9000"]
 ```
+
+Les blocs sont propagés via gossipsub. Chaque validateur co-signe les blocs. Le quorum est `⌈2n/3⌉` parmi `n` validateurs.
 
 ---
 
-## 12. Dépannage
+## 10. Référence des endpoints RPC
 
-**`unexpected argument '...' found` ou `error: Found argument '-output'`**
-→ Le `--` entre `cargo run -p vinx-wallet` et la sous-commande est **obligatoire**.
-  Correct : `cargo run -p vinx-wallet -- keygen --output my-wallet.json`
-  Incorrect : `cargo run -p vinx-wallet keygen --output my-wallet.json`
-  Incorrect : `cargo run -p vinx-wallet -output my-wallet.json`
-
-**Le solde ne change pas après le transfer**
-→ Attendre le prochain bloc (~3s). Le nœud doit être démarré.
-
-**`Error: Node unreachable`**
-→ Vérifier que `cargo run -p vinx-node` tourne dans un autre terminal.
-
-**`Error: Account not found` en vérifiant le solde admin**
-→ Utiliser l'adresse affichée dans le banner du nœud, pas celle du fichier `devnet/admin.json` avant le premier démarrage.
-
-**Repartir de zéro**
-→ Supprimer le dossier `devnet/`. Le nœud génère de nouvelles identités au prochain démarrage.
-
-Linux/macOS/WSL :
-```bash
-rm -rf devnet/
-```
-Windows (PowerShell) :
-```powershell
-Remove-Item -Recurse -Force devnet\
-```
-Windows (cmd.exe) :
-```cmd
-rmdir /s /q devnet
-```
-
-**Lancer les tests d'intégration seuls**
-```bash
-cargo test -p vinx-node --test integration
-```
+| Méthode | Chemin | Description |
+|---|---|---|
+| GET | `/health` | Statut, hauteur, mempool |
+| GET | `/chain/height` | Hauteur de la chaîne |
+| GET | `/block/:height` | Détails d'un bloc |
+| GET | `/account/:address` | Solde et infos d'un compte |
+| POST | `/tx/submit` | Soumettre une transaction |
+| GET | `/tx/:hash` | Détails d'une transaction |
+| GET | `/mempool/size` | Taille du mempool |
+| GET | `/validators` | Ensemble des validateurs |
+| GET | `/protocol/version` | Version du protocole |

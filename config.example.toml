@@ -1,0 +1,42 @@
+# VinX Ledger — Configuration du nœud
+# Copiez ce fichier en config.toml et adaptez les valeurs.
+# Toutes les valeurs sont optionnelles : les défauts sont indiqués en commentaire.
+
+# ─── Répertoire de données ────────────────────────────────────────────────────
+# Contient les fichiers de clés, l'état de la chaîne et le snapshot.
+# Défaut : "devnet"
+# data_dir = "devnet"
+
+# ─── Fichiers de clés ────────────────────────────────────────────────────────
+# Générés automatiquement au premier démarrage si absents.
+# validator_key_file = "devnet/validator.json"
+# admin_key_file     = "devnet/admin.json"
+
+# ─── Paramètres de bloc ───────────────────────────────────────────────────────
+# Temps entre deux blocs en secondes.
+# Défaut : 3 (devnet) — utilisez 10 pour mainnet.
+# block_time_secs = 3
+
+# Nombre maximum de transactions par bloc.
+# Défaut : 1000
+# max_block_txs = 1000
+
+# ─── RPC HTTP ─────────────────────────────────────────────────────────────────
+# Adresse d'écoute du serveur RPC + interface web.
+# Défaut : "0.0.0.0:8545"
+# rpc_listen = "0.0.0.0:8545"
+
+# ─── P2P (réseau entre nœuds) ────────────────────────────────────────────────
+# Décommentez pour activer la couche P2P gossipsub.
+# p2p_listen = "/ip4/0.0.0.0/tcp/9000"
+
+# Pairs à contacter au démarrage (multiaddr libp2p).
+# peers = [
+#   "/ip4/192.168.1.10/tcp/9000",
+#   "/ip4/192.168.1.11/tcp/9000",
+# ]
+
+# ─── Synchronisation de chaîne ────────────────────────────────────────────────
+# URL RPC d'un pair de confiance depuis lequel rattraper les blocs au démarrage.
+# Utile pour rejoindre un testnet existant sans télécharger le snapshot complet.
+# sync_peer_rpc = "http://192.168.1.10:8545"

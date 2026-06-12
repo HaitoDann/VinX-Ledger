@@ -16,17 +16,21 @@ pub struct BlockHeader {
     pub tx_count: u32,
     /// Merkle root of the account state after this block.
     pub state_root: Hash32,
+    /// Dynamic fee floor at block production time, in atoms.
+    #[serde(default)]
+    pub base_fee: u64,
 }
 
 impl BlockHeader {
     pub fn hash(&self) -> Hash32 {
-        let mut bytes = Vec::with_capacity(128);
+        let mut bytes = Vec::with_capacity(144);
         bytes.extend_from_slice(&self.height.to_be_bytes());
         bytes.extend_from_slice(&self.prev_hash);
         bytes.extend_from_slice(&self.timestamp.to_be_bytes());
         bytes.extend_from_slice(self.validator.as_str().as_bytes());
         bytes.extend_from_slice(&self.tx_count.to_be_bytes());
         bytes.extend_from_slice(&self.state_root);
+        bytes.extend_from_slice(&self.base_fee.to_be_bytes());
         sha256(&bytes)
     }
 }
@@ -41,6 +45,15 @@ pub struct BlockSignature {
     pub pub_key: PublicKey,
     /// Signature over `BlockHeader::hash()`.
     pub signature: VinxSignature,
+}
+
+/// Evidence of validator equivocation: two valid signatures by the same validator
+/// on different block hashes at the same height. Used in SlashValidator transactions.
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct SlashEvidence {
+    pub height: u64,
+    pub sig_a: BlockSignature,
+    pub sig_b: BlockSignature,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -101,6 +114,23 @@ mod tests {
             validator: dummy_addr(),
             tx_count: 0,
             state_root: [0u8; 32],
+            base_fee: 0,
+        }
+    }
+
+    fn make_block(height: u64, proposer: Address) -> Block {
+        Block {
+            header: BlockHeader {
+                height,
+                prev_hash: [0u8; 32],
+                timestamp: 0,
+                validator: proposer,
+                tx_count: 0,
+                state_root: [0u8; 32],
+                base_fee: 0,
+            },
+            transactions: vec![],
+            signatures: vec![],
         }
     }
 
