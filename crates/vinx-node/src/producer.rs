@@ -79,6 +79,9 @@ pub fn produce_block(
     // Activate any pending protocol upgrade whose height has been reached
     state.check_upgrade_activation();
 
+    // Check and execute/reject governance proposals
+    state.check_governance_proposals();
+
     // Credit block proposer with accumulated validator fee rewards (30% of all block fees)
     let validator_reward = state.flush_validator_fee_pool();
     if validator_reward > Amount::ZERO {

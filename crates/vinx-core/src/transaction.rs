@@ -18,6 +18,12 @@ pub enum TransactionType {
     AddValidator,
     /// Admin-only: remove an address from the PoA validator set. `to` = validator to remove.
     RemoveValidator,
+    /// Slash a validator who double-signed. `to` = validator, `payload` = bincode(SlashEvidence).
+    SlashValidator,
+    /// Submit a governance proposal. `payload` = bincode(SubmitProposalPayload).
+    SubmitProposal,
+    /// Cast a vote on a proposal. `payload` = bincode(VotePayload).
+    VoteProposal,
 }
 
 impl TransactionType {
@@ -32,6 +38,9 @@ impl TransactionType {
             TransactionType::Emission => 0x07,
             TransactionType::AddValidator => 0x08,
             TransactionType::RemoveValidator => 0x09,
+            TransactionType::SlashValidator => 0x0A,
+            TransactionType::SubmitProposal => 0x0B,
+            TransactionType::VoteProposal => 0x0C,
         }
     }
 }
@@ -267,6 +276,73 @@ impl Transaction {
             fee: Amount::ZERO,
             nonce,
             payload: vec![],
+            pub_key: Some(pk),
+            signature: None,
+        };
+        tx.signature = Some(keypair.sign(&tx.signing_bytes()));
+        tx
+    }
+
+    /// Constructs a SlashValidator tx with equivocation evidence.
+    pub fn new_slash_validator(keypair: &KeyPair, validator: Address, evidence: &crate::block::SlashEvidence, nonce: u64) -> Self {
+        let pk = keypair.public_key();
+        let from = Address::from_public_key(&pk);
+        let payload = bincode::serialize(evidence).expect("slash evidence serializable");
+        let mut tx = Self {
+            tx_type: TransactionType::SlashValidator,
+            from,
+            to: validator,
+            amount: Amount::ZERO,
+            fee: Amount::ZERO,
+            nonce,
+            payload,
+            pub_key: Some(pk),
+            signature: None,
+        };
+        tx.signature = Some(keypair.sign(&tx.signing_bytes()));
+        tx
+    }
+
+    /// Constructs a SubmitProposal tx.
+    pub fn new_submit_proposal(
+        keypair: &KeyPair,
+        description: String,
+        action: crate::governance::GovernanceAction,
+        voting_period_blocks: u64,
+        nonce: u64,
+    ) -> Self {
+        let pk = keypair.public_key();
+        let from = Address::from_public_key(&pk);
+        let payload_data = crate::governance::SubmitProposalPayload { description, action, voting_period_blocks };
+        let payload = bincode::serialize(&payload_data).expect("proposal serializable");
+        let mut tx = Self {
+            tx_type: TransactionType::SubmitProposal,
+            from: from.clone(),
+            to: from,
+            amount: Amount::ZERO,
+            fee: Amount::ZERO,
+            nonce,
+            payload,
+            pub_key: Some(pk),
+            signature: None,
+        };
+        tx.signature = Some(keypair.sign(&tx.signing_bytes()));
+        tx
+    }
+
+    /// Constructs a VoteProposal tx.
+    pub fn new_vote_proposal(keypair: &KeyPair, proposal_id: u64, approve: bool, nonce: u64) -> Self {
+        let pk = keypair.public_key();
+        let from = Address::from_public_key(&pk);
+        let payload = bincode::serialize(&crate::governance::VotePayload { proposal_id, approve }).expect("vote serializable");
+        let mut tx = Self {
+            tx_type: TransactionType::VoteProposal,
+            from: from.clone(),
+            to: from,
+            amount: Amount::ZERO,
+            fee: Amount::ZERO,
+            nonce,
+            payload,
             pub_key: Some(pk),
             signature: None,
         };

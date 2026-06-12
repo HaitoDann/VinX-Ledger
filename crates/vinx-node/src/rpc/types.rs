@@ -226,3 +226,53 @@ pub struct CompactResponse {
 pub struct ErrorResponse {
     pub error: String,
 }
+
+#[derive(Serialize)]
+pub struct ProposalResponse {
+    pub id: u64,
+    pub proposer: String,
+    pub description: String,
+    pub action: String,
+    pub submitted_at: u64,
+    pub voting_ends_at: u64,
+    pub yes_votes: usize,
+    pub no_votes: usize,
+    pub status: String,
+}
+
+impl ProposalResponse {
+    pub fn from_proposal(p: &vinx_core::Proposal) -> Self {
+        Self {
+            id: p.id,
+            proposer: p.proposer.to_string(),
+            description: p.description.clone(),
+            action: format!("{:?}", p.action),
+            submitted_at: p.submitted_at,
+            voting_ends_at: p.voting_ends_at,
+            yes_votes: p.yes_count(),
+            no_votes: p.no_count(),
+            status: format!("{:?}", p.status),
+        }
+    }
+}
+
+#[derive(Serialize)]
+pub struct ProposalListResponse {
+    pub count: usize,
+    pub proposals: Vec<ProposalResponse>,
+}
+
+#[derive(Serialize)]
+pub struct MerkleProofResponse {
+    pub address: String,
+    pub leaf_hash: String,
+    pub state_root: String,
+    pub proof: Vec<MerkleProofStepResponse>,
+    pub valid: bool,
+}
+
+#[derive(Serialize)]
+pub struct MerkleProofStepResponse {
+    pub sibling: String,
+    pub sibling_is_right: bool,
+}

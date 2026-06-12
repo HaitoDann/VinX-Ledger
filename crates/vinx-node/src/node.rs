@@ -211,7 +211,10 @@ impl Node {
     ) -> Result<(), NodeError> {
         let app = crate::rpc::router(Arc::clone(&self));
         tracing::info!(listen = %listener.local_addr().unwrap(), "RPC server starting");
-        axum::serve(listener, app)
+        axum::serve(
+            listener,
+            app.into_make_service_with_connect_info::<std::net::SocketAddr>(),
+        )
             .await
             .map_err(|e| NodeError::Rpc(e.to_string()))
     }

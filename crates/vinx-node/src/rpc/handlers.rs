@@ -317,3 +317,77 @@ pub async fn post_compact(
 pub struct CompactParams {
     pub keep_last: Option<u64>,
 }
+
+// ─── Governance handlers ─────────────────────────────────────────────────────
+
+pub async fn get_proposals(State(node): State<Arc<Node>>) -> ApiResult<ProposalListResponse> {
+    let state = node.state.read().await;
+    let mut proposals: Vec<ProposalResponse> = state.proposals.values()
+        .map(ProposalResponse::from_proposal)
+        .collect();
+    proposals.sort_by_key(|p| p.id);
+    let count = proposals.len();
+    Ok(Json(ProposalListResponse { count, proposals }))
+}
+
+pub async fn get_proposal(
+    State(node): State<Arc<Node>>,
+    Path(id): Path<u64>,
+) -> ApiResult<ProposalResponse> {
+    let state = node.state.read().await;
+    match state.proposals.get(&id) {
+        Some(p) => Ok(Json(ProposalResponse::from_proposal(p))),
+        None => Err(ApiError::NotFound(format!("Proposal {} not found", id))),
+    }
+}
+
+// ─── Merkle proof handler ────────────────────────────────────────────────────
+
+pub async fn get_account_proof(
+    State(node): State<Arc<Node>>,
+    Path(raw_address): Path<String>,
+) -> ApiResult<MerkleProofResponse> {
+    use vinx_crypto::{merkle_proof_for, verify_merkle_proof, sha256};
+
+    let address = Address::from_bech32(&raw_address)
+        .map_err(|e| ApiError::BadRequest(e.to_string()))?;
+
+    let state = node.state.read().await;
+
+    // Build sorted leaf list (same order as compute_state_root)
+    let entries = state.accounts_sorted();
+
+    let index = entries.iter().position(|a| a.address == address)
+        .ok_or_else(|| ApiError::NotFound(format!("Account {} not found", raw_address)))?;
+
+    let leaves: Vec<vinx_crypto::Hash32> = entries.iter().map(|a| {
+        let addr = a.address.as_str().as_bytes();
+        let mut buf = Vec::with_capacity(addr.len() + 48);
+        buf.extend_from_slice(addr);
+        buf.extend_from_slice(&a.balance.atoms().to_be_bytes());
+        buf.extend_from_slice(&a.nonce.to_be_bytes());
+        buf.extend_from_slice(&a.staked.atoms().to_be_bytes());
+        buf.push(a.frozen as u8);
+        buf.extend_from_slice(&a.stake_since.to_be_bytes());
+        buf.extend_from_slice(&a.frozen_since.to_be_bytes());
+        sha256(&buf)
+    }).collect();
+
+    let state_root = state.compute_state_root();
+    let leaf_hash = leaves[index];
+    let proof = merkle_proof_for(&leaves, index)
+        .ok_or_else(|| ApiError::Internal("proof generation failed".to_string()))?;
+
+    let valid = verify_merkle_proof(&leaf_hash, &proof, &state_root);
+
+    Ok(Json(MerkleProofResponse {
+        address: raw_address,
+        leaf_hash: hex::encode(leaf_hash),
+        state_root: hex::encode(state_root),
+        proof: proof.iter().map(|s| MerkleProofStepResponse {
+            sibling: hex::encode(s.sibling),
+            sibling_is_right: s.sibling_is_right,
+        }).collect(),
+        valid,
+    }))
+}

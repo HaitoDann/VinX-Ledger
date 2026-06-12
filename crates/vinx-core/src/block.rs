@@ -47,6 +47,15 @@ pub struct BlockSignature {
     pub signature: VinxSignature,
 }
 
+/// Evidence of validator equivocation: two valid signatures by the same validator
+/// on different block hashes at the same height. Used in SlashValidator transactions.
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct SlashEvidence {
+    pub height: u64,
+    pub sig_a: BlockSignature,
+    pub sig_b: BlockSignature,
+}
+
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct Block {
     pub header: BlockHeader,

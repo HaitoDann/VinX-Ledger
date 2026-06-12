@@ -5,6 +5,8 @@ use vinx_core::{
         Amount, DEFAULT_FEE_FLOOR_ATOMS, FREEZE_DURATION_BLOCKS, MIN_STAKE_ATOMS,
         STAKING_DISTRIBUTION_INTERVAL,
     },
+    block::SlashEvidence,
+    governance::{GovernanceAction, Proposal, ProposalStatus, SubmitProposalPayload, VotePayload, GOVERNANCE_VOTING_PERIOD_BLOCKS},
     protocol::{ProtocolVersion, ScheduledUpgrade},
     Account, CoreError, Transaction, TransactionType, ValidatorSet,
 };
@@ -41,6 +43,12 @@ pub struct WorldState {
     pub pending_upgrade: Option<ScheduledUpgrade>,
     /// Active PoA validator set. Admin can add/remove validators via governance txs.
     pub validator_set: ValidatorSet,
+    /// On-chain governance proposals.
+    #[serde(default)]
+    pub proposals: HashMap<u64, Proposal>,
+    /// Auto-incrementing proposal counter.
+    #[serde(default)]
+    pub proposal_count: u64,
 }
 
 fn default_fee_floor() -> Amount {
@@ -71,6 +79,8 @@ impl WorldState {
             pending_upgrade: None,
             // Placeholder — always overwritten by create_genesis_state before use.
             validator_set: ValidatorSet::single(Address::zero()),
+            proposals: HashMap::new(),
+            proposal_count: 0,
         }
     }
 
@@ -113,6 +123,13 @@ impl WorldState {
 
     pub fn get_account(&self, address: &Address) -> Option<&Account> {
         self.accounts.get(address.as_str())
+    }
+
+    /// Returns all accounts sorted by address (for Merkle proof computation).
+    pub fn accounts_sorted(&self) -> Vec<&Account> {
+        let mut entries: Vec<&Account> = self.accounts.values().collect();
+        entries.sort_by_key(|a| a.address.as_str());
+        entries
     }
 
     pub fn account_balance(&self, address: &Address) -> Amount {
@@ -169,6 +186,9 @@ impl WorldState {
             TransactionType::AnnounceUpgrade => self.apply_announce_upgrade(tx),
             TransactionType::AddValidator => self.apply_add_validator(tx),
             TransactionType::RemoveValidator => self.apply_remove_validator(tx),
+            TransactionType::SlashValidator => self.apply_slash_validator(tx),
+            TransactionType::SubmitProposal => self.apply_submit_proposal(tx),
+            TransactionType::VoteProposal => self.apply_vote_proposal(tx),
             TransactionType::Emission => Err(CoreError::InvalidTransaction(
                 "emission disabled in Phase 1".to_string(),
             )),
@@ -541,6 +561,232 @@ impl WorldState {
         entries.sort_by_key(|a| a.address.as_str());
         let leaves: Vec<Hash32> = entries.iter().map(|a| hash_account(a)).collect();
         merkle_root(&leaves)
+    }
+
+    fn apply_slash_validator(&mut self, tx: &Transaction) -> Result<(), CoreError> {
+        let evidence: SlashEvidence = bincode::deserialize(&tx.payload)
+            .map_err(|_| CoreError::InvalidTransaction("malformed slash evidence".to_string()))?;
+
+        let target = &tx.to;
+
+        // Both signatures must be from the same validator (the target)
+        if evidence.sig_a.validator != *target || evidence.sig_b.validator != *target {
+            return Err(CoreError::InvalidTransaction("evidence validator mismatch".to_string()));
+        }
+
+        if Address::from_public_key(&evidence.sig_a.pub_key) != *target {
+            return Err(CoreError::InvalidTransaction("sig_a pubkey/address mismatch".to_string()));
+        }
+        if Address::from_public_key(&evidence.sig_b.pub_key) != *target {
+            return Err(CoreError::InvalidTransaction("sig_b pubkey/address mismatch".to_string()));
+        }
+
+        // Signatures must be different (they signed different things)
+        if evidence.sig_a.signature == evidence.sig_b.signature {
+            return Err(CoreError::InvalidTransaction("signatures are identical — not equivocation".to_string()));
+        }
+
+        if !self.validator_set.contains(target) {
+            return Err(CoreError::InvalidTransaction("target is not a validator".to_string()));
+        }
+
+        let sender = self.accounts.get_mut(tx.from.as_str()).ok_or(CoreError::InsufficientBalance)?;
+        if sender.nonce != tx.nonce {
+            return Err(CoreError::InvalidNonce { expected: sender.nonce, got: tx.nonce });
+        }
+        sender.nonce += 1;
+
+        // Slash: burn the validator's stake
+        let slashed = self.accounts.get(target.as_str()).map(|a| a.staked).unwrap_or(Amount::ZERO);
+        if slashed > Amount::ZERO {
+            // 10% bounty to the reporter
+            let bounty = Amount::from_atoms(slashed.atoms() / 10);
+            let burn = slashed.checked_sub(bounty).unwrap_or(Amount::ZERO);
+
+            if let Some(acc) = self.accounts.get_mut(target.as_str()) {
+                acc.staked = Amount::ZERO;
+                acc.stake_since = 0;
+            }
+            self.credit(&tx.from, bounty);
+            self.melt_pool = self.melt_pool.saturating_add(burn);
+        }
+
+        // Remove from validator set (can't produce blocks anymore)
+        if self.validator_set.len() > 1 {
+            self.validator_set.remove(target);
+            tracing::warn!(validator = %target, slashed = %slashed, "Validator slashed for equivocation");
+        } else {
+            tracing::warn!(validator = %target, "Slash skipped — last validator");
+        }
+
+        Ok(())
+    }
+
+    fn apply_submit_proposal(&mut self, tx: &Transaction) -> Result<(), CoreError> {
+        let payload: SubmitProposalPayload = bincode::deserialize(&tx.payload)
+            .map_err(|_| CoreError::InvalidTransaction("malformed proposal payload".to_string()))?;
+
+        // Only stakers or validators can submit proposals (must have staked > 0 OR be a validator)
+        let is_validator = self.validator_set.contains(&tx.from);
+        let is_staker = self.accounts.get(tx.from.as_str())
+            .map(|a| a.staked > Amount::ZERO)
+            .unwrap_or(false);
+        if !is_validator && !is_staker {
+            return Err(CoreError::Unauthorized);
+        }
+
+        let sender = self.accounts.get_mut(tx.from.as_str()).ok_or(CoreError::InsufficientBalance)?;
+        if sender.nonce != tx.nonce {
+            return Err(CoreError::InvalidNonce { expected: sender.nonce, got: tx.nonce });
+        }
+        sender.nonce += 1;
+
+        let voting_period = payload.voting_period_blocks
+            .max(1_000)
+            .min(GOVERNANCE_VOTING_PERIOD_BLOCKS * 4);
+
+        let id = self.proposal_count;
+        self.proposal_count += 1;
+
+        let proposal = Proposal {
+            id,
+            proposer: tx.from.clone(),
+            description: payload.description,
+            action: payload.action,
+            submitted_at: self.block_height,
+            voting_ends_at: self.block_height + voting_period,
+            yes_votes: Vec::new(),
+            no_votes: Vec::new(),
+            status: ProposalStatus::Active,
+        };
+
+        tracing::info!(id, proposer = %tx.from, "Governance proposal submitted");
+        self.proposals.insert(id, proposal);
+        Ok(())
+    }
+
+    fn apply_vote_proposal(&mut self, tx: &Transaction) -> Result<(), CoreError> {
+        let vote: VotePayload = bincode::deserialize(&tx.payload)
+            .map_err(|_| CoreError::InvalidTransaction("malformed vote payload".to_string()))?;
+
+        // Only active validators can vote
+        if !self.validator_set.contains(&tx.from) {
+            return Err(CoreError::Unauthorized);
+        }
+
+        let proposal = self.proposals.get(&vote.proposal_id)
+            .ok_or_else(|| CoreError::InvalidTransaction(format!("proposal {} not found", vote.proposal_id)))?;
+
+        if proposal.status != ProposalStatus::Active {
+            return Err(CoreError::InvalidTransaction("proposal is not active".to_string()));
+        }
+        if proposal.has_voted(tx.from.as_str()) {
+            return Err(CoreError::InvalidTransaction("already voted".to_string()));
+        }
+        if self.block_height > proposal.voting_ends_at {
+            return Err(CoreError::InvalidTransaction("voting period has ended".to_string()));
+        }
+
+        let sender = self.accounts.get_mut(tx.from.as_str()).ok_or(CoreError::InsufficientBalance)?;
+        if sender.nonce != tx.nonce {
+            return Err(CoreError::InvalidNonce { expected: sender.nonce, got: tx.nonce });
+        }
+        sender.nonce += 1;
+
+        let proposal = self.proposals.get_mut(&vote.proposal_id).unwrap();
+        if vote.approve {
+            proposal.yes_votes.push(tx.from.to_string());
+        } else {
+            proposal.no_votes.push(tx.from.to_string());
+        }
+
+        tracing::info!(proposal_id = vote.proposal_id, voter = %tx.from, approve = vote.approve, "Governance vote cast");
+        Ok(())
+    }
+
+    /// Checks all active proposals: auto-executes passed ones, rejects expired ones.
+    /// Call this once per block (after incrementing block_height).
+    pub fn check_governance_proposals(&mut self) {
+        let n_validators = self.validator_set.len();
+        let height = self.block_height;
+
+        let mut to_execute: Vec<u64> = Vec::new();
+        let mut to_reject: Vec<u64> = Vec::new();
+
+        for (id, proposal) in &self.proposals {
+            if proposal.status != ProposalStatus::Active { continue; }
+            if proposal.has_quorum(n_validators) {
+                to_execute.push(*id);
+            } else if height > proposal.voting_ends_at || proposal.is_dead(n_validators) {
+                to_reject.push(*id);
+            }
+        }
+
+        for id in to_execute {
+            self.execute_proposal(id);
+        }
+        for id in to_reject {
+            if let Some(p) = self.proposals.get_mut(&id) {
+                p.status = ProposalStatus::Rejected;
+                tracing::info!(id, "Governance proposal rejected");
+            }
+        }
+    }
+
+    fn execute_proposal(&mut self, id: u64) {
+        let action = match self.proposals.get(&id) {
+            Some(p) if p.status == ProposalStatus::Active => p.action.clone(),
+            _ => return,
+        };
+
+        let ok = match action {
+            GovernanceAction::AddValidator(addr) => {
+                if !self.validator_set.contains(&addr) {
+                    self.validator_set.add(addr.clone());
+                    tracing::info!(%addr, "Governance: validator added");
+                }
+                true
+            }
+            GovernanceAction::RemoveValidator(addr) => {
+                if self.validator_set.len() > 1 && self.validator_set.contains(&addr) {
+                    self.validator_set.remove(&addr);
+                    tracing::info!(%addr, "Governance: validator removed");
+                }
+                true
+            }
+            GovernanceAction::UpdateFeeFloor { atoms } => {
+                self.fee_floor = Amount::from_atoms(atoms as u128);
+                if self.base_fee < self.fee_floor {
+                    self.base_fee = self.fee_floor;
+                }
+                tracing::info!(atoms, "Governance: fee floor updated");
+                true
+            }
+            GovernanceAction::ScheduleUpgrade { version, activation_height } => {
+                if self.pending_upgrade.is_none() {
+                    self.pending_upgrade = Some(vinx_core::ScheduledUpgrade {
+                        version: version.clone(),
+                        activation_height,
+                        announced_at: self.block_height,
+                    });
+                    tracing::info!(activation_height, "Governance: upgrade scheduled");
+                }
+                true
+            }
+            GovernanceAction::ReleaseMeltToStaking { amount } => {
+                if self.melt_pool >= amount {
+                    self.melt_pool = self.melt_pool.checked_sub(amount).unwrap_or(Amount::ZERO);
+                    self.staking_pool = self.staking_pool.saturating_add(amount);
+                    tracing::info!(%amount, "Governance: melt released to staking pool");
+                }
+                true
+            }
+        };
+
+        if let Some(p) = self.proposals.get_mut(&id) {
+            p.status = if ok { ProposalStatus::Executed } else { ProposalStatus::Rejected };
+            tracing::info!(id, "Governance proposal executed");
+        }
     }
 
     #[cfg(test)]

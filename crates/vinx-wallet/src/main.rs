@@ -12,8 +12,10 @@ use std::path::PathBuf;
 use clap::{Parser, Subcommand};
 use std::str::FromStr;
 use vinx_core::amount::DEFAULT_FEE_FLOOR_ATOMS;
-use vinx_core::{Amount, ProtocolVersion, Transaction};
+use vinx_core::{Amount, GovernanceAction, ProtocolVersion, Transaction};
 use vinx_crypto::Address;
+#[allow(unused_imports)]
+use hex;
 
 // ─── CLI definition ───────────────────────────────────────────────────────────
 
@@ -176,6 +178,55 @@ enum Commands {
         #[arg(long, default_value = "http://127.0.0.1:8545")]
         node: String,
     },
+    /// Generate a new wallet from a 12-word BIP-39 mnemonic
+    NewWallet {
+        /// Output file path
+        #[arg(short, long, default_value = "wallet.json")]
+        output: PathBuf,
+    },
+    /// Restore a wallet from a BIP-39 mnemonic phrase
+    RestoreWallet {
+        /// Output file path
+        #[arg(short, long, default_value = "wallet.json")]
+        output: PathBuf,
+    },
+    /// Submit a governance proposal
+    SubmitProposal {
+        /// Human-readable description of the proposal
+        #[arg(long)]
+        description: String,
+        /// Action: "add-validator:<addr>", "remove-validator:<addr>", "fee-floor:<atoms>",
+        ///         "release-melt:<amount>"
+        #[arg(long)]
+        action: String,
+        #[arg(short, long, default_value = "wallet.json")]
+        wallet: PathBuf,
+        #[arg(long, default_value = "http://127.0.0.1:8545")]
+        node: String,
+    },
+    /// Vote on a governance proposal
+    VoteProposal {
+        /// Proposal ID to vote on
+        #[arg(long)]
+        proposal_id: u64,
+        /// Vote: "yes" or "no"
+        #[arg(long)]
+        vote: String,
+        #[arg(short, long, default_value = "wallet.json")]
+        wallet: PathBuf,
+        #[arg(long, default_value = "http://127.0.0.1:8545")]
+        node: String,
+    },
+    /// Show active governance proposals
+    ShowProposals {
+        #[arg(long, default_value = "http://127.0.0.1:8545")]
+        node: String,
+    },
+    /// Show network economic statistics
+    NetworkStats {
+        #[arg(long, default_value = "http://127.0.0.1:8545")]
+        node: String,
+    },
 }
 
 // ─── Entry point ─────────────────────────────────────────────────────────────
@@ -218,6 +269,16 @@ async fn run(cmd: Commands) -> Result<(), WalletError> {
         Commands::History { address, limit, offset, node } => {
             cmd_history(&address, limit, offset, &node).await
         }
+        Commands::NewWallet { output } => cmd_new_wallet(&output),
+        Commands::RestoreWallet { output } => cmd_restore_wallet(&output),
+        Commands::SubmitProposal { description, action, wallet, node } => {
+            cmd_submit_proposal(&description, &action, &wallet, &node).await
+        }
+        Commands::VoteProposal { proposal_id, vote, wallet, node } => {
+            cmd_vote_proposal(proposal_id, &vote, &wallet, &node).await
+        }
+        Commands::ShowProposals { node } => cmd_show_proposals(&node).await,
+        Commands::NetworkStats { node } => cmd_network_stats(&node).await,
     }
 }
 
@@ -587,5 +648,188 @@ async fn cmd_history(
             offset + limit,
         );
     }
+    Ok(())
+}
+
+fn cmd_new_wallet(output: &PathBuf) -> Result<(), WalletError> {
+    use bip39::Mnemonic;
+    // Generate 16 bytes of OS entropy = 12-word mnemonic
+    let entropy = {
+        use rand::RngCore;
+        let mut e = [0u8; 16];
+        rand::rngs::OsRng.fill_bytes(&mut e);
+        e
+    };
+    let mnemonic = Mnemonic::from_entropy(&entropy)
+        .map_err(|e| WalletError::Keystore(format!("mnemonic generation failed: {}", e)))?;
+    let seed = mnemonic.to_seed("");
+    let key_bytes: [u8; 32] = seed[..32].try_into()
+        .map_err(|_| WalletError::Keystore("seed too short".to_string()))?;
+    let kp = vinx_crypto::KeyPair::from_secret_bytes(&key_bytes);
+    let address = Address::from_public_key(&kp.public_key()).to_string();
+    let ks = keystore::KeyStore {
+        address: address.clone(),
+        secret_key_hex: hex::encode(kp.secret_bytes()),
+    };
+    ks.save(output)?;
+    println!("Wallet generated");
+    println!("  Address  : {}", address);
+    println!("  Mnemonic : {}", mnemonic);
+    println!("  File     : {}", output.display());
+    println!();
+    println!("Write down your mnemonic — it cannot be recovered!");
+    Ok(())
+}
+
+fn cmd_restore_wallet(output: &PathBuf) -> Result<(), WalletError> {
+    use std::io::{self, BufRead};
+    print!("Enter your 12-word mnemonic: ");
+    let _ = std::io::Write::flush(&mut std::io::stdout());
+    let stdin = io::stdin();
+    let line = stdin.lock().lines().next()
+        .ok_or_else(|| WalletError::Keystore("no input".to_string()))?
+        .map_err(|e| WalletError::Keystore(format!("read error: {}", e)))?;
+    let mnemonic: bip39::Mnemonic = line.parse()
+        .map_err(|e: bip39::Error| WalletError::Keystore(format!("invalid mnemonic: {}", e)))?;
+    let seed = mnemonic.to_seed("");
+    let key_bytes: [u8; 32] = seed[..32].try_into()
+        .map_err(|_| WalletError::Keystore("seed too short".to_string()))?;
+    let kp = vinx_crypto::KeyPair::from_secret_bytes(&key_bytes);
+    let address = Address::from_public_key(&kp.public_key()).to_string();
+    let ks = keystore::KeyStore {
+        address: address.clone(),
+        secret_key_hex: hex::encode(kp.secret_bytes()),
+    };
+    ks.save(output)?;
+    println!("Wallet restored");
+    println!("  Address : {}", address);
+    println!("  File    : {}", output.display());
+    Ok(())
+}
+
+fn parse_governance_action(action_str: &str) -> Result<GovernanceAction, WalletError> {
+    if let Some(rest) = action_str.strip_prefix("add-validator:") {
+        let addr = Address::from_bech32(rest.trim())
+            .map_err(|e| WalletError::NodeError(format!("invalid address: {}", e)))?;
+        Ok(GovernanceAction::AddValidator(addr))
+    } else if let Some(rest) = action_str.strip_prefix("remove-validator:") {
+        let addr = Address::from_bech32(rest.trim())
+            .map_err(|e| WalletError::NodeError(format!("invalid address: {}", e)))?;
+        Ok(GovernanceAction::RemoveValidator(addr))
+    } else if let Some(rest) = action_str.strip_prefix("fee-floor:") {
+        let atoms: u64 = rest.trim().parse()
+            .map_err(|e| WalletError::NodeError(format!("invalid atoms: {}", e)))?;
+        Ok(GovernanceAction::UpdateFeeFloor { atoms })
+    } else if let Some(rest) = action_str.strip_prefix("release-melt:") {
+        let amount = parse_amount(rest.trim())?;
+        Ok(GovernanceAction::ReleaseMeltToStaking { amount })
+    } else {
+        Err(WalletError::NodeError(format!(
+            "unknown action '{}'. Use: add-validator:<addr>, remove-validator:<addr>, fee-floor:<atoms>, release-melt:<amount>",
+            action_str
+        )))
+    }
+}
+
+async fn cmd_submit_proposal(
+    description: &str,
+    action_str: &str,
+    wallet: &PathBuf,
+    node: &str,
+) -> Result<(), WalletError> {
+    let ks = KeyStore::load(wallet)?;
+    let kp = ks.to_keypair()?;
+    let action = parse_governance_action(action_str)?;
+
+    let client = RpcClient::new(node);
+    let acc = client.get_account(ks.address()).await?;
+    let nonce = acc.nonce;
+
+    let tx = Transaction::new_submit_proposal(
+        &kp,
+        description.to_string(),
+        action,
+        vinx_core::GOVERNANCE_VOTING_PERIOD_BLOCKS,
+        nonce,
+    );
+
+    println!("Proposer : {}", ks.address());
+    println!("Action   : {}", action_str);
+    println!("Nonce    : {}", nonce);
+
+    let resp = client.submit_tx(&tx).await?;
+    if resp.accepted {
+        println!("Status   : accepted");
+        println!("Tx hash  : {}", resp.tx_hash);
+    } else {
+        println!("Status   : rejected");
+    }
+    Ok(())
+}
+
+async fn cmd_vote_proposal(
+    proposal_id: u64,
+    vote_str: &str,
+    wallet: &PathBuf,
+    node: &str,
+) -> Result<(), WalletError> {
+    let approve = match vote_str.to_lowercase().as_str() {
+        "yes" | "y" | "true" => true,
+        "no" | "n" | "false" => false,
+        _ => return Err(WalletError::NodeError(format!("invalid vote '{}': use 'yes' or 'no'", vote_str))),
+    };
+
+    let ks = KeyStore::load(wallet)?;
+    let kp = ks.to_keypair()?;
+
+    let client = RpcClient::new(node);
+    let acc = client.get_account(ks.address()).await?;
+    let nonce = acc.nonce;
+
+    let tx = Transaction::new_vote_proposal(&kp, proposal_id, approve, nonce);
+
+    println!("Voter      : {}", ks.address());
+    println!("Proposal   : {}", proposal_id);
+    println!("Vote       : {}", if approve { "YES" } else { "NO" });
+    println!("Nonce      : {}", nonce);
+
+    let resp = client.submit_tx(&tx).await?;
+    if resp.accepted {
+        println!("Status     : accepted");
+        println!("Tx hash    : {}", resp.tx_hash);
+    } else {
+        println!("Status     : rejected");
+    }
+    Ok(())
+}
+
+async fn cmd_show_proposals(node: &str) -> Result<(), WalletError> {
+    let client = RpcClient::new(node);
+    let list = client.get_proposals().await?;
+    println!("Governance proposals: {}", list.count);
+    if list.proposals.is_empty() {
+        println!("(no proposals found)");
+        return Ok(());
+    }
+    println!();
+    for p in &list.proposals {
+        println!("[{}] {} — {} (yes: {}, no: {})",
+            p.id, p.status, p.description, p.yes_votes, p.no_votes);
+        println!("     Action   : {}", p.action);
+        println!("     Proposer : {}", p.proposer);
+        println!("     Ends at  : block {}", p.voting_ends_at);
+        println!();
+    }
+    Ok(())
+}
+
+async fn cmd_network_stats(node: &str) -> Result<(), WalletError> {
+    let client = RpcClient::new(node);
+    let stats = client.get_network_stats().await?;
+    println!("Network Statistics");
+    println!("  Base fee (atoms) : {}", stats.base_fee_atoms);
+    println!("  Staking pool     : {}", stats.staking_pool);
+    println!("  Melt pool        : {}", stats.melt_pool);
+    println!("  Circulating      : {}", stats.circulating_supply);
     Ok(())
 }
