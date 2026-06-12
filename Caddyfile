@@ -1,0 +1,56 @@
+# VinX Ledger Testnet — Caddy TLS reverse proxy
+#
+# Usage (Docker):
+#   docker compose up --build
+#   Le nœud RPC est accessible sur https://localhost (self-signed cert Caddy).
+#
+# Usage (VPS public avec domaine) :
+#   Remplacer ":443" par "api.testnet.vinx.io" (ou votre domaine).
+#   Caddy obtient automatiquement un certificat Let's Encrypt.
+#   Supprimer "tls internal" (Caddy gère TLS automatiquement avec ACME).
+#
+# Pour faire confiance au CA interne Caddy en local :
+#   caddy trust   # ou via le panneau de cert du navigateur
+
+{
+    # Désactiver les métriques admin sur l'interface publique
+    admin off
+    # Certificats internes auto-signés pour testnet/devnet local
+    local_certs
+}
+
+# Redirection HTTP → HTTPS
+:80 {
+    redir https://{host}{uri} permanent
+}
+
+# HTTPS — proxy vers le nœud RPC VinX
+:443 {
+    tls internal
+
+    # CORS — permet aux wallets web et à l'explorateur d'interroger le nœud
+    header {
+        Access-Control-Allow-Origin  *
+        Access-Control-Allow-Methods "GET, POST, OPTIONS"
+        Access-Control-Allow-Headers "Content-Type, Authorization"
+        Access-Control-Max-Age       86400
+        defer
+    }
+
+    # Répondre directement aux pré-vols CORS sans toucher le backend
+    @options method OPTIONS
+    respond @options 204
+
+    reverse_proxy node1:8545 {
+        # Transmettre l'IP réelle pour le rate limiting
+        header_up X-Forwarded-For {remote_host}
+        # Timeout généreux pour les SSE / WebSocket
+        transport http {
+            response_header_timeout 0
+            dial_timeout 5s
+        }
+    }
+}
+
+# WebSocket — même backend, upgrade géré par Caddy automatiquement
+# (Caddy proxifie ws:// et wss:// via reverse_proxy sans config supplémentaire)

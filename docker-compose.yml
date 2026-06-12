@@ -1,21 +1,56 @@
 version: "3.8"
 
-# VinX Ledger — 3-validator testnet
+# VinX Ledger — 3-validator testnet + TLS reverse proxy
 #
 # Usage:
 #   docker compose up --build
 #
-# Validator 1 (node1) starts first and acts as the genesis node.
-# Validators 2 and 3 sync from node1 via --sync-peer and connect via P2P.
+# - node1  : nœud genesis, RPC interne sur :8545
+# - node2/3: synchronisation depuis node1 via --sync-peer
+# - caddy  : reverse proxy TLS, expose le RPC sur https://localhost (port 443)
+#            et redirige HTTP→HTTPS sur le port 80.
+#
+# Accès après démarrage :
+#   https://localhost/health          (cert auto-signé Caddy — à accepter)
+#   https://localhost/faucet/request  (POST)
+#   wss://localhost/ws
+#
+# Pour activer le faucet sur node1 :
+#   1. cargo run -p vinx-wallet -- keygen --output deploy/faucet.json
+#   2. Créer deploy/node1.toml avec : faucet_key_file = "/data/faucet.json"
+#   3. Décommenter le volume ./deploy/node1.toml ci-dessous
+#   4. Envoyer du VINX à l'adresse faucet depuis le wallet admin
 
 services:
+
+  # ── Caddy TLS reverse proxy ────────────────────────────────────────────────
+  caddy:
+    image: caddy:2-alpine
+    container_name: vinx-caddy
+    restart: unless-stopped
+    ports:
+      - "80:80"    # HTTP → redirection HTTPS
+      - "443:443"  # HTTPS (cert auto-signé en local, Let's Encrypt sur VPS public)
+    volumes:
+      - ./Caddyfile:/etc/caddy/Caddyfile:ro
+      - caddy-data:/data
+      - caddy-config:/config
+    depends_on:
+      - node1
+    networks:
+      - vinxnet
+
+  # ── Nœud 1 (genesis) ──────────────────────────────────────────────────────
   node1:
     build: .
     container_name: vinx-node1
+    restart: unless-stopped
     volumes:
       - node1-data:/data
+      # Décommenter pour charger un config.toml personnalisé (faucet, admin_token…) :
+      # - ./deploy/node1.toml:/config.toml:ro
     ports:
-      - "8545:8545"   # RPC
+      - "8545:8545"   # RPC direct (debug interne, pas exposé publiquement)
       - "9001:9000"   # P2P
     command:
       - "--data-dir=/data"
@@ -24,10 +59,17 @@ services:
       - "--block-time=3"
     networks:
       - vinxnet
+    healthcheck:
+      test: ["CMD", "wget", "-qO-", "http://localhost:8545/health"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
 
+  # ── Nœud 2 ────────────────────────────────────────────────────────────────
   node2:
     build: .
     container_name: vinx-node2
+    restart: unless-stopped
     volumes:
       - node2-data:/data
     ports:
@@ -41,13 +83,16 @@ services:
       - "--sync-peer=http://node1:8545"
       - "--block-time=3"
     depends_on:
-      - node1
+      node1:
+        condition: service_healthy
     networks:
       - vinxnet
 
+  # ── Nœud 3 ────────────────────────────────────────────────────────────────
   node3:
     build: .
     container_name: vinx-node3
+    restart: unless-stopped
     volumes:
       - node3-data:/data
     ports:
@@ -61,7 +106,8 @@ services:
       - "--sync-peer=http://node1:8545"
       - "--block-time=3"
     depends_on:
-      - node1
+      node1:
+        condition: service_healthy
     networks:
       - vinxnet
 
@@ -69,6 +115,8 @@ volumes:
   node1-data:
   node2-data:
   node3-data:
+  caddy-data:
+  caddy-config:
 
 networks:
   vinxnet:

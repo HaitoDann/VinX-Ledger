@@ -338,6 +338,225 @@ async fn test_mempool_ordering() {
     }
 }
 
+// ─── Test — faucet endpoint ───────────────────────────────────────────────────
+
+/// POST /faucet/request drips tokens to the requested address and enforces
+/// per-address cooldown (second request within cooldown window must return 400).
+#[tokio::test]
+async fn test_faucet_endpoint() {
+    use vinx_node::config::NodeConfig;
+    use vinx_node::chain::Chain;
+    use vinx_node::Node;
+    use vinx_state::{create_genesis_state, GenesisConfig};
+
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let local_addr = listener.local_addr().unwrap();
+
+    let admin_kp    = KeyPair::generate();
+    let validator_kp = KeyPair::generate();
+    let faucet_kp   = KeyPair::generate();
+
+    let admin_addr     = Address::from_public_key(&admin_kp.public_key());
+    let validator_addr = Address::from_public_key(&validator_kp.public_key());
+    let faucet_addr    = Address::from_public_key(&faucet_kp.public_key());
+
+    let recipient_kp   = KeyPair::generate();
+    let recipient_addr = Address::from_public_key(&recipient_kp.public_key());
+
+    let state = create_genesis_state(&GenesisConfig {
+        admin_address:     admin_addr.clone(),
+        validator_address: validator_addr.clone(),
+    });
+    let (chain, _) = Chain::new_with_genesis(validator_addr.clone(), 0);
+
+    const FAUCET_ATOMS: u128 = 100 * 1_000_000_000_000_000_000; // 100 VinX
+
+    let config = NodeConfig::new(validator_kp)
+        .with_block_time(9_999)
+        .with_rpc_listen(local_addr.to_string())
+        .with_faucet(faucet_kp, FAUCET_ATOMS, 86_400);
+
+    let node = Node::new(state, chain, config);
+
+    // Fund the faucet account
+    {
+        let mut s = node.state.write().await;
+        s.credit_for_test(faucet_addr.clone(), Amount::from_vinx(10_000));
+    }
+
+    let rpc_node = std::sync::Arc::clone(&node);
+    tokio::spawn(async move { let _ = rpc_node.run_rpc_on(listener).await; });
+
+    let http = reqwest::Client::new();
+    let base = format!("http://{}", local_addr);
+    for _ in 0..40 {
+        if http.get(format!("{}/health", base)).send().await.is_ok() { break; }
+        sleep(Duration::from_millis(25)).await;
+    }
+
+    // First request — must be accepted
+    let resp: serde_json::Value = http
+        .post(format!("{}/faucet/request", base))
+        .json(&serde_json::json!({ "address": recipient_addr.to_string() }))
+        .send().await.unwrap()
+        .json().await.unwrap();
+
+    assert_eq!(resp["accepted"], true, "faucet first request should be accepted");
+    assert!(!resp["tx_hash"].as_str().unwrap().is_empty(), "tx_hash must be non-empty");
+    assert_eq!(
+        resp["amount_atoms"].as_str().unwrap().parse::<u128>().unwrap(),
+        FAUCET_ATOMS,
+        "dripped amount must match configured amount"
+    );
+
+    // Produce a block so the transaction is applied and we can check balances
+    node.tick().await.unwrap();
+
+    let account: serde_json::Value = http
+        .get(format!("{}/account/{}", base, recipient_addr))
+        .send().await.unwrap()
+        .json().await.unwrap();
+    let balance: u128 = account["balance_atoms"].as_str().unwrap().parse().unwrap();
+    assert_eq!(balance, FAUCET_ATOMS, "recipient should have received exactly FAUCET_ATOMS");
+
+    // Second request within cooldown — must be rate-limited (400)
+    let status = http
+        .post(format!("{}/faucet/request", base))
+        .json(&serde_json::json!({ "address": recipient_addr.to_string() }))
+        .send().await.unwrap()
+        .status();
+    assert_eq!(status, 400, "second faucet request within cooldown must return 400");
+
+    // Request for a different address must still succeed (per-address cooldown)
+    let other_addr = Address::from_public_key(&KeyPair::generate().public_key());
+    let resp2: serde_json::Value = http
+        .post(format!("{}/faucet/request", base))
+        .json(&serde_json::json!({ "address": other_addr.to_string() }))
+        .send().await.unwrap()
+        .json().await.unwrap();
+    assert_eq!(resp2["accepted"], true, "different address should not be rate-limited");
+}
+
+// ─── Test — crash recovery ────────────────────────────────────────────────────
+
+/// Simulates a node crash by dropping the node after persisting state, then
+/// reloads from disk and verifies that block height, account balances and
+/// circulating supply are fully preserved.
+#[tokio::test]
+async fn test_crash_recovery() {
+    use vinx_node::storage::Storage;
+    use vinx_node::chain::Chain;
+    use vinx_node::config::NodeConfig;
+    use vinx_node::Node;
+    use vinx_state::{create_genesis_state, GenesisConfig};
+
+    // Unique temp dir per test run (avoids collisions in parallel runs)
+    let data_dir = std::env::temp_dir().join(format!(
+        "vinx_crash_{}",
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .subsec_nanos()
+    ));
+    std::fs::create_dir_all(&data_dir).unwrap();
+
+    let validator_kp   = KeyPair::generate();
+    let admin_kp       = KeyPair::generate();
+    let sender_kp      = KeyPair::generate();
+    let receiver_kp    = KeyPair::generate();
+
+    let admin_addr     = Address::from_public_key(&admin_kp.public_key());
+    let validator_addr = Address::from_public_key(&validator_kp.public_key());
+    let sender_addr    = Address::from_public_key(&sender_kp.public_key());
+    let receiver_addr  = Address::from_public_key(&receiver_kp.public_key());
+
+    const INITIAL_VINX: u64 = 10_000;
+    const SEND_VINX:    u64 = 100;
+    const N_TXS:        u64 = 3;
+    const N_BLOCKS:     u64 = 3;
+
+    // ── Phase 1 : run, produce blocks, persist ────────────────────────────
+    let (saved_height, saved_supply, saved_sender, saved_receiver) = {
+        let state = create_genesis_state(&GenesisConfig {
+            admin_address:     admin_addr.clone(),
+            validator_address: validator_addr.clone(),
+        });
+        let (chain, _) = Chain::new_with_genesis(validator_addr.clone(), 0);
+        let config = NodeConfig::new(validator_kp.clone())
+            .with_block_time(9_999)
+            .with_data_dir(&data_dir);
+
+        let node = Node::new(state, chain, config);
+
+        {
+            let mut s = node.state.write().await;
+            s.credit_for_test(sender_addr.clone(), Amount::from_vinx(INITIAL_VINX));
+            s.circulating_supply = Amount::from_vinx(INITIAL_VINX);
+        }
+
+        let amount = Amount::from_vinx(SEND_VINX);
+        let fee    = amount.calculate_fee(Amount::from_atoms(DEFAULT_FEE_FLOOR_ATOMS));
+
+        for nonce in 0..N_TXS {
+            let tx = Transaction::new_transfer(
+                &sender_kp, receiver_addr.clone(), amount, fee, nonce,
+            );
+            node.mempool.write().await.add(tx).unwrap();
+        }
+
+        for _ in 0..N_BLOCKS {
+            node.tick().await.unwrap();
+        }
+
+        node.persist().await;
+
+        let s = node.chain.read().await;
+        let st = node.state.read().await;
+        (
+            s.tip_height(),
+            st.circulating_supply.atoms(),
+            st.account_balance(&sender_addr).atoms(),
+            st.account_balance(&receiver_addr).atoms(),
+        )
+        // Node dropped here — simulates crash
+    };
+
+    assert_eq!(saved_height, N_BLOCKS, "should have produced {N_BLOCKS} blocks");
+
+    // ── Phase 2 : reload from disk, verify nothing was lost ───────────────
+    let storage = Storage::new(&data_dir);
+    let (recovered_state, recovered_chain) = storage
+        .load()
+        .expect("persisted data must be loadable after crash");
+
+    assert_eq!(
+        recovered_chain.tip_height(), saved_height,
+        "chain height must survive crash"
+    );
+    assert_eq!(
+        recovered_state.circulating_supply.atoms(), saved_supply,
+        "circulating_supply must survive crash"
+    );
+    assert_eq!(
+        recovered_state.account_balance(&sender_addr).atoms(), saved_sender,
+        "sender balance must survive crash"
+    );
+    assert_eq!(
+        recovered_state.account_balance(&receiver_addr).atoms(), saved_receiver,
+        "receiver balance must survive crash"
+    );
+
+    // Sanity: receiver actually received tokens (N_TXS × SEND_VINX atoms)
+    let expected_receiver = N_TXS as u128 * Amount::from_vinx(SEND_VINX).atoms();
+    assert_eq!(
+        recovered_state.account_balance(&receiver_addr).atoms(),
+        expected_receiver,
+        "receiver should hold exactly N_TXS × SEND_VINX after recovery"
+    );
+
+    std::fs::remove_dir_all(&data_dir).ok();
+}
+
 // ─── AdminAction governance test ─────────────────────────────────────────────
 
 #[tokio::test]
