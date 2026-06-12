@@ -88,10 +88,10 @@ mod tests {
     }
 
     #[test]
-    fn test_staking_pool_and_treasury_are_zero_at_genesis() {
+    fn test_staking_pool_and_melt_pool_are_zero_at_genesis() {
         let (state, _) = genesis();
         assert_eq!(state.staking_pool, Amount::ZERO);
-        assert_eq!(state.treasury, Amount::ZERO);
+        assert_eq!(state.melt_pool, Amount::ZERO);
     }
 
     #[test]

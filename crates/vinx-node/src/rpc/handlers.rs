@@ -260,6 +260,10 @@ pub async fn get_snapshot(State(node): State<Arc<Node>>) -> impl IntoResponse {
 pub async fn get_metrics(State(node): State<Arc<Node>>) -> impl IntoResponse {
     let height = node.chain.read().await.tip_height();
     let mempool_size = node.mempool.read().await.size();
+    let state = node.state.read().await;
+    let base_fee = state.base_fee.atoms();
+    let melt_pool = state.melt_pool.atoms();
+    let staking_pool = state.staking_pool.atoms();
 
     let body = format!(
         "# HELP vinx_chain_height Current chain tip height\n\
@@ -267,7 +271,16 @@ pub async fn get_metrics(State(node): State<Arc<Node>>) -> impl IntoResponse {
          vinx_chain_height {height}\n\
          # HELP vinx_mempool_size Number of transactions pending in mempool\n\
          # TYPE vinx_mempool_size gauge\n\
-         vinx_mempool_size {mempool_size}\n"
+         vinx_mempool_size {mempool_size}\n\
+         # HELP vinx_base_fee Current dynamic fee floor in atoms\n\
+         # TYPE vinx_base_fee gauge\n\
+         vinx_base_fee {base_fee}\n\
+         # HELP vinx_melt_pool Total melted fees in atoms\n\
+         # TYPE vinx_melt_pool counter\n\
+         vinx_melt_pool {melt_pool}\n\
+         # HELP vinx_staking_pool Current staking reward pool in atoms\n\
+         # TYPE vinx_staking_pool gauge\n\
+         vinx_staking_pool {staking_pool}\n"
     );
 
     (
@@ -275,4 +288,32 @@ pub async fn get_metrics(State(node): State<Arc<Node>>) -> impl IntoResponse {
         [(header::CONTENT_TYPE, "text/plain; version=0.0.4; charset=utf-8")],
         body,
     )
+}
+
+/// Returns economic network statistics (base_fee, staking pool, melt pool).
+pub async fn get_network_stats(State(node): State<Arc<Node>>) -> ApiResult<NetworkStatsResponse> {
+    let state = node.state.read().await;
+    Ok(Json(NetworkStatsResponse {
+        base_fee_atoms: state.base_fee.atoms().to_string(),
+        staking_pool: state.staking_pool.to_string(),
+        melt_pool: state.melt_pool.to_string(),
+        circulating_supply: state.circulating_supply.to_string(),
+    }))
+}
+
+/// Compacts transaction data from blocks older than `keep_last` blocks.
+pub async fn post_compact(
+    State(node): State<Arc<Node>>,
+    axum::extract::Query(params): axum::extract::Query<CompactParams>,
+) -> ApiResult<CompactResponse> {
+    let keep_last = params.keep_last.unwrap_or(1000);
+    let mut chain = node.chain.write().await;
+    let tip = chain.tip_height();
+    chain.compact_old_txs(keep_last);
+    Ok(Json(CompactResponse { compacted: true, kept_last: keep_last, tip_height: tip }))
+}
+
+#[derive(serde::Deserialize)]
+pub struct CompactParams {
+    pub keep_last: Option<u64>,
 }

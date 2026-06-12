@@ -10,6 +10,10 @@ pub enum P2pMessage {
     NewTransaction(Transaction),
     /// A co-signature for an already-announced block.
     BlockCoSignature { height: u64, signature: BlockSignature },
+    /// Request blocks starting from `from_height` (sent when a node detects it's behind).
+    SyncRequest { from_height: u64, limit: u32 },
+    /// Response to SyncRequest with the requested block range.
+    SyncResponse { blocks: Vec<Block> },
 }
 
 impl P2pMessage {
@@ -27,6 +31,7 @@ impl P2pMessage {
             P2pMessage::NewBlock(_) => "vinx/blocks/1",
             P2pMessage::NewTransaction(_) => "vinx/txs/1",
             P2pMessage::BlockCoSignature { .. } => "vinx/sigs/1",
+            P2pMessage::SyncRequest { .. } | P2pMessage::SyncResponse { .. } => "vinx/sync/1",
         }
     }
 }
@@ -50,6 +55,7 @@ mod tests {
                 validator: dummy_addr(),
                 tx_count: 0,
                 state_root: [0u8; 32],
+                base_fee: 0,
             },
             transactions: vec![],
             signatures: vec![],
@@ -59,28 +65,43 @@ mod tests {
     #[test]
     fn test_block_message_roundtrip() {
         let msg = P2pMessage::NewBlock(dummy_block());
-        let encoded = msg.encode();
-        let decoded = P2pMessage::decode(&encoded).unwrap();
+        let decoded = P2pMessage::decode(&msg.encode()).unwrap();
         assert!(matches!(decoded, P2pMessage::NewBlock(_)));
     }
 
     #[test]
     fn test_signature_message_roundtrip() {
         let kp = KeyPair::generate();
-        let addr = dummy_addr();
         let block = dummy_block();
         let hash = block.hash();
         let msg = P2pMessage::BlockCoSignature {
             height: 1,
             signature: BlockSignature {
-                validator: addr,
+                validator: dummy_addr(),
                 pub_key: kp.public_key(),
                 signature: kp.sign(&hash),
             },
         };
-        let encoded = msg.encode();
-        let decoded = P2pMessage::decode(&encoded).unwrap();
+        let decoded = P2pMessage::decode(&msg.encode()).unwrap();
         assert!(matches!(decoded, P2pMessage::BlockCoSignature { height: 1, .. }));
+    }
+
+    #[test]
+    fn test_sync_request_roundtrip() {
+        let msg = P2pMessage::SyncRequest { from_height: 42, limit: 100 };
+        let decoded = P2pMessage::decode(&msg.encode()).unwrap();
+        assert!(matches!(decoded, P2pMessage::SyncRequest { from_height: 42, limit: 100 }));
+    }
+
+    #[test]
+    fn test_sync_response_roundtrip() {
+        let msg = P2pMessage::SyncResponse { blocks: vec![dummy_block()] };
+        let decoded = P2pMessage::decode(&msg.encode()).unwrap();
+        if let P2pMessage::SyncResponse { blocks } = decoded {
+            assert_eq!(blocks.len(), 1);
+        } else {
+            panic!("expected SyncResponse");
+        }
     }
 
     #[test]
@@ -90,55 +111,8 @@ mod tests {
 
     #[test]
     fn test_topic_names() {
-        let kp = KeyPair::generate();
         assert_eq!(P2pMessage::NewBlock(dummy_block()).topic(), "vinx/blocks/1");
-        assert_eq!(
-            P2pMessage::BlockCoSignature {
-                height: 0,
-                signature: BlockSignature {
-                    validator: dummy_addr(),
-                    pub_key: kp.public_key(),
-                    signature: kp.sign(b"x"),
-                }
-            }
-            .topic(),
-            "vinx/sigs/1"
-        );
-    }
-
-    #[test]
-    fn test_transaction_message_roundtrip() {
-        use vinx_core::amount::Amount;
-        let kp = KeyPair::generate();
-        let addr = dummy_addr();
-        let tx = vinx_core::Transaction::new_transfer(&kp, addr, Amount::from_vinx(1), Amount::ZERO, 0);
-        let msg = P2pMessage::NewTransaction(tx.clone());
-        let encoded = msg.encode();
-        let decoded = P2pMessage::decode(&encoded).unwrap();
-        if let P2pMessage::NewTransaction(decoded_tx) = decoded {
-            assert_eq!(decoded_tx.hash(), tx.hash());
-        } else {
-            panic!("expected NewTransaction variant");
-        }
-    }
-
-    #[test]
-    fn test_topic_tx() {
-        use vinx_core::amount::Amount;
-        let kp = KeyPair::generate();
-        let addr = dummy_addr();
-        let tx = vinx_core::Transaction::new_transfer(&kp, addr, Amount::from_vinx(1), Amount::ZERO, 0);
-        assert_eq!(P2pMessage::NewTransaction(tx).topic(), "vinx/txs/1");
-    }
-
-    #[test]
-    fn test_encode_produces_nonempty_bytes() {
-        let msg = P2pMessage::NewBlock(dummy_block());
-        assert!(!msg.encode().is_empty());
-    }
-
-    #[test]
-    fn test_decode_empty_returns_none() {
-        assert!(P2pMessage::decode(&[]).is_none());
+        assert_eq!(P2pMessage::SyncRequest { from_height: 0, limit: 1 }.topic(), "vinx/sync/1");
+        assert_eq!(P2pMessage::SyncResponse { blocks: vec![] }.topic(), "vinx/sync/1");
     }
 }

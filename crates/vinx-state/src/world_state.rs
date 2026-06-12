@@ -17,8 +17,19 @@ pub struct WorldState {
     pub circulating_supply: Amount,
     pub block_height: u64,
     pub staking_pool: Amount,
-    pub treasury: Amount,
+    /// Accumulated melted (burned) fees — removes tokens from circulation.
+    /// 30% of every transaction fee goes here.
+    pub melt_pool: Amount,
+    /// Static minimum fee floor; dynamic base_fee is always >= this.
     pub fee_floor: Amount,
+    /// Dynamic fee floor, updated each block from mempool pressure.
+    /// 1x at normal load, up to 3x at 100% mempool capacity.
+    #[serde(default = "default_fee_floor")]
+    pub base_fee: Amount,
+    /// Pending validator reward for the current block (flushed to proposer at block end).
+    /// 30% of every transaction fee accumulates here.
+    #[serde(default)]
+    pub validator_fee_pool: Amount,
     /// Coffre Maturité: locked until 3 governance conditions are met.
     pub coffre_maturity: Amount,
     /// Address that may issue admin transactions (freeze, upgrade announcements).
@@ -32,6 +43,10 @@ pub struct WorldState {
     pub validator_set: ValidatorSet,
 }
 
+fn default_fee_floor() -> Amount {
+    Amount::from_atoms(DEFAULT_FEE_FLOOR_ATOMS)
+}
+
 impl Default for WorldState {
     fn default() -> Self {
         Self::new()
@@ -40,13 +55,16 @@ impl Default for WorldState {
 
 impl WorldState {
     pub fn new() -> Self {
+        let fee_floor = Amount::from_atoms(DEFAULT_FEE_FLOOR_ATOMS);
         Self {
             accounts: HashMap::new(),
             circulating_supply: Amount::ZERO,
             block_height: 0,
             staking_pool: Amount::ZERO,
-            treasury: Amount::ZERO,
-            fee_floor: Amount::from_atoms(DEFAULT_FEE_FLOOR_ATOMS),
+            melt_pool: Amount::ZERO,
+            fee_floor,
+            base_fee: fee_floor,
+            validator_fee_pool: Amount::ZERO,
             coffre_maturity: Amount::ZERO,
             admin_address: None,
             current_version: ProtocolVersion::GENESIS,
@@ -54,6 +72,43 @@ impl WorldState {
             // Placeholder — always overwritten by create_genesis_state before use.
             validator_set: ValidatorSet::single(Address::zero()),
         }
+    }
+
+    /// Updates the dynamic base fee based on current mempool pressure.
+    /// Applies EIP-1559-style surge pricing: 1× at ≤80% load, up to 3× at 100%.
+    pub fn update_base_fee(&mut self, mempool_pending: usize, max_block_txs: usize) {
+        let load_bps = if max_block_txs == 0 {
+            0usize
+        } else {
+            (mempool_pending * 10_000) / max_block_txs
+        };
+        let multiplier_bps: u128 = if load_bps > 8_000 {
+            // 1× + up to 2× extra at full load (linear: 3× at 100%)
+            10_000 + (load_bps as u128 - 8_000) * 10
+        } else {
+            10_000
+        };
+        let new_atoms = DEFAULT_FEE_FLOOR_ATOMS * multiplier_bps / 10_000;
+        self.base_fee = Amount::from_atoms(new_atoms.max(self.fee_floor.atoms()));
+    }
+
+    /// Drains and returns accumulated validator fee rewards for the current block.
+    pub fn flush_validator_fee_pool(&mut self) -> Amount {
+        let reward = self.validator_fee_pool;
+        self.validator_fee_pool = Amount::ZERO;
+        reward
+    }
+
+    /// Credits `amount` to `address`, creating the account if necessary.
+    pub fn credit(&mut self, addr: &Address, amount: Amount) {
+        if amount == Amount::ZERO {
+            return;
+        }
+        let acc = self
+            .accounts
+            .entry(addr.as_str().to_string())
+            .or_insert_with(|| Account::new(addr.clone()));
+        acc.balance = acc.balance.saturating_add(amount);
     }
 
     pub fn get_account(&self, address: &Address) -> Option<&Account> {
@@ -130,7 +185,8 @@ impl WorldState {
     }
 
     fn apply_transfer(&mut self, tx: &Transaction) -> Result<(), CoreError> {
-        let expected_fee = tx.amount.calculate_fee(self.fee_floor);
+        // Use dynamic base_fee (may be higher than fee_floor during network congestion)
+        let expected_fee = tx.amount.calculate_fee(self.base_fee);
         if tx.fee < expected_fee {
             return Err(CoreError::InvalidTransaction(format!(
                 "fee {} is below minimum {}",
@@ -172,16 +228,13 @@ impl WorldState {
             .checked_add(tx.amount)
             .ok_or(CoreError::AmountOverflow)?;
 
+        // Fee split: 40% staking / 30% validator / 30% melt-burn
         let staking = Amount::staking_share(tx.fee);
-        let treasury = Amount::treasury_share(tx.fee);
-        self.staking_pool = self
-            .staking_pool
-            .checked_add(staking)
-            .ok_or(CoreError::AmountOverflow)?;
-        self.treasury = self
-            .treasury
-            .checked_add(treasury)
-            .ok_or(CoreError::AmountOverflow)?;
+        let validator_reward = Amount::validator_share(tx.fee);
+        let melt = Amount::melt_share(tx.fee);
+        self.staking_pool = self.staking_pool.checked_add(staking).ok_or(CoreError::AmountOverflow)?;
+        self.validator_fee_pool = self.validator_fee_pool.checked_add(validator_reward).ok_or(CoreError::AmountOverflow)?;
+        self.melt_pool = self.melt_pool.checked_add(melt).ok_or(CoreError::AmountOverflow)?;
 
         Ok(())
     }

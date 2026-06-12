@@ -75,6 +75,7 @@ mod tests {
                 validator: proposer,
                 tx_count: 0,
                 state_root: [0u8; 32],
+                base_fee: 0,
             },
             transactions: vec![],
             signatures: vec![],

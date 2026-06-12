@@ -1,15 +1,22 @@
 use std::collections::{BTreeMap, BinaryHeap, HashMap, HashSet};
+use rayon::prelude::*;
 use vinx_core::{CoreError, Transaction};
-use vinx_crypto::Hash32;
+use vinx_crypto::{Address, Hash32};
 
 const DEFAULT_MAX_SIZE: usize = 10_000;
 
 /// Per-account nonce-ordered transaction queue.
 /// Each account's transactions are sorted by nonce; drain always pulls the
 /// lowest available nonce for each sender, then interleaves across senders.
+///
+/// Incoming transactions are first staged in an `unverified` queue. Call
+/// `flush_staged()` before block production to verify signatures in parallel
+/// on all available CPU cores using rayon.
 pub struct Mempool {
-    /// addr_str → sorted(nonce → tx)
+    /// addr_str → sorted(nonce → tx) — all entries here have valid signatures.
     queues: HashMap<String, BTreeMap<u64, Transaction>>,
+    /// Staging queue for unverified incoming transactions (e.g. from P2P batch ingestion).
+    unverified: Vec<Transaction>,
     /// All known tx hashes — prevents double-submission.
     seen: HashSet<Hash32>,
     pending_count: usize,
@@ -26,13 +33,15 @@ impl Mempool {
     pub fn new(max_size: usize) -> Self {
         Self {
             queues: HashMap::new(),
+            unverified: Vec::new(),
             seen: HashSet::new(),
             pending_count: 0,
             max_size,
         }
     }
 
-    /// Inserts a transaction into the per-account nonce queue.
+    /// Inserts a pre-verified transaction into the per-account nonce queue.
+    /// The caller is responsible for verifying the signature before calling this.
     pub fn add(&mut self, tx: Transaction) -> Result<(), MempoolError> {
         if self.pending_count >= self.max_size {
             return Err(MempoolError::Full);
@@ -47,6 +56,37 @@ impl Mempool {
         Ok(())
     }
 
+    /// Stages a transaction for deferred parallel signature verification.
+    /// Use this for bulk P2P ingestion to avoid per-tx overhead on the hot path.
+    /// Call `flush_staged()` before block production to admit verified txs.
+    pub fn stage(&mut self, tx: Transaction) {
+        if self.unverified.len() + self.pending_count < self.max_size * 2 {
+            self.unverified.push(tx);
+        }
+    }
+
+    /// Verifies all staged transactions in parallel across all CPU cores (rayon),
+    /// then admits the valid ones into the verified queue.
+    /// Returns the number of transactions successfully admitted.
+    pub fn flush_staged(&mut self) -> usize {
+        if self.unverified.is_empty() {
+            return 0;
+        }
+        let to_verify = std::mem::take(&mut self.unverified);
+
+        // Parallel signature verification — each CPU core processes a subset
+        let verified: Vec<Transaction> = to_verify
+            .into_par_iter()
+            .filter(|tx| Self::verify_sig_static(tx))
+            .collect();
+
+        let count = verified.len();
+        for tx in verified {
+            let _ = self.add(tx); // silently discard Full / Duplicate
+        }
+        count
+    }
+
     /// Returns up to `limit` transactions ordered by fee (highest first), with
     /// nonce order preserved within each sender account.
     ///
@@ -57,7 +97,6 @@ impl Mempool {
         let mut result = Vec::with_capacity(limit);
 
         // (fee_atoms, addr) — BinaryHeap is a max-heap, so highest fee first.
-        // For equal fees the addr tiebreaks deterministically.
         let mut heap: BinaryHeap<(u128, String)> = self
             .queues
             .iter()
@@ -93,12 +132,11 @@ impl Mempool {
 
     /// Re-inserts transactions that were dequeued for a block but could not be
     /// applied yet (e.g. future-nonce relative to what the state accepted).
-    /// Silently skips duplicates already present in the queue.
     pub fn requeue(&mut self, txs: Vec<Transaction>) {
         for tx in txs {
             let hash = tx.hash();
             if self.seen.contains(&hash) {
-                continue; // already queued
+                continue;
             }
             if self.pending_count >= self.max_size {
                 tracing::warn!("Mempool full — dropping requeued tx {}", hex::encode(hash));
@@ -115,6 +153,16 @@ impl Mempool {
 
     pub fn size(&self) -> usize {
         self.pending_count
+    }
+
+    /// Verifies a transaction's cryptographic signature without holding &mut self.
+    fn verify_sig_static(tx: &Transaction) -> bool {
+        let Some(pk) = &tx.pub_key else { return false };
+        if Address::from_public_key(pk) != tx.from {
+            return false;
+        }
+        let Some(sig) = &tx.signature else { return false };
+        pk.verify(&tx.signing_bytes(), sig).is_ok()
     }
 }
 
@@ -137,7 +185,7 @@ pub enum MempoolError {
 mod tests {
     use super::*;
     use vinx_core::amount::{Amount, DEFAULT_FEE_FLOOR_ATOMS};
-    use vinx_crypto::{Address, KeyPair};
+    use vinx_crypto::KeyPair;
 
     fn make_tx(kp: &KeyPair, to: Address, nonce: u64) -> Transaction {
         let amount = Amount::from_vinx(1);
@@ -145,11 +193,15 @@ mod tests {
         vinx_core::Transaction::new_transfer(kp, to, amount, fee, nonce)
     }
 
+    fn dummy_addr() -> Address {
+        Address::from_public_key(&KeyPair::generate().public_key())
+    }
+
     #[test]
     fn test_add_and_drain() {
         let mut mp = Mempool::new(10);
         let kp = KeyPair::generate();
-        let to = Address::from_public_key(&KeyPair::generate().public_key());
+        let to = dummy_addr();
         mp.add(make_tx(&kp, to.clone(), 0)).unwrap();
         mp.add(make_tx(&kp, to, 1)).unwrap();
         assert_eq!(mp.size(), 2);
@@ -162,7 +214,7 @@ mod tests {
     fn test_duplicate_rejected() {
         let mut mp = Mempool::new(10);
         let kp = KeyPair::generate();
-        let to = Address::from_public_key(&KeyPair::generate().public_key());
+        let to = dummy_addr();
         let tx = make_tx(&kp, to, 0);
         mp.add(tx.clone()).unwrap();
         assert_eq!(mp.add(tx), Err(MempoolError::Duplicate));
@@ -172,7 +224,7 @@ mod tests {
     fn test_full_rejected() {
         let mut mp = Mempool::new(1);
         let kp = KeyPair::generate();
-        let to = Address::from_public_key(&KeyPair::generate().public_key());
+        let to = dummy_addr();
         mp.add(make_tx(&kp, to.clone(), 0)).unwrap();
         assert_eq!(mp.add(make_tx(&kp, to, 1)), Err(MempoolError::Full));
     }
@@ -181,7 +233,7 @@ mod tests {
     fn test_drain_all() {
         let mut mp = Mempool::new(10);
         let kp = KeyPair::generate();
-        let to = Address::from_public_key(&KeyPair::generate().public_key());
+        let to = dummy_addr();
         for i in 0..5 {
             mp.add(make_tx(&kp, to.clone(), i)).unwrap();
         }
@@ -194,8 +246,7 @@ mod tests {
     fn test_nonce_order_preserved_when_inserted_out_of_order() {
         let mut mp = Mempool::new(10);
         let kp = KeyPair::generate();
-        let to = Address::from_public_key(&KeyPair::generate().public_key());
-        // Insert nonces 2, 0, 1 out of order
+        let to = dummy_addr();
         mp.add(make_tx(&kp, to.clone(), 2)).unwrap();
         mp.add(make_tx(&kp, to.clone(), 0)).unwrap();
         mp.add(make_tx(&kp, to.clone(), 1)).unwrap();
@@ -211,12 +262,11 @@ mod tests {
     fn test_requeue_puts_tx_back() {
         let mut mp = Mempool::new(10);
         let kp = KeyPair::generate();
-        let to = Address::from_public_key(&KeyPair::generate().public_key());
+        let to = dummy_addr();
         let tx = make_tx(&kp, to, 5);
         mp.add(tx.clone()).unwrap();
         let drained = mp.drain(10);
         assert_eq!(mp.size(), 0);
-
         mp.requeue(drained);
         assert_eq!(mp.size(), 1);
     }
@@ -225,17 +275,15 @@ mod tests {
     fn test_requeue_skips_duplicate() {
         let mut mp = Mempool::new(10);
         let kp = KeyPair::generate();
-        let to = Address::from_public_key(&KeyPair::generate().public_key());
+        let to = dummy_addr();
         let tx = make_tx(&kp, to, 0);
         mp.add(tx.clone()).unwrap();
-        mp.requeue(vec![tx]); // already in queue
+        mp.requeue(vec![tx]);
         assert_eq!(mp.size(), 1);
     }
 
     fn make_tx_with_fee(kp: &KeyPair, to: Address, nonce: u64, fee_vinx: u64) -> Transaction {
-        let amount = Amount::from_vinx(1);
-        let fee = Amount::from_vinx(fee_vinx);
-        vinx_core::Transaction::new_transfer(kp, to, amount, fee, nonce)
+        vinx_core::Transaction::new_transfer(kp, to, Amount::from_vinx(1), Amount::from_vinx(fee_vinx), nonce)
     }
 
     #[test]
@@ -243,32 +291,25 @@ mod tests {
         let mut mp = Mempool::new(10);
         let kp_a = KeyPair::generate();
         let kp_b = KeyPair::generate();
-        let to = Address::from_public_key(&KeyPair::generate().public_key());
-
-        // A pays fee 1, B pays fee 10 — B should come first
+        let to = dummy_addr();
         mp.add(make_tx_with_fee(&kp_a, to.clone(), 0, 1)).unwrap();
         mp.add(make_tx_with_fee(&kp_b, to.clone(), 0, 10)).unwrap();
-
         let drained = mp.drain(10);
         assert_eq!(drained.len(), 2);
-        assert_eq!(drained[0].fee, Amount::from_vinx(10)); // B first
-        assert_eq!(drained[1].fee, Amount::from_vinx(1));  // A second
+        assert_eq!(drained[0].fee, Amount::from_vinx(10));
+        assert_eq!(drained[1].fee, Amount::from_vinx(1));
     }
 
     #[test]
     fn test_fee_priority_nonce_order_preserved() {
         let mut mp = Mempool::new(10);
         let kp = KeyPair::generate();
-        let to = Address::from_public_key(&KeyPair::generate().public_key());
-
-        // Same sender, nonces 0 and 1 with different fees
-        // Nonce order must be respected regardless of fee
+        let to = dummy_addr();
         mp.add(make_tx_with_fee(&kp, to.clone(), 0, 5)).unwrap();
-        mp.add(make_tx_with_fee(&kp, to.clone(), 1, 100)).unwrap(); // higher fee but nonce=1
-
+        mp.add(make_tx_with_fee(&kp, to.clone(), 1, 100)).unwrap();
         let drained = mp.drain(10);
         assert_eq!(drained.len(), 2);
-        assert_eq!(drained[0].nonce, 0); // nonce 0 must come first
+        assert_eq!(drained[0].nonce, 0);
         assert_eq!(drained[1].nonce, 1);
     }
 
@@ -277,16 +318,44 @@ mod tests {
         let mut mp = Mempool::new(20);
         let kp_a = KeyPair::generate();
         let kp_b = KeyPair::generate();
-        let to = Address::from_public_key(&KeyPair::generate().public_key());
-
-        // A has nonces 0,1 — B has nonces 0,1
+        let to = dummy_addr();
         mp.add(make_tx(&kp_a, to.clone(), 0)).unwrap();
         mp.add(make_tx(&kp_a, to.clone(), 1)).unwrap();
         mp.add(make_tx(&kp_b, to.clone(), 0)).unwrap();
         mp.add(make_tx(&kp_b, to.clone(), 1)).unwrap();
-
         let drained = mp.drain(10);
         assert_eq!(drained.len(), 4);
+        assert_eq!(mp.size(), 0);
+    }
+
+    #[test]
+    fn test_flush_staged_verifies_in_parallel() {
+        let mut mp = Mempool::new(100);
+        let kp = KeyPair::generate();
+        let to = dummy_addr();
+
+        // Stage 10 valid transactions
+        for i in 0..10u64 {
+            mp.stage(make_tx(&kp, to.clone(), i));
+        }
+        assert_eq!(mp.size(), 0); // not admitted yet
+
+        let admitted = mp.flush_staged();
+        assert_eq!(admitted, 10);
+        assert_eq!(mp.size(), 10);
+    }
+
+    #[test]
+    fn test_flush_staged_rejects_bad_sig() {
+        let mut mp = Mempool::new(100);
+        let kp = KeyPair::generate();
+        let to = dummy_addr();
+        let mut tx = make_tx(&kp, to, 0);
+        // Tamper with the amount to invalidate the signature
+        tx.amount = Amount::from_vinx(999_999);
+        mp.stage(tx);
+        let admitted = mp.flush_staged();
+        assert_eq!(admitted, 0);
         assert_eq!(mp.size(), 0);
     }
 }

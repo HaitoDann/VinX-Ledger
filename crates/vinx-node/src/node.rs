@@ -138,20 +138,44 @@ impl Node {
     }
 
     /// Background task: produce a block every `block_time_secs`, then persist.
+    /// Detects leader timeouts when the expected leader hasn't produced for 3+ consecutive slots.
     pub async fn run_block_producer(self: Arc<Self>) {
         let interval = std::time::Duration::from_secs(self.config.block_time_secs);
+        let mut missed_slots: u32 = 0;
+
         loop {
             tokio::time::sleep(interval).await;
             match self.tick().await {
                 Ok(block) => {
+                    missed_slots = 0;
                     tracing::info!(
                         height = block.header.height,
                         txs = block.header.tx_count,
+                        base_fee = block.header.base_fee,
                         "Block sealed"
                     );
                     self.persist().await;
                 }
-                Err(e) => tracing::error!(error = %e, "Block production failed"),
+                Err(NodeError::Consensus(_)) => {
+                    // Not our slot — track how long the expected leader has been missing
+                    missed_slots += 1;
+                    if missed_slots >= 3 {
+                        let vs = self.validator_set.read().await.clone();
+                        let height = self.chain.read().await.tip_height() + 1;
+                        let leader = vs.leader_at(height);
+                        tracing::warn!(
+                            height,
+                            leader = %leader,
+                            missed_slots,
+                            "Leader timeout — expected leader has not produced for {} consecutive slots",
+                            missed_slots
+                        );
+                    }
+                }
+                Err(e) => {
+                    tracing::error!(error = %e, "Block production failed");
+                    missed_slots = 0;
+                }
             }
         }
     }

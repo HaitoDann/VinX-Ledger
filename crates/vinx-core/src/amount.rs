@@ -18,9 +18,11 @@ pub const FEE_DENOMINATOR: u128 = 10_000;
 /// Default fee floor: 0.0001 VinX.
 pub const DEFAULT_FEE_FLOOR_ATOMS: u128 = DECIMAL_FACTOR / 10_000;
 
-/// Fee split: 80% to staking pool, 20% to VinX Labs treasury.
-pub const STAKING_SHARE_NUMERATOR: u128 = 80;
-pub const STAKING_SHARE_DENOMINATOR: u128 = 100;
+/// Fee split (basis points): 40% staking / 30% validators / 30% melt-burn.
+pub const STAKING_FEE_BPS: u128 = 4_000;
+pub const VALIDATOR_FEE_BPS: u128 = 3_000;
+// melt share = remainder (ensures no rounding loss)
+const FEE_BPS_DENOM: u128 = 10_000;
 
 /// Staking rewards distributed every N blocks (~17 minutes at 10s/block).
 pub const STAKING_DISTRIBUTION_INTERVAL: u64 = 100;
@@ -80,15 +82,22 @@ impl Amount {
         }
     }
 
-    /// 80% of a fee amount — goes to the staking pool.
+    /// 40% of a fee amount — goes to the staking pool.
     pub fn staking_share(fee: Self) -> Self {
-        Amount(fee.0 * STAKING_SHARE_NUMERATOR / STAKING_SHARE_DENOMINATOR)
+        Amount(fee.0 * STAKING_FEE_BPS / FEE_BPS_DENOM)
     }
 
-    /// 20% of a fee amount — goes to VinX Labs treasury.
-    pub fn treasury_share(fee: Self) -> Self {
-        let staking = Self::staking_share(fee);
-        fee.checked_sub(staking).unwrap_or(Self::ZERO)
+    /// 30% of a fee amount — goes to the block's validator as reward.
+    pub fn validator_share(fee: Self) -> Self {
+        Amount(fee.0 * VALIDATOR_FEE_BPS / FEE_BPS_DENOM)
+    }
+
+    /// 30% of a fee amount — melted (burned, reduces circulating supply).
+    pub fn melt_share(fee: Self) -> Self {
+        let s = Self::staking_share(fee);
+        let v = Self::validator_share(fee);
+        fee.checked_sub(s).unwrap_or(Self::ZERO)
+           .checked_sub(v).unwrap_or(Self::ZERO)
     }
 }
 
@@ -171,13 +180,16 @@ mod tests {
     }
 
     #[test]
-    fn test_fee_split_80_20() {
+    fn test_fee_split_40_30_30() {
         let fee = Amount::from_vinx(100);
         let staking = Amount::staking_share(fee);
-        let treasury = Amount::treasury_share(fee);
-        assert_eq!(staking, Amount::from_vinx(80));
-        assert_eq!(treasury, Amount::from_vinx(20));
-        assert_eq!(staking.checked_add(treasury).unwrap(), fee);
+        let validator = Amount::validator_share(fee);
+        let melt = Amount::melt_share(fee);
+        assert_eq!(staking, Amount::from_vinx(40));
+        assert_eq!(validator, Amount::from_vinx(30));
+        assert_eq!(melt, Amount::from_vinx(30));
+        // All three parts sum to the whole fee
+        assert_eq!(staking.checked_add(validator).unwrap().checked_add(melt).unwrap(), fee);
     }
 
     #[test]

@@ -135,10 +135,12 @@ mod tests {
         state.apply_transaction(&tx).unwrap();
 
         let staking = Amount::staking_share(fee);
-        let treasury = Amount::treasury_share(fee);
+        let validator = Amount::validator_share(fee);
+        let melt = Amount::melt_share(fee);
         assert_eq!(state.staking_pool, staking);
-        assert_eq!(state.treasury, treasury);
-        assert_eq!(staking.checked_add(treasury).unwrap(), fee);
+        assert_eq!(state.validator_fee_pool, validator);
+        assert_eq!(state.melt_pool, melt);
+        assert_eq!(staking.checked_add(validator).unwrap().checked_add(melt).unwrap(), fee);
     }
 
     #[test]

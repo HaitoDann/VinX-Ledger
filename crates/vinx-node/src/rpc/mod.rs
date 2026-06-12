@@ -25,7 +25,9 @@ pub fn router(node: Arc<Node>) -> Router {
         .route("/validators", get(handlers::get_validators))
         .route("/protocol/version", get(handlers::get_protocol_status))
         .route("/metrics", get(handlers::get_metrics))
+        .route("/network/stats", get(handlers::get_network_stats))
         .route("/snapshot", get(handlers::get_snapshot))
         .route("/events", get(handlers::sse_events))
+        .route("/admin/compact", post(handlers::post_compact))
         .with_state(node)
 }

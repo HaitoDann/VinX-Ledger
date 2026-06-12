@@ -88,6 +88,8 @@ pub struct BlockResponse {
     pub validator: String,
     pub tx_count: u32,
     pub state_root: String,
+    /// Dynamic fee floor (in atoms) at block production time.
+    pub base_fee: u64,
     /// Number of valid co-signatures from registered validators.
     pub signatures_count: usize,
     /// True when signatures_count >= quorum.
@@ -105,6 +107,7 @@ impl BlockResponse {
             validator: block.header.validator.to_string(),
             tx_count: block.header.tx_count,
             state_root: hash_to_hex(&block.header.state_root),
+            base_fee: block.header.base_fee,
             signatures_count: block.valid_signer_count(validator_set),
             finalized: block.is_finalized(validator_set),
             transactions: block.transactions.iter().map(TxResponse::from_tx).collect(),
@@ -201,6 +204,22 @@ pub struct SnapshotResponse {
     pub tip_hash: String,
     /// Full serialized world state (serde_json).
     pub state: serde_json::Value,
+}
+
+/// Economic network stats — exposed via GET /network/stats
+#[derive(Serialize)]
+pub struct NetworkStatsResponse {
+    pub base_fee_atoms: String,
+    pub staking_pool: String,
+    pub melt_pool: String,
+    pub circulating_supply: String,
+}
+
+#[derive(Serialize)]
+pub struct CompactResponse {
+    pub compacted: bool,
+    pub kept_last: u64,
+    pub tip_height: u64,
 }
 
 #[derive(Serialize)]

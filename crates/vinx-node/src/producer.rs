@@ -26,6 +26,23 @@ pub fn produce_block(
         )));
     }
 
+    // Flush staged (unverified) transactions via parallel sig verification pipeline
+    let admitted = mempool.flush_staged();
+    if admitted > 0 {
+        tracing::debug!(admitted, "Staged transactions verified and admitted in parallel");
+    }
+
+    // Update dynamic base fee from mempool pressure (EIP-1559-style surge pricing)
+    state.update_base_fee(mempool.size(), config.max_block_txs);
+    let current_base_fee = state.base_fee;
+    if current_base_fee > state.fee_floor {
+        tracing::info!(
+            base_fee = %current_base_fee,
+            mempool_size = mempool.size(),
+            "Surge pricing active"
+        );
+    }
+
     let mut block_txs: Vec<vinx_core::Transaction> = Vec::new();
 
     // Pull pending transactions from mempool and apply them
@@ -62,6 +79,13 @@ pub fn produce_block(
     // Activate any pending protocol upgrade whose height has been reached
     state.check_upgrade_activation();
 
+    // Credit block proposer with accumulated validator fee rewards (30% of all block fees)
+    let validator_reward = state.flush_validator_fee_pool();
+    if validator_reward > Amount::ZERO {
+        state.credit(&config.validator_address, validator_reward);
+        tracing::debug!(reward = %validator_reward, "Validator fee reward credited to proposer");
+    }
+
     // Distribute accumulated staking fees every STAKING_DISTRIBUTION_INTERVAL blocks
     let rewards = state.distribute_staking_rewards();
     if rewards > Amount::ZERO {
@@ -78,6 +102,7 @@ pub fn produce_block(
         validator: config.validator_address.clone(),
         tx_count: block_txs.len() as u32,
         state_root,
+        base_fee: current_base_fee.atoms() as u64,
     };
     let mut block = Block {
         header,
@@ -93,14 +118,12 @@ pub fn produce_block(
         signature: config.validator_keypair.sign(&header_hash),
     });
 
-    // Sync state's validator set back into WorldState (AddValidator/RemoveValidator txs)
-    // The caller (Node::tick) handles syncing to the Arc<RwLock<ValidatorSet>>.
-
     chain.push(block.clone());
 
     tracing::info!(
         height = next_height,
         txs = block.header.tx_count,
+        base_fee = %current_base_fee,
         "Block produced"
     );
 
@@ -207,5 +230,37 @@ mod tests {
         let b1 = produce_block(&mut state, &mut chain, &mut mempool, &config, &config.validator_set,10).unwrap();
         let b2 = produce_block(&mut state, &mut chain, &mut mempool, &config, &config.validator_set,20).unwrap();
         assert_eq!(b2.header.prev_hash, b1.hash());
+    }
+
+    #[test]
+    fn test_validator_earns_fee_reward() {
+        let (mut state, mut chain, mut mempool, config) = setup();
+
+        let sender_kp = KeyPair::generate();
+        let sender_addr = Address::from_public_key(&sender_kp.public_key());
+        state.credit_for_test(sender_addr.clone(), Amount::from_vinx(10_000));
+
+        let amount = Amount::from_vinx(1_000);
+        let fee = Amount::from_vinx(1); // explicit fee > floor
+        let tx = vinx_core::Transaction::new_transfer(&sender_kp, sender_addr.clone(), amount, fee, 0);
+        mempool.add(tx).unwrap();
+
+        let validator_addr = config.validator_address.clone();
+        let balance_before = state.account_balance(&validator_addr);
+
+        produce_block(&mut state, &mut chain, &mut mempool, &config, &config.validator_set, 1_000).unwrap();
+
+        let balance_after = state.account_balance(&validator_addr);
+        let expected_reward = Amount::validator_share(fee);
+        assert!(balance_after > balance_before);
+        assert_eq!(balance_after.checked_sub(balance_before).unwrap(), expected_reward);
+    }
+
+    #[test]
+    fn test_base_fee_in_header() {
+        let (mut state, mut chain, mut mempool, config) = setup();
+        let block = produce_block(&mut state, &mut chain, &mut mempool, &config, &config.validator_set, 1_000).unwrap();
+        // At zero mempool load, base_fee == fee_floor
+        assert_eq!(block.header.base_fee, DEFAULT_FEE_FLOOR_ATOMS as u64);
     }
 }
