@@ -1,11 +1,16 @@
+use std::collections::HashMap;
+
 use serde::{Deserialize, Serialize};
-use vinx_core::{block::GENESIS_PREV_HASH, Block, BlockHeader};
+use vinx_core::{block::GENESIS_PREV_HASH, Block, BlockHeader, Transaction};
 use vinx_crypto::{Address, Hash32};
 
 #[derive(Serialize, Deserialize)]
 pub struct Chain {
     /// Stored as (block_hash, block) indexed by height.
     blocks: Vec<(Hash32, Block)>,
+    /// Maps hex-encoded tx hash -> (block_height, tx_position). Not persisted.
+    #[serde(skip)]
+    tx_index: HashMap<String, (u64, u32)>,
 }
 
 impl Chain {
@@ -25,6 +30,7 @@ impl Chain {
         let hash = genesis.hash();
         let chain = Self {
             blocks: vec![(hash, genesis.clone())],
+            tx_index: HashMap::new(),
         };
         (chain, genesis)
     }
@@ -44,9 +50,35 @@ impl Chain {
 
     /// Appends a block and returns its hash.
     pub fn push(&mut self, block: Block) -> Hash32 {
+        let height = block.header.height;
+        for (idx, tx) in block.transactions.iter().enumerate() {
+            let hash = hex::encode(tx.hash());
+            self.tx_index.insert(hash, (height, idx as u32));
+        }
         let hash = block.hash();
         self.blocks.push((hash, block));
         hash
+    }
+
+    /// Clears and repopulates the tx_index from all stored blocks.
+    pub fn rebuild_tx_index(&mut self) {
+        self.tx_index.clear();
+        for (_, block) in &self.blocks {
+            let height = block.header.height;
+            for (idx, tx) in block.transactions.iter().enumerate() {
+                let hash = hex::encode(tx.hash());
+                self.tx_index.insert(hash, (height, idx as u32));
+            }
+        }
+    }
+
+    /// Looks up a transaction by its hex-encoded hash.
+    /// Returns `(block_height, block, transaction)` if found.
+    pub fn get_tx_by_hash(&self, hash: &str) -> Option<(u64, &Block, &Transaction)> {
+        let &(height, tx_pos) = self.tx_index.get(hash)?;
+        let (_, block) = self.blocks.get(height as usize)?;
+        let tx = block.transactions.get(tx_pos as usize)?;
+        Some((height, block, tx))
     }
 
     /// Number of blocks (= tip_height + 1).

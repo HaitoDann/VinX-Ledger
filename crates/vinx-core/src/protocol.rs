@@ -34,6 +34,20 @@ impl fmt::Display for ProtocolVersion {
     }
 }
 
+impl std::str::FromStr for ProtocolVersion {
+    type Err = String;
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        let parts: Vec<&str> = s.splitn(3, '.').collect();
+        if parts.len() != 3 {
+            return Err(format!("expected X.Y.Z, got '{}'", s));
+        }
+        let major = parts[0].parse::<u16>().map_err(|_| format!("invalid major: {}", parts[0]))?;
+        let minor = parts[1].parse::<u16>().map_err(|_| format!("invalid minor: {}", parts[1]))?;
+        let patch = parts[2].parse::<u16>().map_err(|_| format!("invalid patch: {}", parts[2]))?;
+        Ok(ProtocolVersion { major, minor, patch })
+    }
+}
+
 /// An upgrade scheduled to activate at a specific block height.
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct ScheduledUpgrade {
@@ -82,6 +96,15 @@ mod tests {
     fn test_display() {
         assert_eq!(ProtocolVersion::GENESIS.to_string(), "1.0.0");
         assert_eq!(ProtocolVersion::new(2, 3, 14).to_string(), "2.3.14");
+    }
+
+    #[test]
+    fn test_from_str() {
+        use std::str::FromStr;
+        assert_eq!(ProtocolVersion::from_str("1.0.0").unwrap(), ProtocolVersion::GENESIS);
+        assert_eq!(ProtocolVersion::from_str("2.3.14").unwrap(), ProtocolVersion::new(2, 3, 14));
+        assert!(ProtocolVersion::from_str("bad").is_err());
+        assert!(ProtocolVersion::from_str("1.2").is_err());
     }
 
     #[test]

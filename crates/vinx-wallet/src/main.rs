@@ -10,8 +10,9 @@ use keystore::KeyStore;
 use std::path::PathBuf;
 
 use clap::{Parser, Subcommand};
+use std::str::FromStr;
 use vinx_core::amount::DEFAULT_FEE_FLOOR_ATOMS;
-use vinx_core::{Amount, Transaction};
+use vinx_core::{Amount, ProtocolVersion, Transaction};
 use vinx_crypto::Address;
 
 // ─── CLI definition ───────────────────────────────────────────────────────────
@@ -92,6 +93,56 @@ enum Commands {
         #[arg(long, default_value = "http://127.0.0.1:8545")]
         node: String,
     },
+    /// Look up a transaction by its hash
+    Tx {
+        /// Hex-encoded transaction hash
+        hash: String,
+        #[arg(long, default_value = "http://127.0.0.1:8545")]
+        node: String,
+    },
+    /// Freeze an account (admin only)
+    Freeze {
+        /// Target address to freeze
+        #[arg(long)]
+        target: String,
+        #[arg(short, long, default_value = "wallet.json")]
+        wallet: PathBuf,
+        #[arg(long, default_value = "http://127.0.0.1:8545")]
+        node: String,
+    },
+    /// Unfreeze an account (admin only)
+    Unfreeze {
+        /// Target address to unfreeze
+        #[arg(long)]
+        target: String,
+        #[arg(short, long, default_value = "wallet.json")]
+        wallet: PathBuf,
+        #[arg(long, default_value = "http://127.0.0.1:8545")]
+        node: String,
+    },
+    /// Announce a protocol upgrade (admin only)
+    AnnounceUpgrade {
+        /// New protocol version, e.g. 1.1.0
+        #[arg(long)]
+        version: String,
+        /// Block height at which the upgrade activates
+        #[arg(long)]
+        activation_height: u64,
+        #[arg(short, long, default_value = "wallet.json")]
+        wallet: PathBuf,
+        #[arg(long, default_value = "http://127.0.0.1:8545")]
+        node: String,
+    },
+    /// Show the active validator set
+    Validators {
+        #[arg(long, default_value = "http://127.0.0.1:8545")]
+        node: String,
+    },
+    /// Show the current protocol version and any pending upgrade
+    Protocol {
+        #[arg(long, default_value = "http://127.0.0.1:8545")]
+        node: String,
+    },
 }
 
 // ─── Entry point ─────────────────────────────────────────────────────────────
@@ -117,6 +168,14 @@ async fn run(cmd: Commands) -> Result<(), WalletError> {
         Commands::Unstake { amount, wallet, node } => cmd_unstake(&amount, &wallet, &node).await,
         Commands::Block { height, node } => cmd_block(height, &node).await,
         Commands::Status { node } => cmd_status(&node).await,
+        Commands::Tx { hash, node } => cmd_tx(&hash, &node).await,
+        Commands::Freeze { target, wallet, node } => cmd_freeze(&target, &wallet, &node).await,
+        Commands::Unfreeze { target, wallet, node } => cmd_unfreeze(&target, &wallet, &node).await,
+        Commands::AnnounceUpgrade { version, activation_height, wallet, node } => {
+            cmd_announce_upgrade(&version, activation_height, &wallet, &node).await
+        }
+        Commands::Validators { node } => cmd_validators(&node).await,
+        Commands::Protocol { node } => cmd_protocol(&node).await,
     }
 }
 
@@ -262,5 +321,130 @@ async fn cmd_status(node: &str) -> Result<(), WalletError> {
     println!("Status  : {}", health.status);
     println!("Height  : {}", health.height);
     println!("Mempool : {} pending", health.mempool_pending);
+    Ok(())
+}
+
+async fn cmd_tx(hash: &str, node: &str) -> Result<(), WalletError> {
+    let client = RpcClient::new(node);
+    let tx = client.get_tx(hash).await?;
+    println!("Hash      : {}", tx.hash);
+    println!("Type      : {}", tx.tx_type);
+    println!("Block     : {} ({})", tx.block_height, tx.block_hash);
+    println!("From      : {}", tx.from);
+    println!("To        : {}", tx.to);
+    println!("Amount    : {}", tx.amount);
+    println!("Fee       : {}", tx.fee);
+    println!("Nonce     : {}", tx.nonce);
+    Ok(())
+}
+
+async fn cmd_freeze(target: &str, wallet: &PathBuf, node: &str) -> Result<(), WalletError> {
+    let ks = KeyStore::load(wallet)?;
+    let kp = ks.to_keypair()?;
+    let target_addr = Address::from_bech32(target)?;
+
+    let client = RpcClient::new(node);
+    let acc = client.get_account(ks.address()).await?;
+    let nonce = acc.nonce;
+
+    let tx = Transaction::new_freeze(&kp, target_addr, nonce);
+
+    println!("Admin   : {}", ks.address());
+    println!("Target  : {}", target);
+    println!("Action  : freeze");
+    println!("Nonce   : {}", nonce);
+
+    let resp = client.submit_tx(&tx).await?;
+    if resp.accepted {
+        println!("Status  : accepted");
+        println!("Tx hash : {}", resp.tx_hash);
+    } else {
+        println!("Status  : rejected");
+    }
+    Ok(())
+}
+
+async fn cmd_unfreeze(target: &str, wallet: &PathBuf, node: &str) -> Result<(), WalletError> {
+    let ks = KeyStore::load(wallet)?;
+    let kp = ks.to_keypair()?;
+    let target_addr = Address::from_bech32(target)?;
+
+    let client = RpcClient::new(node);
+    let acc = client.get_account(ks.address()).await?;
+    let nonce = acc.nonce;
+
+    let tx = Transaction::new_unfreeze(&kp, target_addr, nonce);
+
+    println!("Admin   : {}", ks.address());
+    println!("Target  : {}", target);
+    println!("Action  : unfreeze");
+    println!("Nonce   : {}", nonce);
+
+    let resp = client.submit_tx(&tx).await?;
+    if resp.accepted {
+        println!("Status  : accepted");
+        println!("Tx hash : {}", resp.tx_hash);
+    } else {
+        println!("Status  : rejected");
+    }
+    Ok(())
+}
+
+async fn cmd_announce_upgrade(
+    version_str: &str,
+    activation_height: u64,
+    wallet: &PathBuf,
+    node: &str,
+) -> Result<(), WalletError> {
+    let version = ProtocolVersion::from_str(version_str)
+        .map_err(|e| WalletError::NodeError(format!("Invalid version '{}': {}", version_str, e)))?;
+
+    let ks = KeyStore::load(wallet)?;
+    let kp = ks.to_keypair()?;
+
+    let client = RpcClient::new(node);
+    let acc = client.get_account(ks.address()).await?;
+    let nonce = acc.nonce;
+
+    let tx = Transaction::new_announce_upgrade(&kp, version.clone(), activation_height, nonce);
+
+    println!("Admin             : {}", ks.address());
+    println!("New version       : {}", version);
+    println!("Activation height : {}", activation_height);
+    println!("Nonce             : {}", nonce);
+
+    let resp = client.submit_tx(&tx).await?;
+    if resp.accepted {
+        println!("Status  : accepted");
+        println!("Tx hash : {}", resp.tx_hash);
+    } else {
+        println!("Status  : rejected");
+    }
+    Ok(())
+}
+
+async fn cmd_validators(node: &str) -> Result<(), WalletError> {
+    let client = RpcClient::new(node);
+    let vs = client.get_validators().await?;
+    println!("Validators : {}", vs.count);
+    println!("Quorum     : {}/{}", vs.quorum, vs.count);
+    println!();
+    for (i, v) in vs.validators.iter().enumerate() {
+        println!("  [{:>2}] {}", i + 1, v);
+    }
+    Ok(())
+}
+
+async fn cmd_protocol(node: &str) -> Result<(), WalletError> {
+    let client = RpcClient::new(node);
+    let ps = client.get_protocol_status().await?;
+    println!("Version  : {}", ps.current_version);
+    match ps.pending_upgrade {
+        None => println!("Upgrade  : none scheduled"),
+        Some(u) => {
+            println!("Upgrade  : {} at block {}", u.version, u.activation_height);
+            println!("Announced: block {}", u.announced_at);
+        }
+    }
     Ok(())
 }

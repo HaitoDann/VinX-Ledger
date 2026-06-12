@@ -55,6 +55,39 @@ pub struct HealthInfo {
 }
 
 #[derive(Deserialize)]
+pub struct TxWithBlockInfo {
+    pub block_height: u64,
+    pub block_hash: String,
+    pub tx_type: String,
+    pub from: String,
+    pub to: String,
+    pub amount: String,
+    pub fee: String,
+    pub nonce: u64,
+    pub hash: String,
+}
+
+#[derive(Deserialize)]
+pub struct ValidatorsInfo {
+    pub count: usize,
+    pub quorum: usize,
+    pub validators: Vec<String>,
+}
+
+#[derive(Deserialize)]
+pub struct ProtocolStatusInfo {
+    pub current_version: String,
+    pub pending_upgrade: Option<PendingUpgradeInfo>,
+}
+
+#[derive(Deserialize)]
+pub struct PendingUpgradeInfo {
+    pub version: String,
+    pub activation_height: u64,
+    pub announced_at: u64,
+}
+
+#[derive(Deserialize)]
 struct ErrorBody {
     error: String,
 }
@@ -87,6 +120,18 @@ impl RpcClient {
 
     pub async fn get_block(&self, height: u64) -> Result<BlockInfo, WalletError> {
         self.get(&format!("/block/{}", height)).await
+    }
+
+    pub async fn get_tx(&self, hash: &str) -> Result<TxWithBlockInfo, WalletError> {
+        self.get(&format!("/tx/{}", hash)).await
+    }
+
+    pub async fn get_validators(&self) -> Result<ValidatorsInfo, WalletError> {
+        self.get("/validators").await
+    }
+
+    pub async fn get_protocol_status(&self) -> Result<ProtocolStatusInfo, WalletError> {
+        self.get("/protocol/version").await
     }
 
     pub async fn submit_tx(&self, tx: &Transaction) -> Result<TxSubmitResponse, WalletError> {

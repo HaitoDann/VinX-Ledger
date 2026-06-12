@@ -118,6 +118,24 @@ pub struct MempoolResponse {
 }
 
 #[derive(Serialize)]
+pub struct TxWithBlockResponse {
+    pub block_height: u64,
+    pub block_hash: String,
+    #[serde(flatten)]
+    pub tx: TxResponse,
+}
+
+impl TxWithBlockResponse {
+    pub fn new(height: u64, block_hash: &Hash32, tx: &Transaction) -> Self {
+        Self {
+            block_height: height,
+            block_hash: hash_to_hex(block_hash),
+            tx: TxResponse::from_tx(tx),
+        }
+    }
+}
+
+#[derive(Serialize)]
 pub struct ValidatorSetResponse {
     pub count: usize,
     pub quorum: usize,

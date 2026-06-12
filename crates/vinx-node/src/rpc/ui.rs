@@ -252,6 +252,34 @@ const HTML: &str = r####"<!DOCTYPE html>
     </div>
   </div>
 
+  <!-- Transaction lookup -->
+  <div class="card">
+    <div class="card-header">Transaction</div>
+    <div class="card-body">
+      <div class="row">
+        <input type="text" class="mono" id="tx-hash-in" placeholder="Hash hexadécimal…" />
+        <button onclick="lookupTx()">Chercher</button>
+      </div>
+      <div id="tx-result"></div>
+    </div>
+  </div>
+
+  <!-- Validators -->
+  <div class="card">
+    <div class="card-header">Validateurs <span class="live" id="vs-live" style="display:none">Live</span></div>
+    <div class="card-body">
+      <div id="vs-result"><p class="msg">Chargement…</p></div>
+    </div>
+  </div>
+
+  <!-- Protocol -->
+  <div class="card">
+    <div class="card-header">Protocole</div>
+    <div class="card-body">
+      <div id="proto-result"><p class="msg">Chargement…</p></div>
+    </div>
+  </div>
+
 </main>
 
 <script>
@@ -452,7 +480,7 @@ async function sendTx(txType) {
   // Build JSON manually — Amount is u128 → raw integer in JSON (not quoted)
   const pubKeyArr = '[' + Array.from(wallet.publicKey32).join(',') + ']';
   const sigHex = bytesToHex(signature);
-  const body = `{"tx_type":"${txType}","from":"${wallet.address}","to":"${to}","amount":${amountAtoms},"fee":${feeAtoms},"nonce":${nonce},"pub_key":${pubKeyArr},"signature":"${sigHex}"}`;
+  const body = `{"tx_type":"${txType}","from":"${wallet.address}","to":"${to}","amount":${amountAtoms},"fee":${feeAtoms},"nonce":${nonce},"payload":[],"pub_key":${pubKeyArr},"signature":"${sigHex}"}`;
 
   try {
     const resp = await fetch(BASE + '/tx/submit', {
@@ -539,8 +567,10 @@ async function lookupBlock() {
         <div class="ri"><div class="l">Timestamp</div><div class="v">${new Date(b.timestamp*1000).toLocaleString()}</div></div>
         <div class="ri"><div class="l">Transactions</div><div class="v">${b.tx_count}</div></div>
         <div class="ri"><div class="l">Validateur</div><div class="v mono" title="${b.validator}">${shortA(b.validator)}</div></div>
+        <div class="ri"><div class="l">Signatures</div><div class="v">${b.signatures_count ?? '—'} ${b.finalized ? '<span class="tag g">finalisé</span>' : '<span class="tag o">en attente</span>'}</div></div>
         <div class="ri full"><div class="l">Hash</div><div class="v mono">${b.hash}</div></div>
         <div class="ri full"><div class="l">Hash précédent</div><div class="v mono">${b.prev_hash}</div></div>
+        <div class="ri full"><div class="l">State Root</div><div class="v mono">${b.state_root ?? '—'}</div></div>
       </div>${txs}`;
   } catch (e) {
     out.innerHTML = `<p class="msg err">Erreur : ${e.message}</p>`;
@@ -553,6 +583,78 @@ async function goLatest() {
   try { const h = await (await fetch(BASE+'/chain/height')).json(); document.getElementById('blk-in').value = h.height; lookupBlock(); } catch {}
 }
 document.getElementById('blk-in').addEventListener('keydown', e => { if (e.key==='Enter') lookupBlock(); });
+
+// ─── Transaction lookup ───────────────────────────────────────────────────────
+async function lookupTx() {
+  const hash = document.getElementById('tx-hash-in').value.trim();
+  const out = document.getElementById('tx-result');
+  if (!hash) return;
+  out.innerHTML = `<p class="msg">Chargement…</p>`;
+  try {
+    const resp = await fetch(`${BASE}/tx/${hash}`);
+    if (!resp.ok) {
+      out.innerHTML = `<p class="msg err">Transaction introuvable.</p>`;
+      return;
+    }
+    const tx = await resp.json();
+    out.innerHTML = `
+      <div class="rg" style="margin-top:14px">
+        <div class="ri"><div class="l">Type</div><div class="v">${txTag(tx.tx_type)}</div></div>
+        <div class="ri"><div class="l">Bloc</div><div class="v">${tx.block_height}</div></div>
+        <div class="ri"><div class="l">Montant</div><div class="v">${tx.amount}</div></div>
+        <div class="ri"><div class="l">Fee</div><div class="v">${tx.fee}</div></div>
+        <div class="ri"><div class="l">Nonce</div><div class="v">${tx.nonce}</div></div>
+        <div class="ri full"><div class="l">Hash</div><div class="v mono">${tx.hash}</div></div>
+        <div class="ri full"><div class="l">De</div><div class="v mono">${tx.from}</div></div>
+        <div class="ri full"><div class="l">Vers</div><div class="v mono">${tx.to}</div></div>
+        <div class="ri full"><div class="l">Hash du bloc</div><div class="v mono">${tx.block_hash}</div></div>
+      </div>`;
+  } catch (e) {
+    out.innerHTML = `<p class="msg err">Erreur : ${e.message}</p>`;
+  }
+}
+document.getElementById('tx-hash-in').addEventListener('keydown', e => { if (e.key==='Enter') lookupTx(); });
+
+// ─── Validators ───────────────────────────────────────────────────────────────
+async function refreshValidators() {
+  const out = document.getElementById('vs-result');
+  try {
+    const vs = await (await fetch(BASE + '/validators')).json();
+    document.getElementById('vs-live').style.display = '';
+    const list = vs.validators.map((v, i) =>
+      `<div class="ri full"><div class="l">Validateur ${i+1}</div><div class="v mono">${v}</div></div>`
+    ).join('');
+    out.innerHTML = `
+      <div class="rg">
+        <div class="ri"><div class="l">Total</div><div class="v">${vs.count}</div></div>
+        <div class="ri"><div class="l">Quorum requis</div><div class="v">${vs.quorum}/${vs.count}</div></div>
+        ${list}
+      </div>`;
+  } catch {
+    out.innerHTML = `<p class="msg err">Impossible de charger les validateurs.</p>`;
+  }
+}
+refreshValidators();
+
+// ─── Protocol ─────────────────────────────────────────────────────────────────
+async function refreshProtocol() {
+  const out = document.getElementById('proto-result');
+  try {
+    const p = await (await fetch(BASE + '/protocol/version')).json();
+    const upgrade = p.pending_upgrade
+      ? `<div class="ri"><div class="l">Upgrade prévu</div><div class="v"><span class="tag o">${p.pending_upgrade.version}</span> au bloc ${p.pending_upgrade.activation_height}</div></div>
+         <div class="ri"><div class="l">Annoncé au bloc</div><div class="v">${p.pending_upgrade.announced_at}</div></div>`
+      : `<div class="ri"><div class="l">Upgrade prévu</div><div class="v"><span class="tag g">aucun</span></div></div>`;
+    out.innerHTML = `
+      <div class="rg">
+        <div class="ri"><div class="l">Version actuelle</div><div class="v"><span class="tag b">${p.current_version}</span></div></div>
+        ${upgrade}
+      </div>`;
+  } catch {
+    out.innerHTML = `<p class="msg err">Impossible de charger le protocole.</p>`;
+  }
+}
+refreshProtocol();
 </script>
 </body>
 </html>"####;

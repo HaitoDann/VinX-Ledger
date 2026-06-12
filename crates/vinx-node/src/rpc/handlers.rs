@@ -126,3 +126,14 @@ pub async fn get_protocol_status(State(node): State<Arc<Node>>) -> ApiResult<Pro
         state.pending_upgrade.as_ref(),
     )))
 }
+
+pub async fn get_tx_by_hash(
+    State(node): State<Arc<Node>>,
+    Path(hash): Path<String>,
+) -> ApiResult<TxWithBlockResponse> {
+    let chain = node.chain.read().await;
+    match chain.get_tx_by_hash(&hash) {
+        Some((height, block, tx)) => Ok(Json(TxWithBlockResponse::new(height, &block.hash(), tx))),
+        None => Err(ApiError::NotFound(format!("Transaction {} not found", hash))),
+    }
+}

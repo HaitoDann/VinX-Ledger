@@ -105,4 +105,40 @@ mod tests {
             "vinx/sigs/1"
         );
     }
+
+    #[test]
+    fn test_transaction_message_roundtrip() {
+        use vinx_core::amount::Amount;
+        let kp = KeyPair::generate();
+        let addr = dummy_addr();
+        let tx = vinx_core::Transaction::new_transfer(&kp, addr, Amount::from_vinx(1), Amount::ZERO, 0);
+        let msg = P2pMessage::NewTransaction(tx.clone());
+        let encoded = msg.encode();
+        let decoded = P2pMessage::decode(&encoded).unwrap();
+        if let P2pMessage::NewTransaction(decoded_tx) = decoded {
+            assert_eq!(decoded_tx.hash(), tx.hash());
+        } else {
+            panic!("expected NewTransaction variant");
+        }
+    }
+
+    #[test]
+    fn test_topic_tx() {
+        use vinx_core::amount::Amount;
+        let kp = KeyPair::generate();
+        let addr = dummy_addr();
+        let tx = vinx_core::Transaction::new_transfer(&kp, addr, Amount::from_vinx(1), Amount::ZERO, 0);
+        assert_eq!(P2pMessage::NewTransaction(tx).topic(), "vinx/txs/1");
+    }
+
+    #[test]
+    fn test_encode_produces_nonempty_bytes() {
+        let msg = P2pMessage::NewBlock(dummy_block());
+        assert!(!msg.encode().is_empty());
+    }
+
+    #[test]
+    fn test_decode_empty_returns_none() {
+        assert!(P2pMessage::decode(&[]).is_none());
+    }
 }

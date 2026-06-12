@@ -23,6 +23,8 @@ tracing-subscriber = { workspace = true }
 bincode = { workspace = true }
 libp2p = { version = "0.54", features = ["gossipsub", "noise", "tcp", "yamux", "tokio", "identify", "macros"] }
 futures = "0.3"
+toml = "0.8"
+clap = { version = "4", features = ["derive"] }
 
 [dev-dependencies]
 reqwest = { version = "0.12", features = ["json"] }
