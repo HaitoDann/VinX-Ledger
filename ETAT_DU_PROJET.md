@@ -49,10 +49,10 @@ VinX Ledger est une blockchain L1 de paiement écrite intégralement en Rust, sa
 
 ### Économie
 - [x] Supply totale : 100 milliards de VinX (précision : 18 décimales)
-- [x] Allocation admin à la genèse : **21 milliards** VinX (opérationnel, sandbox phase 1)
-- [x] Coffre Maturité : **79 milliards** VinX — verrouillé jusqu'aux 3 conditions
+- [x] Allocation admin à la genèse : **21 millions** VinX (sandbox phase 1, opérationnel immédiatement)
+- [x] Coffre Maturité : **~99,979 milliards** VinX — verrouillé jusqu'aux 3 conditions (= 100 Mds - 21 M)
 - [x] Récompenses de staking distribuées toutes les 100 blocs
-- [x] Pool melt : les 30 % de frais reviennent dans ce pool — **ce n'est pas un burn**, les tokens sont redistribuables par l'admin (via `ReleaseMeltToStaking`)
+- [x] Pool melt : les 30 % de frais reviennent dans ce pool — **ce n'est pas un burn**, les tokens retournent dans le pool de distribution (pas le staking pool) via décision admin
 
 ### Gouvernance — contrôle exclusif VinX Labs
 
@@ -157,7 +157,7 @@ Le `WorldState` est l'état complet de la chaîne. Il est sérialisé sur disque
 | `fee_floor` | `Amount` | Plancher de frais minimum |
 | `base_fee` | `Amount` | Frais dynamiques actuels |
 | `validator_fee_pool` | `Amount` | Récompenses du validateur courant |
-| `coffre_maturity` | `Amount` | **79 milliards** VinX verrouillés |
+| `coffre_maturity` | `Amount` | **~99,979 milliards** VinX verrouillés (= supply totale - 21 millions admin) |
 | `coffre_mica_casp` | `bool` | Condition 1 : conformité MiCA CASP |
 | `coffre_external_audit` | `bool` | Condition 2 : audit externe réalisé |
 | `coffre_public_policy` | `bool` | Condition 3 : politique publique acceptée |
@@ -206,7 +206,7 @@ base_fee = fee_floor × multiplier  (cap à 3×)
 Répartition de chaque fee :
 - **40 %** → `staking_pool` (distribué aux stakers toutes les 100 blocs)
 - **30 %** → `validator_fee_pool` (crédité au validateur en fin de bloc)
-- **30 %** → `melt_pool` (pool de redistribution — **ce n'est pas un burn** ; les tokens restent en réserve et peuvent être réinjectés dans le staking via `AdminAction::ReleaseMeltToStaking`)
+- **30 %** → `melt_pool` (pool de redistribution — **ce n'est pas un burn** ; les tokens restent en réserve et peuvent être réinjectés dans le pool de distribution via `AdminAction::ReleaseMeltToDistribution`)
 
 ### Gouvernance — VinX Labs uniquement
 
@@ -222,18 +222,18 @@ Actions disponibles :
 | `RemoveValidator(addr)` | Retire un validateur du PoA set |
 | `UpdateFeeFloor { atoms }` | Modifie le plancher de frais |
 | `ScheduleUpgrade { version, height }` | Planifie une mise à jour protocole |
-| `ReleaseMeltToStaking { amount }` | Transfère du melt pool vers le staking pool |
+| `ReleaseMeltToDistribution { amount }` | Réinjecte du melt pool vers le pool de distribution |
 | `RotateAdmin(addr)` | Change la clé admin sans redémarrage |
 | `MarkCoffreCondition(condition)` | Valide une des 3 conditions du Coffre |
 | `UnlockCoffre` | Libère les 79 Mds vers le staking pool (si les 3 conditions sont remplies) |
 
 ### Répartition et rôle du Melt Pool
 
-Le melt pool **n'est pas un burn**. Dans VinX, "melter" signifie que les tokens fondent dans un pool de réserve, prêts à être réinjectés dans l'économie par décision admin. C'est une réserve de redistribution, pas une destruction.
+Le melt pool **n'est pas un burn**. Dans VinX, "melter" signifie que les tokens fondent dans un pool de réserve. Ils ne sont pas détruits — ils retournent dans le **pool de distribution**, c'est-à-dire le réservoir de tokens disponibles pour être redistribués dans l'économie (émissions, récompenses, incentives). C'est l'admin qui décide quand et comment les réinjecter via `AdminAction::ReleaseMeltToDistribution`.
 
 ### Unlock Coffre Maturité
 
-Les **79 milliards** VinX du Coffre ne peuvent être libérés que si les 3 conditions suivantes sont toutes marquées comme remplies par l'admin :
+Les **~99,979 milliards** VinX du Coffre ne peuvent être libérés que si les 3 conditions suivantes sont toutes marquées comme remplies par l'admin :
 1. `MicaCasp` — Obtention du statut CASP sous MiCA (régulation européenne)
 2. `ExternalAudit` — Audit de sécurité externe publié
 3. `PublicPolicy` — Cadre de politique publique accepté

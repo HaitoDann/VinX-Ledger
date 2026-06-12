@@ -6,10 +6,10 @@ pub const DECIMAL_FACTOR: u128 = 1_000_000_000_000_000_000; // 10^18
 
 /// Absolute supply cap: 100 billion VinX — immutable by protocol.
 pub const MAX_SUPPLY_ATOMS: u128 = 100_000_000_000 * DECIMAL_FACTOR;
-/// Genesis allocation to VinX Labs admin account: 21 billion VinX (Sandbox Phase 1).
-pub const ADMIN_ALLOCATION_ATOMS: u128 = 21_000_000_000 * DECIMAL_FACTOR;
-/// Coffre Maturité: 79 billion VinX locked until 3 conditions are met (MiCA CASP, audit, public policy).
-pub const COFFRE_MATURITY_ATOMS: u128 = 79_000_000_000 * DECIMAL_FACTOR;
+/// Genesis allocation to VinX Labs admin account: 21 million VinX (Sandbox Phase 1).
+pub const ADMIN_ALLOCATION_ATOMS: u128 = 21_000_000 * DECIMAL_FACTOR;
+/// Coffre Maturité: ~99.979 billion VinX locked until 3 conditions are met (MiCA CASP, audit, public policy).
+pub const COFFRE_MATURITY_ATOMS: u128 = 99_979_000_000 * DECIMAL_FACTOR;
 
 /// Transaction fee: 0.05% = 5 / 10_000.
 pub const FEE_NUMERATOR: u128 = 5;
