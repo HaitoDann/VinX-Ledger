@@ -20,10 +20,8 @@ pub enum TransactionType {
     RemoveValidator,
     /// Slash a validator who double-signed. `to` = validator, `payload` = bincode(SlashEvidence).
     SlashValidator,
-    /// Submit a governance proposal. `payload` = bincode(SubmitProposalPayload).
-    SubmitProposal,
-    /// Cast a vote on a proposal. `payload` = bincode(VotePayload).
-    VoteProposal,
+    /// Admin-only governance action executed immediately. `payload` = bincode(GovernanceAction).
+    AdminAction,
 }
 
 impl TransactionType {
@@ -39,8 +37,7 @@ impl TransactionType {
             TransactionType::AddValidator => 0x08,
             TransactionType::RemoveValidator => 0x09,
             TransactionType::SlashValidator => 0x0A,
-            TransactionType::SubmitProposal => 0x0B,
-            TransactionType::VoteProposal => 0x0C,
+            TransactionType::AdminAction => 0x0B,
         }
     }
 }
@@ -303,40 +300,15 @@ impl Transaction {
         tx
     }
 
-    /// Constructs a SubmitProposal tx.
-    pub fn new_submit_proposal(
-        keypair: &KeyPair,
-        description: String,
-        action: crate::governance::GovernanceAction,
-        voting_period_blocks: u64,
-        nonce: u64,
-    ) -> Self {
+    /// Constructs and signs an AdminAction transaction (admin only).
+    /// The `action` is a GovernanceAction that will be executed immediately on-chain.
+    pub fn new_admin_action(keypair: &KeyPair, action: &crate::governance::GovernanceAction, nonce: u64) -> Self {
         let pk = keypair.public_key();
         let from = Address::from_public_key(&pk);
-        let payload_data = crate::governance::SubmitProposalPayload { description, action, voting_period_blocks };
-        let payload = bincode::serialize(&payload_data).expect("proposal serializable");
+        let payload = bincode::serialize(action)
+            .expect("GovernanceAction serialization is infallible");
         let mut tx = Self {
-            tx_type: TransactionType::SubmitProposal,
-            from: from.clone(),
-            to: from,
-            amount: Amount::ZERO,
-            fee: Amount::ZERO,
-            nonce,
-            payload,
-            pub_key: Some(pk),
-            signature: None,
-        };
-        tx.signature = Some(keypair.sign(&tx.signing_bytes()));
-        tx
-    }
-
-    /// Constructs a VoteProposal tx.
-    pub fn new_vote_proposal(keypair: &KeyPair, proposal_id: u64, approve: bool, nonce: u64) -> Self {
-        let pk = keypair.public_key();
-        let from = Address::from_public_key(&pk);
-        let payload = bincode::serialize(&crate::governance::VotePayload { proposal_id, approve }).expect("vote serializable");
-        let mut tx = Self {
-            tx_type: TransactionType::VoteProposal,
+            tx_type: TransactionType::AdminAction,
             from: from.clone(),
             to: from,
             amount: Amount::ZERO,

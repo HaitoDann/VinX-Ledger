@@ -375,29 +375,6 @@ pub struct CompactParams {
     pub keep_last: Option<u64>,
 }
 
-// ─── Governance handlers ─────────────────────────────────────────────────────
-
-pub async fn get_proposals(State(node): State<Arc<Node>>) -> ApiResult<ProposalListResponse> {
-    let state = node.state.read().await;
-    let mut proposals: Vec<ProposalResponse> = state.proposals.values()
-        .map(ProposalResponse::from_proposal)
-        .collect();
-    proposals.sort_by_key(|p| p.id);
-    let count = proposals.len();
-    Ok(Json(ProposalListResponse { count, proposals }))
-}
-
-pub async fn get_proposal(
-    State(node): State<Arc<Node>>,
-    Path(id): Path<u64>,
-) -> ApiResult<ProposalResponse> {
-    let state = node.state.read().await;
-    match state.proposals.get(&id) {
-        Some(p) => Ok(Json(ProposalResponse::from_proposal(p))),
-        None => Err(ApiError::NotFound(format!("Proposal {} not found", id))),
-    }
-}
-
 // ─── Merkle proof handler ────────────────────────────────────────────────────
 
 pub async fn get_account_proof(

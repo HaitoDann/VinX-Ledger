@@ -6,10 +6,10 @@ pub const DECIMAL_FACTOR: u128 = 1_000_000_000_000_000_000; // 10^18
 
 /// Absolute supply cap: 100 billion VinX — immutable by protocol.
 pub const MAX_SUPPLY_ATOMS: u128 = 100_000_000_000 * DECIMAL_FACTOR;
-/// Genesis allocation to VinX Labs admin account: 21 million VinX (Sandbox Phase 1).
-pub const ADMIN_ALLOCATION_ATOMS: u128 = 21_000_000 * DECIMAL_FACTOR;
-/// Coffre Maturité: 99.979 billion VinX locked until 3 governance conditions are met.
-pub const COFFRE_MATURITY_ATOMS: u128 = 99_979_000_000 * DECIMAL_FACTOR;
+/// Genesis allocation to VinX Labs admin account: 21 billion VinX (Sandbox Phase 1).
+pub const ADMIN_ALLOCATION_ATOMS: u128 = 21_000_000_000 * DECIMAL_FACTOR;
+/// Coffre Maturité: 79 billion VinX locked until 3 conditions are met (MiCA CASP, audit, public policy).
+pub const COFFRE_MATURITY_ATOMS: u128 = 79_000_000_000 * DECIMAL_FACTOR;
 
 /// Transaction fee: 0.05% = 5 / 10_000.
 pub const FEE_NUMERATOR: u128 = 5;
@@ -18,7 +18,7 @@ pub const FEE_DENOMINATOR: u128 = 10_000;
 /// Default fee floor: 0.0001 VinX.
 pub const DEFAULT_FEE_FLOOR_ATOMS: u128 = DECIMAL_FACTOR / 10_000;
 
-/// Fee split (basis points): 40% staking / 30% validators / 30% melt-burn.
+/// Fee split (basis points): 40% staking / 30% validators / 30% melt (redistribution pool).
 pub const STAKING_FEE_BPS: u128 = 4_000;
 pub const VALIDATOR_FEE_BPS: u128 = 3_000;
 // melt share = remainder (ensures no rounding loss)
@@ -92,7 +92,7 @@ impl Amount {
         Amount(fee.0 * VALIDATOR_FEE_BPS / FEE_BPS_DENOM)
     }
 
-    /// 30% of a fee amount — melted (burned, reduces circulating supply).
+    /// 30% of a fee amount — goes to the melt pool (redistribution reserve, not a burn).
     pub fn melt_share(fee: Self) -> Self {
         let s = Self::staking_share(fee);
         let v = Self::validator_share(fee);

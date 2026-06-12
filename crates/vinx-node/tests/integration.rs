@@ -14,7 +14,6 @@ use vinx_core::{
 use vinx_crypto::{Address, KeyPair};
 use vinx_node::{chain::Chain, config::NodeConfig, Node};
 use vinx_state::{create_genesis_state, GenesisConfig};
-use bincode;
 
 // ─── Test harness ─────────────────────────────────────────────────────────────
 
@@ -339,153 +338,39 @@ async fn test_mempool_ordering() {
     }
 }
 
-// ─── Multi-validator consensus test ──────────────────────────────────────────
+// ─── AdminAction governance test ─────────────────────────────────────────────
 
 #[tokio::test]
-async fn test_three_validator_governance_proposal() {
-    // Set up 3 keypairs
-    let kp1 = KeyPair::generate();
-    let kp2 = KeyPair::generate();
-    let kp3 = KeyPair::generate();
-    let addr1 = Address::from_public_key(&kp1.public_key());
-    let addr2 = Address::from_public_key(&kp2.public_key());
-    let addr3 = Address::from_public_key(&kp3.public_key());
+async fn test_admin_action_adds_validator() {
+    let (node, _base_url) = start_test_node().await;
 
-    use vinx_core::ValidatorSet;
+    // Generate admin and new validator keypairs
+    let admin_kp = KeyPair::generate();
+    let new_val_kp = KeyPair::generate();
+    let admin_addr = Address::from_public_key(&admin_kp.public_key());
+    let new_val_addr = Address::from_public_key(&new_val_kp.public_key());
 
-    // Start with single-validator state so node (kp1/addr1) can always produce blocks.
-    let state = create_genesis_state(&GenesisConfig {
-        admin_address: addr1.clone(),
-        validator_address: addr1.clone(),
-    });
-
-    let (chain, _) = vinx_node::chain::Chain::new_with_genesis(addr1.clone(), 0);
-    let config = NodeConfig::new(kp1.clone())
-        .with_block_time(9_999);
-    let node = Node::new(state, chain, config);
-
-    // Add addr2 and addr3 to the state's validator set for governance quorum purposes.
-    // node.validator_set (used for leader election) is reset to [addr1] after each tick
-    // so addr1 remains the sole block producer.
+    // Override admin address in state and credit the admin account
     {
         let mut s = node.state.write().await;
-        s.validator_set = ValidatorSet::new(vec![addr1.clone(), addr2.clone(), addr3.clone()]);
-        // Credit addr2 and addr3 so they can pay fees for governance txs
-        s.credit_for_test(addr2.clone(), Amount::from_vinx(1_000));
-        s.credit_for_test(addr3.clone(), Amount::from_vinx(1_000));
+        s.admin_address = Some(admin_addr.clone());
+        s.credit_for_test(admin_addr.clone(), Amount::from_vinx(1_000));
     }
 
-    // Produce block 1 (empty — just sets up height).
-    // After each tick, reset node.validator_set to single-validator so addr1
-    // is always the next leader regardless of round-robin.
-    node.tick().await.expect("tick block 1");
-    *node.validator_set.write().await = ValidatorSet::single(addr1.clone());
+    // Build AdminAction tx to add new_val_addr as validator
+    let action = vinx_core::GovernanceAction::AddValidator(new_val_addr.clone());
+    let nonce = 0u64;
+    let tx = vinx_core::Transaction::new_admin_action(&admin_kp, &action, nonce);
 
-    // validator2 submits a governance proposal to add a new validator
-    let new_val_kp = KeyPair::generate();
-    let new_val = Address::from_public_key(&new_val_kp.public_key());
+    node.mempool.write().await.add(tx).unwrap();
+    node.tick().await.expect("tick");
 
-    use vinx_core::{GovernanceAction, SubmitProposalPayload, GOVERNANCE_VOTING_PERIOD_BLOCKS};
-    let payload = SubmitProposalPayload {
-        description: "Add validator 4".to_string(),
-        action: GovernanceAction::AddValidator(new_val.clone()),
-        voting_period_blocks: GOVERNANCE_VOTING_PERIOD_BLOCKS,
-    };
-    let payload_bytes = bincode::serialize(&payload).unwrap();
-
-    let submit_tx = {
-        let s = node.state.read().await;
-        let nonce = s.get_account(&addr2).map(|a| a.nonce).unwrap_or(0);
-        let fee = Amount::from_atoms(DEFAULT_FEE_FLOOR_ATOMS);
-        let mut tx = vinx_core::Transaction {
-            tx_type: vinx_core::TransactionType::SubmitProposal,
-            from: addr2.clone(),
-            to: addr2.clone(),
-            amount: Amount::ZERO,
-            fee,
-            nonce,
-            payload: payload_bytes,
-            pub_key: None,
-            signature: None,
-        };
-        tx.sign(&kp2);
-        tx
-    };
-
-    node.mempool.write().await.add(submit_tx).unwrap();
-    node.tick().await.expect("tick block 2 (proposal submitted)");
-    *node.validator_set.write().await = ValidatorSet::single(addr1.clone());
-
-    // Verify proposal exists
-    {
-        let s = node.state.read().await;
-        assert!(s.proposals.contains_key(&0), "proposal 0 should exist");
-        assert_eq!(s.proposals[&0].status, vinx_core::ProposalStatus::Active);
-    }
-
-    // validator1 and validator2 vote YES (quorum = ceil(2*3/3) = 2)
-    let vote_payload = bincode::serialize(&vinx_core::VotePayload { proposal_id: 0, approve: true }).unwrap();
-
-    // Vote from validator1 (addr1)
-    let vote1 = {
-        let s = node.state.read().await;
-        let nonce = s.get_account(&addr1).map(|a| a.nonce).unwrap_or(0);
-        let fee = Amount::from_atoms(DEFAULT_FEE_FLOOR_ATOMS);
-        let mut tx = vinx_core::Transaction {
-            tx_type: vinx_core::TransactionType::VoteProposal,
-            from: addr1.clone(),
-            to: addr1.clone(),
-            amount: Amount::ZERO,
-            fee,
-            nonce,
-            payload: vote_payload.clone(),
-            pub_key: None,
-            signature: None,
-        };
-        tx.sign(&kp1);
-        tx
-    };
-
-    // Vote from validator2 (addr2)
-    let vote2 = {
-        let s = node.state.read().await;
-        let nonce = s.get_account(&addr2).map(|a| a.nonce).unwrap_or(0);
-        let fee = Amount::from_atoms(DEFAULT_FEE_FLOOR_ATOMS);
-        let mut tx = vinx_core::Transaction {
-            tx_type: vinx_core::TransactionType::VoteProposal,
-            from: addr2.clone(),
-            to: addr2.clone(),
-            amount: Amount::ZERO,
-            fee,
-            nonce,
-            payload: vote_payload.clone(),
-            pub_key: None,
-            signature: None,
-        };
-        tx.sign(&kp2);
-        tx
-    };
-
-    {
-        let mut mp = node.mempool.write().await;
-        mp.add(vote1).unwrap();
-        mp.add(vote2).unwrap();
-    }
-    node.tick().await.expect("tick block 3 (votes cast)");
-
-    // Proposal should now be Executed (2/3 = quorum) and new_val added
-    {
-        let s = node.state.read().await;
-        assert_eq!(
-            s.proposals[&0].status,
-            vinx_core::ProposalStatus::Executed,
-            "proposal should be executed after reaching quorum"
-        );
-        assert!(
-            s.validator_set.contains(&new_val),
-            "new validator should be in validator set after governance execution"
-        );
-    }
+    // Verify new validator was added
+    let s = node.state.read().await;
+    assert!(
+        s.validator_set.contains(&new_val_addr),
+        "new validator should be in set after AdminAction"
+    );
 }
 
 // ─── Test 6 — /chain/sync ─────────────────────────────────────────────────────

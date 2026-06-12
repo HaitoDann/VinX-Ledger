@@ -6,7 +6,7 @@ use vinx_core::{
         STAKING_DISTRIBUTION_INTERVAL,
     },
     block::SlashEvidence,
-    governance::{CoffreCondition, GovernanceAction, Proposal, ProposalStatus, SubmitProposalPayload, VotePayload, GOVERNANCE_VOTING_PERIOD_BLOCKS},
+    governance::{CoffreCondition, GovernanceAction},
     protocol::{ProtocolVersion, ScheduledUpgrade},
     Account, CoreError, Transaction, TransactionType, ValidatorSet,
 };
@@ -19,7 +19,7 @@ pub struct WorldState {
     pub circulating_supply: Amount,
     pub block_height: u64,
     pub staking_pool: Amount,
-    /// Accumulated melted (burned) fees — removes tokens from circulation.
+    /// Accumulated melt fees — redistribution pool (not a burn, does not reduce supply).
     /// 30% of every transaction fee goes here.
     pub melt_pool: Amount,
     /// Static minimum fee floor; dynamic base_fee is always >= this.
@@ -49,12 +49,6 @@ pub struct WorldState {
     pub pending_upgrade: Option<ScheduledUpgrade>,
     /// Active PoA validator set. Admin can add/remove validators via governance txs.
     pub validator_set: ValidatorSet,
-    /// On-chain governance proposals.
-    #[serde(default)]
-    pub proposals: HashMap<u64, Proposal>,
-    /// Auto-incrementing proposal counter.
-    #[serde(default)]
-    pub proposal_count: u64,
 }
 
 fn default_fee_floor() -> Amount {
@@ -88,8 +82,6 @@ impl WorldState {
             pending_upgrade: None,
             // Placeholder — always overwritten by create_genesis_state before use.
             validator_set: ValidatorSet::single(Address::zero()),
-            proposals: HashMap::new(),
-            proposal_count: 0,
         }
     }
 
@@ -196,8 +188,7 @@ impl WorldState {
             TransactionType::AddValidator => self.apply_add_validator(tx),
             TransactionType::RemoveValidator => self.apply_remove_validator(tx),
             TransactionType::SlashValidator => self.apply_slash_validator(tx),
-            TransactionType::SubmitProposal => self.apply_submit_proposal(tx),
-            TransactionType::VoteProposal => self.apply_vote_proposal(tx),
+            TransactionType::AdminAction => self.apply_admin_action(tx),
             TransactionType::Emission => Err(CoreError::InvalidTransaction(
                 "emission disabled in Phase 1".to_string(),
             )),
@@ -257,7 +248,7 @@ impl WorldState {
             .checked_add(tx.amount)
             .ok_or(CoreError::AmountOverflow)?;
 
-        // Fee split: 40% staking / 30% validator / 30% melt-burn
+        // Fee split: 40% staking / 30% validator / 30% melt (redistribution pool)
         let staking = Amount::staking_share(tx.fee);
         let validator_reward = Amount::validator_share(tx.fee);
         let melt = Amount::melt_share(tx.fee);
@@ -605,19 +596,20 @@ impl WorldState {
         }
         sender.nonce += 1;
 
-        // Slash: burn the validator's stake
+        // Slash: redirect the validator's stake to the redistribution pool
         let slashed = self.accounts.get(target.as_str()).map(|a| a.staked).unwrap_or(Amount::ZERO);
         if slashed > Amount::ZERO {
             // 10% bounty to the reporter
             let bounty = Amount::from_atoms(slashed.atoms() / 10);
-            let burn = slashed.checked_sub(bounty).unwrap_or(Amount::ZERO);
+            // Remainder goes to the melt pool (redistribution reserve, not a burn)
+            let to_melt = slashed.checked_sub(bounty).unwrap_or(Amount::ZERO);
 
             if let Some(acc) = self.accounts.get_mut(target.as_str()) {
                 acc.staked = Amount::ZERO;
                 acc.stake_since = 0;
             }
             self.credit(&tx.from, bounty);
-            self.melt_pool = self.melt_pool.saturating_add(burn);
+            self.melt_pool = self.melt_pool.saturating_add(to_melt);
         }
 
         // Remove from validator set (can't produce blocks anymore)
@@ -631,18 +623,12 @@ impl WorldState {
         Ok(())
     }
 
-    fn apply_submit_proposal(&mut self, tx: &Transaction) -> Result<(), CoreError> {
-        let payload: SubmitProposalPayload = bincode::deserialize(&tx.payload)
-            .map_err(|_| CoreError::InvalidTransaction("malformed proposal payload".to_string()))?;
+    fn apply_admin_action(&mut self, tx: &Transaction) -> Result<(), CoreError> {
+        // Require sender to be the admin
+        self.check_admin(tx)?;
 
-        // Only stakers or validators can submit proposals (must have staked > 0 OR be a validator)
-        let is_validator = self.validator_set.contains(&tx.from);
-        let is_staker = self.accounts.get(tx.from.as_str())
-            .map(|a| a.staked > Amount::ZERO)
-            .unwrap_or(false);
-        if !is_validator && !is_staker {
-            return Err(CoreError::Unauthorized);
-        }
+        let action: GovernanceAction = bincode::deserialize(&tx.payload)
+            .map_err(|_| CoreError::InvalidTransaction("malformed governance action payload".to_string()))?;
 
         let sender = self.accounts.get_mut(tx.from.as_str()).ok_or(CoreError::InsufficientBalance)?;
         if sender.nonce != tx.nonce {
@@ -650,126 +636,25 @@ impl WorldState {
         }
         sender.nonce += 1;
 
-        let voting_period = payload.voting_period_blocks
-            .max(1_000)
-            .min(GOVERNANCE_VOTING_PERIOD_BLOCKS * 4);
-
-        let id = self.proposal_count;
-        self.proposal_count += 1;
-
-        let proposal = Proposal {
-            id,
-            proposer: tx.from.clone(),
-            description: payload.description,
-            action: payload.action,
-            submitted_at: self.block_height,
-            voting_ends_at: self.block_height + voting_period,
-            yes_votes: Vec::new(),
-            no_votes: Vec::new(),
-            status: ProposalStatus::Active,
-        };
-
-        tracing::info!(id, proposer = %tx.from, "Governance proposal submitted");
-        self.proposals.insert(id, proposal);
-        Ok(())
-    }
-
-    fn apply_vote_proposal(&mut self, tx: &Transaction) -> Result<(), CoreError> {
-        let vote: VotePayload = bincode::deserialize(&tx.payload)
-            .map_err(|_| CoreError::InvalidTransaction("malformed vote payload".to_string()))?;
-
-        // Only active validators can vote
-        if !self.validator_set.contains(&tx.from) {
-            return Err(CoreError::Unauthorized);
-        }
-
-        let proposal = self.proposals.get(&vote.proposal_id)
-            .ok_or_else(|| CoreError::InvalidTransaction(format!("proposal {} not found", vote.proposal_id)))?;
-
-        if proposal.status != ProposalStatus::Active {
-            return Err(CoreError::InvalidTransaction("proposal is not active".to_string()));
-        }
-        if proposal.has_voted(tx.from.as_str()) {
-            return Err(CoreError::InvalidTransaction("already voted".to_string()));
-        }
-        if self.block_height > proposal.voting_ends_at {
-            return Err(CoreError::InvalidTransaction("voting period has ended".to_string()));
-        }
-
-        let sender = self.accounts.get_mut(tx.from.as_str()).ok_or(CoreError::InsufficientBalance)?;
-        if sender.nonce != tx.nonce {
-            return Err(CoreError::InvalidNonce { expected: sender.nonce, got: tx.nonce });
-        }
-        sender.nonce += 1;
-
-        let proposal = self.proposals.get_mut(&vote.proposal_id).unwrap();
-        if vote.approve {
-            proposal.yes_votes.push(tx.from.to_string());
-        } else {
-            proposal.no_votes.push(tx.from.to_string());
-        }
-
-        tracing::info!(proposal_id = vote.proposal_id, voter = %tx.from, approve = vote.approve, "Governance vote cast");
-        Ok(())
-    }
-
-    /// Checks all active proposals: auto-executes passed ones, rejects expired ones.
-    /// Call this once per block (after incrementing block_height).
-    pub fn check_governance_proposals(&mut self) {
-        let n_validators = self.validator_set.len();
-        let height = self.block_height;
-
-        let mut to_execute: Vec<u64> = Vec::new();
-        let mut to_reject: Vec<u64> = Vec::new();
-
-        for (id, proposal) in &self.proposals {
-            if proposal.status != ProposalStatus::Active { continue; }
-            if proposal.has_quorum(n_validators) {
-                to_execute.push(*id);
-            } else if height > proposal.voting_ends_at || proposal.is_dead(n_validators) {
-                to_reject.push(*id);
-            }
-        }
-
-        for id in to_execute {
-            self.execute_proposal(id);
-        }
-        for id in to_reject {
-            if let Some(p) = self.proposals.get_mut(&id) {
-                p.status = ProposalStatus::Rejected;
-                tracing::info!(id, "Governance proposal rejected");
-            }
-        }
-    }
-
-    fn execute_proposal(&mut self, id: u64) {
-        let action = match self.proposals.get(&id) {
-            Some(p) if p.status == ProposalStatus::Active => p.action.clone(),
-            _ => return,
-        };
-
-        let ok = match action {
+        match action {
             GovernanceAction::AddValidator(addr) => {
                 if !self.validator_set.contains(&addr) {
                     self.validator_set.add(addr.clone());
-                    tracing::info!(%addr, "Governance: validator added");
+                    tracing::info!(%addr, "Admin: validator added");
                 }
-                true
             }
             GovernanceAction::RemoveValidator(addr) => {
                 if self.validator_set.len() > 1 && self.validator_set.contains(&addr) {
                     self.validator_set.remove(&addr);
-                    tracing::info!(%addr, "Governance: validator removed");
+                    tracing::info!(%addr, "Admin: validator removed");
                 }
-                true
             }
             GovernanceAction::UpdateFeeFloor { atoms } => {
                 self.fee_floor = Amount::from_atoms(atoms as u128);
                 if self.base_fee < self.fee_floor {
                     self.base_fee = self.fee_floor;
                 }
-                tracing::info!(atoms, "Governance: fee floor updated");
-                true
+                tracing::info!(atoms, "Admin: fee floor updated");
             }
             GovernanceAction::ScheduleUpgrade { version, activation_height } => {
                 if self.pending_upgrade.is_none() {
@@ -778,22 +663,19 @@ impl WorldState {
                         activation_height,
                         announced_at: self.block_height,
                     });
-                    tracing::info!(activation_height, "Governance: upgrade scheduled");
+                    tracing::info!(activation_height, "Admin: upgrade scheduled");
                 }
-                true
             }
             GovernanceAction::ReleaseMeltToStaking { amount } => {
                 if self.melt_pool >= amount {
                     self.melt_pool = self.melt_pool.checked_sub(amount).unwrap_or(Amount::ZERO);
                     self.staking_pool = self.staking_pool.saturating_add(amount);
-                    tracing::info!(%amount, "Governance: melt released to staking pool");
+                    tracing::info!(%amount, "Admin: melt released to staking pool");
                 }
-                true
             }
             GovernanceAction::RotateAdmin(new_admin) => {
                 self.admin_address = Some(new_admin.clone());
-                tracing::info!(%new_admin, "Governance: admin key rotated");
-                true
+                tracing::info!(%new_admin, "Admin: admin key rotated");
             }
             GovernanceAction::MarkCoffreCondition(condition) => {
                 match condition {
@@ -801,8 +683,7 @@ impl WorldState {
                     CoffreCondition::ExternalAudit => self.coffre_external_audit = true,
                     CoffreCondition::PublicPolicy => self.coffre_public_policy = true,
                 }
-                tracing::info!(?condition, "Governance: Coffre condition marked");
-                true
+                tracing::info!(?condition, "Admin: Coffre condition marked");
             }
             GovernanceAction::UnlockCoffre => {
                 if self.coffre_mica_casp && self.coffre_external_audit && self.coffre_public_policy {
@@ -810,19 +691,16 @@ impl WorldState {
                     self.staking_pool = self.staking_pool.saturating_add(amount);
                     self.circulating_supply = self.circulating_supply.saturating_add(amount);
                     self.coffre_maturity = Amount::ZERO;
-                    tracing::info!(%amount, "Governance: Coffre Maturité unlocked");
-                    true
+                    tracing::info!(%amount, "Admin: Coffre Maturité unlocked");
                 } else {
-                    tracing::warn!("Governance: UnlockCoffre rejected — not all conditions met");
-                    false
+                    return Err(CoreError::InvalidTransaction(
+                        "UnlockCoffre rejected: not all 3 conditions are met".to_string()
+                    ));
                 }
             }
-        };
-
-        if let Some(p) = self.proposals.get_mut(&id) {
-            p.status = if ok { ProposalStatus::Executed } else { ProposalStatus::Rejected };
-            tracing::info!(id, "Governance proposal executed");
         }
+
+        Ok(())
     }
 
     #[cfg(test)]

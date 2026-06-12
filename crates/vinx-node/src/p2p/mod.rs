@@ -308,7 +308,6 @@ async fn dispatch_message(
                     sg.block_height = height;
                     sg.check_auto_unfreeze();
                     sg.check_upgrade_activation();
-                    sg.check_governance_proposals();
                     let reward = sg.flush_validator_fee_pool();
                     if reward > vinx_core::amount::Amount::ZERO {
                         sg.credit(&block.header.validator, reward);
@@ -433,7 +432,6 @@ async fn dispatch_message(
                         sg.block_height = height;
                         sg.check_auto_unfreeze();
                         sg.check_upgrade_activation();
-                        sg.check_governance_proposals();
                         let r = sg.flush_validator_fee_pool();
                         if r > vinx_core::amount::Amount::ZERO { sg.credit(&block.header.validator, r); }
                         let _rw = sg.distribute_staking_rewards();

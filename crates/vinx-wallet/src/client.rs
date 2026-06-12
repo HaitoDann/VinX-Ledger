@@ -105,26 +105,6 @@ pub struct NetworkStatsInfo {
 }
 
 #[derive(Deserialize)]
-pub struct ProposalInfo {
-    pub id: u64,
-    pub proposer: String,
-    pub description: String,
-    pub action: String,
-    #[allow(dead_code)]
-    pub submitted_at: u64,
-    pub voting_ends_at: u64,
-    pub yes_votes: usize,
-    pub no_votes: usize,
-    pub status: String,
-}
-
-#[derive(Deserialize)]
-pub struct ProposalListInfo {
-    pub count: usize,
-    pub proposals: Vec<ProposalInfo>,
-}
-
-#[derive(Deserialize)]
 struct ErrorBody {
     error: String,
 }
@@ -182,10 +162,6 @@ impl RpcClient {
 
     pub async fn get_network_stats(&self) -> Result<NetworkStatsInfo, WalletError> {
         self.get("/network/stats").await
-    }
-
-    pub async fn get_proposals(&self) -> Result<ProposalListInfo, WalletError> {
-        self.get("/governance/proposals").await
     }
 
     pub async fn submit_tx(&self, tx: &Transaction) -> Result<TxSubmitResponse, WalletError> {

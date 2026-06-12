@@ -73,8 +73,8 @@ mod tests {
     fn test_transfer_insufficient_balance() {
         let (mut state, sender_kp, _) = funded_state();
         let receiver = Address::from_public_key(&KeyPair::generate().public_key());
-        // Try to send more than total admin allocation (21M)
-        let too_much = Amount::from_vinx(22_000_000);
+        // Try to send more than total admin allocation (21B)
+        let too_much = Amount::from_vinx(22_000_000_000);
         let tx = Transaction::new_transfer(&sender_kp, receiver, too_much, fee_for(too_much), 0);
 
         let result = state.apply_transaction(&tx);

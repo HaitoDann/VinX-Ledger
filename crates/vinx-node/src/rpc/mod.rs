@@ -35,8 +35,6 @@ pub fn router(node: Arc<Node>) -> Router {
         .route("/events", get(handlers::sse_events))
         .route("/ws", get(handlers::ws_events))
         .route("/admin/compact", post(handlers::post_compact))
-        .route("/governance/proposals", get(handlers::get_proposals))
-        .route("/governance/proposal/:id", get(handlers::get_proposal))
         .layer(middleware::from_fn_with_state(limiter, rate_limit))
         .with_state(node)
 }

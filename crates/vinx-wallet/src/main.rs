@@ -190,35 +190,13 @@ enum Commands {
         #[arg(short, long, default_value = "wallet.json")]
         output: PathBuf,
     },
-    /// Submit a governance proposal
-    SubmitProposal {
-        /// Human-readable description of the proposal
-        #[arg(long)]
-        description: String,
-        /// Action: "add-validator:<addr>", "remove-validator:<addr>", "fee-floor:<atoms>",
-        ///         "release-melt:<amount>"
+    /// Execute a governance action immediately (admin only).
+    AdminAction {
+        /// JSON-encoded action, e.g. '{"AddValidator":"vinx1abc..."}'
         #[arg(long)]
         action: String,
         #[arg(short, long, default_value = "wallet.json")]
         wallet: PathBuf,
-        #[arg(long, default_value = "http://127.0.0.1:8545")]
-        node: String,
-    },
-    /// Vote on a governance proposal
-    VoteProposal {
-        /// Proposal ID to vote on
-        #[arg(long)]
-        proposal_id: u64,
-        /// Vote: "yes" or "no"
-        #[arg(long)]
-        vote: String,
-        #[arg(short, long, default_value = "wallet.json")]
-        wallet: PathBuf,
-        #[arg(long, default_value = "http://127.0.0.1:8545")]
-        node: String,
-    },
-    /// Show active governance proposals
-    ShowProposals {
         #[arg(long, default_value = "http://127.0.0.1:8545")]
         node: String,
     },
@@ -271,13 +249,9 @@ async fn run(cmd: Commands) -> Result<(), WalletError> {
         }
         Commands::NewWallet { output } => cmd_new_wallet(&output),
         Commands::RestoreWallet { output } => cmd_restore_wallet(&output),
-        Commands::SubmitProposal { description, action, wallet, node } => {
-            cmd_submit_proposal(&description, &action, &wallet, &node).await
+        Commands::AdminAction { action, wallet, node } => {
+            cmd_admin_action(&action, &wallet, &node).await
         }
-        Commands::VoteProposal { proposal_id, vote, wallet, node } => {
-            cmd_vote_proposal(proposal_id, &vote, &wallet, &node).await
-        }
-        Commands::ShowProposals { node } => cmd_show_proposals(&node).await,
         Commands::NetworkStats { node } => cmd_network_stats(&node).await,
     }
 }
@@ -707,78 +681,10 @@ fn cmd_restore_wallet(output: &PathBuf) -> Result<(), WalletError> {
     Ok(())
 }
 
-fn parse_governance_action(action_str: &str) -> Result<GovernanceAction, WalletError> {
-    if let Some(rest) = action_str.strip_prefix("add-validator:") {
-        let addr = Address::from_bech32(rest.trim())
-            .map_err(|e| WalletError::NodeError(format!("invalid address: {}", e)))?;
-        Ok(GovernanceAction::AddValidator(addr))
-    } else if let Some(rest) = action_str.strip_prefix("remove-validator:") {
-        let addr = Address::from_bech32(rest.trim())
-            .map_err(|e| WalletError::NodeError(format!("invalid address: {}", e)))?;
-        Ok(GovernanceAction::RemoveValidator(addr))
-    } else if let Some(rest) = action_str.strip_prefix("fee-floor:") {
-        let atoms: u64 = rest.trim().parse()
-            .map_err(|e| WalletError::NodeError(format!("invalid atoms: {}", e)))?;
-        Ok(GovernanceAction::UpdateFeeFloor { atoms })
-    } else if let Some(rest) = action_str.strip_prefix("release-melt:") {
-        let amount = parse_amount(rest.trim())?;
-        Ok(GovernanceAction::ReleaseMeltToStaking { amount })
-    } else {
-        Err(WalletError::NodeError(format!(
-            "unknown action '{}'. Use: add-validator:<addr>, remove-validator:<addr>, fee-floor:<atoms>, release-melt:<amount>",
-            action_str
-        )))
-    }
-}
-
-async fn cmd_submit_proposal(
-    description: &str,
-    action_str: &str,
-    wallet: &PathBuf,
-    node: &str,
-) -> Result<(), WalletError> {
-    let ks = KeyStore::load(wallet)?;
-    let kp = ks.to_keypair()?;
-    let action = parse_governance_action(action_str)?;
-
-    let client = RpcClient::new(node);
-    let acc = client.get_account(ks.address()).await?;
-    let nonce = acc.nonce;
-
-    let tx = Transaction::new_submit_proposal(
-        &kp,
-        description.to_string(),
-        action,
-        vinx_core::GOVERNANCE_VOTING_PERIOD_BLOCKS,
-        nonce,
-    );
-
-    println!("Proposer : {}", ks.address());
-    println!("Action   : {}", action_str);
-    println!("Nonce    : {}", nonce);
-
-    let resp = client.submit_tx(&tx).await?;
-    if resp.accepted {
-        println!("Status   : accepted");
-        println!("Tx hash  : {}", resp.tx_hash);
-    } else {
-        println!("Status   : rejected");
-    }
-    Ok(())
-}
-
-async fn cmd_vote_proposal(
-    proposal_id: u64,
-    vote_str: &str,
-    wallet: &PathBuf,
-    node: &str,
-) -> Result<(), WalletError> {
-    let approve = match vote_str.to_lowercase().as_str() {
-        "yes" | "y" | "true" => true,
-        "no" | "n" | "false" => false,
-        _ => return Err(WalletError::NodeError(format!("invalid vote '{}': use 'yes' or 'no'", vote_str))),
-    };
-
+async fn cmd_admin_action(action_json: &str, wallet: &PathBuf, node: &str) -> Result<(), WalletError> {
+    // Parse the action from JSON
+    let action: GovernanceAction = serde_json::from_str(action_json)
+        .map_err(|e| WalletError::NodeError(format!("invalid action JSON: {}", e)))?;
     let ks = KeyStore::load(wallet)?;
     let kp = ks.to_keypair()?;
 
@@ -786,39 +692,17 @@ async fn cmd_vote_proposal(
     let acc = client.get_account(ks.address()).await?;
     let nonce = acc.nonce;
 
-    let tx = Transaction::new_vote_proposal(&kp, proposal_id, approve, nonce);
+    let tx = Transaction::new_admin_action(&kp, &action, nonce);
 
-    println!("Voter      : {}", ks.address());
-    println!("Proposal   : {}", proposal_id);
-    println!("Vote       : {}", if approve { "YES" } else { "NO" });
-    println!("Nonce      : {}", nonce);
+    println!("Admin  : {}", ks.address());
+    println!("Nonce  : {}", nonce);
 
     let resp = client.submit_tx(&tx).await?;
     if resp.accepted {
-        println!("Status     : accepted");
-        println!("Tx hash    : {}", resp.tx_hash);
+        println!("Status : accepted");
+        println!("Tx hash: {}", resp.tx_hash);
     } else {
-        println!("Status     : rejected");
-    }
-    Ok(())
-}
-
-async fn cmd_show_proposals(node: &str) -> Result<(), WalletError> {
-    let client = RpcClient::new(node);
-    let list = client.get_proposals().await?;
-    println!("Governance proposals: {}", list.count);
-    if list.proposals.is_empty() {
-        println!("(no proposals found)");
-        return Ok(());
-    }
-    println!();
-    for p in &list.proposals {
-        println!("[{}] {} — {} (yes: {}, no: {})",
-            p.id, p.status, p.description, p.yes_votes, p.no_votes);
-        println!("     Action   : {}", p.action);
-        println!("     Proposer : {}", p.proposer);
-        println!("     Ends at  : block {}", p.voting_ends_at);
-        println!();
+        println!("Status : rejected");
     }
     Ok(())
 }
