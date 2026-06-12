@@ -1,7 +1,7 @@
 # VinX Ledger — État du Projet
 
 > Document de référence interne — mis à jour à chaque sprint.
-> Dernière mise à jour : juin 2026.
+> Dernière mise à jour : juin 2026 (v2 — corrections gouvernance, supply, melt).
 
 ---
 
@@ -35,7 +35,7 @@ VinX Ledger est une blockchain L1 de paiement écrite intégralement en Rust, sa
 ### Production de blocs
 - [x] Producteur de blocs avec slots temporels (3 s devnet, 10 s mainnet)
 - [x] Frais dynamiques style EIP-1559 (×1 à ×3 selon la charge mémoire)
-- [x] Répartition des frais : 40 % staking pool / 30 % validateur / 30 % melt-burn
+- [x] Répartition des frais : 40 % staking pool / 30 % validateur / 30 % melt (pool de redistribution)
 - [x] Vérification des signatures en parallèle (rayon, tous les cœurs CPU)
 - [x] Détection des slots manqués (leader timeout ≥ 3 slots consécutifs)
 
@@ -49,17 +49,19 @@ VinX Ledger est une blockchain L1 de paiement écrite intégralement en Rust, sa
 
 ### Économie
 - [x] Supply totale : 100 milliards de VinX (précision : 18 décimales)
-- [x] Allocation admin à la genèse : 21 millions VinX (sandbox phase 1)
-- [x] Coffre Maturité : ~79,979 milliards VinX — verrouillé cryptographiquement
+- [x] Allocation admin à la genèse : **21 milliards** VinX (opérationnel, sandbox phase 1)
+- [x] Coffre Maturité : **79 milliards** VinX — verrouillé jusqu'aux 3 conditions
 - [x] Récompenses de staking distribuées toutes les 100 blocs
-- [x] Pool melt : tokens brûlés via les frais, recyclables par gouvernance
+- [x] Pool melt : les 30 % de frais reviennent dans ce pool — **ce n'est pas un burn**, les tokens sont redistribuables par l'admin (via `ReleaseMeltToStaking`)
 
-### Gouvernance on-chain
-- [x] 8 actions de gouvernance : AddValidator, RemoveValidator, UpdateFeeFloor, ScheduleUpgrade, ReleaseMeltToStaking, RotateAdmin, MarkCoffreCondition, UnlockCoffre
-- [x] Propositions soumises et votées par les validateurs actifs
-- [x] Exécution automatique au quorum (`⌈2n/3⌉`)
-- [x] Rejet automatique à expiration ou si le quorum est mathématiquement impossible
-- [x] Unlock Coffre Maturité conditionnel à 3 critères : MiCA CASP, audit externe, politique publique
+### Gouvernance — contrôle exclusif VinX Labs
+
+La gouvernance est **centralisée** : seul VinX Labs (clé admin) exécute les décisions de protocole on-chain. Il n'y a pas de vote de validateurs, pas de DAO. Les propositions et sondages communautaires se font hors-chaîne (Discord, forum).
+
+- [x] 8 actions admin exécutables directement : `AddValidator`, `RemoveValidator`, `UpdateFeeFloor`, `ScheduleUpgrade`, `ReleaseMeltToStaking`, `RotateAdmin`, `MarkCoffreCondition`, `UnlockCoffre`
+- [x] Transaction `AdminAction` (0x0B) : encapsule une `GovernanceAction` dans la payload, requiert la signature de la clé admin, s'exécute immédiatement
+- [x] Rotation de la clé admin possible via `AdminAction::RotateAdmin` (sans redémarrage du nœud)
+- [x] Unlock Coffre conditionnel : les 3 critères (MiCA CASP, audit externe, politique publique) doivent être marqués par l'admin avant que `UnlockCoffre` soit accepté
 
 ### Sécurité
 - [x] Slashing : preuve d'équivocation → 10 % bounty au rapporteur, 90 % vers melt pool, validateur exclu
@@ -120,12 +122,12 @@ sdk/
 | `Block` / `BlockHeader` | Bloc avec hauteur, hash, validateur, frais de base |
 | `BlockSignature` | Co-signature d'un validateur |
 | `SlashEvidence` | Preuve de double-signature |
-| `Transaction` | 12 types encodés dans un objet unique |
+| `Transaction` | 11 types encodés dans un objet unique |
 | `ValidatorSet` | Ensemble des validateurs autorisés + calcul quorum |
-| `Proposal` / `GovernanceAction` | Propositions et actions de gouvernance |
+| `GovernanceAction` | Actions admin exécutables (8 variants) |
 | `CoffreCondition` | `MicaCasp \| ExternalAudit \| PublicPolicy` |
 
-**Les 12 types de transactions :**
+**Les 11 types de transactions :**
 
 | Code | Type | Rôle |
 |------|------|------|
@@ -139,8 +141,7 @@ sdk/
 | `0x08` | `AddValidator` | Ajout d'un validateur (admin) |
 | `0x09` | `RemoveValidator` | Suppression d'un validateur (admin) |
 | `0x0A` | `SlashValidator` | Slashing pour équivocation |
-| `0x0B` | `SubmitProposal` | Soumission d'une proposition de gouvernance |
-| `0x0C` | `VoteProposal` | Vote sur une proposition |
+| `0x0B` | `AdminAction` | Action de gouvernance directe (admin, exécution immédiate) |
 
 ### `vinx-state` — WorldState
 
@@ -152,20 +153,18 @@ Le `WorldState` est l'état complet de la chaîne. Il est sérialisé sur disque
 | `circulating_supply` | `Amount` | Supply en circulation |
 | `block_height` | `u64` | Hauteur actuelle |
 | `staking_pool` | `Amount` | Réserve de récompenses staking |
-| `melt_pool` | `Amount` | Tokens brûlés (fees 30 %) |
+| `melt_pool` | `Amount` | Pool de redistribution (fees 30 % — **pas un burn**, relâchable par l'admin) |
 | `fee_floor` | `Amount` | Plancher de frais minimum |
 | `base_fee` | `Amount` | Frais dynamiques actuels |
 | `validator_fee_pool` | `Amount` | Récompenses du validateur courant |
-| `coffre_maturity` | `Amount` | ~79,979 Mds VinX verrouillés |
+| `coffre_maturity` | `Amount` | **79 milliards** VinX verrouillés |
 | `coffre_mica_casp` | `bool` | Condition 1 : conformité MiCA CASP |
 | `coffre_external_audit` | `bool` | Condition 2 : audit externe réalisé |
 | `coffre_public_policy` | `bool` | Condition 3 : politique publique acceptée |
-| `admin_address` | `Option<Address>` | Clé admin (rotatble par gouvernance) |
+| `admin_address` | `Option<Address>` | Clé admin (rotatable via `AdminAction::RotateAdmin`) |
 | `current_version` | `ProtocolVersion` | Version actuelle du protocole |
 | `pending_upgrade` | `Option<ScheduledUpgrade>` | Mise à jour planifiée |
 | `validator_set` | `ValidatorSet` | Validateurs actifs |
-| `proposals` | `HashMap<u64, Proposal>` | Propositions de gouvernance |
-| `proposal_count` | `u64` | Compteur d'ID de propositions |
 
 ### `vinx-node` — Nœud complet
 
@@ -207,20 +206,35 @@ base_fee = fee_floor × multiplier  (cap à 3×)
 Répartition de chaque fee :
 - **40 %** → `staking_pool` (distribué aux stakers toutes les 100 blocs)
 - **30 %** → `validator_fee_pool` (crédité au validateur en fin de bloc)
-- **30 %** → `melt_pool` (brûlé définitivement, sauf ReleaseMeltToStaking par gouvernance)
+- **30 %** → `melt_pool` (pool de redistribution — **ce n'est pas un burn** ; les tokens restent en réserve et peuvent être réinjectés dans le staking via `AdminAction::ReleaseMeltToStaking`)
 
-### Gouvernance
+### Gouvernance — VinX Labs uniquement
 
-1. Tout validateur actif ou staker peut soumettre une proposition (`SubmitProposal`)
-2. Seuls les validateurs actifs peuvent voter (`VoteProposal`)
-3. Période de vote par défaut : 25 920 blocs (~72 h à 10 s/bloc)
-4. Auto-exécution dès que `yes_votes ≥ ⌈2n/3⌉`
-5. Auto-rejet si expiration ou si le quorum est mathématiquement impossible
+La gouvernance de VinX est **centralisée** : seul VinX Labs prend les décisions de protocole. Les échanges communautaires se font hors-chaîne.
+
+On-chain, l'admin soumet une transaction `AdminAction` avec la `GovernanceAction` souhaitée en payload. Elle est vérifiée (signature admin) et exécutée immédiatement dans le même bloc. Pas de vote, pas de délai.
+
+Actions disponibles :
+
+| Action | Effet |
+|--------|-------|
+| `AddValidator(addr)` | Ajoute un validateur au PoA set |
+| `RemoveValidator(addr)` | Retire un validateur du PoA set |
+| `UpdateFeeFloor { atoms }` | Modifie le plancher de frais |
+| `ScheduleUpgrade { version, height }` | Planifie une mise à jour protocole |
+| `ReleaseMeltToStaking { amount }` | Transfère du melt pool vers le staking pool |
+| `RotateAdmin(addr)` | Change la clé admin sans redémarrage |
+| `MarkCoffreCondition(condition)` | Valide une des 3 conditions du Coffre |
+| `UnlockCoffre` | Libère les 79 Mds vers le staking pool (si les 3 conditions sont remplies) |
+
+### Répartition et rôle du Melt Pool
+
+Le melt pool **n'est pas un burn**. Dans VinX, "melter" signifie que les tokens fondent dans un pool de réserve, prêts à être réinjectés dans l'économie par décision admin. C'est une réserve de redistribution, pas une destruction.
 
 ### Unlock Coffre Maturité
 
-Les ~79,979 Mds VinX du Coffre ne peuvent être libérés que si les 3 conditions suivantes sont toutes validées **par vote de gouvernance** :
-1. `MicaCasp` — Obtention du statut CASP sous MiCA
+Les **79 milliards** VinX du Coffre ne peuvent être libérés que si les 3 conditions suivantes sont toutes marquées comme remplies par l'admin :
+1. `MicaCasp` — Obtention du statut CASP sous MiCA (régulation européenne)
 2. `ExternalAudit` — Audit de sécurité externe publié
 3. `PublicPolicy` — Cadre de politique publique accepté
 
@@ -253,9 +267,6 @@ Le nœud expose un serveur HTTP sur `0.0.0.0:8545` par défaut.
 | GET | `/ws` | WebSocket — push par bloc |
 | GET | `/snapshot` | État complet JSON (⚠ admin auth si token configuré) |
 | POST | `/admin/compact` | Supprime les vieilles tx des blocs (⚠ admin auth) |
-| GET | `/governance/proposals` | Liste toutes les propositions |
-| GET | `/governance/proposal/:id` | Détail d'une proposition |
-
 **Auth admin :** si `admin_token` est configuré dans `config.toml`, les routes `/snapshot` et `/admin/compact` requièrent le header `Authorization: Bearer <token>`.
 
 **Rate limiting :** 100 requêtes / 60 secondes par IP. Retourne HTTP 429 en cas de dépassement.
@@ -289,7 +300,6 @@ cargo run -p vinx-wallet -- <commande> [options]
 | `validators` | | Liste des validateurs actifs |
 | `protocol` | | Version protocole + upgrade planifiée |
 | `network-stats` | | Frais de base, pools, supply |
-| `show-proposals` | | Liste les propositions de gouvernance |
 
 **Transactions :**
 
@@ -299,7 +309,7 @@ cargo run -p vinx-wallet -- <commande> [options]
 | `stake` | `--amount 500` | Verrouiller des VinX en staking |
 | `unstake` | `--amount 500` | Déverrouiller du staking |
 
-**Admin (requiert la clé admin) :**
+**Admin — transactions directes (requiert la clé admin) :**
 
 | Commande | Options clés | Description |
 |----------|-------------|-------------|
@@ -309,12 +319,29 @@ cargo run -p vinx-wallet -- <commande> [options]
 | `remove-validator` | `--validator vinx1...` | Retirer un validateur |
 | `announce-upgrade` | `--version 1.1.0 --activation-height 100000` | Planifier un upgrade |
 
-**Gouvernance :**
+**Admin — actions de gouvernance (requiert la clé admin) :**
 
 | Commande | Options clés | Description |
 |----------|-------------|-------------|
-| `submit-proposal` | `--description "..." --action "..."` | Soumettre une proposition |
-| `vote-proposal` | `--proposal-id 0 --vote yes` | Voter sur une proposition |
+| `admin-action` | `--action '{"AddValidator":"vinx1..."}'` | Exécute une `GovernanceAction` immédiatement |
+
+Exemple d'actions JSON valides :
+```bash
+# Ajouter un validateur
+--action '{"AddValidator":"vinx1abc..."}'
+
+# Modifier le plancher de frais (en atomes)
+--action '{"UpdateFeeFloor":{"atoms":100000000000000}}'
+
+# Libérer du melt pool vers le staking
+--action '{"ReleaseMeltToStaking":{"amount":"1000000000"}}'
+
+# Marquer la condition MiCA
+--action '"MarkCoffreCondition":"MicaCasp"'
+
+# Libérer le Coffre (si les 3 conditions sont remplies)
+--action '"UnlockCoffre"'
+```
 
 > Toutes les commandes de transaction acceptent `--node http://127.0.0.1:8545` (défaut) et `--wallet wallet.json` (défaut).
 
