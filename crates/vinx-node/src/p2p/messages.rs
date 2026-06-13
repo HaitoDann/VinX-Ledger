@@ -9,7 +9,10 @@ pub enum P2pMessage {
     /// A new transaction submitted by a user.
     NewTransaction(Transaction),
     /// A co-signature for an already-announced block.
-    BlockCoSignature { height: u64, signature: BlockSignature },
+    BlockCoSignature {
+        height: u64,
+        signature: BlockSignature,
+    },
     /// Request blocks starting from `from_height` (sent when a node detects it's behind).
     SyncRequest { from_height: u64, limit: u32 },
     /// Response to SyncRequest with the requested block range.
@@ -83,19 +86,33 @@ mod tests {
             },
         };
         let decoded = P2pMessage::decode(&msg.encode()).unwrap();
-        assert!(matches!(decoded, P2pMessage::BlockCoSignature { height: 1, .. }));
+        assert!(matches!(
+            decoded,
+            P2pMessage::BlockCoSignature { height: 1, .. }
+        ));
     }
 
     #[test]
     fn test_sync_request_roundtrip() {
-        let msg = P2pMessage::SyncRequest { from_height: 42, limit: 100 };
+        let msg = P2pMessage::SyncRequest {
+            from_height: 42,
+            limit: 100,
+        };
         let decoded = P2pMessage::decode(&msg.encode()).unwrap();
-        assert!(matches!(decoded, P2pMessage::SyncRequest { from_height: 42, limit: 100 }));
+        assert!(matches!(
+            decoded,
+            P2pMessage::SyncRequest {
+                from_height: 42,
+                limit: 100
+            }
+        ));
     }
 
     #[test]
     fn test_sync_response_roundtrip() {
-        let msg = P2pMessage::SyncResponse { blocks: vec![dummy_block()] };
+        let msg = P2pMessage::SyncResponse {
+            blocks: vec![dummy_block()],
+        };
         let decoded = P2pMessage::decode(&msg.encode()).unwrap();
         if let P2pMessage::SyncResponse { blocks } = decoded {
             assert_eq!(blocks.len(), 1);
@@ -112,7 +129,17 @@ mod tests {
     #[test]
     fn test_topic_names() {
         assert_eq!(P2pMessage::NewBlock(dummy_block()).topic(), "vinx/blocks/1");
-        assert_eq!(P2pMessage::SyncRequest { from_height: 0, limit: 1 }.topic(), "vinx/sync/1");
-        assert_eq!(P2pMessage::SyncResponse { blocks: vec![] }.topic(), "vinx/sync/1");
+        assert_eq!(
+            P2pMessage::SyncRequest {
+                from_height: 0,
+                limit: 1
+            }
+            .topic(),
+            "vinx/sync/1"
+        );
+        assert_eq!(
+            P2pMessage::SyncResponse { blocks: vec![] }.topic(),
+            "vinx/sync/1"
+        );
     }
 }

@@ -1,5 +1,5 @@
-use std::collections::{BTreeMap, BinaryHeap, HashMap, HashSet};
 use rayon::prelude::*;
+use std::collections::{BTreeMap, BinaryHeap, HashMap, HashSet};
 use vinx_core::{CoreError, Transaction};
 use vinx_crypto::{Address, Hash32};
 
@@ -101,7 +101,10 @@ impl Mempool {
             .queues
             .iter()
             .filter_map(|(addr, queue)| {
-                queue.values().next().map(|tx| (tx.fee.atoms(), addr.clone()))
+                queue
+                    .values()
+                    .next()
+                    .map(|tx| (tx.fee.atoms(), addr.clone()))
             })
             .collect();
 
@@ -170,7 +173,9 @@ impl Mempool {
         if Address::from_public_key(pk) != tx.from {
             return false;
         }
-        let Some(sig) = &tx.signature else { return false };
+        let Some(sig) = &tx.signature else {
+            return false;
+        };
         pk.verify(&tx.signing_bytes(), sig).is_ok()
     }
 }
@@ -292,7 +297,13 @@ mod tests {
     }
 
     fn make_tx_with_fee(kp: &KeyPair, to: Address, nonce: u64, fee_vinx: u64) -> Transaction {
-        vinx_core::Transaction::new_transfer(kp, to, Amount::from_vinx(1), Amount::from_vinx(fee_vinx), nonce)
+        vinx_core::Transaction::new_transfer(
+            kp,
+            to,
+            Amount::from_vinx(1),
+            Amount::from_vinx(fee_vinx),
+            nonce,
+        )
     }
 
     #[test]

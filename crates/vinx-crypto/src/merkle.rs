@@ -61,12 +61,15 @@ pub fn merkle_proof_for(leaves: &[Hash32], index: usize) -> Option<Vec<MerklePro
             sibling: level[sibling_idx],
             sibling_is_right: idx % 2 == 0,
         });
-        level = level.chunks_exact(2).map(|p| {
-            let mut buf = [0u8; 64];
-            buf[..32].copy_from_slice(&p[0]);
-            buf[32..].copy_from_slice(&p[1]);
-            sha256(&buf)
-        }).collect();
+        level = level
+            .chunks_exact(2)
+            .map(|p| {
+                let mut buf = [0u8; 64];
+                buf[..32].copy_from_slice(&p[0]);
+                buf[32..].copy_from_slice(&p[1]);
+                sha256(&buf)
+            })
+            .collect();
         idx /= 2;
     }
     Some(proof)
@@ -74,7 +77,11 @@ pub fn merkle_proof_for(leaves: &[Hash32], index: usize) -> Option<Vec<MerklePro
 
 /// Verifies an inclusion proof: reconstructs root from leaf + proof steps,
 /// returns true iff it matches `expected_root`.
-pub fn verify_merkle_proof(leaf: &Hash32, proof: &[MerkleProofStep], expected_root: &Hash32) -> bool {
+pub fn verify_merkle_proof(
+    leaf: &Hash32,
+    proof: &[MerkleProofStep],
+    expected_root: &Hash32,
+) -> bool {
     let mut current = *leaf;
     for step in proof {
         let (left, right) = if step.sibling_is_right {
@@ -193,8 +200,11 @@ mod tests {
         let root = merkle_root(&leaves);
         for idx in 0..4 {
             let proof = merkle_proof_for(&leaves, idx).unwrap();
-            assert!(verify_merkle_proof(&leaves[idx], &proof, &root),
-                "proof failed for index {}", idx);
+            assert!(
+                verify_merkle_proof(&leaves[idx], &proof, &root),
+                "proof failed for index {}",
+                idx
+            );
         }
     }
 
@@ -204,8 +214,11 @@ mod tests {
         let root = merkle_root(&leaves);
         for idx in 0..5 {
             let proof = merkle_proof_for(&leaves, idx).unwrap();
-            assert!(verify_merkle_proof(&leaves[idx], &proof, &root),
-                "proof failed for index {}", idx);
+            assert!(
+                verify_merkle_proof(&leaves[idx], &proof, &root),
+                "proof failed for index {}",
+                idx
+            );
         }
     }
 

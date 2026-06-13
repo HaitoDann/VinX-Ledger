@@ -22,7 +22,9 @@ pub struct RateLimiter {
 
 impl RateLimiter {
     pub fn new() -> Self {
-        Self { state: Arc::new(Mutex::new(HashMap::new())) }
+        Self {
+            state: Arc::new(Mutex::new(HashMap::new())),
+        }
     }
 }
 
@@ -45,7 +47,8 @@ pub async fn rate_limit(
             return (
                 StatusCode::TOO_MANY_REQUESTS,
                 "Rate limit exceeded — max 100 requests/minute per IP",
-            ).into_response();
+            )
+                .into_response();
         }
     }
     next.run(request).await

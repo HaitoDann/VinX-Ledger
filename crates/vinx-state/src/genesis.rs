@@ -78,7 +78,10 @@ mod tests {
 
     #[test]
     fn test_admin_plus_coffre_equals_max_supply() {
-        assert_eq!(ADMIN_ALLOCATION_ATOMS + COFFRE_MATURITY_ATOMS, MAX_SUPPLY_ATOMS);
+        assert_eq!(
+            ADMIN_ALLOCATION_ATOMS + COFFRE_MATURITY_ATOMS,
+            MAX_SUPPLY_ATOMS
+        );
     }
 
     #[test]

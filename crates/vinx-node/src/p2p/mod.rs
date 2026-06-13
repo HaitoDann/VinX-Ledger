@@ -3,15 +3,13 @@ pub mod messages;
 use std::sync::Arc;
 use std::time::Duration;
 
+use futures::StreamExt;
 use libp2p::{
     gossipsub::{self, IdentTopic, TopicHash},
-    identify,
-    mdns,
-    noise,
+    identify, mdns, noise,
     swarm::{NetworkBehaviour, SwarmEvent},
     tcp, yamux, Multiaddr, PeerId, SwarmBuilder,
 };
-use futures::StreamExt;
 use tokio::sync::{mpsc, RwLock};
 use tracing::{debug, info, warn};
 
@@ -34,13 +32,24 @@ pub struct P2pHandle {
 
 impl P2pHandle {
     pub fn broadcast_block(&self, block: &Block) {
-        let _ = self.cmd_tx.send(P2pCommand::Broadcast(P2pMessage::NewBlock(block.clone())));
+        let _ = self
+            .cmd_tx
+            .send(P2pCommand::Broadcast(P2pMessage::NewBlock(block.clone())));
     }
     pub fn broadcast_tx(&self, tx: &Transaction) {
-        let _ = self.cmd_tx.send(P2pCommand::Broadcast(P2pMessage::NewTransaction(tx.clone())));
+        let _ = self
+            .cmd_tx
+            .send(P2pCommand::Broadcast(P2pMessage::NewTransaction(
+                tx.clone(),
+            )));
     }
     pub fn broadcast_signature(&self, height: u64, signature: BlockSignature) {
-        let _ = self.cmd_tx.send(P2pCommand::Broadcast(P2pMessage::BlockCoSignature { height, signature }));
+        let _ = self
+            .cmd_tx
+            .send(P2pCommand::Broadcast(P2pMessage::BlockCoSignature {
+                height,
+                signature,
+            }));
     }
     pub fn shutdown(&self) {
         let _ = self.cmd_tx.send(P2pCommand::Shutdown);
@@ -87,7 +96,11 @@ pub async fn start(
 
     let mut swarm = SwarmBuilder::with_existing_identity(libp2p_kp)
         .with_tokio()
-        .with_tcp(tcp::Config::default(), noise::Config::new, yamux::Config::default)
+        .with_tcp(
+            tcp::Config::default(),
+            noise::Config::new,
+            yamux::Config::default,
+        )
         .map_err(|e| NodeError::Config(format!("P2P TCP setup failed: {e}")))?
         .with_behaviour(|key| {
             let gossipsub_config = gossipsub::ConfigBuilder::default()
@@ -98,25 +111,39 @@ pub async fn start(
             let gossipsub = gossipsub::Behaviour::new(
                 gossipsub::MessageAuthenticity::Signed(key.clone()),
                 gossipsub_config,
-            ).expect("valid gossipsub behaviour");
+            )
+            .expect("valid gossipsub behaviour");
             let identify = identify::Behaviour::new(identify::Config::new(
                 "/vinx/1.0.0".to_string(),
                 key.public(),
             ));
-            let mdns = mdns::tokio::Behaviour::new(mdns::Config::default(), key.public().to_peer_id())
-                .expect("valid mDNS behaviour");
-            Ok(VinxBehaviour { gossipsub, identify, mdns })
+            let mdns =
+                mdns::tokio::Behaviour::new(mdns::Config::default(), key.public().to_peer_id())
+                    .expect("valid mDNS behaviour");
+            Ok(VinxBehaviour {
+                gossipsub,
+                identify,
+                mdns,
+            })
         })
         .map_err(|e| NodeError::Config(format!("P2P behaviour setup failed: {e}")))?
         .build();
 
-    let _topic_map: Vec<(TopicHash, IdentTopic)> = TOPICS.iter().map(|t| {
-        let topic = IdentTopic::new(*t);
-        swarm.behaviour_mut().gossipsub.subscribe(&topic).expect("subscribe ok");
-        (topic.hash(), topic)
-    }).collect();
+    let _topic_map: Vec<(TopicHash, IdentTopic)> = TOPICS
+        .iter()
+        .map(|t| {
+            let topic = IdentTopic::new(*t);
+            swarm
+                .behaviour_mut()
+                .gossipsub
+                .subscribe(&topic)
+                .expect("subscribe ok");
+            (topic.hash(), topic)
+        })
+        .collect();
 
-    swarm.listen_on(listen_addr.clone())
+    swarm
+        .listen_on(listen_addr.clone())
         .map_err(|e| NodeError::Config(format!("P2P listen failed: {e}")))?;
 
     for peer_addr in &config.peer_addrs {
@@ -131,10 +158,23 @@ pub async fn start(
     let local_addr = config.validator_address.clone();
 
     tokio::spawn(async move {
-        run_event_loop(swarm, cmd_rx, chain, mempool, state, validator_set, local_kp, local_addr).await;
+        run_event_loop(
+            swarm,
+            cmd_rx,
+            chain,
+            mempool,
+            state,
+            validator_set,
+            local_kp,
+            local_addr,
+        )
+        .await;
     });
 
-    Ok(P2pHandle { cmd_tx, local_peer_id })
+    Ok(P2pHandle {
+        cmd_tx,
+        local_peer_id,
+    })
 }
 
 async fn run_event_loop(
@@ -204,19 +244,37 @@ async fn handle_swarm_event(
         SwarmEvent::Behaviour(VinxBehaviourEvent::Mdns(mdns::Event::Expired(peers))) => {
             for (peer_id, _) in peers {
                 debug!(peer = %peer_id, "mDNS peer expired");
-                swarm.behaviour_mut().gossipsub.remove_explicit_peer(&peer_id);
+                swarm
+                    .behaviour_mut()
+                    .gossipsub
+                    .remove_explicit_peer(&peer_id);
             }
         }
 
-        SwarmEvent::Behaviour(VinxBehaviourEvent::Gossipsub(
-            gossipsub::Event::Message { message, .. },
-        )) => {
-            let Some(msg) = P2pMessage::decode(&message.data) else { return };
-            dispatch_message(msg, chain, mempool, state, validator_set, local_kp, local_addr, swarm).await;
+        SwarmEvent::Behaviour(VinxBehaviourEvent::Gossipsub(gossipsub::Event::Message {
+            message,
+            ..
+        })) => {
+            let Some(msg) = P2pMessage::decode(&message.data) else {
+                return;
+            };
+            dispatch_message(
+                msg,
+                chain,
+                mempool,
+                state,
+                validator_set,
+                local_kp,
+                local_addr,
+                swarm,
+            )
+            .await;
         }
 
         SwarmEvent::Behaviour(VinxBehaviourEvent::Identify(identify::Event::Received {
-            peer_id, info, ..
+            peer_id,
+            info,
+            ..
         })) => {
             debug!(peer = %peer_id, protocols = ?info.protocols, "Peer identified");
             for addr in info.listen_addrs {
@@ -259,10 +317,17 @@ async fn dispatch_message(
                 if height > expected {
                     // Behind — request missing blocks
                     let limit = (height - expected).min(200) as u32 + 1;
-                    let req = P2pMessage::SyncRequest { from_height: expected, limit };
+                    let req = P2pMessage::SyncRequest {
+                        from_height: expected,
+                        limit,
+                    };
                     let topic = IdentTopic::new(req.topic());
                     let _ = swarm.behaviour_mut().gossipsub.publish(topic, req.encode());
-                    debug!(our = expected, peer = height, "Sent SyncRequest to catch up");
+                    debug!(
+                        our = expected,
+                        peer = height,
+                        "Sent SyncRequest to catch up"
+                    );
                     return;
                 }
                 if block.header.prev_hash != chain_guard.tip_hash() {
@@ -279,14 +344,23 @@ async fn dispatch_message(
 
             // 3. Proposer signature cryptographic verification
             let block_hash = block.hash();
-            match block.signatures.iter().find(|s| s.validator == block.header.validator) {
-                None => { warn!(height, "P2P block missing proposer sig"); return; }
+            match block
+                .signatures
+                .iter()
+                .find(|s| s.validator == block.header.validator)
+            {
+                None => {
+                    warn!(height, "P2P block missing proposer sig");
+                    return;
+                }
                 Some(sig) => {
                     if Address::from_public_key(&sig.pub_key) != sig.validator {
-                        warn!(height, "P2P block proposer pubkey/address mismatch"); return;
+                        warn!(height, "P2P block proposer pubkey/address mismatch");
+                        return;
                     }
                     if sig.pub_key.verify(&block_hash, &sig.signature).is_err() {
-                        warn!(height, "P2P block proposer sig invalid"); return;
+                        warn!(height, "P2P block proposer sig invalid");
+                        return;
                     }
                 }
             }
@@ -326,10 +400,14 @@ async fn dispatch_message(
                 }
                 ok
             };
-            if !applied { return; }
+            if !applied {
+                return;
+            }
 
             // 5. Commit
-            { chain.write().await.push(block.clone()); }
+            {
+                chain.write().await.push(block.clone());
+            }
             info!(height, "P2P: block validated and applied");
 
             // 6. Co-sign if we're a validator
@@ -340,15 +418,23 @@ async fn dispatch_message(
                     pub_key: local_kp.public_key(),
                     signature: local_kp.sign(&block_hash),
                 };
-                let co_msg = P2pMessage::BlockCoSignature { height, signature: sig.clone() };
+                let co_msg = P2pMessage::BlockCoSignature {
+                    height,
+                    signature: sig.clone(),
+                };
                 let topic = IdentTopic::new(co_msg.topic());
-                let _ = swarm.behaviour_mut().gossipsub.publish(topic, co_msg.encode());
+                let _ = swarm
+                    .behaviour_mut()
+                    .gossipsub
+                    .publish(topic, co_msg.encode());
                 debug!(height, "Co-signed block");
 
                 let mut c = chain.write().await;
                 c.record_signature(local_addr.as_str(), height, block_hash);
                 let finalized = c.add_co_signature(height, sig, &vs);
-                if finalized { info!(height, "Block finalized after co-signing"); }
+                if finalized {
+                    info!(height, "Block finalized after co-signing");
+                }
             }
         }
 
@@ -368,10 +454,17 @@ async fn dispatch_message(
                 let c = chain.read().await;
                 match c.get_block(height) {
                     Some(b) => b.hash(),
-                    None => { debug!(height, "P2P co-sig for unknown height"); return; }
+                    None => {
+                        debug!(height, "P2P co-sig for unknown height");
+                        return;
+                    }
                 }
             };
-            if signature.pub_key.verify(&block_hash, &signature.signature).is_err() {
+            if signature
+                .pub_key
+                .verify(&block_hash, &signature.signature)
+                .is_err()
+            {
                 warn!(height, validator = %signature.validator, "P2P co-sig invalid crypto");
                 return;
             }
@@ -382,7 +475,9 @@ async fn dispatch_message(
                 return;
             }
             let finalized = c.add_co_signature(height, signature, &vs);
-            if finalized { info!(height, "Block finalized via co-signatures"); }
+            if finalized {
+                info!(height, "Block finalized via co-signatures");
+            }
         }
 
         // Respond to sync requests with our stored blocks
@@ -398,7 +493,10 @@ async fn dispatch_message(
                 let n = blocks.len();
                 let resp = P2pMessage::SyncResponse { blocks };
                 let topic = IdentTopic::new(resp.topic());
-                let _ = swarm.behaviour_mut().gossipsub.publish(topic, resp.encode());
+                let _ = swarm
+                    .behaviour_mut()
+                    .gossipsub
+                    .publish(topic, resp.encode());
                 debug!(from = from_height, count = n, "Served SyncResponse");
             }
         }
@@ -414,10 +512,12 @@ async fn dispatch_message(
                 }
                 let vs = validator_set.read().await.clone();
                 if vs.leader_at(height) != &block.header.validator {
-                    warn!(height, "SyncResponse block wrong proposer"); break;
+                    warn!(height, "SyncResponse block wrong proposer");
+                    break;
                 }
                 if block.header.prev_hash != chain.read().await.tip_hash() {
-                    warn!(height, "SyncResponse block wrong prev_hash"); break;
+                    warn!(height, "SyncResponse block wrong prev_hash");
+                    break;
                 }
                 let ok = {
                     let mut sg = state.write().await;
@@ -425,7 +525,10 @@ async fn dispatch_message(
                     let mut ok = true;
                     for tx in &block.transactions {
                         if let Err(e) = sg.apply_transaction(tx) {
-                            warn!(height, error=%e, "SyncResponse tx failed"); *sg = snapshot.clone(); ok = false; break;
+                            warn!(height, error=%e, "SyncResponse tx failed");
+                            *sg = snapshot.clone();
+                            ok = false;
+                            break;
                         }
                     }
                     if ok {
@@ -433,13 +536,18 @@ async fn dispatch_message(
                         sg.check_auto_unfreeze();
                         sg.check_upgrade_activation();
                         let r = sg.flush_validator_fee_pool();
-                        if r > vinx_core::amount::Amount::ZERO { sg.credit(&block.header.validator, r); }
+                        if r > vinx_core::amount::Amount::ZERO {
+                            sg.credit(&block.header.validator, r);
+                        }
                         let _rw = sg.distribute_staking_rewards();
                         let root = sg.compute_state_root();
                         if root != block.header.state_root {
-                            warn!(height, "SyncResponse state_root mismatch"); *sg = snapshot.clone(); ok = false;
+                            warn!(height, "SyncResponse state_root mismatch");
+                            *sg = snapshot.clone();
+                            ok = false;
                         } else {
-                            let nv = sg.validator_set.clone(); drop(sg);
+                            let nv = sg.validator_set.clone();
+                            drop(sg);
                             *validator_set.write().await = nv;
                         }
                     }

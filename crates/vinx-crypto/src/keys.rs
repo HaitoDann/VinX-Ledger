@@ -97,7 +97,10 @@ mod tests {
         let kp = KeyPair::generate();
         let pk = kp.public_key();
         let sig = kp.sign(b"original message");
-        assert_eq!(pk.verify(b"tampered message", &sig), Err(CryptoError::InvalidSignature));
+        assert_eq!(
+            pk.verify(b"tampered message", &sig),
+            Err(CryptoError::InvalidSignature)
+        );
     }
 
     #[test]
@@ -106,7 +109,10 @@ mod tests {
         let kp2 = KeyPair::generate();
         let msg = b"pay alice 50 VinX";
         let sig = kp1.sign(msg);
-        assert_eq!(kp2.public_key().verify(msg, &sig), Err(CryptoError::InvalidSignature));
+        assert_eq!(
+            kp2.public_key().verify(msg, &sig),
+            Err(CryptoError::InvalidSignature)
+        );
     }
 
     #[test]

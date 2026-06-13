@@ -1,0 +1,139 @@
+name: Release
+
+on:
+  push:
+    tags:
+      - "v[0-9]+.[0-9]+.[0-9]+*"
+
+env:
+  CARGO_TERM_COLOR: always
+
+permissions:
+  contents: write
+
+jobs:
+  # ── Build matrix ─────────────────────────────────────────────────────────
+  build:
+    name: Build ${{ matrix.target }}
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - target: x86_64-unknown-linux-gnu
+            os: ubuntu-latest
+            archive: tar.gz
+          - target: aarch64-unknown-linux-gnu
+            os: ubuntu-latest
+            archive: tar.gz
+            cross: true
+          - target: x86_64-apple-darwin
+            os: macos-latest
+            archive: tar.gz
+          - target: aarch64-apple-darwin
+            os: macos-latest
+            archive: tar.gz
+          - target: x86_64-pc-windows-msvc
+            os: windows-latest
+            archive: zip
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.target }}
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: ${{ matrix.target }}
+
+      - name: Install cross
+        if: matrix.cross
+        run: cargo install cross --locked
+
+      - name: Build vinx-node
+        run: |
+          ${{ matrix.cross && 'cross' || 'cargo' }} build \
+            --release --locked \
+            --target ${{ matrix.target }} \
+            -p vinx-node
+
+      - name: Build vinx-wallet
+        run: |
+          ${{ matrix.cross && 'cross' || 'cargo' }} build \
+            --release --locked \
+            --target ${{ matrix.target }} \
+            -p vinx-wallet
+
+      - name: Package (Unix)
+        if: matrix.archive == 'tar.gz'
+        shell: bash
+        run: |
+          TAG=${{ github.ref_name }}
+          DIR="vinx-ledger-${TAG}-${{ matrix.target }}"
+          mkdir -p "$DIR"
+          cp target/${{ matrix.target }}/release/vinx-node "$DIR/"
+          cp target/${{ matrix.target }}/release/vinx-wallet "$DIR/"
+          cp README.md CHANGELOG.md "$DIR/" 2>/dev/null || true
+          tar -czf "${DIR}.tar.gz" "$DIR"
+          echo "ASSET=${DIR}.tar.gz" >> $GITHUB_ENV
+
+      - name: Package (Windows)
+        if: matrix.archive == 'zip'
+        shell: pwsh
+        run: |
+          $tag = "${{ github.ref_name }}"
+          $dir = "vinx-ledger-${tag}-${{ matrix.target }}"
+          New-Item -ItemType Directory $dir
+          Copy-Item "target/${{ matrix.target }}/release/vinx-node.exe" $dir/
+          Copy-Item "target/${{ matrix.target }}/release/vinx-wallet.exe" $dir/
+          if (Test-Path README.md)   { Copy-Item README.md   $dir/ }
+          if (Test-Path CHANGELOG.md) { Copy-Item CHANGELOG.md $dir/ }
+          Compress-Archive -Path $dir -DestinationPath "${dir}.zip"
+          "ASSET=${dir}.zip" | Out-File -Append $env:GITHUB_ENV
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ env.ASSET }}
+          path: ${{ env.ASSET }}
+
+  # ── Checksums & GitHub Release ────────────────────────────────────────────
+  release:
+    name: Publish GitHub Release
+    needs: build
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Download all artifacts
+        uses: actions/download-artifact@v4
+        with:
+          path: dist
+          merge-multiple: true
+
+      - name: Generate SHA-256 checksums
+        working-directory: dist
+        run: sha256sum * > SHA256SUMS.txt
+
+      - name: Extract changelog for this version
+        id: changelog
+        run: |
+          TAG=${{ github.ref_name }}
+          VERSION=${TAG#v}
+          # Extract the section between this version and the previous one
+          awk "/^## \[${VERSION}\]/{flag=1; next} /^## \[/{flag=0} flag" CHANGELOG.md \
+            > release-notes.md
+          echo "notes<<EOF" >> $GITHUB_OUTPUT
+          cat release-notes.md >> $GITHUB_OUTPUT
+          echo "EOF" >> $GITHUB_OUTPUT
+
+      - name: Create GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          name: VinX Ledger ${{ github.ref_name }}
+          body: ${{ steps.changelog.outputs.notes }}
+          prerelease: ${{ contains(github.ref_name, 'alpha') || contains(github.ref_name, 'beta') || contains(github.ref_name, 'rc') }}
+          files: |
+            dist/*

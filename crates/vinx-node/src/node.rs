@@ -4,13 +4,8 @@ use std::time::{Instant, SystemTime, UNIX_EPOCH};
 use tokio::sync::{broadcast, Mutex, RwLock};
 
 use crate::{
-    chain::Chain,
-    config::NodeConfig,
-    mempool::Mempool,
-    p2p::P2pHandle,
-    producer::produce_block,
-    storage::Storage,
-    NodeError,
+    chain::Chain, config::NodeConfig, mempool::Mempool, p2p::P2pHandle, producer::produce_block,
+    storage::Storage, NodeError,
 };
 use vinx_core::{Block, ValidatorSet};
 use vinx_state::WorldState;
@@ -58,11 +53,7 @@ impl Node {
     }
 
     /// Creates a node and immediately starts the P2P layer (if configured).
-    pub async fn new_with_p2p(
-        state: WorldState,
-        chain: Chain,
-        config: NodeConfig,
-    ) -> Arc<Self> {
+    pub async fn new_with_p2p(state: WorldState, chain: Chain, config: NodeConfig) -> Arc<Self> {
         let storage = config.data_dir.as_ref().map(|p| Storage::new(p.clone()));
         let initial_vs = state.validator_set.clone();
         let state_arc = Arc::new(RwLock::new(state));
@@ -78,7 +69,9 @@ impl Node {
                 Arc::clone(&mempool_arc),
                 Arc::clone(&state_arc),
                 Arc::clone(&vs_arc),
-            ).await {
+            )
+            .await
+            {
                 Ok(handle) => {
                     tracing::info!(peer_id = %handle.local_peer_id, "P2P layer active");
                     Some(handle)
@@ -117,7 +110,14 @@ impl Node {
         let mut mempool = self.mempool.write().await;
         let vs = self.validator_set.read().await.clone();
 
-        let block = produce_block(&mut state, &mut chain, &mut mempool, &self.config, &vs, timestamp)?;
+        let block = produce_block(
+            &mut state,
+            &mut chain,
+            &mut mempool,
+            &self.config,
+            &vs,
+            timestamp,
+        )?;
 
         // Sync validator set from state (may have changed if AddValidator/RemoveValidator was applied)
         let new_vs = state.validator_set.clone();
@@ -220,7 +220,7 @@ impl Node {
             listener,
             app.into_make_service_with_connect_info::<std::net::SocketAddr>(),
         )
-            .await
-            .map_err(|e| NodeError::Rpc(e.to_string()))
+        .await
+        .map_err(|e| NodeError::Rpc(e.to_string()))
     }
 }

@@ -1,7 +1,7 @@
-use std::collections::HashSet;
 use crate::transaction::Transaction;
 use crate::validator_set::ValidatorSet;
 use serde::{Deserialize, Serialize};
+use std::collections::HashSet;
 use vinx_crypto::{sha256, Address, Hash32, PublicKey, VinxSignature};
 
 pub const GENESIS_PREV_HASH: Hash32 = [0u8; 32];

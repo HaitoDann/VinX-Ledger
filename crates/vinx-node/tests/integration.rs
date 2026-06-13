@@ -273,13 +273,7 @@ async fn test_mempool_ordering() {
 
     // Submit in deliberately wrong order: nonce 2, then 0, then 1
     for nonce in [2u64, 0, 1] {
-        let tx = Transaction::new_transfer(
-            &sender_kp,
-            receiver_addr.clone(),
-            amount,
-            fee,
-            nonce,
-        );
+        let tx = Transaction::new_transfer(&sender_kp, receiver_addr.clone(), amount, fee, nonce);
         let submit_resp: serde_json::Value = client
             .post(format!("{}/tx/submit", base_url))
             .json(&tx)
@@ -344,27 +338,27 @@ async fn test_mempool_ordering() {
 /// per-address cooldown (second request within cooldown window must return 400).
 #[tokio::test]
 async fn test_faucet_endpoint() {
-    use vinx_node::config::NodeConfig;
     use vinx_node::chain::Chain;
+    use vinx_node::config::NodeConfig;
     use vinx_node::Node;
     use vinx_state::{create_genesis_state, GenesisConfig};
 
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
     let local_addr = listener.local_addr().unwrap();
 
-    let admin_kp    = KeyPair::generate();
+    let admin_kp = KeyPair::generate();
     let validator_kp = KeyPair::generate();
-    let faucet_kp   = KeyPair::generate();
+    let faucet_kp = KeyPair::generate();
 
-    let admin_addr     = Address::from_public_key(&admin_kp.public_key());
+    let admin_addr = Address::from_public_key(&admin_kp.public_key());
     let validator_addr = Address::from_public_key(&validator_kp.public_key());
-    let faucet_addr    = Address::from_public_key(&faucet_kp.public_key());
+    let faucet_addr = Address::from_public_key(&faucet_kp.public_key());
 
-    let recipient_kp   = KeyPair::generate();
+    let recipient_kp = KeyPair::generate();
     let recipient_addr = Address::from_public_key(&recipient_kp.public_key());
 
     let state = create_genesis_state(&GenesisConfig {
-        admin_address:     admin_addr.clone(),
+        admin_address: admin_addr.clone(),
         validator_address: validator_addr.clone(),
     });
     let (chain, _) = Chain::new_with_genesis(validator_addr.clone(), 0);
@@ -385,12 +379,16 @@ async fn test_faucet_endpoint() {
     }
 
     let rpc_node = std::sync::Arc::clone(&node);
-    tokio::spawn(async move { let _ = rpc_node.run_rpc_on(listener).await; });
+    tokio::spawn(async move {
+        let _ = rpc_node.run_rpc_on(listener).await;
+    });
 
     let http = reqwest::Client::new();
     let base = format!("http://{}", local_addr);
     for _ in 0..40 {
-        if http.get(format!("{}/health", base)).send().await.is_ok() { break; }
+        if http.get(format!("{}/health", base)).send().await.is_ok() {
+            break;
+        }
         sleep(Duration::from_millis(25)).await;
     }
 
@@ -398,13 +396,27 @@ async fn test_faucet_endpoint() {
     let resp: serde_json::Value = http
         .post(format!("{}/faucet/request", base))
         .json(&serde_json::json!({ "address": recipient_addr.to_string() }))
-        .send().await.unwrap()
-        .json().await.unwrap();
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
 
-    assert_eq!(resp["accepted"], true, "faucet first request should be accepted");
-    assert!(!resp["tx_hash"].as_str().unwrap().is_empty(), "tx_hash must be non-empty");
     assert_eq!(
-        resp["amount_atoms"].as_str().unwrap().parse::<u128>().unwrap(),
+        resp["accepted"], true,
+        "faucet first request should be accepted"
+    );
+    assert!(
+        !resp["tx_hash"].as_str().unwrap().is_empty(),
+        "tx_hash must be non-empty"
+    );
+    assert_eq!(
+        resp["amount_atoms"]
+            .as_str()
+            .unwrap()
+            .parse::<u128>()
+            .unwrap(),
         FAUCET_ATOMS,
         "dripped amount must match configured amount"
     );
@@ -414,27 +426,46 @@ async fn test_faucet_endpoint() {
 
     let account: serde_json::Value = http
         .get(format!("{}/account/{}", base, recipient_addr))
-        .send().await.unwrap()
-        .json().await.unwrap();
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
     let balance: u128 = account["balance_atoms"].as_str().unwrap().parse().unwrap();
-    assert_eq!(balance, FAUCET_ATOMS, "recipient should have received exactly FAUCET_ATOMS");
+    assert_eq!(
+        balance, FAUCET_ATOMS,
+        "recipient should have received exactly FAUCET_ATOMS"
+    );
 
     // Second request within cooldown — must be rate-limited (400)
     let status = http
         .post(format!("{}/faucet/request", base))
         .json(&serde_json::json!({ "address": recipient_addr.to_string() }))
-        .send().await.unwrap()
+        .send()
+        .await
+        .unwrap()
         .status();
-    assert_eq!(status, 400, "second faucet request within cooldown must return 400");
+    assert_eq!(
+        status, 400,
+        "second faucet request within cooldown must return 400"
+    );
 
     // Request for a different address must still succeed (per-address cooldown)
     let other_addr = Address::from_public_key(&KeyPair::generate().public_key());
     let resp2: serde_json::Value = http
         .post(format!("{}/faucet/request", base))
         .json(&serde_json::json!({ "address": other_addr.to_string() }))
-        .send().await.unwrap()
-        .json().await.unwrap();
-    assert_eq!(resp2["accepted"], true, "different address should not be rate-limited");
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    assert_eq!(
+        resp2["accepted"], true,
+        "different address should not be rate-limited"
+    );
 }
 
 // ─── Test — crash recovery ────────────────────────────────────────────────────
@@ -444,9 +475,9 @@ async fn test_faucet_endpoint() {
 /// circulating supply are fully preserved.
 #[tokio::test]
 async fn test_crash_recovery() {
-    use vinx_node::storage::Storage;
     use vinx_node::chain::Chain;
     use vinx_node::config::NodeConfig;
+    use vinx_node::storage::Storage;
     use vinx_node::Node;
     use vinx_state::{create_genesis_state, GenesisConfig};
 
@@ -460,25 +491,25 @@ async fn test_crash_recovery() {
     ));
     std::fs::create_dir_all(&data_dir).unwrap();
 
-    let validator_kp   = KeyPair::generate();
-    let admin_kp       = KeyPair::generate();
-    let sender_kp      = KeyPair::generate();
-    let receiver_kp    = KeyPair::generate();
+    let validator_kp = KeyPair::generate();
+    let admin_kp = KeyPair::generate();
+    let sender_kp = KeyPair::generate();
+    let receiver_kp = KeyPair::generate();
 
-    let admin_addr     = Address::from_public_key(&admin_kp.public_key());
+    let admin_addr = Address::from_public_key(&admin_kp.public_key());
     let validator_addr = Address::from_public_key(&validator_kp.public_key());
-    let sender_addr    = Address::from_public_key(&sender_kp.public_key());
-    let receiver_addr  = Address::from_public_key(&receiver_kp.public_key());
+    let sender_addr = Address::from_public_key(&sender_kp.public_key());
+    let receiver_addr = Address::from_public_key(&receiver_kp.public_key());
 
     const INITIAL_VINX: u64 = 10_000;
-    const SEND_VINX:    u64 = 100;
-    const N_TXS:        u64 = 3;
-    const N_BLOCKS:     u64 = 3;
+    const SEND_VINX: u64 = 100;
+    const N_TXS: u64 = 3;
+    const N_BLOCKS: u64 = 3;
 
     // ── Phase 1 : run, produce blocks, persist ────────────────────────────
     let (saved_height, saved_supply, saved_sender, saved_receiver) = {
         let state = create_genesis_state(&GenesisConfig {
-            admin_address:     admin_addr.clone(),
+            admin_address: admin_addr.clone(),
             validator_address: validator_addr.clone(),
         });
         let (chain, _) = Chain::new_with_genesis(validator_addr.clone(), 0);
@@ -495,12 +526,11 @@ async fn test_crash_recovery() {
         }
 
         let amount = Amount::from_vinx(SEND_VINX);
-        let fee    = amount.calculate_fee(Amount::from_atoms(DEFAULT_FEE_FLOOR_ATOMS));
+        let fee = amount.calculate_fee(Amount::from_atoms(DEFAULT_FEE_FLOOR_ATOMS));
 
         for nonce in 0..N_TXS {
-            let tx = Transaction::new_transfer(
-                &sender_kp, receiver_addr.clone(), amount, fee, nonce,
-            );
+            let tx =
+                Transaction::new_transfer(&sender_kp, receiver_addr.clone(), amount, fee, nonce);
             node.mempool.write().await.add(tx).unwrap();
         }
 
@@ -521,7 +551,10 @@ async fn test_crash_recovery() {
         // Node dropped here — simulates crash
     };
 
-    assert_eq!(saved_height, N_BLOCKS, "should have produced {N_BLOCKS} blocks");
+    assert_eq!(
+        saved_height, N_BLOCKS,
+        "should have produced {N_BLOCKS} blocks"
+    );
 
     // ── Phase 2 : reload from disk, verify nothing was lost ───────────────
     let storage = Storage::new(&data_dir);
@@ -530,19 +563,23 @@ async fn test_crash_recovery() {
         .expect("persisted data must be loadable after crash");
 
     assert_eq!(
-        recovered_chain.tip_height(), saved_height,
+        recovered_chain.tip_height(),
+        saved_height,
         "chain height must survive crash"
     );
     assert_eq!(
-        recovered_state.circulating_supply.atoms(), saved_supply,
+        recovered_state.circulating_supply.atoms(),
+        saved_supply,
         "circulating_supply must survive crash"
     );
     assert_eq!(
-        recovered_state.account_balance(&sender_addr).atoms(), saved_sender,
+        recovered_state.account_balance(&sender_addr).atoms(),
+        saved_sender,
         "sender balance must survive crash"
     );
     assert_eq!(
-        recovered_state.account_balance(&receiver_addr).atoms(), saved_receiver,
+        recovered_state.account_balance(&receiver_addr).atoms(),
+        saved_receiver,
         "receiver balance must survive crash"
     );
 
@@ -615,16 +652,15 @@ async fn test_chain_sync_endpoint() {
         .await
         .expect("parse JSON");
 
-    assert_eq!(
-        resp["from"], 0,
-        "sync response should start from height 0"
-    );
+    assert_eq!(resp["from"], 0, "sync response should start from height 0");
     assert_eq!(
         resp["count"], 4,
         "sync should return 4 blocks: genesis + 3 produced"
     );
 
-    let blocks = resp["blocks"].as_array().expect("blocks should be an array");
+    let blocks = resp["blocks"]
+        .as_array()
+        .expect("blocks should be an array");
     assert_eq!(blocks.len(), 4, "blocks array length should be 4");
 
     // Verify heights are sequential 0, 1, 2, 3

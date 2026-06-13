@@ -34,7 +34,7 @@ pub const MIN_STAKE_ATOMS: u128 = DECIMAL_FACTOR;
 pub const FREEZE_DURATION_BLOCKS: u64 = 365 * 24 * 360; // 3_153_600 blocks ≈ 1 year
 
 /// Announcement lead-time minimums by upgrade type.
-pub const UPGRADE_NOTICE_PATCH_BLOCKS: u64 = 7 * 24 * 360;  //  7 days
+pub const UPGRADE_NOTICE_PATCH_BLOCKS: u64 = 7 * 24 * 360; //  7 days
 pub const UPGRADE_NOTICE_MINOR_BLOCKS: u64 = 30 * 24 * 360; // 30 days
 pub const UPGRADE_NOTICE_MAJOR_BLOCKS: u64 = 90 * 24 * 360; // 90 days
 
@@ -96,8 +96,10 @@ impl Amount {
     pub fn melt_share(fee: Self) -> Self {
         let s = Self::staking_share(fee);
         let v = Self::validator_share(fee);
-        fee.checked_sub(s).unwrap_or(Self::ZERO)
-           .checked_sub(v).unwrap_or(Self::ZERO)
+        fee.checked_sub(s)
+            .unwrap_or(Self::ZERO)
+            .checked_sub(v)
+            .unwrap_or(Self::ZERO)
     }
 }
 
@@ -189,7 +191,14 @@ mod tests {
         assert_eq!(validator, Amount::from_vinx(30));
         assert_eq!(melt, Amount::from_vinx(30));
         // All three parts sum to the whole fee
-        assert_eq!(staking.checked_add(validator).unwrap().checked_add(melt).unwrap(), fee);
+        assert_eq!(
+            staking
+                .checked_add(validator)
+                .unwrap()
+                .checked_add(melt)
+                .unwrap(),
+            fee
+        );
     }
 
     #[test]

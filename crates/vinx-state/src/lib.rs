@@ -43,7 +43,8 @@ mod tests {
         let (mut state, sender_kp, _sender_addr) = funded_state();
         let receiver = Address::from_public_key(&KeyPair::generate().public_key());
         let amount = Amount::from_vinx(1_000);
-        let tx = Transaction::new_transfer(&sender_kp, receiver.clone(), amount, fee_for(amount), 0);
+        let tx =
+            Transaction::new_transfer(&sender_kp, receiver.clone(), amount, fee_for(amount), 0);
 
         state.apply_transaction(&tx).unwrap();
 
@@ -105,7 +106,10 @@ mod tests {
 
         assert!(matches!(
             state.apply_transaction(&tx),
-            Err(vinx_core::CoreError::InvalidNonce { expected: 0, got: 1 })
+            Err(vinx_core::CoreError::InvalidNonce {
+                expected: 0,
+                got: 1
+            })
         ));
     }
 
@@ -115,7 +119,8 @@ mod tests {
         let receiver = Address::from_public_key(&KeyPair::generate().public_key());
         let amount = Amount::from_vinx(1);
 
-        let tx0 = Transaction::new_transfer(&sender_kp, receiver.clone(), amount, fee_for(amount), 0);
+        let tx0 =
+            Transaction::new_transfer(&sender_kp, receiver.clone(), amount, fee_for(amount), 0);
         state.apply_transaction(&tx0).unwrap();
         assert_eq!(state.accounts[sender_addr.as_str()].nonce, 1);
 
@@ -140,7 +145,14 @@ mod tests {
         assert_eq!(state.staking_pool, staking);
         assert_eq!(state.validator_fee_pool, validator);
         assert_eq!(state.melt_pool, melt);
-        assert_eq!(staking.checked_add(validator).unwrap().checked_add(melt).unwrap(), fee);
+        assert_eq!(
+            staking
+                .checked_add(validator)
+                .unwrap()
+                .checked_add(melt)
+                .unwrap(),
+            fee
+        );
     }
 
     #[test]
@@ -198,12 +210,22 @@ mod tests {
         let stake_amount = Amount::from_vinx(500);
 
         state
-            .apply_transaction(&Transaction::new_stake(&sender_kp, stake_amount, Amount::ZERO, 0))
+            .apply_transaction(&Transaction::new_stake(
+                &sender_kp,
+                stake_amount,
+                Amount::ZERO,
+                0,
+            ))
             .unwrap();
         let balance_after_stake = state.account_balance(&sender_addr);
 
         state
-            .apply_transaction(&Transaction::new_unstake(&sender_kp, stake_amount, Amount::ZERO, 1))
+            .apply_transaction(&Transaction::new_unstake(
+                &sender_kp,
+                stake_amount,
+                Amount::ZERO,
+                1,
+            ))
             .unwrap();
 
         assert_eq!(

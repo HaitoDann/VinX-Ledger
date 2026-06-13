@@ -1,8 +1,11 @@
 use axum::{
-    extract::{Path, Query, State},
     extract::ws::{Message, WebSocket, WebSocketUpgrade},
+    extract::{Path, Query, State},
     http::{header, StatusCode},
-    response::{sse::{Event, KeepAlive, Sse}, IntoResponse, Response},
+    response::{
+        sse::{Event, KeepAlive, Sse},
+        IntoResponse, Response,
+    },
     Json,
 };
 use futures::stream::{self, Stream};
@@ -87,7 +90,9 @@ pub async fn submit_tx(
     if let Some(pk) = &tx.pub_key {
         let derived = Address::from_public_key(pk);
         if derived != tx.from {
-            return Err(ApiError::BadRequest("Public key does not match sender address".to_string()));
+            return Err(ApiError::BadRequest(
+                "Public key does not match sender address".to_string(),
+            ));
         }
         if let Some(sig) = &tx.signature {
             pk.verify(&tx.signing_bytes(), sig)
@@ -118,7 +123,10 @@ pub async fn get_block(
 ) -> ApiResult<BlockResponse> {
     let chain = node.chain.read().await;
     match chain.get_block(height) {
-        Some(block) => Ok(Json(BlockResponse::from_block(block, &*node.validator_set.read().await))),
+        Some(block) => Ok(Json(BlockResponse::from_block(
+            block,
+            &*node.validator_set.read().await,
+        ))),
         None => Err(ApiError::NotFound(format!("Block {} not found", height))),
     }
 }
@@ -134,7 +142,9 @@ pub async fn get_validators(State(node): State<Arc<Node>>) -> ApiResult<Validato
     )))
 }
 
-pub async fn get_protocol_status(State(node): State<Arc<Node>>) -> ApiResult<ProtocolStatusResponse> {
+pub async fn get_protocol_status(
+    State(node): State<Arc<Node>>,
+) -> ApiResult<ProtocolStatusResponse> {
     let state = node.state.read().await;
     Ok(Json(ProtocolStatusResponse::new(
         &state.current_version,
@@ -149,7 +159,10 @@ pub async fn get_tx_by_hash(
     let chain = node.chain.read().await;
     match chain.get_tx_by_hash(&hash) {
         Some((height, block, tx)) => Ok(Json(TxWithBlockResponse::new(height, &block.hash(), tx))),
-        None => Err(ApiError::NotFound(format!("Transaction {} not found", hash))),
+        None => Err(ApiError::NotFound(format!(
+            "Transaction {} not found",
+            hash
+        ))),
     }
 }
 
@@ -216,18 +229,29 @@ pub async fn get_chain_sync(
 
     let start = params.from;
     if start > tip {
-        return Ok(Json(ChainSyncResponse { from: start, count: 0, blocks: vec![] }));
+        return Ok(Json(ChainSyncResponse {
+            from: start,
+            count: 0,
+            blocks: vec![],
+        }));
     }
 
     let end = (start + limit as u64).min(tip + 1);
     let mut blocks = Vec::new();
     for h in start..end {
         if let Some(block) = chain.get_block(h) {
-            blocks.push(BlockResponse::from_block(block, &*node.validator_set.read().await));
+            blocks.push(BlockResponse::from_block(
+                block,
+                &*node.validator_set.read().await,
+            ));
         }
     }
     let count = blocks.len();
-    Ok(Json(ChainSyncResponse { from: start, count, blocks }))
+    Ok(Json(ChainSyncResponse {
+        from: start,
+        count,
+        blocks,
+    }))
 }
 
 /// Server-Sent Events stream: sends a JSON event on every new block.
@@ -253,10 +277,7 @@ pub async fn sse_events(
 /// WebSocket endpoint — streams new-block events as JSON messages.
 /// Connect with `ws://host:port/ws`. Each message is a JSON object:
 /// `{"type":"new_block","height":N,"tx_count":N,"hash":"hex"}`
-pub async fn ws_events(
-    ws: WebSocketUpgrade,
-    State(node): State<Arc<Node>>,
-) -> impl IntoResponse {
+pub async fn ws_events(ws: WebSocketUpgrade, State(node): State<Arc<Node>>) -> impl IntoResponse {
     ws.on_upgrade(|socket| handle_ws_client(socket, node))
 }
 
@@ -290,7 +311,13 @@ pub async fn get_snapshot(
     State(node): State<Arc<Node>>,
 ) -> impl IntoResponse {
     if !check_admin_auth(&headers, node.config.admin_token.as_deref()) {
-        return (StatusCode::UNAUTHORIZED, Json(ErrorResponse { error: "unauthorized".to_string() })).into_response();
+        return (
+            StatusCode::UNAUTHORIZED,
+            Json(ErrorResponse {
+                error: "unauthorized".to_string(),
+            }),
+        )
+            .into_response();
     }
     let state_guard = node.state.read().await;
     let chain_guard = node.chain.read().await;
@@ -299,26 +326,33 @@ pub async fn get_snapshot(
 
     match serde_json::to_value(&*state_guard) {
         Ok(state_json) => {
-            let snap = SnapshotResponse { height, tip_hash, state: state_json };
+            let snap = SnapshotResponse {
+                height,
+                tip_hash,
+                state: state_json,
+            };
             (StatusCode::OK, Json(snap)).into_response()
         }
         Err(e) => (
             StatusCode::INTERNAL_SERVER_ERROR,
-            Json(ErrorResponse { error: e.to_string() }),
-        ).into_response(),
+            Json(ErrorResponse {
+                error: e.to_string(),
+            }),
+        )
+            .into_response(),
     }
 }
 
 /// Returns node metrics in Prometheus text format.
 pub async fn get_metrics(State(node): State<Arc<Node>>) -> impl IntoResponse {
-    let height      = node.chain.read().await.tip_height();
+    let height = node.chain.read().await.tip_height();
     let mempool_size = node.mempool.read().await.size();
-    let state       = node.state.read().await;
-    let base_fee    = state.base_fee.atoms();
-    let melt_pool   = state.melt_pool.atoms();
+    let state = node.state.read().await;
+    let base_fee = state.base_fee.atoms();
+    let melt_pool = state.melt_pool.atoms();
     let staking_pool = state.staking_pool.atoms();
     let distribution_pool = state.distribution_pool.atoms();
-    let circulating  = state.circulating_supply.atoms();
+    let circulating = state.circulating_supply.atoms();
     let validator_count = state.validator_set.len();
 
     let body = format!(
@@ -350,7 +384,10 @@ pub async fn get_metrics(State(node): State<Arc<Node>>) -> impl IntoResponse {
 
     (
         StatusCode::OK,
-        [(header::CONTENT_TYPE, "text/plain; version=0.0.4; charset=utf-8")],
+        [(
+            header::CONTENT_TYPE,
+            "text/plain; version=0.0.4; charset=utf-8",
+        )],
         body,
     )
 }
@@ -380,7 +417,11 @@ pub async fn post_compact(
     let mut chain = node.chain.write().await;
     let tip = chain.tip_height();
     chain.compact_old_txs(keep_last);
-    Ok(Json(CompactResponse { compacted: true, kept_last: keep_last, tip_height: tip }))
+    Ok(Json(CompactResponse {
+        compacted: true,
+        kept_last: keep_last,
+        tip_height: tip,
+    }))
 }
 
 #[derive(serde::Deserialize)]
@@ -394,8 +435,10 @@ pub async fn faucet_request(
     State(node): State<Arc<Node>>,
     Json(req): Json<crate::rpc::types::FaucetRequest>,
 ) -> ApiResult<crate::rpc::types::FaucetResponse> {
-    let faucet_kp = node.config.faucet_keypair.as_ref()
-        .ok_or_else(|| ApiError::BadRequest("Faucet is not enabled on this node".to_string()))?;
+    let faucet_kp =
+        node.config.faucet_keypair.as_ref().ok_or_else(|| {
+            ApiError::BadRequest("Faucet is not enabled on this node".to_string())
+        })?;
 
     let to_addr = Address::from_bech32(&req.address)
         .map_err(|e| ApiError::BadRequest(format!("Invalid address: {}", e)))?;
@@ -418,13 +461,18 @@ pub async fn faucet_request(
     }
 
     // Nonce = highest confirmed nonce or next pending nonce (whichever is larger).
-    let confirmed_nonce = node.state.read().await
+    let confirmed_nonce = node
+        .state
+        .read()
+        .await
         .get_account(&faucet_addr)
         .map(|a| a.nonce)
         .unwrap_or(0);
     let nonce = {
         let mempool = node.mempool.read().await;
-        mempool.next_nonce_for(&faucet_addr).unwrap_or(confirmed_nonce)
+        mempool
+            .next_nonce_for(&faucet_addr)
+            .unwrap_or(confirmed_nonce)
     };
 
     let amount = Amount::from_atoms(node.config.faucet_amount_atoms);
@@ -433,7 +481,9 @@ pub async fn faucet_request(
     let tx = Transaction::new_transfer(faucet_kp, to_addr, amount, fee, nonce);
     let tx_hash = hex::encode(tx.hash());
 
-    node.mempool.write().await
+    node.mempool
+        .write()
+        .await
         .add(tx)
         .map_err(|e| ApiError::BadRequest(e.to_string()))?;
 
@@ -453,31 +503,36 @@ pub async fn get_account_proof(
     State(node): State<Arc<Node>>,
     Path(raw_address): Path<String>,
 ) -> ApiResult<MerkleProofResponse> {
-    use vinx_crypto::{merkle_proof_for, verify_merkle_proof, sha256};
+    use vinx_crypto::{merkle_proof_for, sha256, verify_merkle_proof};
 
-    let address = Address::from_bech32(&raw_address)
-        .map_err(|e| ApiError::BadRequest(e.to_string()))?;
+    let address =
+        Address::from_bech32(&raw_address).map_err(|e| ApiError::BadRequest(e.to_string()))?;
 
     let state = node.state.read().await;
 
     // Build sorted leaf list (same order as compute_state_root)
     let entries = state.accounts_sorted();
 
-    let index = entries.iter().position(|a| a.address == address)
+    let index = entries
+        .iter()
+        .position(|a| a.address == address)
         .ok_or_else(|| ApiError::NotFound(format!("Account {} not found", raw_address)))?;
 
-    let leaves: Vec<vinx_crypto::Hash32> = entries.iter().map(|a| {
-        let addr = a.address.as_str().as_bytes();
-        let mut buf = Vec::with_capacity(addr.len() + 48);
-        buf.extend_from_slice(addr);
-        buf.extend_from_slice(&a.balance.atoms().to_be_bytes());
-        buf.extend_from_slice(&a.nonce.to_be_bytes());
-        buf.extend_from_slice(&a.staked.atoms().to_be_bytes());
-        buf.push(a.frozen as u8);
-        buf.extend_from_slice(&a.stake_since.to_be_bytes());
-        buf.extend_from_slice(&a.frozen_since.to_be_bytes());
-        sha256(&buf)
-    }).collect();
+    let leaves: Vec<vinx_crypto::Hash32> = entries
+        .iter()
+        .map(|a| {
+            let addr = a.address.as_str().as_bytes();
+            let mut buf = Vec::with_capacity(addr.len() + 48);
+            buf.extend_from_slice(addr);
+            buf.extend_from_slice(&a.balance.atoms().to_be_bytes());
+            buf.extend_from_slice(&a.nonce.to_be_bytes());
+            buf.extend_from_slice(&a.staked.atoms().to_be_bytes());
+            buf.push(a.frozen as u8);
+            buf.extend_from_slice(&a.stake_since.to_be_bytes());
+            buf.extend_from_slice(&a.frozen_since.to_be_bytes());
+            sha256(&buf)
+        })
+        .collect();
 
     let state_root = state.compute_state_root();
     let leaf_hash = leaves[index];
@@ -490,10 +545,13 @@ pub async fn get_account_proof(
         address: raw_address,
         leaf_hash: hex::encode(leaf_hash),
         state_root: hex::encode(state_root),
-        proof: proof.iter().map(|s| MerkleProofStepResponse {
-            sibling: hex::encode(s.sibling),
-            sibling_is_right: s.sibling_is_right,
-        }).collect(),
+        proof: proof
+            .iter()
+            .map(|s| MerkleProofStepResponse {
+                sibling: hex::encode(s.sibling),
+                sibling_is_right: s.sibling_is_right,
+            })
+            .collect(),
         valid,
     }))
 }

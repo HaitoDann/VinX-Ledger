@@ -24,10 +24,10 @@ impl Storage {
     /// Atomically saves state and chain to disk.
     /// Writes to temp files first, then renames — safe against mid-write crashes.
     pub fn save(&self, state: &WorldState, chain: &Chain) -> io::Result<()> {
-        let state_bytes = bincode::serialize(state)
-            .map_err(|e| io::Error::new(io::ErrorKind::Other, e))?;
-        let chain_bytes = bincode::serialize(chain)
-            .map_err(|e| io::Error::new(io::ErrorKind::Other, e))?;
+        let state_bytes =
+            bincode::serialize(state).map_err(|e| io::Error::new(io::ErrorKind::Other, e))?;
+        let chain_bytes =
+            bincode::serialize(chain).map_err(|e| io::Error::new(io::ErrorKind::Other, e))?;
 
         let state_tmp = self.dir.join("state.bin.tmp");
         let chain_tmp = self.dir.join("chain.bin.tmp");

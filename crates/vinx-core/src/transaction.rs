@@ -236,9 +236,7 @@ impl Transaction {
         let major = u16::from_be_bytes([self.payload[0], self.payload[1]]);
         let minor = u16::from_be_bytes([self.payload[2], self.payload[3]]);
         let patch = u16::from_be_bytes([self.payload[4], self.payload[5]]);
-        let activation_height = u64::from_be_bytes(
-            self.payload[6..14].try_into().ok()?
-        );
+        let activation_height = u64::from_be_bytes(self.payload[6..14].try_into().ok()?);
         Some((ProtocolVersion::new(major, minor, patch), activation_height))
     }
 
@@ -281,7 +279,12 @@ impl Transaction {
     }
 
     /// Constructs a SlashValidator tx with equivocation evidence.
-    pub fn new_slash_validator(keypair: &KeyPair, validator: Address, evidence: &crate::block::SlashEvidence, nonce: u64) -> Self {
+    pub fn new_slash_validator(
+        keypair: &KeyPair,
+        validator: Address,
+        evidence: &crate::block::SlashEvidence,
+        nonce: u64,
+    ) -> Self {
         let pk = keypair.public_key();
         let from = Address::from_public_key(&pk);
         let payload = bincode::serialize(evidence).expect("slash evidence serializable");
@@ -302,11 +305,15 @@ impl Transaction {
 
     /// Constructs and signs an AdminAction transaction (admin only).
     /// The `action` is a GovernanceAction that will be executed immediately on-chain.
-    pub fn new_admin_action(keypair: &KeyPair, action: &crate::governance::GovernanceAction, nonce: u64) -> Self {
+    pub fn new_admin_action(
+        keypair: &KeyPair,
+        action: &crate::governance::GovernanceAction,
+        nonce: u64,
+    ) -> Self {
         let pk = keypair.public_key();
         let from = Address::from_public_key(&pk);
-        let payload = bincode::serialize(action)
-            .expect("GovernanceAction serialization is infallible");
+        let payload =
+            bincode::serialize(action).expect("GovernanceAction serialization is infallible");
         let mut tx = Self {
             tx_type: TransactionType::AdminAction,
             from: from.clone(),

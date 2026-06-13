@@ -43,8 +43,8 @@ impl Address {
                 "expected Bech32 variant".to_string(),
             ));
         }
-        let payload =
-            Vec::<u8>::from_base32(&data_u5).map_err(|e| CryptoError::InvalidAddress(e.to_string()))?;
+        let payload = Vec::<u8>::from_base32(&data_u5)
+            .map_err(|e| CryptoError::InvalidAddress(e.to_string()))?;
         if payload.len() != 20 {
             return Err(CryptoError::InvalidAddress(format!(
                 "expected 20-byte payload, got {}",

@@ -3,7 +3,9 @@ use vinx_core::{
     amount::{Amount, DECIMAL_FACTOR, DEFAULT_FEE_FLOOR_ATOMS},
     Transaction,
 };
-use vinx_crypto::{merkle_proof_for, merkle_root, sha256, verify_merkle_proof, Address, Hash32, KeyPair};
+use vinx_crypto::{
+    merkle_proof_for, merkle_root, sha256, verify_merkle_proof, Address, Hash32, KeyPair,
+};
 use vinx_state::WorldState;
 
 // ─── Helper ──────────────────────────────────────────────────────────────────

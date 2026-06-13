@@ -157,7 +157,11 @@ impl RpcClient {
         limit: usize,
         offset: usize,
     ) -> Result<AccountTxsInfo, WalletError> {
-        self.get(&format!("/account/{}/txs?limit={}&offset={}", address, limit, offset)).await
+        self.get(&format!(
+            "/account/{}/txs?limit={}&offset={}",
+            address, limit, offset
+        ))
+        .await
     }
 
     pub async fn get_network_stats(&self) -> Result<NetworkStatsInfo, WalletError> {
@@ -186,10 +190,7 @@ impl RpcClient {
             .map_err(|e| WalletError::NodeError(e.to_string()))
     }
 
-    async fn get<T: for<'de> serde::Deserialize<'de>>(
-        &self,
-        path: &str,
-    ) -> Result<T, WalletError> {
+    async fn get<T: for<'de> serde::Deserialize<'de>>(&self, path: &str) -> Result<T, WalletError> {
         let url = format!("{}{}", self.base_url, path);
         let resp = self
             .client

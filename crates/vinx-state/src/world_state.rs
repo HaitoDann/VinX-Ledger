@@ -256,9 +256,18 @@ impl WorldState {
         let staking = Amount::staking_share(tx.fee);
         let validator_reward = Amount::validator_share(tx.fee);
         let melt = Amount::melt_share(tx.fee);
-        self.staking_pool = self.staking_pool.checked_add(staking).ok_or(CoreError::AmountOverflow)?;
-        self.validator_fee_pool = self.validator_fee_pool.checked_add(validator_reward).ok_or(CoreError::AmountOverflow)?;
-        self.melt_pool = self.melt_pool.checked_add(melt).ok_or(CoreError::AmountOverflow)?;
+        self.staking_pool = self
+            .staking_pool
+            .checked_add(staking)
+            .ok_or(CoreError::AmountOverflow)?;
+        self.validator_fee_pool = self
+            .validator_fee_pool
+            .checked_add(validator_reward)
+            .ok_or(CoreError::AmountOverflow)?;
+        self.melt_pool = self
+            .melt_pool
+            .checked_add(melt)
+            .ok_or(CoreError::AmountOverflow)?;
 
         Ok(())
     }
@@ -343,7 +352,9 @@ impl WorldState {
         let target = self
             .accounts
             .get_mut(tx.to.as_str())
-            .ok_or(CoreError::InvalidTransaction("target account does not exist".to_string()))?;
+            .ok_or(CoreError::InvalidTransaction(
+                "target account does not exist".to_string(),
+            ))?;
         if target.frozen {
             return Err(CoreError::InvalidTransaction(
                 "account is already frozen".to_string(),
@@ -371,7 +382,9 @@ impl WorldState {
         let target = self
             .accounts
             .get_mut(tx.to.as_str())
-            .ok_or(CoreError::InvalidTransaction("target account does not exist".to_string()))?;
+            .ok_or(CoreError::InvalidTransaction(
+                "target account does not exist".to_string(),
+            ))?;
         target.frozen = false;
         target.frozen_since = 0;
         Ok(())
@@ -440,7 +453,10 @@ impl WorldState {
             .get_mut(tx.from.as_str())
             .ok_or(CoreError::InsufficientBalance)?;
         if sender.nonce != tx.nonce {
-            return Err(CoreError::InvalidNonce { expected: sender.nonce, got: tx.nonce });
+            return Err(CoreError::InvalidNonce {
+                expected: sender.nonce,
+                got: tx.nonce,
+            });
         }
         sender.nonce += 1;
         self.validator_set.add(tx.to.clone());
@@ -465,7 +481,10 @@ impl WorldState {
             .get_mut(tx.from.as_str())
             .ok_or(CoreError::InsufficientBalance)?;
         if sender.nonce != tx.nonce {
-            return Err(CoreError::InvalidNonce { expected: sender.nonce, got: tx.nonce });
+            return Err(CoreError::InvalidNonce {
+                expected: sender.nonce,
+                got: tx.nonce,
+            });
         }
         sender.nonce += 1;
         self.validator_set.remove(&tx.to);
@@ -516,9 +535,7 @@ impl WorldState {
 
     /// Distributes staking pool every STAKING_DISTRIBUTION_INTERVAL blocks.
     pub fn distribute_staking_rewards(&mut self) -> Amount {
-        if self.block_height == 0
-            || self.block_height % STAKING_DISTRIBUTION_INTERVAL != 0
-        {
+        if self.block_height == 0 || self.block_height % STAKING_DISTRIBUTION_INTERVAL != 0 {
             return Amount::ZERO;
         }
         if self.staking_pool == Amount::ZERO {
@@ -575,33 +592,53 @@ impl WorldState {
 
         // Both signatures must be from the same validator (the target)
         if evidence.sig_a.validator != *target || evidence.sig_b.validator != *target {
-            return Err(CoreError::InvalidTransaction("evidence validator mismatch".to_string()));
+            return Err(CoreError::InvalidTransaction(
+                "evidence validator mismatch".to_string(),
+            ));
         }
 
         if Address::from_public_key(&evidence.sig_a.pub_key) != *target {
-            return Err(CoreError::InvalidTransaction("sig_a pubkey/address mismatch".to_string()));
+            return Err(CoreError::InvalidTransaction(
+                "sig_a pubkey/address mismatch".to_string(),
+            ));
         }
         if Address::from_public_key(&evidence.sig_b.pub_key) != *target {
-            return Err(CoreError::InvalidTransaction("sig_b pubkey/address mismatch".to_string()));
+            return Err(CoreError::InvalidTransaction(
+                "sig_b pubkey/address mismatch".to_string(),
+            ));
         }
 
         // Signatures must be different (they signed different things)
         if evidence.sig_a.signature == evidence.sig_b.signature {
-            return Err(CoreError::InvalidTransaction("signatures are identical — not equivocation".to_string()));
+            return Err(CoreError::InvalidTransaction(
+                "signatures are identical — not equivocation".to_string(),
+            ));
         }
 
         if !self.validator_set.contains(target) {
-            return Err(CoreError::InvalidTransaction("target is not a validator".to_string()));
+            return Err(CoreError::InvalidTransaction(
+                "target is not a validator".to_string(),
+            ));
         }
 
-        let sender = self.accounts.get_mut(tx.from.as_str()).ok_or(CoreError::InsufficientBalance)?;
+        let sender = self
+            .accounts
+            .get_mut(tx.from.as_str())
+            .ok_or(CoreError::InsufficientBalance)?;
         if sender.nonce != tx.nonce {
-            return Err(CoreError::InvalidNonce { expected: sender.nonce, got: tx.nonce });
+            return Err(CoreError::InvalidNonce {
+                expected: sender.nonce,
+                got: tx.nonce,
+            });
         }
         sender.nonce += 1;
 
         // Slash: redirect the validator's stake to the redistribution pool
-        let slashed = self.accounts.get(target.as_str()).map(|a| a.staked).unwrap_or(Amount::ZERO);
+        let slashed = self
+            .accounts
+            .get(target.as_str())
+            .map(|a| a.staked)
+            .unwrap_or(Amount::ZERO);
         if slashed > Amount::ZERO {
             // 10% bounty to the reporter
             let bounty = Amount::from_atoms(slashed.atoms() / 10);
@@ -631,12 +668,19 @@ impl WorldState {
         // Require sender to be the admin
         self.check_admin(tx)?;
 
-        let action: GovernanceAction = bincode::deserialize(&tx.payload)
-            .map_err(|_| CoreError::InvalidTransaction("malformed governance action payload".to_string()))?;
+        let action: GovernanceAction = bincode::deserialize(&tx.payload).map_err(|_| {
+            CoreError::InvalidTransaction("malformed governance action payload".to_string())
+        })?;
 
-        let sender = self.accounts.get_mut(tx.from.as_str()).ok_or(CoreError::InsufficientBalance)?;
+        let sender = self
+            .accounts
+            .get_mut(tx.from.as_str())
+            .ok_or(CoreError::InsufficientBalance)?;
         if sender.nonce != tx.nonce {
-            return Err(CoreError::InvalidNonce { expected: sender.nonce, got: tx.nonce });
+            return Err(CoreError::InvalidNonce {
+                expected: sender.nonce,
+                got: tx.nonce,
+            });
         }
         sender.nonce += 1;
 
@@ -660,7 +704,10 @@ impl WorldState {
                 }
                 tracing::info!(atoms, "Admin: fee floor updated");
             }
-            GovernanceAction::ScheduleUpgrade { version, activation_height } => {
+            GovernanceAction::ScheduleUpgrade {
+                version,
+                activation_height,
+            } => {
                 if self.pending_upgrade.is_none() {
                     self.pending_upgrade = Some(vinx_core::ScheduledUpgrade {
                         version: version.clone(),
@@ -690,7 +737,8 @@ impl WorldState {
                 tracing::info!(?condition, "Admin: Coffre condition marked");
             }
             GovernanceAction::UnlockCoffre => {
-                if self.coffre_mica_casp && self.coffre_external_audit && self.coffre_public_policy {
+                if self.coffre_mica_casp && self.coffre_external_audit && self.coffre_public_policy
+                {
                     let amount = self.coffre_maturity;
                     self.distribution_pool = self.distribution_pool.saturating_add(amount);
                     self.circulating_supply = self.circulating_supply.saturating_add(amount);
@@ -698,7 +746,7 @@ impl WorldState {
                     tracing::info!(%amount, "Admin: Coffre Maturité unlocked → distribution pool");
                 } else {
                     return Err(CoreError::InvalidTransaction(
-                        "UnlockCoffre rejected: not all 3 conditions are met".to_string()
+                        "UnlockCoffre rejected: not all 3 conditions are met".to_string(),
                     ));
                 }
             }
@@ -876,10 +924,18 @@ mod tests {
         let target_addr = Address::from_public_key(&target_kp.public_key());
         state.credit_for_test(target_addr.clone(), Amount::from_vinx(100));
 
-        state.apply_transaction(&Transaction::new_freeze(&admin_kp, target_addr.clone(), 0)).unwrap();
+        state
+            .apply_transaction(&Transaction::new_freeze(&admin_kp, target_addr.clone(), 0))
+            .unwrap();
         assert!(state.is_frozen(&target_addr));
 
-        state.apply_transaction(&Transaction::new_unfreeze(&admin_kp, target_addr.clone(), 1)).unwrap();
+        state
+            .apply_transaction(&Transaction::new_unfreeze(
+                &admin_kp,
+                target_addr.clone(),
+                1,
+            ))
+            .unwrap();
         assert!(!state.is_frozen(&target_addr));
         assert_eq!(state.accounts[target_addr.as_str()].frozen_since, 0);
     }
@@ -939,12 +995,7 @@ mod tests {
     fn test_upgrade_too_soon_rejected() {
         let (mut state, admin_kp, _) = admin_state();
         // 1 block is way too short
-        let tx = Transaction::new_announce_upgrade(
-            &admin_kp,
-            ProtocolVersion::new(2, 0, 0),
-            1,
-            0,
-        );
+        let tx = Transaction::new_announce_upgrade(&admin_kp, ProtocolVersion::new(2, 0, 0), 1, 0);
         assert!(matches!(
             state.apply_transaction(&tx),
             Err(CoreError::UpgradeViolation(_))
@@ -957,12 +1008,14 @@ mod tests {
         let notice = vinx_core::amount::UPGRADE_NOTICE_PATCH_BLOCKS;
         let activation = notice + 1;
 
-        state.apply_transaction(&Transaction::new_announce_upgrade(
-            &admin_kp,
-            ProtocolVersion::new(1, 0, 1),
-            activation,
-            0,
-        )).unwrap();
+        state
+            .apply_transaction(&Transaction::new_announce_upgrade(
+                &admin_kp,
+                ProtocolVersion::new(1, 0, 1),
+                activation,
+                0,
+            ))
+            .unwrap();
 
         // Not yet activated
         state.block_height = activation - 1;

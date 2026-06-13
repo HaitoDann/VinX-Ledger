@@ -50,7 +50,10 @@ impl Chain {
     }
 
     pub fn tip_hash(&self) -> Hash32 {
-        self.blocks.last().map(|(h, _)| *h).unwrap_or(GENESIS_PREV_HASH)
+        self.blocks
+            .last()
+            .map(|(h, _)| *h)
+            .unwrap_or(GENESIS_PREV_HASH)
     }
 
     pub fn get_block(&self, height: u64) -> Option<&Block> {
@@ -116,7 +119,13 @@ impl Chain {
                 if offset >= len {
                     return vec![];
                 }
-                hashes.iter().rev().skip(offset).take(limit).cloned().collect()
+                hashes
+                    .iter()
+                    .rev()
+                    .skip(offset)
+                    .take(limit)
+                    .cloned()
+                    .collect()
             }
         }
     }
@@ -153,7 +162,10 @@ impl Chain {
     /// Returns `true` if equivocation is detected (validator signed a DIFFERENT
     /// block at the same height — a slashable offense).
     pub fn record_signature(&mut self, validator: &str, height: u64, block_hash: Hash32) -> bool {
-        let heights = self.slash_evidence.entry(validator.to_string()).or_default();
+        let heights = self
+            .slash_evidence
+            .entry(validator.to_string())
+            .or_default();
         let hashes = heights.entry(height).or_default();
         if !hashes.is_empty() && !hashes.contains(&block_hash) {
             return true; // double-sign detected
@@ -178,7 +190,10 @@ impl Chain {
         }
         // Rebuild index to remove entries from pruned blocks
         self.rebuild_tx_index();
-        tracing::info!(compacted = compact_up_to, "Chain compacted old transaction data");
+        tracing::info!(
+            compacted = compact_up_to,
+            "Chain compacted old transaction data"
+        );
     }
 }
 
@@ -230,7 +245,7 @@ mod tests {
 
         assert!(!chain.record_signature(addr, 5, hash_a)); // first sig — ok
         assert!(!chain.record_signature(addr, 5, hash_a)); // same hash — ok (idempotent)
-        assert!(chain.record_signature(addr, 5, hash_b));  // different hash — EQUIVOCATION
+        assert!(chain.record_signature(addr, 5, hash_b)); // different hash — EQUIVOCATION
     }
 
     #[test]
