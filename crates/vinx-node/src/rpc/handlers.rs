@@ -311,12 +311,15 @@ pub async fn get_snapshot(
 
 /// Returns node metrics in Prometheus text format.
 pub async fn get_metrics(State(node): State<Arc<Node>>) -> impl IntoResponse {
-    let height = node.chain.read().await.tip_height();
+    let height      = node.chain.read().await.tip_height();
     let mempool_size = node.mempool.read().await.size();
-    let state = node.state.read().await;
-    let base_fee = state.base_fee.atoms();
-    let melt_pool = state.melt_pool.atoms();
+    let state       = node.state.read().await;
+    let base_fee    = state.base_fee.atoms();
+    let melt_pool   = state.melt_pool.atoms();
     let staking_pool = state.staking_pool.atoms();
+    let distribution_pool = state.distribution_pool.atoms();
+    let circulating  = state.circulating_supply.atoms();
+    let validator_count = state.validator_set.len();
 
     let body = format!(
         "# HELP vinx_chain_height Current chain tip height\n\
@@ -328,12 +331,21 @@ pub async fn get_metrics(State(node): State<Arc<Node>>) -> impl IntoResponse {
          # HELP vinx_base_fee Current dynamic fee floor in atoms\n\
          # TYPE vinx_base_fee gauge\n\
          vinx_base_fee {base_fee}\n\
-         # HELP vinx_melt_pool Total melted fees in atoms\n\
-         # TYPE vinx_melt_pool counter\n\
+         # HELP vinx_melt_pool Total melted fees in atoms (redistribution reserve)\n\
+         # TYPE vinx_melt_pool gauge\n\
          vinx_melt_pool {melt_pool}\n\
          # HELP vinx_staking_pool Current staking reward pool in atoms\n\
          # TYPE vinx_staking_pool gauge\n\
-         vinx_staking_pool {staking_pool}\n"
+         vinx_staking_pool {staking_pool}\n\
+         # HELP vinx_distribution_pool Distribution pool in atoms\n\
+         # TYPE vinx_distribution_pool gauge\n\
+         vinx_distribution_pool {distribution_pool}\n\
+         # HELP vinx_circulating_supply Total circulating supply in atoms\n\
+         # TYPE vinx_circulating_supply gauge\n\
+         vinx_circulating_supply {circulating}\n\
+         # HELP vinx_validator_count Number of active validators in the PoA set\n\
+         # TYPE vinx_validator_count gauge\n\
+         vinx_validator_count {validator_count}\n"
     );
 
     (
