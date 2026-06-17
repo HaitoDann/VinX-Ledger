@@ -1,3 +1,5 @@
+use std::collections::HashMap;
+
 use serde::{Deserialize, Serialize};
 use vinx_core::{Account, Block, ProtocolVersion, ScheduledUpgrade, Transaction, ValidatorSet};
 use vinx_crypto::Hash32;
@@ -139,20 +141,85 @@ impl TxWithBlockResponse {
 }
 
 #[derive(Serialize)]
+pub struct ValidatorInfo {
+    pub address: String,
+    /// True if this validator is the round-robin leader for the next block.
+    pub is_next_leader: bool,
+    /// Last block height produced by this validator (None = never seen on this node).
+    pub last_seen_height: Option<u64>,
+    /// Considered online if it produced a block within the last 10 slots.
+    pub online: bool,
+}
+
+#[derive(Serialize)]
 pub struct ValidatorSetResponse {
     pub count: usize,
     pub quorum: usize,
-    pub validators: Vec<String>,
+    pub next_leader: String,
+    pub validators: Vec<ValidatorInfo>,
 }
 
 impl ValidatorSetResponse {
-    pub fn from_validator_set(vs: &ValidatorSet) -> Self {
+    pub fn from_validator_set(
+        vs: &ValidatorSet,
+        next_height: u64,
+        liveness: &HashMap<String, u64>,
+        slot_window: u64,
+    ) -> Self {
+        let next_leader = vs.leader_at(next_height).to_string();
+        let validators = vs
+            .validators()
+            .iter()
+            .map(|a| {
+                let addr_str = a.to_string();
+                let last_seen = liveness.get(&addr_str).copied();
+                let online =
+                    last_seen.map_or(false, |h| next_height.saturating_sub(h) <= slot_window);
+                ValidatorInfo {
+                    is_next_leader: addr_str == next_leader,
+                    address: addr_str,
+                    last_seen_height: last_seen,
+                    online,
+                }
+            })
+            .collect();
         Self {
             count: vs.len(),
             quorum: vs.quorum(),
-            validators: vs.validators().iter().map(|a| a.to_string()).collect(),
+            next_leader,
+            validators,
         }
     }
+}
+
+// ─── Validator join request ───────────────────────────────────────────────────
+
+#[derive(Deserialize)]
+pub struct ValidatorJoinRequestBody {
+    pub address: String,
+    pub p2p_multiaddr: Option<String>,
+    pub message: Option<String>,
+}
+
+#[derive(Serialize)]
+pub struct ValidatorJoinResponse {
+    pub accepted: bool,
+    pub address: String,
+    pub note: &'static str,
+}
+
+#[derive(Serialize)]
+pub struct ValidatorJoinListResponse {
+    pub count: usize,
+    pub requests: Vec<ValidatorJoinRequestItem>,
+}
+
+#[derive(Serialize)]
+pub struct ValidatorJoinRequestItem {
+    pub address: String,
+    pub p2p_multiaddr: Option<String>,
+    pub message: Option<String>,
+    pub submitted_at: u64,
 }
 
 #[derive(Serialize)]

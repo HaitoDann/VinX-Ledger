@@ -9,7 +9,7 @@ use axum::{
     Json,
 };
 use futures::stream::{self, Stream};
-use std::{convert::Infallible, sync::Arc};
+use std::{convert::Infallible, sync::Arc, time::SystemTime};
 use tokio_stream::wrappers::BroadcastStream;
 use tokio_stream::StreamExt as _;
 use vinx_core::{amount::Amount, Transaction};
@@ -137,9 +137,69 @@ pub async fn get_mempool(State(node): State<Arc<Node>>) -> ApiResult<MempoolResp
 }
 
 pub async fn get_validators(State(node): State<Arc<Node>>) -> ApiResult<ValidatorSetResponse> {
+    let vs = node.validator_set.read().await;
+    let next_height = node.chain.read().await.tip_height() + 1;
+    let liveness = node.validator_liveness.read().await;
+    // "Online" = seen within 10 slots
     Ok(Json(ValidatorSetResponse::from_validator_set(
-        &*node.validator_set.read().await,
+        &vs,
+        next_height,
+        &liveness,
+        10,
     )))
+}
+
+pub async fn post_validator_request(
+    State(node): State<Arc<Node>>,
+    Json(body): Json<ValidatorJoinRequestBody>,
+) -> ApiResult<ValidatorJoinResponse> {
+    use crate::node::ValidatorJoinRequest;
+
+    // Basic address format check
+    Address::from_bech32(&body.address).map_err(|e| ApiError::BadRequest(e.to_string()))?;
+
+    let now = SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs())
+        .unwrap_or(0);
+
+    let req = ValidatorJoinRequest {
+        address: body.address.clone(),
+        p2p_multiaddr: body.p2p_multiaddr,
+        message: body.message,
+        submitted_at: now,
+    };
+
+    node.validator_requests.lock().await.push(req);
+    tracing::info!(address = %body.address, "Validator join request received");
+
+    Ok(Json(ValidatorJoinResponse {
+        accepted: true,
+        address: body.address,
+        note: "Request queued. An admin must approve it via AddValidator transaction.",
+    }))
+}
+
+pub async fn get_validator_requests(
+    State(node): State<Arc<Node>>,
+    headers: axum::http::HeaderMap,
+) -> ApiResult<ValidatorJoinListResponse> {
+    if !check_admin_auth(&headers, node.config.admin_token.as_deref()) {
+        return Err(ApiError::Unauthorized("Admin token required".to_string()));
+    }
+    let requests = node.validator_requests.lock().await;
+    Ok(Json(ValidatorJoinListResponse {
+        count: requests.len(),
+        requests: requests
+            .iter()
+            .map(|r| ValidatorJoinRequestItem {
+                address: r.address.clone(),
+                p2p_multiaddr: r.p2p_multiaddr.clone(),
+                message: r.message.clone(),
+                submitted_at: r.submitted_at,
+            })
+            .collect(),
+    }))
 }
 
 pub async fn get_protocol_status(

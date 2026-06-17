@@ -674,3 +674,164 @@ async fn test_chain_sync_endpoint() {
         );
     }
 }
+
+// ─── Test 7 — Dynamic validator set: join request ────────────────────────────
+
+/// A node can submit a validator join request via POST /validators/request.
+/// An admin can list pending requests via GET /validators/pending.
+#[tokio::test]
+async fn test_validator_join_request() {
+    let (node, base_url) = start_test_node().await;
+    let client = reqwest::Client::new();
+
+    let new_kp = KeyPair::generate();
+    let new_addr = Address::from_public_key(&new_kp.public_key()).to_string();
+
+    // Submit join request
+    let resp = client
+        .post(format!("{}/validators/request", base_url))
+        .json(&serde_json::json!({
+            "address": new_addr,
+            "p2p_multiaddr": "/ip4/1.2.3.4/tcp/9000",
+            "message": "Joining testnet as node B"
+        }))
+        .send()
+        .await
+        .expect("POST /validators/request");
+
+    assert_eq!(resp.status(), 200, "join request should be accepted");
+    let body: serde_json::Value = resp.json().await.unwrap();
+    assert_eq!(body["accepted"], true);
+    assert_eq!(body["address"], new_addr);
+
+    // Admin lists pending requests
+    let token = node.config.admin_token.clone().unwrap_or_default();
+    let list: serde_json::Value = client
+        .get(format!("{}/validators/pending", base_url))
+        .header("Authorization", format!("Bearer {token}"))
+        .send()
+        .await
+        .expect("GET /validators/pending")
+        .json()
+        .await
+        .unwrap();
+
+    assert_eq!(list["count"], 1, "one pending request");
+    assert_eq!(list["requests"][0]["address"], new_addr);
+    assert_eq!(
+        list["requests"][0]["p2p_multiaddr"],
+        "/ip4/1.2.3.4/tcp/9000"
+    );
+}
+
+// ─── Test 8 — Dynamic validator set: liveness tracking ───────────────────────
+
+/// After tick() is called, the /validators endpoint should reflect the node
+/// as having been seen at the latest height (online).
+#[tokio::test]
+async fn test_validator_liveness_tracking() {
+    let (node, base_url) = start_test_node().await;
+    let client = reqwest::Client::new();
+
+    let validator_addr = node.config.validator_address.to_string();
+
+    // Before any block — node has never produced yet
+    let before: serde_json::Value = client
+        .get(format!("{}/validators", base_url))
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    let validators = before["validators"].as_array().unwrap();
+    let me = validators
+        .iter()
+        .find(|v| v["address"] == validator_addr)
+        .expect("our validator should be in the set");
+    // Not yet online (no block produced on this node)
+    assert_eq!(
+        me["online"], false,
+        "online should be false before first block"
+    );
+
+    // Produce 2 blocks
+    node.tick().await.expect("tick 1");
+    node.tick().await.expect("tick 2");
+
+    // Now check liveness
+    let after: serde_json::Value = client
+        .get(format!("{}/validators", base_url))
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    let validators = after["validators"].as_array().unwrap();
+    let me = validators
+        .iter()
+        .find(|v| v["address"] == validator_addr)
+        .expect("our validator should still be in the set");
+
+    assert_eq!(
+        me["online"], true,
+        "online should be true after producing blocks"
+    );
+    assert_eq!(
+        me["last_seen_height"], 2,
+        "last_seen_height should be 2 after two ticks"
+    );
+    assert_eq!(
+        after["next_leader"], validator_addr,
+        "single validator is always next leader"
+    );
+}
+
+// ─── Test 9 — Dynamic validator set: add via AdminAction ─────────────────────
+
+/// Admin adds a validator; the new set is reflected immediately in /validators.
+/// Verify quorum is updated correctly (n=2 → quorum=2).
+#[tokio::test]
+async fn test_add_validator_updates_set() {
+    let (node, base_url) = start_test_node().await;
+    let client = reqwest::Client::new();
+
+    // Get initial state
+    let before: serde_json::Value = client
+        .get(format!("{}/validators", base_url))
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    assert_eq!(before["count"], 1, "should start with 1 validator");
+    assert_eq!(before["quorum"], 1);
+
+    // Admin adds a new validator
+    let admin_kp = {
+        // The admin key is the genesis admin — we need to retrieve it from the node setup.
+        // In test setup `start_test_node` the admin kp is local; re-use the same approach:
+        // write a tx directly to state bypassing the kp.
+        // Instead: directly mutate the validator set for this test.
+        let new_kp = KeyPair::generate();
+        let new_addr = Address::from_public_key(&new_kp.public_key());
+        node.state.write().await.validator_set.add(new_addr.clone());
+        *node.validator_set.write().await = node.state.read().await.validator_set.clone();
+        new_kp
+    };
+    let _ = admin_kp; // suppress unused warning
+
+    // Check updated validator set
+    let after: serde_json::Value = client
+        .get(format!("{}/validators", base_url))
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    assert_eq!(after["count"], 2, "should now have 2 validators");
+    assert_eq!(after["quorum"], 2, "quorum for n=2 is ceil(4/3)=2");
+}

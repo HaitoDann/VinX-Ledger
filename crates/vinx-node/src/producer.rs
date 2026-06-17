@@ -141,6 +141,113 @@ pub fn produce_block(
     Ok(block)
 }
 
+/// Produces a block as a backup validator stepping in for an offline scheduled leader.
+/// Skips the round-robin leader check — any registered validator may call this after
+/// the slot timeout has expired.
+pub fn produce_block_backup(
+    state: &mut WorldState,
+    chain: &mut Chain,
+    mempool: &mut Mempool,
+    config: &NodeConfig,
+    validator_set: &ValidatorSet,
+    timestamp: u64,
+) -> Result<Block, NodeError> {
+    // Only registered validators may step in
+    if !validator_set.contains(&config.validator_address) {
+        return Err(NodeError::Consensus(
+            "backup producer is not a registered validator".into(),
+        ));
+    }
+    produce_block_inner(state, chain, mempool, config, validator_set, timestamp)
+}
+
+fn produce_block_inner(
+    state: &mut WorldState,
+    chain: &mut Chain,
+    mempool: &mut Mempool,
+    config: &NodeConfig,
+    validator_set: &ValidatorSet,
+    timestamp: u64,
+) -> Result<Block, NodeError> {
+    let next_height = chain.tip_height() + 1;
+    let prev_hash = chain.tip_hash();
+
+    let admitted = mempool.flush_staged();
+    if admitted > 0 {
+        tracing::debug!(admitted, "Staged transactions verified and admitted");
+    }
+
+    state.update_base_fee(mempool.size(), config.max_block_txs);
+    let current_base_fee = state.base_fee;
+
+    let mut block_txs: Vec<vinx_core::Transaction> = Vec::new();
+    let pending = mempool.drain(config.max_block_txs);
+    let mut rejected = 0usize;
+    let mut requeue_buf: Vec<vinx_core::Transaction> = Vec::new();
+    for tx in pending {
+        match state.apply_transaction(&tx) {
+            Ok(()) => block_txs.push(tx),
+            Err(e) => {
+                tracing::debug!(error = %e, "Transaction rejected during block production");
+                if is_future_nonce(&e) {
+                    requeue_buf.push(tx);
+                } else {
+                    rejected += 1;
+                }
+            }
+        }
+    }
+    if !requeue_buf.is_empty() {
+        mempool.requeue(requeue_buf);
+    }
+    if rejected > 0 {
+        tracing::warn!(rejected, "Transactions dropped from block");
+    }
+
+    state.block_height = next_height;
+    state.check_auto_unfreeze();
+    state.check_upgrade_activation();
+
+    let validator_reward = state.flush_validator_fee_pool();
+    if validator_reward > Amount::ZERO {
+        state.credit(&config.validator_address, validator_reward);
+    }
+    let rewards = state.distribute_staking_rewards();
+    if rewards > Amount::ZERO {
+        tracing::debug!(rewards = %rewards, "Staking rewards distributed");
+    }
+
+    let state_root = state.compute_state_root();
+    let header = BlockHeader {
+        height: next_height,
+        prev_hash,
+        timestamp,
+        validator: config.validator_address.clone(),
+        tx_count: block_txs.len() as u32,
+        state_root,
+        base_fee: current_base_fee.atoms() as u64,
+    };
+    let mut block = Block {
+        header,
+        transactions: block_txs,
+        signatures: Vec::new(),
+    };
+    let header_hash = block.hash();
+    block.signatures.push(BlockSignature {
+        validator: config.validator_address.clone(),
+        pub_key: config.validator_keypair.public_key(),
+        signature: config.validator_keypair.sign(&header_hash),
+    });
+    chain.push(block.clone());
+
+    tracing::info!(
+        height = next_height,
+        txs = block.header.tx_count,
+        "Block produced (backup)"
+    );
+    Ok(block)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

@@ -3,17 +3,21 @@ use vinx_crypto::{Address, KeyPair};
 
 use crate::NodeError;
 
-/// Validates that a block has the correct round-robin proposer and enough co-signatures.
+/// Validates that a block has a registered proposer and enough co-signatures.
 /// Genesis blocks (height 0) are exempt from both checks.
+///
+/// # Proposer rule
+/// Any registered validator may propose a block — the round-robin schedule is
+/// advisory (normal) or pre-empted when the scheduled leader is offline (slot skip).
+/// What is always enforced: the proposer must be a current member of the validator set.
 pub fn validate_block(block: &Block, validator_set: &ValidatorSet) -> Result<(), NodeError> {
     if block.is_genesis() {
         return Ok(());
     }
 
-    let expected = validator_set.leader_at(block.header.height);
-    if expected != &block.header.validator {
+    if !validator_set.contains(&block.header.validator) {
         return Err(NodeError::Consensus(format!(
-            "wrong proposer at height {}: expected {expected}, got {}",
+            "block {} proposed by non-validator {}",
             block.header.height, block.header.validator
         )));
     }
@@ -103,17 +107,32 @@ mod tests {
     }
 
     #[test]
-    fn test_wrong_proposer_rejected() {
+    fn test_non_validator_proposer_rejected() {
         let validators = kps(2);
         let vs = ValidatorSet::new(validators.iter().map(addr_of).collect());
 
-        // height 1 % 2 = 1 → validators[1] is the leader
-        // But we declare validators[0] as proposer — wrong!
-        let mut block = make_block(1, addr_of(&validators[0]));
+        // An outsider (not in the set) cannot propose a block
+        let outsider = KeyPair::generate();
+        let mut block = make_block(1, addr_of(&outsider));
+        // Give it enough signatures from real validators (quorum met)
         sign_block(&mut block, &validators[0], &vs).unwrap();
         sign_block(&mut block, &validators[1], &vs).unwrap();
 
         assert!(validate_block(&block, &vs).is_err());
+    }
+
+    #[test]
+    fn test_backup_proposer_accepted() {
+        let validators = kps(3);
+        let vs = ValidatorSet::new(validators.iter().map(addr_of).collect());
+
+        // height 1 % 3 = 1 → validators[1] is the scheduled leader.
+        // But in a slot-skip scenario, validators[2] may step in as backup.
+        // As long as validators[2] is in the set and quorum is met, it's valid.
+        let mut block = make_block(1, addr_of(&validators[2]));
+        sign_block(&mut block, &validators[0], &vs).unwrap();
+        sign_block(&mut block, &validators[2], &vs).unwrap(); // quorum = 2
+        assert!(validate_block(&block, &vs).is_ok());
     }
 
     #[test]

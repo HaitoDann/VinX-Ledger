@@ -4,11 +4,26 @@ use std::time::{Instant, SystemTime, UNIX_EPOCH};
 use tokio::sync::{broadcast, Mutex, RwLock};
 
 use crate::{
-    chain::Chain, config::NodeConfig, mempool::Mempool, p2p::P2pHandle, producer::produce_block,
-    storage::Storage, NodeError,
+    chain::Chain,
+    config::NodeConfig,
+    mempool::Mempool,
+    p2p::P2pHandle,
+    producer::{produce_block, produce_block_backup},
+    storage::Storage,
+    NodeError,
 };
 use vinx_core::{Block, ValidatorSet};
 use vinx_state::WorldState;
+
+// ─── Validator join request ───────────────────────────────────────────────────
+
+#[derive(Clone, serde::Serialize, serde::Deserialize)]
+pub struct ValidatorJoinRequest {
+    pub address: String,
+    pub p2p_multiaddr: Option<String>,
+    pub message: Option<String>,
+    pub submitted_at: u64,
+}
 
 /// Events broadcast to SSE subscribers on each produced block.
 #[derive(Clone, Debug)]
@@ -32,6 +47,12 @@ pub struct Node {
     pub block_events: broadcast::Sender<BlockEvent>,
     /// Per-address faucet cooldown tracker + serialization lock for faucet requests.
     pub faucet_cooldowns: Arc<Mutex<HashMap<String, Instant>>>,
+    /// Timestamp of the last block produced or received — used for slot-skip logic.
+    pub last_block_instant: Arc<RwLock<Instant>>,
+    /// Last block height seen from each validator address (liveness tracking).
+    pub validator_liveness: Arc<RwLock<HashMap<String, u64>>>,
+    /// Pending validator join requests (in-memory, not persisted).
+    pub validator_requests: Arc<Mutex<Vec<ValidatorJoinRequest>>>,
 }
 
 impl Node {
@@ -49,6 +70,9 @@ impl Node {
             p2p: None,
             block_events,
             faucet_cooldowns: Arc::new(Mutex::new(HashMap::new())),
+            last_block_instant: Arc::new(RwLock::new(Instant::now())),
+            validator_liveness: Arc::new(RwLock::new(HashMap::new())),
+            validator_requests: Arc::new(Mutex::new(Vec::new())),
         })
     }
 
@@ -95,6 +119,9 @@ impl Node {
             p2p,
             block_events,
             faucet_cooldowns: Arc::new(Mutex::new(HashMap::new())),
+            last_block_instant: Arc::new(RwLock::new(Instant::now())),
+            validator_liveness: Arc::new(RwLock::new(HashMap::new())),
+            validator_requests: Arc::new(Mutex::new(Vec::new())),
         })
     }
 
@@ -119,14 +146,52 @@ impl Node {
             timestamp,
         )?;
 
-        // Sync validator set from state (may have changed if AddValidator/RemoveValidator was applied)
-        let new_vs = state.validator_set.clone();
-        drop(state);
-        drop(chain);
-        drop(mempool);
-        *self.validator_set.write().await = new_vs;
+        self.after_block_produced(&block, &state.validator_set)
+            .await;
+        Ok(block)
+    }
 
-        // Broadcast new-block event to SSE subscribers
+    /// Produces a block as a backup validator (slot skip — the scheduled leader is offline).
+    async fn tick_as_backup(&self) -> Result<Block, NodeError> {
+        let timestamp = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .map(|d| d.as_secs())
+            .unwrap_or(0);
+
+        let mut state = self.state.write().await;
+        let mut chain = self.chain.write().await;
+        let mut mempool = self.mempool.write().await;
+        let vs = self.validator_set.read().await.clone();
+
+        let block = produce_block_backup(
+            &mut state,
+            &mut chain,
+            &mut mempool,
+            &self.config,
+            &vs,
+            timestamp,
+        )?;
+
+        self.after_block_produced(&block, &state.validator_set)
+            .await;
+        Ok(block)
+    }
+
+    /// Common bookkeeping after any block is produced by this node.
+    async fn after_block_produced(&self, block: &Block, new_vs: &ValidatorSet) {
+        // Update validator set from state (AddValidator/RemoveValidator tx effects)
+        *self.validator_set.write().await = new_vs.clone();
+
+        // Record liveness for this node
+        self.validator_liveness.write().await.insert(
+            self.config.validator_address.to_string(),
+            block.header.height,
+        );
+
+        // Reset the slot-timeout clock
+        *self.last_block_instant.write().await = Instant::now();
+
+        // Broadcast SSE event
         let event = BlockEvent {
             height: block.header.height,
             tx_count: block.header.tx_count,
@@ -134,25 +199,84 @@ impl Node {
         };
         let _ = self.block_events.send(event);
 
-        // Broadcast the new block via P2P so co-validators can sign it
+        // Broadcast to P2P peers
         if let Some(ref p2p) = self.p2p {
-            p2p.broadcast_block(&block);
+            p2p.broadcast_block(block);
+        }
+    }
+
+    /// Checks whether this node should step in as a backup producer because
+    /// the scheduled leader has not produced within the slot timeout window.
+    ///
+    /// Backup validators activate in round-robin order after the stuck leader:
+    /// - validator at distance 1 activates after `2 × block_time`
+    /// - validator at distance 2 activates after `3 × block_time`
+    /// - etc.
+    async fn try_backup_production(&self) {
+        let block_time = self.config.block_time_secs;
+        let elapsed = self.last_block_instant.read().await.elapsed().as_secs();
+
+        // Grace period: at least 2 full slot-times must have elapsed
+        if elapsed < 2 * block_time {
+            return;
         }
 
-        Ok(block)
+        let vs = self.validator_set.read().await.clone();
+        let n = vs.len();
+        if n <= 1 {
+            return; // Single-validator chain — can't skip yourself
+        }
+
+        let height = self.chain.read().await.tip_height() + 1;
+        let leader_idx = vs.leader_idx_at(height);
+
+        let my_idx = match vs.index_of(&self.config.validator_address) {
+            Some(i) => i,
+            None => return, // Not a validator
+        };
+
+        if my_idx == leader_idx {
+            return; // We ARE the scheduled leader — tick() will handle this
+        }
+
+        // My position in the backup queue (1 = first backup, 2 = second, …)
+        let distance = (my_idx + n - leader_idx) % n;
+
+        // Each backup activates one slot-time later than the previous
+        let activation_secs = (distance as u64 + 1) * block_time;
+        if elapsed >= activation_secs {
+            tracing::warn!(
+                height,
+                scheduled_leader = %vs.leader_at(height),
+                my_addr = %self.config.validator_address,
+                elapsed_secs = elapsed,
+                "Slot timeout — stepping in as backup producer (distance {})",
+                distance
+            );
+            match self.tick_as_backup().await {
+                Ok(b) => {
+                    tracing::info!(height = b.header.height, "Backup block produced");
+                    self.persist().await;
+                }
+                Err(e) => {
+                    tracing::debug!(error = %e, "Backup production attempt failed");
+                }
+            }
+        }
     }
 
     /// Background task: produce a block every `block_time_secs`, then persist.
-    /// Detects leader timeouts when the expected leader hasn't produced for 3+ consecutive slots.
+    ///
+    /// Implements **slot skip**: if the scheduled leader is offline, backup validators
+    /// activate in round-robin order after 2, 3, … slot-times respectively, so the
+    /// chain keeps advancing as long as any validator is live.
     pub async fn run_block_producer(self: Arc<Self>) {
         let interval = std::time::Duration::from_secs(self.config.block_time_secs);
-        let mut missed_slots: u32 = 0;
 
         loop {
             tokio::time::sleep(interval).await;
             match self.tick().await {
                 Ok(block) => {
-                    missed_slots = 0;
                     tracing::info!(
                         height = block.header.height,
                         txs = block.header.tx_count,
@@ -162,24 +286,11 @@ impl Node {
                     self.persist().await;
                 }
                 Err(NodeError::Consensus(_)) => {
-                    // Not our slot — track how long the expected leader has been missing
-                    missed_slots += 1;
-                    if missed_slots >= 3 {
-                        let vs = self.validator_set.read().await.clone();
-                        let height = self.chain.read().await.tip_height() + 1;
-                        let leader = vs.leader_at(height);
-                        tracing::warn!(
-                            height,
-                            leader = %leader,
-                            missed_slots,
-                            "Leader timeout — expected leader has not produced for {} consecutive slots",
-                            missed_slots
-                        );
-                    }
+                    // Not our scheduled slot — check whether we should step in as backup
+                    self.try_backup_production().await;
                 }
                 Err(e) => {
                     tracing::error!(error = %e, "Block production failed");
-                    missed_slots = 0;
                 }
             }
         }

@@ -28,6 +28,11 @@ pub fn router(node: Arc<Node>) -> Router {
         .route("/block/:height", get(handlers::get_block))
         .route("/mempool/size", get(handlers::get_mempool))
         .route("/validators", get(handlers::get_validators))
+        .route(
+            "/validators/request",
+            post(handlers::post_validator_request),
+        )
+        .route("/validators/pending", get(handlers::get_validator_requests))
         .route("/protocol/version", get(handlers::get_protocol_status))
         .route("/metrics", get(handlers::get_metrics))
         .route("/network/stats", get(handlers::get_network_stats))
