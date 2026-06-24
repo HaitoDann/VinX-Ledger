@@ -41,7 +41,7 @@ fn test_storage_roundtrip() {
     let (_, admin) = make_addr();
     let (_, validator) = make_addr();
 
-    let state = create_genesis_state(&GenesisConfig {
+    let state = create_genesis_state(&GenesisConfig { chain_id: vinx_core::CHAIN_ID_DEVNET,
         admin_address: admin.clone(),
         validator_address: validator.clone(),
     });
@@ -78,7 +78,7 @@ async fn test_state_persists_across_node_restarts() {
 
     // ── First run: produce 5 blocks ──────────────────────────────────────────
     {
-        let state = create_genesis_state(&GenesisConfig {
+        let state = create_genesis_state(&GenesisConfig { chain_id: vinx_core::CHAIN_ID_DEVNET,
             admin_address: admin_addr.clone(),
             validator_address: validator_addr.clone(),
         });
@@ -89,12 +89,8 @@ async fn test_state_persists_across_node_restarts() {
         for _ in 0..5 {
             node.tick().await.unwrap();
         }
-        // Persist manually (block producer normally does this after each tick)
-        {
-            let state = node.state.read().await;
-            let chain = node.chain.read().await;
-            Storage::new(tmp.path()).save(&state, &chain).unwrap();
-        }
+        // Persist via the node's own storage (avoids opening a second redb instance)
+        node.persist().await;
         assert_eq!(node.chain.read().await.tip_height(), 5);
     }
 

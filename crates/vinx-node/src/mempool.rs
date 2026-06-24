@@ -4,6 +4,8 @@ use vinx_core::{CoreError, Transaction};
 use vinx_crypto::{Address, Hash32};
 
 const DEFAULT_MAX_SIZE: usize = 10_000;
+/// Maximum pending transactions per sender address.
+const MAX_PER_ADDRESS: usize = 50;
 
 /// Per-account nonce-ordered transaction queue.
 /// Each account's transactions are sorted by nonce; drain always pulls the
@@ -51,9 +53,39 @@ impl Mempool {
             return Err(MempoolError::Duplicate);
         }
         let addr = tx.from.to_string();
-        self.queues.entry(addr).or_default().insert(tx.nonce, tx);
+        let queue = self.queues.entry(addr).or_default();
+        if queue.len() >= MAX_PER_ADDRESS {
+            // Undo the seen insertion
+            self.seen.remove(&hash);
+            return Err(MempoolError::RateLimited);
+        }
+        queue.insert(tx.nonce, tx);
         self.pending_count += 1;
         Ok(())
+    }
+
+    /// Removes all transactions whose `expires_at_height` <= `current_height`.
+    /// Call this once per block tick before draining for production.
+    pub fn prune_expired(&mut self, current_height: u64) {
+        let mut expired_hashes: Vec<Hash32> = Vec::new();
+        for queue in self.queues.values_mut() {
+            queue.retain(|_, tx| {
+                let expired = tx
+                    .expires_at_height
+                    .map(|h| current_height >= h)
+                    .unwrap_or(false);
+                if expired {
+                    expired_hashes.push(tx.hash());
+                }
+                !expired
+            });
+        }
+        let removed = expired_hashes.len();
+        for h in expired_hashes {
+            self.seen.remove(&h);
+        }
+        self.pending_count = self.pending_count.saturating_sub(removed);
+        self.queues.retain(|_, q| !q.is_empty());
     }
 
     /// Stages a transaction for deferred parallel signature verification.
@@ -193,6 +225,8 @@ pub enum MempoolError {
     Full,
     #[error("Transaction already submitted")]
     Duplicate,
+    #[error("Too many pending transactions from this address")]
+    RateLimited,
 }
 
 #[cfg(test)]

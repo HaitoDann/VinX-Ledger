@@ -15,6 +15,16 @@ use crate::{
 use vinx_core::{Block, ValidatorSet};
 use vinx_state::WorldState;
 
+// ─── Transaction receipt ─────────────────────────────────────────────────────
+
+#[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
+pub struct TxReceipt {
+    pub tx_hash: String,
+    pub block_height: u64,
+    pub success: bool,
+    pub error: Option<String>,
+}
+
 // ─── Validator join request ───────────────────────────────────────────────────
 
 #[derive(Clone, serde::Serialize, serde::Deserialize)]
@@ -53,6 +63,8 @@ pub struct Node {
     pub validator_liveness: Arc<RwLock<HashMap<String, u64>>>,
     /// Pending validator join requests (in-memory, not persisted).
     pub validator_requests: Arc<Mutex<Vec<ValidatorJoinRequest>>>,
+    /// Transaction receipts indexed by hex-encoded tx hash.
+    pub receipts: Arc<RwLock<HashMap<String, TxReceipt>>>,
 }
 
 impl Node {
@@ -73,6 +85,7 @@ impl Node {
             last_block_instant: Arc::new(RwLock::new(Instant::now())),
             validator_liveness: Arc::new(RwLock::new(HashMap::new())),
             validator_requests: Arc::new(Mutex::new(Vec::new())),
+            receipts: Arc::new(RwLock::new(HashMap::new())),
         })
     }
 
@@ -122,6 +135,7 @@ impl Node {
             last_block_instant: Arc::new(RwLock::new(Instant::now())),
             validator_liveness: Arc::new(RwLock::new(HashMap::new())),
             validator_requests: Arc::new(Mutex::new(Vec::new())),
+            receipts: Arc::new(RwLock::new(HashMap::new())),
         })
     }
 
@@ -137,6 +151,8 @@ impl Node {
         let mut mempool = self.mempool.write().await;
         let vs = self.validator_set.read().await.clone();
 
+        mempool.prune_expired(state.block_height);
+
         let block = produce_block(
             &mut state,
             &mut chain,
@@ -145,6 +161,24 @@ impl Node {
             &vs,
             timestamp,
         )?;
+
+        let receipts = block
+            .transactions
+            .iter()
+            .map(|tx| {
+                let hash = hex::encode(tx.hash());
+                (
+                    hash.clone(),
+                    TxReceipt {
+                        tx_hash: hash,
+                        block_height: block.header.height,
+                        success: true,
+                        error: None,
+                    },
+                )
+            })
+            .collect::<HashMap<_, _>>();
+        self.receipts.write().await.extend(receipts);
 
         self.after_block_produced(&block, &state.validator_set)
             .await;

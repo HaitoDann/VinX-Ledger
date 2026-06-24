@@ -1,5 +1,6 @@
 pub mod messages;
 
+use std::collections::HashMap;
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -146,9 +147,20 @@ pub async fn start(
         .listen_on(listen_addr.clone())
         .map_err(|e| NodeError::Config(format!("P2P listen failed: {e}")))?;
 
+    // Dial explicitly configured peers (e.g. from config file)
     for peer_addr in &config.peer_addrs {
         if let Ok(addr) = peer_addr.parse::<Multiaddr>() {
             let _ = swarm.dial(addr);
+        }
+    }
+    // Dial hardcoded bootstrap peers for initial network discovery
+    for peer_addr in &config.bootstrap_peers {
+        match peer_addr.parse::<Multiaddr>() {
+            Ok(addr) => {
+                info!(addr = %addr, "Dialing bootstrap peer");
+                let _ = swarm.dial(addr);
+            }
+            Err(e) => warn!(addr = %peer_addr, error = %e, "Invalid bootstrap peer address"),
         }
     }
 
@@ -177,6 +189,8 @@ pub async fn start(
     })
 }
 
+const BAN_THRESHOLD: i32 = -5;
+
 async fn run_event_loop(
     mut swarm: libp2p::Swarm<VinxBehaviour>,
     mut cmd_rx: mpsc::UnboundedReceiver<P2pCommand>,
@@ -187,6 +201,8 @@ async fn run_event_loop(
     local_kp: vinx_crypto::KeyPair,
     local_addr: Address,
 ) {
+    let mut reputation: HashMap<PeerId, i32> = HashMap::new();
+
     loop {
         tokio::select! {
             cmd = cmd_rx.recv() => {
@@ -205,7 +221,7 @@ async fn run_event_loop(
             }
             event = swarm.next() => {
                 if let Some(event) = event {
-                    handle_swarm_event(event, &chain, &mempool, &state, &validator_set, &local_kp, &local_addr, &mut swarm).await;
+                    handle_swarm_event(event, &chain, &mempool, &state, &validator_set, &local_kp, &local_addr, &mut swarm, &mut reputation).await;
                 }
             }
         }
@@ -221,6 +237,7 @@ async fn handle_swarm_event(
     local_kp: &vinx_crypto::KeyPair,
     local_addr: &Address,
     swarm: &mut libp2p::Swarm<VinxBehaviour>,
+    reputation: &mut HashMap<PeerId, i32>,
 ) {
     match event {
         SwarmEvent::NewListenAddr { address, .. } => {
@@ -253,9 +270,17 @@ async fn handle_swarm_event(
 
         SwarmEvent::Behaviour(VinxBehaviourEvent::Gossipsub(gossipsub::Event::Message {
             message,
+            propagation_source,
             ..
         })) => {
             let Some(msg) = P2pMessage::decode(&message.data) else {
+                // Undecipherable message — penalize sender
+                let score = reputation.entry(propagation_source).or_insert(0);
+                *score -= 1;
+                if *score <= BAN_THRESHOLD {
+                    warn!(peer = %propagation_source, score, "Banning peer for invalid messages");
+                    swarm.behaviour_mut().gossipsub.blacklist_peer(&propagation_source);
+                }
                 return;
             };
             dispatch_message(

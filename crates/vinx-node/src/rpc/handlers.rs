@@ -615,3 +615,33 @@ pub async fn get_account_proof(
         valid,
     }))
 }
+
+pub async fn get_tx_receipt(
+    Path(hash_hex): Path<String>,
+    State(node): State<Arc<Node>>,
+) -> ApiResult<TxReceiptResponse> {
+    let receipts = node.receipts.read().await;
+    let receipt = receipts
+        .get(&hash_hex)
+        .ok_or_else(|| ApiError::NotFound(format!("receipt not found for tx {hash_hex}")))?;
+    Ok(Json(TxReceiptResponse {
+        tx_hash: receipt.tx_hash.clone(),
+        block_height: receipt.block_height,
+        success: receipt.success,
+        error: receipt.error.clone(),
+    }))
+}
+
+pub async fn get_fee_estimate(State(node): State<Arc<Node>>) -> ApiResult<FeeEstimateResponse> {
+    let state = node.state.read().await;
+    let mempool = node.mempool.read().await;
+    let base_fee = state.base_fee;
+    let sample_amount = vinx_core::Amount::from_vinx(100);
+    let recommended_fee = sample_amount.calculate_fee(base_fee);
+    Ok(Json(FeeEstimateResponse {
+        base_fee_atoms: base_fee.atoms().to_string(),
+        recommended_fee_atoms: recommended_fee.atoms().to_string(),
+        mempool_pending: mempool.size(),
+        mempool_max: node.config.max_block_txs,
+    }))
+}

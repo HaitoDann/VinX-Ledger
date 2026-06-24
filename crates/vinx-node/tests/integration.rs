@@ -37,7 +37,7 @@ async fn start_test_node() -> (Arc<Node>, String) {
     // NOTE: GenesisConfig is written here with the NEW two-field signature that
     // will be in place once `validator_address` is added.  The existing codebase
     // only has `admin_address`; the compiler will surface any mismatch.
-    let state = create_genesis_state(&GenesisConfig {
+    let state = create_genesis_state(&GenesisConfig { chain_id: vinx_core::CHAIN_ID_DEVNET,
         admin_address: admin_addr.clone(),
         validator_address: validator_addr.clone(),
     });
@@ -357,7 +357,7 @@ async fn test_faucet_endpoint() {
     let recipient_kp = KeyPair::generate();
     let recipient_addr = Address::from_public_key(&recipient_kp.public_key());
 
-    let state = create_genesis_state(&GenesisConfig {
+    let state = create_genesis_state(&GenesisConfig { chain_id: vinx_core::CHAIN_ID_DEVNET,
         admin_address: admin_addr.clone(),
         validator_address: validator_addr.clone(),
     });
@@ -508,7 +508,7 @@ async fn test_crash_recovery() {
 
     // ── Phase 1 : run, produce blocks, persist ────────────────────────────
     let (saved_height, saved_supply, saved_sender, saved_receiver) = {
-        let state = create_genesis_state(&GenesisConfig {
+        let state = create_genesis_state(&GenesisConfig { chain_id: vinx_core::CHAIN_ID_DEVNET,
             admin_address: admin_addr.clone(),
             validator_address: validator_addr.clone(),
         });

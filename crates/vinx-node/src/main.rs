@@ -1,6 +1,7 @@
 use clap::Parser;
 use std::path::{Path, PathBuf};
 use tracing_subscriber::EnvFilter;
+use vinx_core::CHAIN_ID_DEVNET;
 use vinx_crypto::{Address, KeyPair};
 use vinx_node::{chain::Chain, config::NodeConfig, storage::Storage};
 use vinx_state::{create_genesis_state, GenesisConfig};
@@ -72,6 +73,12 @@ struct Args {
     /// RPC URL of a trusted peer to sync from on startup, e.g. http://1.2.3.4:8545
     #[arg(long)]
     sync_peer: Option<String>,
+    /// Chain ID: 1=mainnet, 7=testnet, 42=devnet (default: 42)
+    #[arg(long, default_value_t = CHAIN_ID_DEVNET)]
+    chain_id: u32,
+    /// Hardcoded bootstrap peers (repeatable, in addition to --peers)
+    #[arg(long, num_args = 0..)]
+    bootstrap_peers: Vec<String>,
 }
 
 // ─── Key file helpers ─────────────────────────────────────────────────────────
@@ -152,6 +159,8 @@ async fn main() {
     } else {
         file_cfg.peers.unwrap_or_default()
     };
+    let bootstrap_peers = args.bootstrap_peers;
+    let chain_id = args.chain_id;
     let max_block_txs = file_cfg.max_block_txs.unwrap_or(1_000);
     let sync_peer_rpc = args.sync_peer.or(file_cfg.sync_peer_rpc);
 
@@ -186,6 +195,7 @@ async fn main() {
             let state = create_genesis_state(&GenesisConfig {
                 admin_address: admin_addr.clone(),
                 validator_address: validator_addr.clone(),
+                chain_id,
             });
             let (chain, _genesis) = Chain::new_with_genesis(validator_addr.clone(), timestamp);
             (state, chain, false)
@@ -203,6 +213,10 @@ async fn main() {
     if !peers.is_empty() {
         config = config.with_peers(peers);
     }
+    if !bootstrap_peers.is_empty() {
+        config = config.with_bootstrap_peers(bootstrap_peers);
+    }
+    config = config.with_chain_id(chain_id);
     if let Some(ref url) = sync_peer_rpc {
         config = config.with_sync_peer(url.clone());
     }

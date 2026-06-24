@@ -4,7 +4,8 @@ use crate::{
     mempool::{is_future_nonce, Mempool},
     NodeError,
 };
-use vinx_core::{amount::Amount, Block, BlockHeader, BlockSignature, ValidatorSet};
+use vinx_core::{amount::Amount, Block, BlockHeader, BlockSignature, Transaction, ValidatorSet};
+use vinx_crypto::sha256;
 use vinx_state::WorldState;
 
 /// Produces the next block: applies mempool transactions, distributes staking rewards,
@@ -105,6 +106,7 @@ pub fn produce_block(
 
     // Compute Merkle root over all account states after all mutations
     let state_root = state.compute_state_root();
+    let receipts_root = compute_receipts_root(&block_txs);
 
     let header = BlockHeader {
         height: next_height,
@@ -114,6 +116,7 @@ pub fn produce_block(
         tx_count: block_txs.len() as u32,
         state_root,
         base_fee: current_base_fee.atoms() as u64,
+        receipts_root,
     };
     let mut block = Block {
         header,
@@ -166,7 +169,7 @@ fn produce_block_inner(
     chain: &mut Chain,
     mempool: &mut Mempool,
     config: &NodeConfig,
-    validator_set: &ValidatorSet,
+    _validator_set: &ValidatorSet,
     timestamp: u64,
 ) -> Result<Block, NodeError> {
     let next_height = chain.tip_height() + 1;
@@ -218,6 +221,7 @@ fn produce_block_inner(
     }
 
     let state_root = state.compute_state_root();
+    let receipts_root = compute_receipts_root(&block_txs);
     let header = BlockHeader {
         height: next_height,
         prev_hash,
@@ -226,6 +230,7 @@ fn produce_block_inner(
         tx_count: block_txs.len() as u32,
         state_root,
         base_fee: current_base_fee.atoms() as u64,
+        receipts_root,
     };
     let mut block = Block {
         header,
@@ -248,6 +253,19 @@ fn produce_block_inner(
     Ok(block)
 }
 
+/// Computes a SHA-256 receipts root from the ordered list of included transactions.
+/// Empty blocks get the zero hash.  Non-empty blocks: sha256(hash0 || hash1 || ...).
+fn compute_receipts_root(txs: &[Transaction]) -> [u8; 32] {
+    if txs.is_empty() {
+        return [0u8; 32];
+    }
+    let mut bytes = Vec::with_capacity(txs.len() * 32);
+    for tx in txs {
+        bytes.extend_from_slice(&tx.hash());
+    }
+    sha256(&bytes)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -267,6 +285,7 @@ mod tests {
         let state = create_genesis_state(&GenesisConfig {
             admin_address: admin_addr,
             validator_address: validator_addr.clone(),
+            chain_id: vinx_core::CHAIN_ID_DEVNET,
         });
 
         let (chain, _) = Chain::new_with_genesis(validator_addr.clone(), 0);

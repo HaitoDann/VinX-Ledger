@@ -19,11 +19,14 @@ pub struct BlockHeader {
     /// Dynamic fee floor at block production time, in atoms.
     #[serde(default)]
     pub base_fee: u64,
+    /// SHA-256 Merkle root of transaction receipts in this block.
+    #[serde(default)]
+    pub receipts_root: Hash32,
 }
 
 impl BlockHeader {
     pub fn hash(&self) -> Hash32 {
-        let mut bytes = Vec::with_capacity(144);
+        let mut bytes = Vec::with_capacity(176);
         bytes.extend_from_slice(&self.height.to_be_bytes());
         bytes.extend_from_slice(&self.prev_hash);
         bytes.extend_from_slice(&self.timestamp.to_be_bytes());
@@ -31,6 +34,7 @@ impl BlockHeader {
         bytes.extend_from_slice(&self.tx_count.to_be_bytes());
         bytes.extend_from_slice(&self.state_root);
         bytes.extend_from_slice(&self.base_fee.to_be_bytes());
+        bytes.extend_from_slice(&self.receipts_root);
         sha256(&bytes)
     }
 }
@@ -115,6 +119,7 @@ mod tests {
             tx_count: 0,
             state_root: [0u8; 32],
             base_fee: 0,
+            receipts_root: [0u8; 32],
         }
     }
 
@@ -128,6 +133,7 @@ mod tests {
                 tx_count: 0,
                 state_root: [0u8; 32],
                 base_fee: 0,
+                receipts_root: [0u8; 32],
             },
             transactions: vec![],
             signatures: vec![],

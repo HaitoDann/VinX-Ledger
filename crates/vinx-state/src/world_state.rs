@@ -6,6 +6,7 @@ use vinx_core::{
         STAKING_DISTRIBUTION_INTERVAL,
     },
     block::SlashEvidence,
+    chain_id::CHAIN_ID_DEVNET,
     governance::{CoffreCondition, GovernanceAction},
     protocol::{ProtocolVersion, ScheduledUpgrade},
     Account, CoreError, Transaction, TransactionType, ValidatorSet,
@@ -52,10 +53,17 @@ pub struct WorldState {
     pub pending_upgrade: Option<ScheduledUpgrade>,
     /// Active PoA validator set. Admin can add/remove validators via governance txs.
     pub validator_set: ValidatorSet,
+    /// Chain ID for replay protection — transactions must match this value.
+    #[serde(default = "default_chain_id")]
+    pub chain_id: u32,
 }
 
 fn default_fee_floor() -> Amount {
     Amount::from_atoms(DEFAULT_FEE_FLOOR_ATOMS)
+}
+
+fn default_chain_id() -> u32 {
+    CHAIN_ID_DEVNET
 }
 
 impl Default for WorldState {
@@ -86,6 +94,7 @@ impl WorldState {
             pending_upgrade: None,
             // Placeholder — always overwritten by create_genesis_state before use.
             validator_set: ValidatorSet::single(Address::zero()),
+            chain_id: CHAIN_ID_DEVNET,
         }
     }
 
@@ -173,6 +182,22 @@ impl WorldState {
 
     pub fn apply_transaction(&mut self, tx: &Transaction) -> Result<(), CoreError> {
         if tx.tx_type != TransactionType::Emission {
+            // Chain-ID replay protection
+            if tx.chain_id != self.chain_id {
+                return Err(CoreError::InvalidTransaction(format!(
+                    "chain_id mismatch: tx={} state={}",
+                    tx.chain_id, self.chain_id
+                )));
+            }
+            // TTL check
+            if let Some(expires) = tx.expires_at_height {
+                if self.block_height >= expires {
+                    return Err(CoreError::InvalidTransaction(format!(
+                        "transaction expired at height {} (current {})",
+                        expires, self.block_height
+                    )));
+                }
+            }
             let pk = tx.pub_key.as_ref().ok_or(CoreError::InvalidSignature)?;
             let derived = Address::from_public_key(pk);
             if derived != tx.from {

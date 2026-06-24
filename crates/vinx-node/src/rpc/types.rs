@@ -310,6 +310,29 @@ pub struct MerkleProofStepResponse {
     pub sibling_is_right: bool,
 }
 
+// ─── Receipts ────────────────────────────────────────────────────────────────
+
+#[derive(Serialize)]
+pub struct TxReceiptResponse {
+    pub tx_hash: String,
+    pub block_height: u64,
+    pub success: bool,
+    pub error: Option<String>,
+}
+
+// ─── Fee estimation ───────────────────────────────────────────────────────────
+
+#[derive(Serialize)]
+pub struct FeeEstimateResponse {
+    /// Current dynamic base fee in atoms (1× at low load, up to 3× at full mempool).
+    pub base_fee_atoms: String,
+    /// Recommended minimum fee for a standard 100 VinX transfer at the current base fee.
+    pub recommended_fee_atoms: String,
+    /// Mempool occupancy: pending / max.
+    pub mempool_pending: usize,
+    pub mempool_max: usize,
+}
+
 // ─── Faucet ──────────────────────────────────────────────────────────────────
 
 #[derive(serde::Deserialize)]

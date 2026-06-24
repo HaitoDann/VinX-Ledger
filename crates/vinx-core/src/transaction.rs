@@ -1,4 +1,5 @@
 use crate::amount::Amount;
+use crate::chain_id::CHAIN_ID_DEVNET;
 use crate::protocol::ProtocolVersion;
 use serde::{Deserialize, Serialize};
 use vinx_crypto::{sha256, Address, Hash32, KeyPair, PublicKey, VinxSignature};
@@ -51,12 +52,24 @@ pub struct Transaction {
     /// Fee the sender explicitly agrees to pay (validated against protocol minimum).
     pub fee: Amount,
     pub nonce: u64,
+    /// Chain this transaction is valid on — prevents cross-network replay attacks.
+    /// Must match the node's configured chain ID (CHAIN_ID_MAINNET / TESTNET / DEVNET).
+    #[serde(default = "default_chain_id")]
+    pub chain_id: u32,
+    /// Block height after which this transaction is invalid.
+    /// `None` = no expiry (valid until included or evicted from mempool).
+    #[serde(default)]
+    pub expires_at_height: Option<u64>,
     /// Extra typed data for specialized transactions (empty for standard ops).
     /// AnnounceUpgrade: 14 bytes = major(2) || minor(2) || patch(2) || activation_height(8)
     pub payload: Vec<u8>,
     /// Sender's public key — used to verify `from` ownership.
     pub pub_key: Option<PublicKey>,
     pub signature: Option<VinxSignature>,
+}
+
+fn default_chain_id() -> u32 {
+    CHAIN_ID_DEVNET
 }
 
 impl Transaction {
@@ -73,6 +86,14 @@ impl Transaction {
         bytes.extend_from_slice(&self.amount.atoms().to_be_bytes());
         bytes.extend_from_slice(&self.fee.atoms().to_be_bytes());
         bytes.extend_from_slice(&self.nonce.to_be_bytes());
+        bytes.extend_from_slice(&self.chain_id.to_be_bytes());
+        match self.expires_at_height {
+            Some(h) => {
+                bytes.push(1u8);
+                bytes.extend_from_slice(&h.to_be_bytes());
+            }
+            None => bytes.push(0u8),
+        }
         if !self.payload.is_empty() {
             bytes.extend_from_slice(&self.payload);
         }
@@ -108,6 +129,8 @@ impl Transaction {
             amount,
             fee,
             nonce,
+            chain_id: CHAIN_ID_DEVNET,
+            expires_at_height: None,
             payload: vec![],
             pub_key: Some(pk),
             signature: None,
@@ -128,6 +151,8 @@ impl Transaction {
             amount,
             fee,
             nonce,
+            chain_id: CHAIN_ID_DEVNET,
+            expires_at_height: None,
             payload: vec![],
             pub_key: Some(pk),
             signature: None,
@@ -148,6 +173,8 @@ impl Transaction {
             amount,
             fee,
             nonce,
+            chain_id: CHAIN_ID_DEVNET,
+            expires_at_height: None,
             payload: vec![],
             pub_key: Some(pk),
             signature: None,
@@ -167,6 +194,8 @@ impl Transaction {
             amount: Amount::ZERO,
             fee: Amount::ZERO,
             nonce,
+            chain_id: CHAIN_ID_DEVNET,
+            expires_at_height: None,
             payload: vec![],
             pub_key: Some(pk),
             signature: None,
@@ -186,6 +215,8 @@ impl Transaction {
             amount: Amount::ZERO,
             fee: Amount::ZERO,
             nonce,
+            chain_id: CHAIN_ID_DEVNET,
+            expires_at_height: None,
             payload: vec![],
             pub_key: Some(pk),
             signature: None,
@@ -219,6 +250,8 @@ impl Transaction {
             amount: Amount::ZERO,
             fee: Amount::ZERO,
             nonce,
+            chain_id: CHAIN_ID_DEVNET,
+            expires_at_height: None,
             payload,
             pub_key: Some(pk),
             signature: None,
@@ -251,6 +284,8 @@ impl Transaction {
             amount: Amount::ZERO,
             fee: Amount::ZERO,
             nonce,
+            chain_id: CHAIN_ID_DEVNET,
+            expires_at_height: None,
             payload: vec![],
             pub_key: Some(pk),
             signature: None,
@@ -270,6 +305,8 @@ impl Transaction {
             amount: Amount::ZERO,
             fee: Amount::ZERO,
             nonce,
+            chain_id: CHAIN_ID_DEVNET,
+            expires_at_height: None,
             payload: vec![],
             pub_key: Some(pk),
             signature: None,
@@ -295,6 +332,8 @@ impl Transaction {
             amount: Amount::ZERO,
             fee: Amount::ZERO,
             nonce,
+            chain_id: CHAIN_ID_DEVNET,
+            expires_at_height: None,
             payload,
             pub_key: Some(pk),
             signature: None,
@@ -321,6 +360,8 @@ impl Transaction {
             amount: Amount::ZERO,
             fee: Amount::ZERO,
             nonce,
+            chain_id: CHAIN_ID_DEVNET,
+            expires_at_height: None,
             payload,
             pub_key: Some(pk),
             signature: None,
@@ -338,10 +379,24 @@ impl Transaction {
             amount,
             fee: Amount::ZERO,
             nonce: 0,
+            chain_id: CHAIN_ID_DEVNET,
+            expires_at_height: None,
             payload: vec![],
             pub_key: None,
             signature: None,
         }
+    }
+
+    /// Builder: override the chain ID (use CHAIN_ID_MAINNET / TESTNET / DEVNET).
+    pub fn with_chain_id(mut self, chain_id: u32) -> Self {
+        self.chain_id = chain_id;
+        self
+    }
+
+    /// Builder: set block-height expiry for this transaction.
+    pub fn with_expiry(mut self, height: u64) -> Self {
+        self.expires_at_height = Some(height);
+        self
     }
 }
 
