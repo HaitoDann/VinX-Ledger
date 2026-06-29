@@ -139,18 +139,12 @@ mod tests {
         let tx = Transaction::new_transfer(&sender_kp, receiver, amount, fee, 0);
         state.apply_transaction(&tx).unwrap();
 
-        let staking = Amount::staking_share(fee);
-        let validator = Amount::validator_share(fee);
-        let melt = Amount::melt_share(fee);
-        assert_eq!(state.staking_pool, staking);
-        assert_eq!(state.validator_fee_pool, validator);
-        assert_eq!(state.melt_pool, melt);
+        let validator_cut = Amount::validator_share(fee);
+        let treasury_cut = Amount::treasury_share(fee);
+        assert_eq!(state.validator_fee_pool, validator_cut);
+        assert_eq!(state.treasury, treasury_cut);
         assert_eq!(
-            staking
-                .checked_add(validator)
-                .unwrap()
-                .checked_add(melt)
-                .unwrap(),
+            validator_cut.checked_add(treasury_cut).unwrap(),
             fee
         );
     }

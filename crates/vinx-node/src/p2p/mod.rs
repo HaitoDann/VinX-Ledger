@@ -7,7 +7,7 @@ use std::time::Duration;
 use futures::StreamExt;
 use libp2p::{
     gossipsub::{self, IdentTopic, TopicHash},
-    identify, mdns, noise,
+    identify, mdns, noise, quic,
     swarm::{NetworkBehaviour, SwarmEvent},
     tcp, yamux, Multiaddr, PeerId, SwarmBuilder,
 };
@@ -103,6 +103,7 @@ pub async fn start(
             yamux::Config::default,
         )
         .map_err(|e| NodeError::Config(format!("P2P TCP setup failed: {e}")))?
+        .with_quic()
         .with_behaviour(|key| {
             let gossipsub_config = gossipsub::ConfigBuilder::default()
                 .heartbeat_interval(Duration::from_secs(1))
@@ -146,6 +147,17 @@ pub async fn start(
     swarm
         .listen_on(listen_addr.clone())
         .map_err(|e| NodeError::Config(format!("P2P listen failed: {e}")))?;
+
+    // Also listen on QUIC (same port as TCP, different protocol)
+    let quic_listen = config
+        .p2p_listen
+        .as_deref()
+        .unwrap_or("/ip4/0.0.0.0/tcp/9000")
+        .replace("/tcp/", "/udp/");
+    let quic_addr_str = format!("{}/quic-v1", quic_listen);
+    if let Ok(addr) = quic_addr_str.parse::<Multiaddr>() {
+        let _ = swarm.listen_on(addr);
+    }
 
     // Dial explicitly configured peers (e.g. from config file)
     for peer_addr in &config.peer_addrs {

@@ -1,5 +1,6 @@
 use crate::{hash::sha256, CryptoError, PublicKey};
 use bech32::{self, FromBase32, ToBase32, Variant};
+use borsh::{BorshDeserialize, BorshSerialize};
 use serde::{Deserialize, Serialize};
 use std::fmt;
 use std::str::FromStr;
@@ -8,7 +9,7 @@ pub const BECH32_HRP: &str = "vinx";
 
 /// A VinX Ledger address in Bech32 format: `vinx1...`
 /// Derived from the first 20 bytes of SHA-256(public_key).
-#[derive(Clone, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[derive(Clone, Debug, PartialEq, Eq, Hash, Serialize, Deserialize, BorshSerialize, BorshDeserialize)]
 pub struct Address(String);
 
 impl Address {

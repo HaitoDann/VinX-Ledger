@@ -22,23 +22,23 @@ fn total_tracked(state: &WorldState) -> u128 {
         + state.melt_pool.atoms()
         + state.distribution_pool.atoms()
         + state.validator_fee_pool.atoms()
+        + state.treasury_balance().atoms()
 }
 
 // ─── Fee arithmetic ───────────────────────────────────────────────────────────
 
 proptest! {
-    /// The three fee shares must always sum to the exact fee (no atoms lost to rounding).
+    /// The two fee shares must always sum to the exact fee (no atoms lost to rounding).
     #[test]
     fn fee_split_sums_to_fee(atoms in 1u128..=1_000_000_000 * DECIMAL_FACTOR) {
         let fee = Amount::from_atoms(atoms);
-        let staking   = Amount::staking_share(fee);
         let validator = Amount::validator_share(fee);
-        let melt      = Amount::melt_share(fee);
+        let treasury  = Amount::treasury_share(fee);
         prop_assert_eq!(
-            staking.atoms() + validator.atoms() + melt.atoms(),
+            validator.atoms() + treasury.atoms(),
             fee.atoms(),
-            "fee split lost atoms: staking={} validator={} melt={} fee={}",
-            staking.atoms(), validator.atoms(), melt.atoms(), fee.atoms()
+            "fee split lost atoms: validator={} treasury={} fee={}",
+            validator.atoms(), treasury.atoms(), fee.atoms()
         );
     }
 
@@ -46,9 +46,8 @@ proptest! {
     #[test]
     fn fee_parts_never_exceed_total(atoms in 1u128..=1_000_000_000 * DECIMAL_FACTOR) {
         let fee = Amount::from_atoms(atoms);
-        prop_assert!(Amount::staking_share(fee)   <= fee);
         prop_assert!(Amount::validator_share(fee) <= fee);
-        prop_assert!(Amount::melt_share(fee)      <= fee);
+        prop_assert!(Amount::treasury_share(fee)  <= fee);
     }
 
     /// calculate_fee must always return at least the floor.
@@ -224,22 +223,20 @@ proptest! {
         let amount = Amount::from_vinx(amount_vinx);
         let fee    = amount.calculate_fee(state.base_fee);
 
-        let staking_before   = state.staking_pool.atoms();
         let validator_before = state.validator_fee_pool.atoms();
-        let melt_before      = state.melt_pool.atoms();
+        let treasury_before  = state.treasury_balance().atoms();
 
         let tx = Transaction::new_transfer(&sender_kp, receiver_addr, amount, fee, 0);
         state.apply_transaction(&tx).unwrap();
 
-        let staking_gained   = state.staking_pool.atoms()       - staking_before;
         let validator_gained = state.validator_fee_pool.atoms() - validator_before;
-        let melt_gained      = state.melt_pool.atoms()          - melt_before;
+        let treasury_gained  = state.treasury_balance().atoms() - treasury_before;
 
         prop_assert_eq!(
-            staking_gained + validator_gained + melt_gained,
+            validator_gained + treasury_gained,
             fee.atoms(),
             "fee not fully distributed: distributed={} expected={}",
-            staking_gained + validator_gained + melt_gained,
+            validator_gained + treasury_gained,
             fee.atoms()
         );
     }

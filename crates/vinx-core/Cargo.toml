@@ -11,3 +11,4 @@ serde_json = { workspace = true }
 thiserror = { workspace = true }
 hex = { workspace = true }
 bincode = { workspace = true }
+borsh = { workspace = true }

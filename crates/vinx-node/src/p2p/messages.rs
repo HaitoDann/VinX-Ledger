@@ -1,8 +1,10 @@
+use borsh::{BorshDeserialize, BorshSerialize};
 use serde::{Deserialize, Serialize};
 use vinx_core::{Block, BlockSignature, Transaction};
 
 /// Messages exchanged over the GossipSub P2P network.
-#[derive(Clone, Debug, Serialize, Deserialize)]
+/// Wire format: Borsh (deterministic, compact, no schema needed).
+#[derive(Clone, Debug, Serialize, Deserialize, BorshSerialize, BorshDeserialize)]
 pub enum P2pMessage {
     /// A new block produced by the leader of that height.
     NewBlock(Block),
@@ -21,11 +23,11 @@ pub enum P2pMessage {
 
 impl P2pMessage {
     pub fn encode(&self) -> Vec<u8> {
-        bincode::serialize(self).unwrap_or_default()
+        borsh::to_vec(self).unwrap_or_default()
     }
 
     pub fn decode(bytes: &[u8]) -> Option<Self> {
-        bincode::deserialize(bytes).ok()
+        borsh::from_slice(bytes).ok()
     }
 
     /// GossipSub topic name for this message type.

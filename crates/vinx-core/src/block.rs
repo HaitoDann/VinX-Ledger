@@ -1,12 +1,13 @@
 use crate::transaction::Transaction;
 use crate::validator_set::ValidatorSet;
+use borsh::{BorshDeserialize, BorshSerialize};
 use serde::{Deserialize, Serialize};
 use std::collections::HashSet;
 use vinx_crypto::{sha256, Address, Hash32, PublicKey, VinxSignature};
 
 pub const GENESIS_PREV_HASH: Hash32 = [0u8; 32];
 
-#[derive(Clone, Debug, Serialize, Deserialize)]
+#[derive(Clone, Debug, Serialize, Deserialize, BorshSerialize, BorshDeserialize)]
 pub struct BlockHeader {
     pub height: u64,
     pub prev_hash: Hash32,
@@ -40,7 +41,7 @@ impl BlockHeader {
 }
 
 /// One validator's co-signature on a block header hash.
-#[derive(Clone, Debug, Serialize, Deserialize)]
+#[derive(Clone, Debug, Serialize, Deserialize, BorshSerialize, BorshDeserialize)]
 pub struct BlockSignature {
     /// Address of the signing validator.
     pub validator: Address,
@@ -60,7 +61,7 @@ pub struct SlashEvidence {
     pub sig_b: BlockSignature,
 }
 
-#[derive(Clone, Debug, Serialize, Deserialize)]
+#[derive(Clone, Debug, Serialize, Deserialize, BorshSerialize, BorshDeserialize)]
 pub struct Block {
     pub header: BlockHeader,
     pub transactions: Vec<Transaction>,

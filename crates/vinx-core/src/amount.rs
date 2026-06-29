@@ -1,3 +1,4 @@
+use borsh::{BorshDeserialize, BorshSerialize};
 use serde::{Deserialize, Serialize};
 use std::fmt;
 
@@ -18,10 +19,9 @@ pub const FEE_DENOMINATOR: u128 = 10_000;
 /// Default fee floor: 0.0001 VinX.
 pub const DEFAULT_FEE_FLOOR_ATOMS: u128 = DECIMAL_FACTOR / 10_000;
 
-/// Fee split (basis points): 40% staking / 30% validators / 30% melt (redistribution pool).
-pub const STAKING_FEE_BPS: u128 = 4_000;
-pub const VALIDATOR_FEE_BPS: u128 = 3_000;
-// melt share = remainder (ensures no rounding loss)
+/// Fee split: 80% validator / 20% treasury.
+pub const VALIDATOR_FEE_BPS: u128 = 8_000;
+// treasury share = remainder (ensures no rounding loss)
 const FEE_BPS_DENOM: u128 = 10_000;
 
 /// Staking rewards distributed every N blocks (~17 minutes at 10s/block).
@@ -40,7 +40,7 @@ pub const UPGRADE_NOTICE_MAJOR_BLOCKS: u64 = 90 * 24 * 360; // 90 days
 
 /// Internal token amount stored as an integer in the smallest unit (10^-18 VinX).
 /// All arithmetic uses checked operations to prevent overflow or underflow.
-#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Default, Serialize, Deserialize)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Default, Serialize, Deserialize, BorshSerialize, BorshDeserialize)]
 pub struct Amount(pub(crate) u128);
 
 impl Amount {
@@ -82,23 +82,15 @@ impl Amount {
         }
     }
 
-    /// 40% of a fee amount — goes to the staking pool.
-    pub fn staking_share(fee: Self) -> Self {
-        Amount(fee.0 * STAKING_FEE_BPS / FEE_BPS_DENOM)
-    }
-
-    /// 30% of a fee amount — goes to the block's validator as reward.
+    /// 80% of a fee amount — goes to the block's active validator.
     pub fn validator_share(fee: Self) -> Self {
         Amount(fee.0 * VALIDATOR_FEE_BPS / FEE_BPS_DENOM)
     }
 
-    /// 30% of a fee amount — goes to the melt pool (redistribution reserve, not a burn).
-    pub fn melt_share(fee: Self) -> Self {
-        let s = Self::staking_share(fee);
-        let v = Self::validator_share(fee);
-        fee.checked_sub(s)
-            .unwrap_or(Self::ZERO)
-            .checked_sub(v)
+    /// 20% of a fee amount — goes to the on-chain protocol treasury.
+    /// Computed as remainder to avoid rounding loss.
+    pub fn treasury_share(fee: Self) -> Self {
+        fee.checked_sub(Self::validator_share(fee))
             .unwrap_or(Self::ZERO)
     }
 }
@@ -182,23 +174,13 @@ mod tests {
     }
 
     #[test]
-    fn test_fee_split_40_30_30() {
+    fn test_fee_split_80_20() {
         let fee = Amount::from_vinx(100);
-        let staking = Amount::staking_share(fee);
         let validator = Amount::validator_share(fee);
-        let melt = Amount::melt_share(fee);
-        assert_eq!(staking, Amount::from_vinx(40));
-        assert_eq!(validator, Amount::from_vinx(30));
-        assert_eq!(melt, Amount::from_vinx(30));
-        // All three parts sum to the whole fee
-        assert_eq!(
-            staking
-                .checked_add(validator)
-                .unwrap()
-                .checked_add(melt)
-                .unwrap(),
-            fee
-        );
+        let treasury = Amount::treasury_share(fee);
+        assert_eq!(validator, Amount::from_vinx(80));
+        assert_eq!(treasury, Amount::from_vinx(20));
+        assert_eq!(validator.checked_add(treasury).unwrap(), fee);
     }
 
     #[test]

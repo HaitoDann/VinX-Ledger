@@ -36,6 +36,10 @@ pub struct WorldState {
     /// 30% of every transaction fee accumulates here.
     #[serde(default)]
     pub validator_fee_pool: Amount,
+    /// Protocol treasury: accumulates 20% of every transaction fee.
+    /// Governed by admin — funds protocol development, audits, public policy.
+    #[serde(default)]
+    pub treasury: Amount,
     /// Coffre Maturité: locked until 3 governance conditions are met.
     pub coffre_maturity: Amount,
     #[serde(default)]
@@ -85,6 +89,7 @@ impl WorldState {
             fee_floor,
             base_fee: fee_floor,
             validator_fee_pool: Amount::ZERO,
+            treasury: Amount::ZERO,
             coffre_maturity: Amount::ZERO,
             coffre_mica_casp: false,
             coffre_external_audit: false,
@@ -160,6 +165,10 @@ impl WorldState {
             .unwrap_or(Amount::ZERO)
     }
 
+    pub fn treasury_balance(&self) -> Amount {
+        self.treasury
+    }
+
     pub fn is_frozen(&self, address: &Address) -> bool {
         self.accounts
             .get(address.as_str())
@@ -205,6 +214,22 @@ impl WorldState {
             }
             let sig = tx.signature.as_ref().ok_or(CoreError::InvalidSignature)?;
             pk.verify(&tx.signing_bytes(), sig)?;
+
+            // Sponsored transaction: validate sponsor's key and signature
+            if let Some(ref sponsor_addr) = tx.sponsor {
+                let spk = tx
+                    .sponsor_pub_key
+                    .as_ref()
+                    .ok_or(CoreError::InvalidSignature)?;
+                if &Address::from_public_key(spk) != sponsor_addr {
+                    return Err(CoreError::PubKeyMismatch);
+                }
+                let ssig = tx
+                    .sponsor_signature
+                    .as_ref()
+                    .ok_or(CoreError::InvalidSignature)?;
+                spk.verify(&tx.signing_bytes(), ssig)?;
+            }
         }
 
         match &tx.tx_type {
@@ -242,10 +267,17 @@ impl WorldState {
                 tx.fee, expected_fee
             )));
         }
-        let total_debit = tx
-            .amount
-            .checked_add(tx.fee)
-            .ok_or(CoreError::AmountOverflow)?;
+
+        // Sponsored tx: sender pays only the transfer amount; sponsor pays the fee separately
+        let (sender_debit, fee_payer) = if let Some(ref sponsor_addr) = tx.sponsor {
+            (tx.amount, sponsor_addr.clone())
+        } else {
+            let total = tx
+                .amount
+                .checked_add(tx.fee)
+                .ok_or(CoreError::AmountOverflow)?;
+            (total, tx.from.clone())
+        };
 
         {
             let sender = self
@@ -261,11 +293,26 @@ impl WorldState {
                     got: tx.nonce,
                 });
             }
-            if sender.balance < total_debit {
+            if sender.balance < sender_debit {
                 return Err(CoreError::InsufficientBalance);
             }
-            sender.balance = sender.balance.checked_sub(total_debit).unwrap();
+            sender.balance = sender.balance.checked_sub(sender_debit).unwrap();
             sender.nonce += 1;
+        }
+
+        // Debit fee from sponsor (if different from sender)
+        if fee_payer != tx.from {
+            let sponsor_acc = self
+                .accounts
+                .get_mut(fee_payer.as_str())
+                .ok_or(CoreError::InsufficientBalance)?;
+            if sponsor_acc.frozen {
+                return Err(CoreError::AccountFrozen);
+            }
+            if sponsor_acc.balance < tx.fee {
+                return Err(CoreError::InsufficientBalance);
+            }
+            sponsor_acc.balance = sponsor_acc.balance.checked_sub(tx.fee).unwrap();
         }
 
         let receiver = self
@@ -277,21 +324,16 @@ impl WorldState {
             .checked_add(tx.amount)
             .ok_or(CoreError::AmountOverflow)?;
 
-        // Fee split: 40% staking / 30% validator / 30% melt (redistribution pool)
-        let staking = Amount::staking_share(tx.fee);
-        let validator_reward = Amount::validator_share(tx.fee);
-        let melt = Amount::melt_share(tx.fee);
-        self.staking_pool = self
-            .staking_pool
-            .checked_add(staking)
-            .ok_or(CoreError::AmountOverflow)?;
+        // Fee split: 80% validator / 20% treasury
+        let validator_cut = Amount::validator_share(tx.fee);
+        let treasury_cut = Amount::treasury_share(tx.fee);
         self.validator_fee_pool = self
             .validator_fee_pool
-            .checked_add(validator_reward)
+            .checked_add(validator_cut)
             .ok_or(CoreError::AmountOverflow)?;
-        self.melt_pool = self
-            .melt_pool
-            .checked_add(melt)
+        self.treasury = self
+            .treasury
+            .checked_add(treasury_cut)
             .ok_or(CoreError::AmountOverflow)?;
 
         Ok(())

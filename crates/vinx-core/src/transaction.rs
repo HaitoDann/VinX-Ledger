@@ -1,10 +1,11 @@
 use crate::amount::Amount;
 use crate::chain_id::CHAIN_ID_DEVNET;
 use crate::protocol::ProtocolVersion;
+use borsh::{BorshDeserialize, BorshSerialize};
 use serde::{Deserialize, Serialize};
 use vinx_crypto::{sha256, Address, Hash32, KeyPair, PublicKey, VinxSignature};
 
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, BorshSerialize, BorshDeserialize)]
 pub enum TransactionType {
     Transfer,
     Stake,
@@ -43,7 +44,7 @@ impl TransactionType {
     }
 }
 
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, BorshSerialize, BorshDeserialize)]
 pub struct Transaction {
     pub tx_type: TransactionType,
     pub from: Address,
@@ -66,6 +67,17 @@ pub struct Transaction {
     /// Sender's public key — used to verify `from` ownership.
     pub pub_key: Option<PublicKey>,
     pub signature: Option<VinxSignature>,
+    /// Optional sponsor: third party who pays the fee (gasless UX).
+    /// When set, the fee is debited from `sponsor` instead of `from`.
+    #[serde(default)]
+    pub sponsor: Option<Address>,
+    /// Sponsor's public key — proves sponsor identity.
+    #[serde(default)]
+    pub sponsor_pub_key: Option<PublicKey>,
+    /// Sponsor's signature over the transaction's signing bytes.
+    /// Proves the sponsor consented to pay the fee for this exact transaction.
+    #[serde(default)]
+    pub sponsor_signature: Option<VinxSignature>,
 }
 
 fn default_chain_id() -> u32 {
@@ -96,6 +108,15 @@ impl Transaction {
         }
         if !self.payload.is_empty() {
             bytes.extend_from_slice(&self.payload);
+        }
+        // Include sponsor address so the sponsor signature commits to it
+        if let Some(ref sponsor) = self.sponsor {
+            bytes.push(1u8);
+            let s = sponsor.as_str().as_bytes();
+            bytes.push(s.len() as u8);
+            bytes.extend_from_slice(s);
+        } else {
+            bytes.push(0u8);
         }
         bytes
     }
@@ -134,6 +155,9 @@ impl Transaction {
             payload: vec![],
             pub_key: Some(pk),
             signature: None,
+            sponsor: None,
+            sponsor_pub_key: None,
+            sponsor_signature: None,
         };
         tx.signature = Some(keypair.sign(&tx.signing_bytes()));
         tx
@@ -156,6 +180,9 @@ impl Transaction {
             payload: vec![],
             pub_key: Some(pk),
             signature: None,
+            sponsor: None,
+            sponsor_pub_key: None,
+            sponsor_signature: None,
         };
         tx.signature = Some(keypair.sign(&tx.signing_bytes()));
         tx
@@ -178,6 +205,9 @@ impl Transaction {
             payload: vec![],
             pub_key: Some(pk),
             signature: None,
+            sponsor: None,
+            sponsor_pub_key: None,
+            sponsor_signature: None,
         };
         tx.signature = Some(keypair.sign(&tx.signing_bytes()));
         tx
@@ -199,6 +229,9 @@ impl Transaction {
             payload: vec![],
             pub_key: Some(pk),
             signature: None,
+            sponsor: None,
+            sponsor_pub_key: None,
+            sponsor_signature: None,
         };
         tx.signature = Some(keypair.sign(&tx.signing_bytes()));
         tx
@@ -220,6 +253,9 @@ impl Transaction {
             payload: vec![],
             pub_key: Some(pk),
             signature: None,
+            sponsor: None,
+            sponsor_pub_key: None,
+            sponsor_signature: None,
         };
         tx.signature = Some(keypair.sign(&tx.signing_bytes()));
         tx
@@ -255,6 +291,9 @@ impl Transaction {
             payload,
             pub_key: Some(pk),
             signature: None,
+            sponsor: None,
+            sponsor_pub_key: None,
+            sponsor_signature: None,
         };
         tx.signature = Some(keypair.sign(&tx.signing_bytes()));
         tx
@@ -289,6 +328,9 @@ impl Transaction {
             payload: vec![],
             pub_key: Some(pk),
             signature: None,
+            sponsor: None,
+            sponsor_pub_key: None,
+            sponsor_signature: None,
         };
         tx.signature = Some(keypair.sign(&tx.signing_bytes()));
         tx
@@ -310,6 +352,9 @@ impl Transaction {
             payload: vec![],
             pub_key: Some(pk),
             signature: None,
+            sponsor: None,
+            sponsor_pub_key: None,
+            sponsor_signature: None,
         };
         tx.signature = Some(keypair.sign(&tx.signing_bytes()));
         tx
@@ -337,6 +382,9 @@ impl Transaction {
             payload,
             pub_key: Some(pk),
             signature: None,
+            sponsor: None,
+            sponsor_pub_key: None,
+            sponsor_signature: None,
         };
         tx.signature = Some(keypair.sign(&tx.signing_bytes()));
         tx
@@ -365,6 +413,9 @@ impl Transaction {
             payload,
             pub_key: Some(pk),
             signature: None,
+            sponsor: None,
+            sponsor_pub_key: None,
+            sponsor_signature: None,
         };
         tx.signature = Some(keypair.sign(&tx.signing_bytes()));
         tx
@@ -384,6 +435,9 @@ impl Transaction {
             payload: vec![],
             pub_key: None,
             signature: None,
+            sponsor: None,
+            sponsor_pub_key: None,
+            sponsor_signature: None,
         }
     }
 
@@ -396,6 +450,18 @@ impl Transaction {
     /// Builder: set block-height expiry for this transaction.
     pub fn with_expiry(mut self, height: u64) -> Self {
         self.expires_at_height = Some(height);
+        self
+    }
+
+    /// Builder: attach a sponsor who will pay the fee instead of the sender.
+    /// `keypair` is the sponsor's keypair. Call after all other fields are set,
+    /// since the sponsor signs the transaction's current signing bytes.
+    pub fn with_sponsor(mut self, keypair: &KeyPair) -> Self {
+        let pk = keypair.public_key();
+        let addr = Address::from_public_key(&pk);
+        self.sponsor = Some(addr);
+        self.sponsor_pub_key = Some(keypair.public_key());
+        self.sponsor_signature = Some(keypair.sign(&self.signing_bytes()));
         self
     }
 }
