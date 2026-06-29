@@ -299,16 +299,41 @@ impl Node {
         }
     }
 
-    /// Background task: produce a block every `block_time_secs`, then persist.
+    /// Background task: produce blocks on demand (event-driven) with a heartbeat fallback.
+    ///
+    /// Workflow:
+    ///  - Sleeps until the mempool signals a new transaction (`tx_ready` Notify).
+    ///  - Waits a short batch window so concurrent submissions land in the same block.
+    ///  - Falls back to a heartbeat block every HEARTBEAT_INTERVAL_SECS when idle,
+    ///    keeping height-based timers (freeze expiry, upgrade activation) advancing.
     ///
     /// Implements **slot skip**: if the scheduled leader is offline, backup validators
-    /// activate in round-robin order after 2, 3, … slot-times respectively, so the
-    /// chain keeps advancing as long as any validator is live.
+    /// step in after 2, 3, … block-times so the chain keeps advancing.
     pub async fn run_block_producer(self: Arc<Self>) {
-        let interval = std::time::Duration::from_secs(self.config.block_time_secs);
+        use vinx_core::amount::{BATCH_WINDOW_MS, HEARTBEAT_INTERVAL_SECS};
+
+        let block_time = std::time::Duration::from_secs(self.config.block_time_secs);
+        let batch_window = std::time::Duration::from_millis(BATCH_WINDOW_MS);
+        let heartbeat = std::time::Duration::from_secs(HEARTBEAT_INTERVAL_SECS);
+
+        // Extract the Notify handle once — no lock held while awaiting.
+        let tx_ready = self.mempool.read().await.tx_ready.clone();
 
         loop {
-            tokio::time::sleep(interval).await;
+            // Wait for either a new transaction or the heartbeat deadline.
+            let triggered_by_tx = tokio::select! {
+                _ = tx_ready.notified() => true,
+                _ = tokio::time::sleep(heartbeat) => false,
+            };
+
+            if triggered_by_tx {
+                // Brief batch window: let concurrent txs accumulate before sealing.
+                tokio::time::sleep(batch_window).await;
+                tracing::debug!("Block triggered by transaction");
+            } else {
+                tracing::debug!("Heartbeat block — mempool idle for {HEARTBEAT_INTERVAL_SECS}s");
+            }
+
             match self.tick().await {
                 Ok(block) => {
                     tracing::info!(
@@ -318,9 +343,12 @@ impl Node {
                         "Block sealed"
                     );
                     self.persist().await;
+                    // Respect block time before accepting the next production round.
+                    if triggered_by_tx {
+                        tokio::time::sleep(block_time).await;
+                    }
                 }
                 Err(NodeError::Consensus(_)) => {
-                    // Not our scheduled slot — check whether we should step in as backup
                     self.try_backup_production().await;
                 }
                 Err(e) => {

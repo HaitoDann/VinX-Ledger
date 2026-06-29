@@ -1,5 +1,7 @@
 use rayon::prelude::*;
 use std::collections::{BTreeMap, BinaryHeap, HashMap, HashSet};
+use std::sync::Arc;
+use tokio::sync::Notify;
 use vinx_core::{CoreError, Transaction};
 use vinx_crypto::{Address, Hash32};
 
@@ -23,6 +25,9 @@ pub struct Mempool {
     seen: HashSet<Hash32>,
     pending_count: usize,
     max_size: usize,
+    /// Signals the block producer that at least one transaction is ready.
+    /// Cloned and held by the producer loop — no lock needed to await it.
+    pub tx_ready: Arc<Notify>,
 }
 
 impl Default for Mempool {
@@ -39,7 +44,12 @@ impl Mempool {
             seen: HashSet::new(),
             pending_count: 0,
             max_size,
+            tx_ready: Arc::new(Notify::new()),
         }
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.pending_count == 0
     }
 
     /// Inserts a pre-verified transaction into the per-account nonce queue.
@@ -61,6 +71,7 @@ impl Mempool {
         }
         queue.insert(tx.nonce, tx);
         self.pending_count += 1;
+        self.tx_ready.notify_one();
         Ok(())
     }
 
@@ -114,6 +125,7 @@ impl Mempool {
 
         let count = verified.len();
         for tx in verified {
+            // add() already calls notify_one() internally
             let _ = self.add(tx); // silently discard Full / Duplicate
         }
         count

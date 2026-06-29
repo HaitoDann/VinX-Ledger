@@ -30,6 +30,14 @@ pub const STAKING_DISTRIBUTION_INTERVAL: u64 = 100;
 /// Minimum amount that can be staked: 1 VinX.
 pub const MIN_STAKE_ATOMS: u128 = DECIMAL_FACTOR;
 
+/// Heartbeat block interval when mempool is empty: 1 hour of real time.
+/// Guarantees liveness and keeps height-based timers advancing.
+pub const HEARTBEAT_INTERVAL_SECS: u64 = 3_600;
+
+/// Batch window after the first transaction arrives before sealing a block.
+/// Allows concurrent submissions to be grouped into a single block.
+pub const BATCH_WINDOW_MS: u64 = 200;
+
 /// Judicial freeze duration before mandatory auto-unfreeze: 365 days at 10 s/block.
 pub const FREEZE_DURATION_BLOCKS: u64 = 365 * 24 * 360; // 3_153_600 blocks ≈ 1 year
 
