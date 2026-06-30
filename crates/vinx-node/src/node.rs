@@ -1,5 +1,5 @@
 use lru::LruCache;
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::num::NonZeroUsize;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
@@ -129,6 +129,8 @@ pub struct Node {
     pub address_cache: tokio::sync::Mutex<LruCache<String, vinx_crypto::Address>>,
     /// Lock-free real-time counters exposed on GET /metrics.
     pub metrics: NodeMetrics,
+    /// Validators temporarily suspended from the round-robin due to liveness eviction.
+    pub suspended_validators: Arc<RwLock<HashSet<String>>>,
 }
 
 impl Node {
@@ -152,6 +154,7 @@ impl Node {
             receipts: Arc::new(RwLock::new(LruCache::new(NonZeroUsize::new(100_000).unwrap()))),
             address_cache: tokio::sync::Mutex::new(LruCache::new(NonZeroUsize::new(1_024).unwrap())),
             metrics: NodeMetrics::new(),
+            suspended_validators: Arc::new(RwLock::new(HashSet::new())),
         })
     }
 
@@ -207,6 +210,7 @@ impl Node {
             receipts: Arc::new(RwLock::new(LruCache::new(NonZeroUsize::new(100_000).unwrap()))),
             address_cache: tokio::sync::Mutex::new(LruCache::new(NonZeroUsize::new(1_024).unwrap())),
             metrics,
+            suspended_validators: Arc::new(RwLock::new(HashSet::new())),
         })
     }
 
@@ -377,8 +381,16 @@ impl Node {
         // My position in the backup queue (1 = first backup, 2 = second, …)
         let distance = (my_idx + n - leader_idx) % n;
 
-        // Each backup activates one slot-time later than the previous
-        let activation_secs = (distance as u64 + 1) * block_time;
+        // If the scheduled leader is already suspended (liveness-evicted), halve the
+        // activation time so backup validators step in sooner.
+        let leader_addr = vs.leader_at(height).to_string();
+        let leader_suspended = self.suspended_validators.read().await.contains(&leader_addr);
+        let activation_secs = if leader_suspended {
+            ((distance as u64 + 1) * block_time).max(block_time / 2)
+        } else {
+            (distance as u64 + 1) * block_time
+        };
+
         if elapsed >= activation_secs {
             tracing::warn!(
                 height,
@@ -452,12 +464,49 @@ impl Node {
                         base_fee = block.header.base_fee,
                         "Block sealed"
                     );
-                    // Periodic pruning: drop old tx/sig data every PRUNE_INTERVAL blocks
                     {
                         use vinx_core::amount::{BLOCK_RETENTION_COUNT, PRUNE_INTERVAL};
+                        const AUTO_COMPACT_INTERVAL: u64 = 500;
+                        const LIVENESS_EVICTION_BLOCKS: u64 = 50;
                         let h = block.header.height;
+                        // Periodic pruning: drop old tx/sig data every PRUNE_INTERVAL blocks
                         if h > 0 && h % PRUNE_INTERVAL == 0 {
                             self.chain.write().await.prune(BLOCK_RETENTION_COUNT);
+                        }
+                        // Auto-compact old tx index every 500 blocks (E)
+                        if h > 0 && h % AUTO_COMPACT_INTERVAL == 0 {
+                            self.chain.write().await.compact_old_txs(BLOCK_RETENTION_COUNT);
+                            tracing::debug!(height = h, "Auto-compacted chain tx data");
+                        }
+                        // Update suspended validators based on liveness (F)
+                        if h >= LIVENESS_EVICTION_BLOCKS {
+                            let liveness = self.validator_liveness.read().await;
+                            let vs = self.validator_set.read().await;
+                            let my_addr = self.config.validator_address.to_string();
+                            let mut suspended = self.suspended_validators.write().await;
+                            for addr in vs.validators() {
+                                let addr_str = addr.to_string();
+                                if addr_str == my_addr {
+                                    continue; // never suspend ourselves
+                                }
+                                let offline_for = liveness
+                                    .get(&addr_str)
+                                    .map_or(h, |&last| h.saturating_sub(last));
+                                if offline_for >= LIVENESS_EVICTION_BLOCKS {
+                                    if suspended.insert(addr_str.clone()) {
+                                        tracing::warn!(
+                                            address = %addr_str,
+                                            offline_for,
+                                            "Validator suspended (liveness eviction)"
+                                        );
+                                    }
+                                } else if suspended.remove(&addr_str) {
+                                    tracing::info!(
+                                        address = %addr_str,
+                                        "Validator restored (back online)"
+                                    );
+                                }
+                            }
                         }
                     }
                     self.persist().await;

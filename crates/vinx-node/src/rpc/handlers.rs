@@ -16,6 +16,7 @@ use vinx_core::{amount::Amount, Transaction};
 use vinx_crypto::Address;
 
 use crate::{rpc::types::*, Node};
+use vinx_state::WorldState;
 
 pub type ApiResult<T> = Result<Json<T>, ApiError>;
 
@@ -139,12 +140,13 @@ pub async fn get_validators(State(node): State<Arc<Node>>) -> ApiResult<Validato
     let vs = node.validator_set.read().await;
     let next_height = node.chain.read().await.tip_height() + 1;
     let liveness = node.validator_liveness.read().await;
-    // "Online" = seen within 10 slots
+    let suspended = node.suspended_validators.read().await;
     Ok(Json(ValidatorSetResponse::from_validator_set(
         &vs,
         next_height,
         &liveness,
         10,
+        &suspended,
     )))
 }
 
@@ -621,6 +623,111 @@ pub async fn faucet_request(
         amount_atoms: amount.atoms().to_string(),
         to: req.address,
     }))
+}
+
+/// Imports a previously-exported state snapshot, replacing the live world state.
+/// Admin-only.  The snapshot body must match the format produced by `GET /snapshot`.
+pub async fn post_snapshot(
+    headers: axum::http::HeaderMap,
+    State(node): State<Arc<Node>>,
+    Json(body): Json<SnapshotResponse>,
+) -> impl IntoResponse {
+    if !check_admin_auth(&headers, node.config.admin_token.as_deref()) {
+        return (
+            StatusCode::UNAUTHORIZED,
+            Json(ErrorResponse { error: "unauthorized".to_string() }),
+        )
+            .into_response();
+    }
+    match serde_json::from_value::<WorldState>(body.state) {
+        Ok(new_state) => {
+            let new_vs = new_state.validator_set.clone();
+            let validator_count = new_vs.len();
+            let height = body.height;
+            *node.state.write().await = new_state;
+            *node.validator_set.write().await = new_vs;
+            node.suspended_validators.write().await.clear();
+            tracing::info!(height, validator_count, "Snapshot imported via POST /snapshot");
+            (
+                StatusCode::OK,
+                Json(SnapshotImportResponse { imported: true, height, validator_count }),
+            )
+                .into_response()
+        }
+        Err(e) => (
+            StatusCode::BAD_REQUEST,
+            Json(ErrorResponse { error: e.to_string() }),
+        )
+            .into_response(),
+    }
+}
+
+/// Accepts a batch of up to 100 transactions, verifies signatures in parallel
+/// using rayon, and submits valid transactions to the mempool.
+pub async fn submit_tx_batch(
+    State(node): State<Arc<Node>>,
+    Json(txs): Json<Vec<Transaction>>,
+) -> ApiResult<TxBatchResponse> {
+    use rayon::prelude::*;
+
+    if txs.is_empty() {
+        return Ok(Json(TxBatchResponse { total: 0, accepted: 0, results: vec![] }));
+    }
+    if txs.len() > 100 {
+        return Err(ApiError::BadRequest(
+            "Batch size exceeds maximum of 100 transactions".to_string(),
+        ));
+    }
+
+    // Parallel signature verification — no locks held during CPU-bound work.
+    let verifications: Vec<(String, Result<(), String>)> = txs
+        .par_iter()
+        .map(|tx| {
+            let hash = hex::encode(tx.hash());
+            let result = (|| {
+                let pk = tx.pub_key.as_ref().ok_or_else(|| "Missing public key".to_string())?;
+                let derived = Address::from_public_key(pk);
+                if derived != tx.from {
+                    return Err("Public key does not match sender address".to_string());
+                }
+                let sig =
+                    tx.signature.as_ref().ok_or_else(|| "Missing signature".to_string())?;
+                pk.verify(&tx.signing_bytes(), sig).map_err(|e| e.to_string())
+            })();
+            (hash, result)
+        })
+        .collect();
+
+    let total = txs.len();
+    let mut results = Vec::with_capacity(total);
+    let mut accepted = 0usize;
+    let mut mempool = node.mempool.write().await;
+
+    for (tx, (hash, sig_result)) in txs.into_iter().zip(verifications) {
+        match sig_result {
+            Err(e) => {
+                node.metrics.tx_submitted_err.fetch_add(1, Ordering::Relaxed);
+                results.push(BatchTxResult { tx_hash: hash, accepted: false, error: Some(e) });
+            }
+            Ok(()) => match mempool.add(tx) {
+                Ok(()) => {
+                    node.metrics.tx_submitted_ok.fetch_add(1, Ordering::Relaxed);
+                    accepted += 1;
+                    results.push(BatchTxResult { tx_hash: hash, accepted: true, error: None });
+                }
+                Err(e) => {
+                    node.metrics.tx_submitted_err.fetch_add(1, Ordering::Relaxed);
+                    results.push(BatchTxResult {
+                        tx_hash: hash,
+                        accepted: false,
+                        error: Some(e.to_string()),
+                    });
+                }
+            },
+        }
+    }
+
+    Ok(Json(TxBatchResponse { total, accepted, results }))
 }
 
 // ─── Merkle proof handler ────────────────────────────────────────────────────

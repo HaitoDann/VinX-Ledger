@@ -149,6 +149,9 @@ pub struct ValidatorInfo {
     pub last_seen_height: Option<u64>,
     /// Considered online if it produced a block within the last 10 slots.
     pub online: bool,
+    /// True when the validator has been offline for too many consecutive blocks and
+    /// has been temporarily suspended from the round-robin by liveness eviction.
+    pub suspended: bool,
 }
 
 #[derive(Serialize)]
@@ -165,6 +168,7 @@ impl ValidatorSetResponse {
         next_height: u64,
         liveness: &HashMap<String, u64>,
         slot_window: u64,
+        suspended: &std::collections::HashSet<String>,
     ) -> Self {
         let next_leader = vs.leader_at(next_height).to_string();
         let validators = vs
@@ -177,6 +181,7 @@ impl ValidatorSetResponse {
                     last_seen.map_or(false, |h| next_height.saturating_sub(h) <= slot_window);
                 ValidatorInfo {
                     is_next_leader: addr_str == next_leader,
+                    suspended: suspended.contains(&addr_str),
                     address: addr_str,
                     last_seen_height: last_seen,
                     online,
@@ -308,6 +313,31 @@ pub struct MerkleProofResponse {
 pub struct MerkleProofStepResponse {
     pub sibling: String,
     pub sibling_is_right: bool,
+}
+
+// ─── Batch transaction submission ────────────────────────────────────────────
+
+#[derive(Serialize)]
+pub struct BatchTxResult {
+    pub tx_hash: String,
+    pub accepted: bool,
+    pub error: Option<String>,
+}
+
+#[derive(Serialize)]
+pub struct TxBatchResponse {
+    pub total: usize,
+    pub accepted: usize,
+    pub results: Vec<BatchTxResult>,
+}
+
+// ─── Snapshot import ─────────────────────────────────────────────────────────
+
+#[derive(Serialize)]
+pub struct SnapshotImportResponse {
+    pub imported: bool,
+    pub height: u64,
+    pub validator_count: usize,
 }
 
 // ─── Receipts ────────────────────────────────────────────────────────────────
