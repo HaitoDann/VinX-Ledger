@@ -563,7 +563,7 @@ pub async fn get_account_proof(
     State(node): State<Arc<Node>>,
     Path(raw_address): Path<String>,
 ) -> ApiResult<MerkleProofResponse> {
-    use vinx_crypto::{merkle_proof_for, sha256, verify_merkle_proof};
+    use vinx_crypto::{merkle_proof_for, merkle_root, sha256, verify_merkle_proof};
 
     let address =
         Address::from_bech32(&raw_address).map_err(|e| ApiError::BadRequest(e.to_string()))?;
@@ -594,7 +594,7 @@ pub async fn get_account_proof(
         })
         .collect();
 
-    let state_root = state.compute_state_root();
+    let state_root = merkle_root(&leaves);
     let leaf_hash = leaves[index];
     let proof = merkle_proof_for(&leaves, index)
         .ok_or_else(|| ApiError::Internal("proof generation failed".to_string()))?;

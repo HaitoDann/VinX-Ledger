@@ -60,6 +60,10 @@ pub struct WorldState {
     /// Chain ID for replay protection — transactions must match this value.
     #[serde(default = "default_chain_id")]
     pub chain_id: u32,
+    /// Cached Merkle root; `None` means the cache is stale and must be recomputed.
+    /// Not persisted — rebuilt on the first `compute_state_root` call after load.
+    #[serde(skip)]
+    cached_root: Option<Hash32>,
 }
 
 fn default_fee_floor() -> Amount {
@@ -100,7 +104,14 @@ impl WorldState {
             // Placeholder — always overwritten by create_genesis_state before use.
             validator_set: ValidatorSet::single(Address::zero()),
             chain_id: CHAIN_ID_DEVNET,
+            cached_root: None,
         }
+    }
+
+    /// Marks the cached state root stale so the next `compute_state_root` recomputes.
+    #[inline]
+    fn invalidate_root_cache(&mut self) {
+        self.cached_root = None;
     }
 
     /// Updates the dynamic base fee based on current mempool pressure.
@@ -133,6 +144,7 @@ impl WorldState {
         if amount == Amount::ZERO {
             return;
         }
+        self.invalidate_root_cache();
         let acc = self
             .accounts
             .entry(addr.as_str().to_string())
@@ -197,6 +209,7 @@ impl WorldState {
     }
 
     pub fn credit_for_test(&mut self, address: Address, amount: Amount) {
+        self.invalidate_root_cache();
         let acc = self
             .accounts
             .entry(address.as_str().to_string())
@@ -205,6 +218,7 @@ impl WorldState {
     }
 
     pub fn apply_transaction(&mut self, tx: &Transaction) -> Result<(), CoreError> {
+        self.invalidate_root_cache();
         if tx.tx_type != TransactionType::Emission {
             // Chain-ID replay protection
             if tx.chain_id != self.chain_id {
@@ -578,18 +592,23 @@ impl WorldState {
     /// and automatically unfreezes them. Called by the block producer on every block.
     pub fn check_auto_unfreeze(&mut self) {
         let height = self.block_height;
+        let mut unfroze_any = false;
         for account in self.accounts.values_mut() {
             if account.frozen
                 && height.saturating_sub(account.frozen_since) >= FREEZE_DURATION_BLOCKS
             {
                 account.frozen = false;
                 account.frozen_since = 0;
+                unfroze_any = true;
                 tracing::info!(
                     address = %account.address,
                     height,
                     "Account automatically unfrozen (12-month limit reached)"
                 );
             }
+        }
+        if unfroze_any {
+            self.cached_root = None;
         }
     }
 
@@ -632,6 +651,7 @@ impl WorldState {
         let pool = self.staking_pool.atoms();
         let mut distributed = 0u128;
 
+        let mut reward_distributed = false;
         for account in self.accounts.values_mut() {
             if account.staked == Amount::ZERO {
                 continue;
@@ -647,7 +667,11 @@ impl WorldState {
             if reward > 0 {
                 account.balance = account.balance.saturating_add(Amount::from_atoms(reward));
                 distributed = distributed.saturating_add(reward);
+                reward_distributed = true;
             }
+        }
+        if reward_distributed {
+            self.cached_root = None;
         }
 
         self.staking_pool = self
@@ -659,11 +683,18 @@ impl WorldState {
     }
 
     /// Merkle root of the account state after sorting accounts by address.
-    pub fn compute_state_root(&self) -> Hash32 {
+    /// Result is cached and reused until the state changes, avoiding an O(n log n)
+    /// sort + hash pass on every block when no transactions have modified accounts.
+    pub fn compute_state_root(&mut self) -> Hash32 {
+        if let Some(root) = self.cached_root {
+            return root;
+        }
         let mut entries: Vec<&Account> = self.accounts.values().collect();
         entries.sort_by_key(|a| a.address.as_str());
         let leaves: Vec<Hash32> = entries.iter().map(|a| hash_account(a)).collect();
-        merkle_root(&leaves)
+        let root = merkle_root(&leaves);
+        self.cached_root = Some(root);
+        root
     }
 
     fn apply_slash_validator(&mut self, tx: &Transaction) -> Result<(), CoreError> {
@@ -1133,7 +1164,7 @@ mod tests {
 
     #[test]
     fn test_state_root_empty_is_zero() {
-        let s = WorldState::new();
+        let mut s = WorldState::new();
         assert_eq!(s.compute_state_root(), [0u8; 32]);
     }
 
