@@ -9,6 +9,102 @@ Versioning: [Semantic Versioning](https://semver.org/spec/v2.0.0.html)
 
 ## [Unreleased]
 
+### Performance optimisations — session 2026-06-30
+
+A series of targeted optimisations were applied to the node, mempool, state,
+and P2P layers. No breaking protocol change; schema version bumped to v3.
+
+#### Storage & Persistence
+- **Block pruning** (`BLOCK_RETENTION_COUNT = 100 000`, `PRUNE_INTERVAL = 1 000`) —
+  blocks older than the retention window are compacted: transaction lists and
+  validator signatures are dropped, only headers are kept. Slash-evidence
+  entries older than the window are also removed. Triggered automatically
+  every 1 000 blocks during block production.
+  New helpers: `Chain::prune()`, `Chain::compact_old_txs()`.
+
+- **Persistent transaction index** — `tx_index` and `account_tx_index` are
+  now serialised alongside state and chain at every persist cycle (schema v3).
+  On load, indexes are restored in O(1) via `import_tx_indexes()`; a full
+  O(n) `rebuild_tx_index()` is kept as fallback for older snapshots.
+
+- **Asynchronous persistence** — serialisation now occurs while holding the
+  read locks; locks are released before any disk I/O. The compressed blobs
+  are written to redb inside a `tokio::task::spawn_blocking` call, completely
+  decoupling the critical path from storage latency.
+  New API: `Storage::serialize()` (pure, no I/O) + `Storage::save_serialized()`
+  (I/O only, callable from any thread). `Storage` is now `Clone` via `Arc<Database>`.
+
+- **zstd compression** (level 3 storage / level 1 P2P wire) — all redb blobs
+  (state, chain, tx-index) are compressed with zstd before write and
+  decompressed on read. P2P messages above 512 bytes are also compressed at
+  level 1 with a one-byte flag header (`0x00` = raw, `0x01` = zstd).
+  Typical reduction: 60-75 % on serialised state, 40-60 % on P2P gossip.
+
+#### State Layer
+- **Lazy Merkle root cache** — `WorldState` now holds an `Option<Hash32>` root
+  cache (`#[serde(skip)]`). `compute_state_root()` returns the cached value
+  immediately on repeated calls; the cache is invalidated (`None`) only on
+  actual mutations: `credit()`, `apply_transaction()`, `check_auto_unfreeze()`,
+  `distribute_staking_rewards()`. Eliminates redundant full Merkle recomputes
+  on every RPC read within the same epoch.
+
+#### Mempool
+- **Bloom-filter P2P deduplication** — a `bloomfilter::Bloom<Hash32>` (1 % FP
+  rate at 2× capacity) pre-screens incoming gossiped transactions in `stage()`.
+  Transactions whose hash hits the bloom filter skip expensive signature
+  verification. Correctness is guaranteed by the exact `HashSet<Hash32>`
+  (`seen`) that remains the authoritative dedup store.
+
+- **Fee-based eviction** — when the mempool is at capacity (`max_size`), a
+  newly admitted high-fee transaction can evict the pending transaction with
+  the lowest fee across all queues (`try_evict_for()`). Transactions with equal
+  or lower fees are rejected with `MempoolError::Full`.
+
+- **Nonce validation at admission** — `Mempool` tracks `min_nonce: HashMap<String, u64>`,
+  the minimum acceptable nonce per sender, updated after every produced block
+  via `update_confirmed_nonces()`. Transactions with `nonce < min_nonce` are
+  rejected immediately with `MempoolError::StaleNonce`, before any lock
+  acquisition or signature check. Same-nonce replacement is allowed only when
+  the incoming fee is strictly higher (fee-bump); otherwise the submission
+  returns `MempoolError::NonceTaken`. `update_confirmed_nonces()` also
+  atomically prunes stale pending entries and rebuilds the bloom filter.
+
+- **Fee-bump** — a pending transaction can be replaced at the same nonce if
+  the replacement carries a strictly higher fee. The old entry is evicted from
+  both `seen` and the bloom filter; `pending_count` is unchanged.
+
+#### P2P
+- **Parallel signature verification** — `NewBlock` and `SyncResponse` handlers
+  now verify all validator signatures concurrently using `rayon::par_iter()`.
+  Each worker checks `Address::from_public_key(pub_key) == validator` then
+  calls `pub_key.verify(block_hash, signature)`. Verification throughput scales
+  linearly with available CPU cores.
+
+#### RPC / Node
+- **LRU address cache** — bech32 address parsing results are cached in a
+  `lru::LruCache<String, Address>` (capacity 1 024, behind a `tokio::Mutex`).
+  All five RPC handlers that previously decoded bech32 inline now go through
+  `Node::parse_address()`.
+
+- **LRU receipt cache** — transaction receipts are kept in an
+  `lru::LruCache<String, TxReceipt>` (capacity 100 000, behind an `Arc<RwLock>`).
+  The `GET /tx/:hash` handler writes to the cache on first access and returns
+  the cached value on subsequent lookups.
+
+### Changed
+- `WorldState::compute_state_root` signature changed from `&self` to `&mut self`
+  to support the lazy cache write.
+- `Storage` constructor now wraps `redb::Database` in `Arc`; `Storage` derives
+  `Clone`.
+- Schema version bumped from v2 → v3 (adds tx-index blobs, zstd compression).
+
+### Fixed
+- Bloom filter is correctly rebuilt after `update_confirmed_nonces()` prunes
+  stale entries, preventing false-negatives on reused tx hashes.
+- `persist()` awaits the `spawn_blocking` handle, ensuring the `Arc<Database>`
+  is fully released before the node is dropped (fixes `DatabaseAlreadyOpen`
+  in crash-recovery integration test).
+
 ---
 
 ## [0.1.0-alpha.1] — 2026-06-13
