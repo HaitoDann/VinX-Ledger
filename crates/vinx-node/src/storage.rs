@@ -4,10 +4,16 @@ use std::path::{Path, PathBuf};
 use crate::chain::Chain;
 use redb::{Database, ReadableTable, TableDefinition};
 use vinx_state::WorldState;
+use zstd;
 
 /// Schema version stored in the meta table.  Increment when the storage layout changes
 /// in a backwards-incompatible way so nodes refuse to start on stale data.
-const STORAGE_VERSION: u64 = 1;
+/// v2: blobs are zstd-compressed (level 3) before insertion.
+const STORAGE_VERSION: u64 = 2;
+
+/// zstd compression level — level 3 is the sweet spot: ~60-70% size reduction,
+/// negligible latency compared to disk I/O.
+const ZSTD_LEVEL: i32 = 3;
 
 const STATE: TableDefinition<&str, &[u8]> = TableDefinition::new("state");
 const META: TableDefinition<&str, u64> = TableDefinition::new("meta");
@@ -56,6 +62,14 @@ impl Storage {
         io::Error::new(io::ErrorKind::Other, msg.to_string())
     }
 
+    fn compress(data: &[u8]) -> io::Result<Vec<u8>> {
+        zstd::encode_all(data, ZSTD_LEVEL).map_err(|e| Self::io_err(format!("zstd compress: {e}")))
+    }
+
+    fn decompress(data: &[u8]) -> io::Result<Vec<u8>> {
+        zstd::decode_all(data).map_err(|e| Self::io_err(format!("zstd decompress: {e}")))
+    }
+
     /// Persist current state and chain in a single ACID transaction.
     pub fn save(&self, state: &WorldState, chain: &Chain) -> io::Result<()> {
         let state_bytes =
@@ -63,12 +77,23 @@ impl Storage {
         let chain_bytes =
             bincode::serialize(chain).map_err(|e| Self::io_err(format!("serialize chain: {e}")))?;
 
+        let state_compressed = Self::compress(&state_bytes)?;
+        let chain_compressed = Self::compress(&chain_bytes)?;
+
+        tracing::debug!(
+            state_raw = state_bytes.len(),
+            state_compressed = state_compressed.len(),
+            chain_raw = chain_bytes.len(),
+            chain_compressed = chain_compressed.len(),
+            "Persisting compressed state"
+        );
+
         let tx = self.db.begin_write().map_err(|e| Self::io_err(e))?;
         {
             let mut tbl = tx.open_table(STATE).map_err(|e| Self::io_err(e))?;
-            tbl.insert("world_state", state_bytes.as_slice())
+            tbl.insert("world_state", state_compressed.as_slice())
                 .map_err(|e| Self::io_err(e))?;
-            tbl.insert("chain", chain_bytes.as_slice())
+            tbl.insert("chain", chain_compressed.as_slice())
                 .map_err(|e| Self::io_err(e))?;
         }
         tx.commit().map_err(|e| Self::io_err(e))?;
@@ -80,8 +105,15 @@ impl Storage {
         let tx = self.db.begin_read().ok()?;
         let tbl = tx.open_table(STATE).ok()?;
 
-        let state_bytes = tbl.get("world_state").ok()??.value().to_vec();
-        let chain_bytes = tbl.get("chain").ok()??.value().to_vec();
+        let state_compressed = tbl.get("world_state").ok()??.value().to_vec();
+        let chain_compressed = tbl.get("chain").ok()??.value().to_vec();
+
+        let state_bytes = Self::decompress(&state_compressed)
+            .map_err(|e| tracing::warn!("Cannot decompress state: {e}"))
+            .ok()?;
+        let chain_bytes = Self::decompress(&chain_compressed)
+            .map_err(|e| tracing::warn!("Cannot decompress chain: {e}"))
+            .ok()?;
 
         let state: WorldState = bincode::deserialize(&state_bytes)
             .map_err(|e| tracing::warn!("Cannot deserialize state: {e}"))

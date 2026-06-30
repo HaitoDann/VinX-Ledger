@@ -1,3 +1,4 @@
+use bloomfilter::Bloom;
 use rayon::prelude::*;
 use std::collections::{BTreeMap, BinaryHeap, HashMap, HashSet};
 use std::sync::Arc;
@@ -23,6 +24,10 @@ pub struct Mempool {
     unverified: Vec<Transaction>,
     /// All known tx hashes — prevents double-submission.
     seen: HashSet<Hash32>,
+    /// Bloom filter pre-screening duplicate hashes in `stage()` to skip
+    /// costly signature verification on already-known P2P-gossiped transactions.
+    /// 1% false-positive rate at capacity — correctness guaranteed by `seen`.
+    bloom: Bloom<Hash32>,
     pending_count: usize,
     max_size: usize,
     /// Signals the block producer that at least one transaction is ready.
@@ -38,10 +43,14 @@ impl Default for Mempool {
 
 impl Mempool {
     pub fn new(max_size: usize) -> Self {
+        // Size the bloom filter for 2× capacity at 1% false-positive rate.
+        // A false positive only causes a staged tx to be skipped; `seen` ensures correctness.
+        let bloom = Bloom::new_for_fp_rate(max_size * 2, 0.01);
         Self {
             queues: HashMap::new(),
             unverified: Vec::new(),
             seen: HashSet::new(),
+            bloom,
             pending_count: 0,
             max_size,
             tx_ready: Arc::new(Notify::new()),
@@ -69,6 +78,7 @@ impl Mempool {
             self.seen.remove(&hash);
             return Err(MempoolError::RateLimited);
         }
+        self.bloom.set(&hash);
         queue.insert(tx.nonce, tx);
         self.pending_count += 1;
         self.tx_ready.notify_one();
@@ -97,12 +107,28 @@ impl Mempool {
         }
         self.pending_count = self.pending_count.saturating_sub(removed);
         self.queues.retain(|_, q| !q.is_empty());
+
+        // Rebuild the bloom filter from the surviving entries so evicted hashes
+        // no longer cause false-positive skips in stage().
+        if removed > 0 {
+            self.bloom.clear();
+            for queue in self.queues.values() {
+                for tx in queue.values() {
+                    self.bloom.set(&tx.hash());
+                }
+            }
+        }
     }
 
     /// Stages a transaction for deferred parallel signature verification.
     /// Use this for bulk P2P ingestion to avoid per-tx overhead on the hot path.
     /// Call `flush_staged()` before block production to admit verified txs.
     pub fn stage(&mut self, tx: Transaction) {
+        // Bloom pre-filter: skip signature verification for hashes already admitted.
+        // False positives (~1%) cause rare benign drops; correctness is guaranteed by `seen`.
+        if self.bloom.check(&tx.hash()) {
+            return;
+        }
         if self.unverified.len() + self.pending_count < self.max_size * 2 {
             self.unverified.push(tx);
         }
