@@ -274,6 +274,21 @@ async fn main() {
 
     let node = vinx_node::Node::new_with_p2p(state, chain, config).await;
 
+    // Restore mempool from last persist — re-validate each tx against current state.
+    if let Some(txs) = storage.load_mempool() {
+        let total = txs.len();
+        if total > 0 {
+            let mut mp = node.mempool.write().await;
+            let mut restored = 0usize;
+            for tx in txs {
+                if mp.add(tx).is_ok() {
+                    restored += 1;
+                }
+            }
+            tracing::info!(restored, total, "Mempool restored from disk");
+        }
+    }
+
     let block_node = std::sync::Arc::clone(&node);
     tokio::spawn(async move { block_node.run_block_producer().await });
 

@@ -5,6 +5,24 @@ Format : `MAJEUR.MINEUR.CORRECTIF` — les versions `0.x.y` sont des versions de
 
 ---
 
+## [0.18.0] — 2026-06-30
+
+### Métriques P2P câblées & persistance du mempool
+
+**Métriques P2P — Compteurs désormais actifs**
+- `p2p::start()` accepte désormais `NodeMetrics` en paramètre et le transmet à la boucle d'événements
+- `p2p_blocks_recv` incrémenté à chaque bloc validé et appliqué via gossip P2P
+- `p2p_tx_recv` incrémenté à chaque transaction reçue via gossip P2P
+- Les métriques sont partagées sans verrou entre le nœud, le rate limiter et la couche P2P
+
+**Persistance du mempool (optimisation #3)**
+- `Storage::serialize_mempool` / `save_mempool_blob` / `load_mempool` : nouvelles méthodes pour sérialiser, compresser (zstd niveau 3) et restaurer le mempool en une transaction redb dédiée
+- `Node::persist()` inclut désormais le mempool dans chaque cycle de sauvegarde sur disque, sans rallonger la durée de verrouillage (sérialisation sous verrou lecture, I/O hors verrou)
+- Au démarrage (`main.rs`), les transactions persistées sont rechargées et réinjectées dans le mempool en appliquant la validation complète — les transactions expirées ou invalides sont silencieusement ignorées
+- Nombre de transactions restaurées affiché dans les logs (`tracing::info!`)
+
+---
+
 ## [0.17.0] — 2026-06-30
 
 ### Rate limiting token bucket, métriques atomiques & WebSocket enrichi

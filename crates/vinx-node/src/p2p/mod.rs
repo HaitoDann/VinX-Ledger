@@ -14,9 +14,10 @@ use libp2p::{
 use tokio::sync::{mpsc, RwLock};
 use tracing::{debug, info, warn};
 
-use crate::{chain::Chain, config::NodeConfig, mempool::Mempool, NodeError};
+use crate::{chain::Chain, config::NodeConfig, mempool::Mempool, node::NodeMetrics, NodeError};
 use messages::P2pMessage;
 use rayon::prelude::*;
+use std::sync::atomic::Ordering;
 use vinx_core::{Block, BlockSignature, Transaction, ValidatorSet};
 use vinx_crypto::{Address, Hash32};
 use vinx_state::WorldState;
@@ -73,6 +74,7 @@ pub async fn start(
     mempool: Arc<RwLock<Mempool>>,
     state: Arc<RwLock<WorldState>>,
     validator_set: Arc<RwLock<ValidatorSet>>,
+    metrics: NodeMetrics,
 ) -> Result<P2pHandle, NodeError> {
     let (cmd_tx, cmd_rx) = mpsc::unbounded_channel::<P2pCommand>();
 
@@ -192,6 +194,7 @@ pub async fn start(
             validator_set,
             local_kp,
             local_addr,
+            metrics,
         )
         .await;
     });
@@ -213,6 +216,7 @@ async fn run_event_loop(
     validator_set: Arc<RwLock<ValidatorSet>>,
     local_kp: vinx_crypto::KeyPair,
     local_addr: Address,
+    metrics: NodeMetrics,
 ) {
     let mut reputation: HashMap<PeerId, i32> = HashMap::new();
 
@@ -234,7 +238,7 @@ async fn run_event_loop(
             }
             event = swarm.next() => {
                 if let Some(event) = event {
-                    handle_swarm_event(event, &chain, &mempool, &state, &validator_set, &local_kp, &local_addr, &mut swarm, &mut reputation).await;
+                    handle_swarm_event(event, &chain, &mempool, &state, &validator_set, &local_kp, &local_addr, &mut swarm, &mut reputation, &metrics).await;
                 }
             }
         }
@@ -251,6 +255,7 @@ async fn handle_swarm_event(
     local_addr: &Address,
     swarm: &mut libp2p::Swarm<VinxBehaviour>,
     reputation: &mut HashMap<PeerId, i32>,
+    metrics: &NodeMetrics,
 ) {
     match event {
         SwarmEvent::NewListenAddr { address, .. } => {
@@ -305,6 +310,7 @@ async fn handle_swarm_event(
                 local_kp,
                 local_addr,
                 swarm,
+                metrics,
             )
             .await;
         }
@@ -346,9 +352,11 @@ async fn dispatch_message(
     local_kp: &vinx_crypto::KeyPair,
     local_addr: &Address,
     swarm: &mut libp2p::Swarm<VinxBehaviour>,
+    metrics: &NodeMetrics,
 ) {
     match msg {
         P2pMessage::NewTransaction(tx) => {
+            metrics.p2p_tx_recv.fetch_add(1, Ordering::Relaxed);
             // Stage for deferred parallel verification (flush_staged() called at block production)
             mempool.write().await.stage(tx);
         }
@@ -448,6 +456,7 @@ async fn dispatch_message(
                 chain.write().await.push(block.clone());
             }
             info!(height, "P2P: block validated and applied");
+            metrics.p2p_blocks_recv.fetch_add(1, Ordering::Relaxed);
 
             // 6. Co-sign if we're a validator
             let vs = validator_set.read().await.clone();

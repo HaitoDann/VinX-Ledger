@@ -331,6 +331,11 @@ impl Mempool {
         self.pending_count
     }
 
+    /// Returns references to all pending (verified) transactions across all accounts.
+    pub fn pending_txs(&self) -> Vec<&Transaction> {
+        self.queues.values().flat_map(|q| q.values()).collect()
+    }
+
     /// Returns the next nonce to use for `addr`, accounting for pending transactions.
     /// Returns `None` if there are no pending transactions (caller should use confirmed nonce).
     pub fn next_nonce_for(&self, addr: &Address) -> Option<u64> {

@@ -165,6 +165,8 @@ impl Node {
         let vs_arc = Arc::new(RwLock::new(initial_vs));
         let (block_events, _) = broadcast::channel(64);
 
+        let metrics = NodeMetrics::new();
+
         let p2p = if config.p2p_listen.is_some() {
             match crate::p2p::start(
                 &config,
@@ -172,6 +174,7 @@ impl Node {
                 Arc::clone(&mempool_arc),
                 Arc::clone(&state_arc),
                 Arc::clone(&vs_arc),
+                metrics.clone(),
             )
             .await
             {
@@ -203,7 +206,7 @@ impl Node {
             validator_requests: Arc::new(Mutex::new(Vec::new())),
             receipts: Arc::new(RwLock::new(LruCache::new(NonZeroUsize::new(100_000).unwrap()))),
             address_cache: tokio::sync::Mutex::new(LruCache::new(NonZeroUsize::new(1_024).unwrap())),
-            metrics: NodeMetrics::new(),
+            metrics,
         })
     }
 
@@ -473,7 +476,7 @@ impl Node {
         }
     }
 
-    /// Writes chain and state to disk (no-op if no data_dir configured).
+    /// Writes chain, state, and mempool to disk (no-op if no data_dir configured).
     ///
     /// Serializes to bytes while holding read locks (fast, pure in-memory), releases
     /// the locks, then offloads zstd compression + redb write to a blocking thread.
@@ -485,11 +488,15 @@ impl Node {
         };
 
         // Serialize under read locks — fast, no disk I/O here.
-        let blobs = {
+        let (blobs, mempool_blob) = {
             let state = self.state.read().await;
             let chain = self.chain.read().await;
-            Storage::serialize(&state, &chain)
-        }; // locks dropped here
+            let mempool = self.mempool.read().await;
+            let txs = mempool.pending_txs();
+            let blobs = Storage::serialize(&state, &chain);
+            let mp_blob = Storage::serialize_mempool(&txs);
+            (blobs, mp_blob)
+        }; // all locks dropped here
 
         match blobs {
             Err(e) => tracing::warn!(error = %e, "Failed to serialize state for persist"),
@@ -498,6 +505,16 @@ impl Node {
                 let _ = tokio::task::spawn_blocking(move || {
                     if let Err(e) = storage.save_serialized(sb, cb, tib, atib) {
                         tracing::warn!(error = %e, "Failed to persist state to disk");
+                    }
+                    match mempool_blob {
+                        Ok(blob) => {
+                            if let Err(e) = storage.save_mempool_blob(blob) {
+                                tracing::warn!(error = %e, "Failed to persist mempool to disk");
+                            }
+                        }
+                        Err(e) => {
+                            tracing::warn!(error = %e, "Failed to serialize mempool for persist");
+                        }
                     }
                 })
                 .await;

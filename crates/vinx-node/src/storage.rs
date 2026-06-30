@@ -5,6 +5,7 @@ use std::sync::Arc;
 
 use crate::chain::Chain;
 use redb::{Database, ReadableTable, TableDefinition};
+use vinx_core::Transaction;
 use vinx_state::WorldState;
 use zstd;
 
@@ -176,6 +177,40 @@ impl Storage {
         }
 
         Some((state, chain))
+    }
+
+    /// Serializes pending mempool transactions to raw bytes.
+    pub fn serialize_mempool(txs: &[&Transaction]) -> io::Result<Vec<u8>> {
+        bincode::serialize(txs)
+            .map_err(|e| Self::io_err(format!("serialize mempool: {e}")))
+    }
+
+    /// Compresses and writes a pre-serialized mempool blob to redb.
+    /// Designed to run inside `tokio::task::spawn_blocking`.
+    pub fn save_mempool_blob(&self, blob: Vec<u8>) -> io::Result<()> {
+        let compressed = Self::compress(&blob)?;
+        let tx = self.db.begin_write().map_err(|e| Self::io_err(e))?;
+        {
+            let mut tbl = tx.open_table(STATE).map_err(|e| Self::io_err(e))?;
+            tbl.insert("mempool", compressed.as_slice())
+                .map_err(|e| Self::io_err(e))?;
+        }
+        tx.commit().map_err(|e| Self::io_err(e))?;
+        Ok(())
+    }
+
+    /// Loads and decompresses persisted mempool transactions.
+    /// Returns `None` if no mempool snapshot exists yet.
+    pub fn load_mempool(&self) -> Option<Vec<Transaction>> {
+        let tx = self.db.begin_read().ok()?;
+        let tbl = tx.open_table(STATE).ok()?;
+        let compressed = tbl.get("mempool").ok()??.value().to_vec();
+        let bytes = Self::decompress(&compressed)
+            .map_err(|e| tracing::warn!("Cannot decompress mempool: {e}"))
+            .ok()?;
+        bincode::deserialize(&bytes)
+            .map_err(|e| tracing::warn!("Cannot deserialize mempool: {e}"))
+            .ok()
     }
 
     pub fn exists(&self) -> bool {
