@@ -30,6 +30,15 @@ pub const STAKING_DISTRIBUTION_INTERVAL: u64 = 100;
 /// Minimum amount that can be staked: 1 VinX.
 pub const MIN_STAKE_ATOMS: u128 = DECIMAL_FACTOR;
 
+/// Number of recent blocks to retain with full data (header + transactions + signatures).
+/// Older blocks are compacted: transactions and signatures are dropped, only the header
+/// (height, hashes, validator, state_root) is kept for chain integrity verification.
+/// At peak load (1 block/3s) this covers ~3.5 days; at low activity, much longer.
+pub const BLOCK_RETENTION_COUNT: u64 = 100_000;
+
+/// Pruning runs every N blocks to amortize the O(n) tx-index rebuild cost.
+pub const PRUNE_INTERVAL: u64 = 1_000;
+
 /// Heartbeat block interval when mempool is empty: 1 hour of real time.
 /// Guarantees liveness and keeps height-based timers advancing.
 pub const HEARTBEAT_INTERVAL_SECS: u64 = 3_600;
