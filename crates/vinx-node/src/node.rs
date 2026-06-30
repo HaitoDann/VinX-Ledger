@@ -320,10 +320,19 @@ impl Node {
         let tx_ready = self.mempool.read().await.tx_ready.clone();
 
         loop {
-            // Wait for either a new transaction or the heartbeat deadline.
-            let triggered_by_tx = tokio::select! {
-                _ = tx_ready.notified() => true,
-                _ = tokio::time::sleep(heartbeat) => false,
+            // Only arm the heartbeat timer when something time-sensitive is pending
+            // (upgrade scheduled or account frozen). Otherwise sleep forever — a
+            // transaction signal is the only thing that can wake us up.
+            let needs_heartbeat = self.state.read().await.has_pending_time_sensitive_ops();
+
+            let triggered_by_tx = if needs_heartbeat {
+                tokio::select! {
+                    _ = tx_ready.notified() => true,
+                    _ = tokio::time::sleep(heartbeat) => false,
+                }
+            } else {
+                tx_ready.notified().await;
+                true
             };
 
             if triggered_by_tx {
@@ -331,7 +340,7 @@ impl Node {
                 tokio::time::sleep(batch_window).await;
                 tracing::debug!("Block triggered by transaction");
             } else {
-                tracing::debug!("Heartbeat block — mempool idle for {HEARTBEAT_INTERVAL_SECS}s");
+                tracing::debug!("Heartbeat block — upgrade or freeze pending");
             }
 
             match self.tick().await {

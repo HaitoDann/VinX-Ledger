@@ -169,6 +169,21 @@ impl WorldState {
         self.treasury
     }
 
+    /// Returns true when the chain must keep advancing even with an empty mempool.
+    ///
+    /// Two conditions require a periodic heartbeat block:
+    /// - A protocol upgrade is scheduled (activation triggered by reaching a block height).
+    /// - At least one account is frozen (auto-unfreeze triggered by block height elapsed).
+    ///
+    /// When neither condition holds, the node can sleep indefinitely until the next
+    /// transaction arrives — no heartbeat needed, no wasted storage.
+    pub fn has_pending_time_sensitive_ops(&self) -> bool {
+        if self.pending_upgrade.is_some() {
+            return true;
+        }
+        self.accounts.values().any(|a| a.frozen)
+    }
+
     pub fn is_frozen(&self, address: &Address) -> bool {
         self.accounts
             .get(address.as_str())
