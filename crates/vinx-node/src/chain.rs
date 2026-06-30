@@ -83,6 +83,24 @@ impl Chain {
         hash
     }
 
+    /// Exports both tx indexes for external persistence (called by Storage::save).
+    pub fn export_tx_indexes(
+        &self,
+    ) -> (&HashMap<String, (u64, u32)>, &HashMap<String, Vec<String>>) {
+        (&self.tx_index, &self.account_tx_index)
+    }
+
+    /// Replaces both tx indexes from a previously persisted snapshot.
+    /// Faster than `rebuild_tx_index` — O(1) deserialization vs O(blocks × txs).
+    pub fn import_tx_indexes(
+        &mut self,
+        tx_index: HashMap<String, (u64, u32)>,
+        account_tx_index: HashMap<String, Vec<String>>,
+    ) {
+        self.tx_index = tx_index;
+        self.account_tx_index = account_tx_index;
+    }
+
     /// Clears and repopulates both tx indexes from all stored blocks.
     pub fn rebuild_tx_index(&mut self) {
         self.tx_index.clear();

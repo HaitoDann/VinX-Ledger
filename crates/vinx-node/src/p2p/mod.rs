@@ -16,8 +16,9 @@ use tracing::{debug, info, warn};
 
 use crate::{chain::Chain, config::NodeConfig, mempool::Mempool, NodeError};
 use messages::P2pMessage;
+use rayon::prelude::*;
 use vinx_core::{Block, BlockSignature, Transaction, ValidatorSet};
-use vinx_crypto::Address;
+use vinx_crypto::{Address, Hash32};
 use vinx_state::WorldState;
 
 pub enum P2pCommand {
@@ -323,6 +324,19 @@ async fn handle_swarm_event(
     }
 }
 
+/// Verifies all co-signatures on a block in parallel (rayon).
+/// Returns `true` only if every signature has a valid pubkey→address binding
+/// and a valid ed25519 signature over `block_hash`.
+/// The proposer signature is included in the same pass.
+fn verify_block_signatures_parallel(sigs: &[BlockSignature], block_hash: &Hash32) -> bool {
+    sigs.par_iter().all(|sig| {
+        if Address::from_public_key(&sig.pub_key) != sig.validator {
+            return false;
+        }
+        sig.pub_key.verify(block_hash, &sig.signature).is_ok()
+    })
+}
+
 async fn dispatch_message(
     msg: P2pMessage,
     chain: &Arc<RwLock<Chain>>,
@@ -379,27 +393,15 @@ async fn dispatch_message(
                 return;
             }
 
-            // 3. Proposer signature cryptographic verification
+            // 3. Signature verification — proposer must be present; all sigs verified in parallel.
             let block_hash = block.hash();
-            match block
-                .signatures
-                .iter()
-                .find(|s| s.validator == block.header.validator)
-            {
-                None => {
-                    warn!(height, "P2P block missing proposer sig");
-                    return;
-                }
-                Some(sig) => {
-                    if Address::from_public_key(&sig.pub_key) != sig.validator {
-                        warn!(height, "P2P block proposer pubkey/address mismatch");
-                        return;
-                    }
-                    if sig.pub_key.verify(&block_hash, &sig.signature).is_err() {
-                        warn!(height, "P2P block proposer sig invalid");
-                        return;
-                    }
-                }
+            if !block.signatures.iter().any(|s| s.validator == block.header.validator) {
+                warn!(height, "P2P block missing proposer sig");
+                return;
+            }
+            if !verify_block_signatures_parallel(&block.signatures, &block_hash) {
+                warn!(height, "P2P block has invalid signature(s)");
+                return;
             }
 
             // 4. State transition with rollback
@@ -554,6 +556,14 @@ async fn dispatch_message(
                 }
                 if block.header.prev_hash != chain.read().await.tip_hash() {
                     warn!(height, "SyncResponse block wrong prev_hash");
+                    break;
+                }
+                // Verify all bundled co-signatures in parallel before applying state.
+                let block_hash = block.hash();
+                if !block.signatures.is_empty()
+                    && !verify_block_signatures_parallel(&block.signatures, &block_hash)
+                {
+                    warn!(height, "SyncResponse block has invalid signature(s)");
                     break;
                 }
                 let ok = {

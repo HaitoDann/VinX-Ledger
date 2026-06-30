@@ -48,7 +48,7 @@ pub struct Node {
     pub mempool: Arc<RwLock<Mempool>>,
     pub chain: Arc<RwLock<Chain>>,
     pub config: NodeConfig,
-    storage: Option<Storage>,
+    storage: Option<Arc<Storage>>,
     /// P2P handle — present when p2p_listen is configured.
     pub p2p: Option<P2pHandle>,
     /// Live validator set — updated after each block that modifies it.
@@ -69,7 +69,7 @@ pub struct Node {
 
 impl Node {
     pub fn new(state: WorldState, chain: Chain, config: NodeConfig) -> Arc<Self> {
-        let storage = config.data_dir.as_ref().map(|p| Storage::new(p.clone()));
+        let storage = config.data_dir.as_ref().map(|p| Arc::new(Storage::new(p.clone())));
         let initial_vs = state.validator_set.clone();
         let (block_events, _) = broadcast::channel(64);
         Arc::new(Self {
@@ -91,7 +91,7 @@ impl Node {
 
     /// Creates a node and immediately starts the P2P layer (if configured).
     pub async fn new_with_p2p(state: WorldState, chain: Chain, config: NodeConfig) -> Arc<Self> {
-        let storage = config.data_dir.as_ref().map(|p| Storage::new(p.clone()));
+        let storage = config.data_dir.as_ref().map(|p| Arc::new(Storage::new(p.clone())));
         let initial_vs = state.validator_set.clone();
         let state_arc = Arc::new(RwLock::new(state));
         let chain_arc = Arc::new(RwLock::new(chain));
@@ -376,12 +376,33 @@ impl Node {
     }
 
     /// Writes chain and state to disk (no-op if no data_dir configured).
+    ///
+    /// Serializes to bytes while holding read locks (fast, pure in-memory), releases
+    /// the locks, then offloads zstd compression + redb write to a blocking thread.
+    /// The JoinHandle is awaited so the persist completes before the caller proceeds,
+    /// but locks are never held during I/O.
     pub async fn persist(&self) {
-        if let Some(ref storage) = self.storage {
+        let Some(storage) = self.storage.as_ref().map(Arc::clone) else {
+            return;
+        };
+
+        // Serialize under read locks — fast, no disk I/O here.
+        let blobs = {
             let state = self.state.read().await;
             let chain = self.chain.read().await;
-            if let Err(e) = storage.save(&state, &chain) {
-                tracing::warn!(error = %e, "Failed to persist state to disk");
+            Storage::serialize(&state, &chain)
+        }; // locks dropped here
+
+        match blobs {
+            Err(e) => tracing::warn!(error = %e, "Failed to serialize state for persist"),
+            Ok((sb, cb, tib, atib)) => {
+                // Compress + write in a blocking thread. Locks already released.
+                let _ = tokio::task::spawn_blocking(move || {
+                    if let Err(e) = storage.save_serialized(sb, cb, tib, atib) {
+                        tracing::warn!(error = %e, "Failed to persist state to disk");
+                    }
+                })
+                .await;
             }
         }
     }
