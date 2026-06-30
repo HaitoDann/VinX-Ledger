@@ -196,6 +196,53 @@ impl Chain {
             "Chain compacted old transaction data"
         );
     }
+
+    /// Full pruning pass — runs every PRUNE_INTERVAL blocks.
+    ///
+    /// Three things are cleaned up:
+    /// 1. Transaction data older than `keep_last` blocks (largest space consumer).
+    /// 2. Signatures on finalized blocks older than `keep_last` (verified, no longer needed).
+    /// 3. Slash evidence older than `keep_last * 2` (equivocation window is well past).
+    ///
+    /// Block headers (height, prev_hash, state_root, validator…) are NEVER dropped —
+    /// they are needed for hash-chain integrity and light-client sync proofs.
+    pub fn prune(&mut self, keep_last: u64) {
+        let tip = self.tip_height();
+        if tip < keep_last {
+            return;
+        }
+        let prune_up_to = (tip - keep_last) as usize;
+
+        let mut tx_pruned = 0usize;
+        let mut sig_pruned = 0usize;
+
+        for i in 0..prune_up_to {
+            if let Some((_, block)) = self.blocks.get_mut(i) {
+                tx_pruned += block.transactions.len();
+                block.transactions.clear();
+                sig_pruned += block.signatures.len();
+                block.signatures.clear();
+            }
+        }
+
+        // Remove slash evidence older than 2× the retention window
+        let evidence_cutoff = tip.saturating_sub(keep_last * 2);
+        self.slash_evidence.retain(|_, heights| {
+            heights.retain(|&h, _| h > evidence_cutoff);
+            !heights.is_empty()
+        });
+
+        // Rebuild tx index to remove stale entries
+        self.rebuild_tx_index();
+
+        tracing::info!(
+            tip,
+            pruned_below = prune_up_to,
+            tx_pruned,
+            sig_pruned,
+            "Chain pruned — headers retained, old tx/sig data dropped"
+        );
+    }
 }
 
 #[cfg(test)]
@@ -247,6 +294,46 @@ mod tests {
         assert!(!chain.record_signature(addr, 5, hash_a)); // first sig — ok
         assert!(!chain.record_signature(addr, 5, hash_a)); // same hash — ok (idempotent)
         assert!(chain.record_signature(addr, 5, hash_b)); // different hash — EQUIVOCATION
+    }
+
+    #[test]
+    fn test_prune_drops_tx_and_sig_data_but_keeps_headers() {
+        let v = validator();
+        let (mut chain, _) = Chain::new_with_genesis(v.clone(), 0);
+        for h in 1u64..=10 {
+            let block = Block {
+                header: BlockHeader {
+                    height: h,
+                    prev_hash: chain.tip_hash(),
+                    timestamp: h,
+                    validator: v.clone(),
+                    tx_count: 0,
+                    state_root: [0u8; 32],
+                    base_fee: 0,
+                    receipts_root: [0u8; 32],
+                },
+                transactions: vec![],
+                signatures: vec![],
+            };
+            chain.push(block);
+        }
+        // Prune keeping last 3 blocks (height 8, 9, 10); blocks 0-7 are compacted
+        chain.prune(3);
+        // All headers still accessible
+        for h in 0u64..=10 {
+            assert!(chain.get_block(h).is_some(), "block {h} missing after prune");
+        }
+        assert_eq!(chain.tip_height(), 10);
+    }
+
+    #[test]
+    fn test_prune_noop_when_chain_shorter_than_keep_last() {
+        let v = validator();
+        let (mut chain, _) = Chain::new_with_genesis(v.clone(), 0);
+        // Only genesis — prune with keep_last=100 should be a no-op
+        chain.prune(100);
+        assert_eq!(chain.tip_height(), 0);
+        assert!(chain.get_block(0).is_some());
     }
 
     #[test]

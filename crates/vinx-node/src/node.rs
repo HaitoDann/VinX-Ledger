@@ -351,6 +351,14 @@ impl Node {
                         base_fee = block.header.base_fee,
                         "Block sealed"
                     );
+                    // Periodic pruning: drop old tx/sig data every PRUNE_INTERVAL blocks
+                    {
+                        use vinx_core::amount::{BLOCK_RETENTION_COUNT, PRUNE_INTERVAL};
+                        let h = block.header.height;
+                        if h > 0 && h % PRUNE_INTERVAL == 0 {
+                            self.chain.write().await.prune(BLOCK_RETENTION_COUNT);
+                        }
+                    }
                     self.persist().await;
                     // Respect block time before accepting the next production round.
                     if triggered_by_tx {
