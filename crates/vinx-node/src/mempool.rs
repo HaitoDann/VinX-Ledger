@@ -28,6 +28,9 @@ pub struct Mempool {
     /// costly signature verification on already-known P2P-gossiped transactions.
     /// 1% false-positive rate at capacity — correctness guaranteed by `seen`.
     bloom: Bloom<Hash32>,
+    /// Minimum acceptable nonce per sender — updated after each block is applied.
+    /// Transactions with nonce < min_nonce are rejected immediately in add().
+    min_nonce: HashMap<String, u64>,
     pending_count: usize,
     max_size: usize,
     /// Signals the block producer that at least one transaction is ready.
@@ -51,6 +54,7 @@ impl Mempool {
             unverified: Vec::new(),
             seen: HashSet::new(),
             bloom,
+            min_nonce: HashMap::new(),
             pending_count: 0,
             max_size,
             tx_ready: Arc::new(Notify::new()),
@@ -64,28 +68,94 @@ impl Mempool {
     /// Inserts a pre-verified transaction into the per-account nonce queue.
     /// The caller is responsible for verifying the signature before calling this.
     pub fn add(&mut self, tx: Transaction) -> Result<(), MempoolError> {
+        let addr = tx.from.to_string();
+
+        // Reject transactions whose nonce is already consumed by a confirmed block.
+        let min = self.min_nonce.get(&addr).copied().unwrap_or(0);
+        if tx.nonce < min {
+            return Err(MempoolError::StaleNonce);
+        }
+
         if self.pending_count >= self.max_size {
             if !self.try_evict_for(&tx) {
                 return Err(MempoolError::Full);
             }
-            // eviction succeeded — slot is free, continue insertion
         }
+
         let hash = tx.hash();
-        if !self.seen.insert(hash) {
+
+        // Exact duplicate check (same hash = same tx).
+        if self.seen.contains(&hash) {
             return Err(MempoolError::Duplicate);
         }
-        let addr = tx.from.to_string();
+
         let queue = self.queues.entry(addr).or_default();
-        if queue.len() >= MAX_PER_ADDRESS {
-            // Undo the seen insertion
-            self.seen.remove(&hash);
+        if queue.len() >= MAX_PER_ADDRESS && !queue.contains_key(&tx.nonce) {
             return Err(MempoolError::RateLimited);
         }
+
+        // Fee bump: if a pending tx exists at the same nonce, replace only if fee is higher.
+        if let Some(existing) = queue.get(&tx.nonce) {
+            if tx.fee > existing.fee {
+                let old_hash = existing.hash();
+                self.seen.remove(&old_hash);
+                self.seen.insert(hash);
+                self.bloom.set(&hash);
+                queue.insert(tx.nonce, tx);
+                // pending_count unchanged — one tx replaced another
+                self.tx_ready.notify_one();
+                return Ok(());
+            } else {
+                return Err(MempoolError::NonceTaken);
+            }
+        }
+
+        self.seen.insert(hash);
+
         self.bloom.set(&hash);
         queue.insert(tx.nonce, tx);
         self.pending_count += 1;
         self.tx_ready.notify_one();
         Ok(())
+    }
+
+    /// Updates the minimum acceptable nonce per sender after a block is applied,
+    /// and immediately removes any pending transactions whose nonce is now stale.
+    /// Called by the block producer after each successful block.
+    pub fn update_confirmed_nonces(&mut self, confirmed: &HashMap<String, u64>) {
+        let mut removed = 0usize;
+        for (addr, &next_nonce) in confirmed {
+            // Always advance — never go backwards.
+            let entry = self.min_nonce.entry(addr.clone()).or_insert(0);
+            if next_nonce > *entry {
+                *entry = next_nonce;
+            }
+            // Flush any pending txs that are now below the confirmed nonce.
+            if let Some(queue) = self.queues.get_mut(addr) {
+                let stale: Vec<u64> = queue
+                    .keys()
+                    .copied()
+                    .filter(|&n| n < next_nonce)
+                    .collect();
+                for nonce in stale {
+                    if let Some(tx) = queue.remove(&nonce) {
+                        self.seen.remove(&tx.hash());
+                        removed += 1;
+                    }
+                }
+            }
+        }
+        if removed > 0 {
+            self.pending_count = self.pending_count.saturating_sub(removed);
+            self.queues.retain(|_, q| !q.is_empty());
+            // Rebuild bloom so evicted hashes stop causing false-positive skips.
+            self.bloom.clear();
+            for queue in self.queues.values() {
+                for tx in queue.values() {
+                    self.bloom.set(&tx.hash());
+                }
+            }
+        }
     }
 
     /// Removes all transactions whose `expires_at_height` <= `current_height`.
@@ -298,6 +368,10 @@ pub enum MempoolError {
     Duplicate,
     #[error("Too many pending transactions from this address")]
     RateLimited,
+    #[error("Transaction nonce already consumed by a confirmed block")]
+    StaleNonce,
+    #[error("A pending transaction already occupies this nonce; submit with a higher fee to replace it")]
+    NonceTaken,
 }
 
 #[cfg(test)]
@@ -511,5 +585,64 @@ mod tests {
         let admitted = mp.flush_staged();
         assert_eq!(admitted, 0);
         assert_eq!(mp.size(), 0);
+    }
+
+    #[test]
+    fn test_stale_nonce_rejected() {
+        let mut mp = Mempool::new(10);
+        let kp = KeyPair::generate();
+        let to = dummy_addr();
+        let addr = vinx_crypto::Address::from_public_key(&kp.public_key()).to_string();
+        let mut confirmed = std::collections::HashMap::new();
+        confirmed.insert(addr, 2u64);
+        mp.update_confirmed_nonces(&confirmed);
+        assert_eq!(mp.add(make_tx(&kp, to.clone(), 0)), Err(MempoolError::StaleNonce));
+        assert_eq!(mp.add(make_tx(&kp, to.clone(), 1)), Err(MempoolError::StaleNonce));
+        mp.add(make_tx(&kp, to, 2)).unwrap();
+        assert_eq!(mp.size(), 1);
+    }
+
+    #[test]
+    fn test_fee_bump_replaces_same_nonce() {
+        let mut mp = Mempool::new(10);
+        let kp = KeyPair::generate();
+        let to = dummy_addr();
+        mp.add(make_tx_with_fee(&kp, to.clone(), 0, 1)).unwrap();
+        mp.add(make_tx_with_fee(&kp, to.clone(), 0, 10)).unwrap();
+        assert_eq!(mp.size(), 1);
+        let drained = mp.drain(10);
+        assert_eq!(drained[0].fee, Amount::from_vinx(10));
+    }
+
+    #[test]
+    fn test_nonce_taken_same_fee() {
+        let mut mp = Mempool::new(10);
+        let kp = KeyPair::generate();
+        let to = dummy_addr();
+        mp.add(make_tx_with_fee(&kp, to.clone(), 0, 5)).unwrap();
+        // Different amount → different hash, but same nonce and same fee → NonceTaken
+        let tx2 = vinx_core::Transaction::new_transfer(
+            &kp, to, Amount::from_vinx(2), Amount::from_vinx(5), 0,
+        );
+        assert_eq!(mp.add(tx2), Err(MempoolError::NonceTaken));
+        assert_eq!(mp.size(), 1);
+    }
+
+    #[test]
+    fn test_update_confirmed_nonces_prunes_queue() {
+        let mut mp = Mempool::new(10);
+        let kp = KeyPair::generate();
+        let to = dummy_addr();
+        mp.add(make_tx(&kp, to.clone(), 0)).unwrap();
+        mp.add(make_tx(&kp, to.clone(), 1)).unwrap();
+        mp.add(make_tx(&kp, to.clone(), 2)).unwrap();
+        assert_eq!(mp.size(), 3);
+        let addr = vinx_crypto::Address::from_public_key(&kp.public_key()).to_string();
+        let mut confirmed = std::collections::HashMap::new();
+        confirmed.insert(addr, 2u64);
+        mp.update_confirmed_nonces(&confirmed);
+        assert_eq!(mp.size(), 1);
+        let drained = mp.drain(10);
+        assert_eq!(drained[0].nonce, 2);
     }
 }

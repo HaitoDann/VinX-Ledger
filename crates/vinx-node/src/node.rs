@@ -168,6 +168,17 @@ impl Node {
             timestamp,
         )?;
 
+        // Flush mempool entries whose nonce is now consumed by this block.
+        {
+            let mut confirmed_nonces = HashMap::new();
+            for tx in &block.transactions {
+                confirmed_nonces.insert(tx.from.to_string(), tx.nonce + 1);
+            }
+            if !confirmed_nonces.is_empty() {
+                mempool.update_confirmed_nonces(&confirmed_nonces);
+            }
+        }
+
         let receipts = block
             .transactions
             .iter()
