@@ -5,6 +5,43 @@ Format : `MAJEUR.MINEUR.CORRECTIF` — les versions `0.x.y` sont des versions de
 
 ---
 
+## [0.17.0] — 2026-06-30
+
+### Rate limiting token bucket, métriques atomiques & WebSocket enrichi
+
+**Rate limiting — Token bucket par route**
+- Remplacement du compteur à fenêtre fixe par un token bucket (burst autorisé + refill continu)
+- Limites différenciées par type de route :
+  - `/health`, `/metrics`, `/ws`, `/events` : exempt (aucune limite)
+  - `/tx/submit` : 20 req burst, refill 20/min
+  - `/faucet/*` : 5 req burst, refill 5/heure
+  - Tout le reste : 100 req burst, refill 100/min
+- Chaque IP dispose de buckets indépendants par classe de route
+- Le nombre de requêtes rejetées est compté dans `NodeMetrics.ratelimit_hit`
+
+**Métriques Prometheus — Compteurs atomiques temps réel**
+- `NodeMetrics` : struct avec 8 champs `AtomicU64` sur le `Node`, partagée avec le `RateLimiter` via `Arc`
+- `GET /metrics` lit les compteurs d'activité sans aucun verrou (lock-free) ; seules les données économiques nécessitent encore un verrou
+- 8 nouvelles métriques s'ajoutent aux 8 existantes :
+  - `vinx_blocks_produced_total` — blocs produits par ce nœud
+  - `vinx_tx_submitted_total{status="ok"|"err"}` — tx acceptées / rejetées via RPC
+  - `vinx_tx_in_block_total` — tx incluses dans les blocs produits
+  - `vinx_p2p_blocks_received_total` — blocs reçus via P2P gossip
+  - `vinx_p2p_tx_received_total` — transactions reçues via P2P gossip
+  - `vinx_ratelimit_hit_total` — requêtes rejetées par le rate limiter
+  - `vinx_last_block_timestamp_seconds` — timestamp Unix du dernier bloc produit
+- Les compteurs sont incrémentés aux sites d'événement : `tick()`, `submit_tx`, P2P handlers
+
+**WebSocket — Ping/pong keepalive & événements enrichis**
+- `BlockEvent` étendu avec `base_fee_atoms`, `proposer` (adresse bech32 du validateur), `state_root` (hex)
+- Handler `/ws` réécrit avec `tokio::select!` sur trois branches :
+  - Réception d'un `BlockEvent` → envoi JSON enrichi
+  - Timer 30 s → envoi d'un `Ping` pour détecter les connexions silencieusement fermées
+  - Message entrant → gestion du `Close` et des frames Pong (ignorées)
+- SSE `/events` enrichi avec les mêmes champs supplémentaires
+
+---
+
 ## [0.16.0] — 2026-06-30
 
 ### Optimisations de performance — pruning, compression, cache & mempool
@@ -23,7 +60,7 @@ Format : `MAJEUR.MINEUR.CORRECTIF` — les versions `0.x.y` sont des versions de
 **Compression zstd**
 - Tous les blobs redb (state, chain, tx-index) compressés en niveau 3 à l'écriture
 - Messages P2P ≥ 512 octets compressés en niveau 1 avec un octet de flag (`0x00` = brut, `0x01` = zstd)
-- Réduction estimée : 60–75 % sur l'état sérialisé, 40–60 % sur les messages gossip
+- Réduction estimée : 60-75 % sur l'état sérialisé, 40-60 % sur les messages gossip
 
 **Filtre de Bloom P2P**
 - `bloomfilter::Bloom<Hash32>` (taux FP 1 % à 2× capacité) pré-filtre les transactions dupliquées dans `stage()`
@@ -70,7 +107,7 @@ Format : `MAJEUR.MINEUR.CORRECTIF` — les versions `0.x.y` sont des versions de
 - `tokio::select!` entre `tx_ready.notified()` (nouvelle tx admise) et `sleep(heartbeat)`
 - Fenêtre de batch 200 ms après le signal tx pour regrouper les soumissions simultanées
 - `Mempool::tx_ready: Arc<Notify>` — signal déclenché à chaque `add()` et `flush_staged()`
-- Constantes : `HEARTBEAT_INTERVAL_SECS = 3 600`, `BATCH_WINDOW_MS = 200`
+- Constantes : `HEARTBEAT_INTERVAL_SECS = 3_600`, `BATCH_WINDOW_MS = 200`
 - Économie estimée ~90 % d'espace disque en période creuse (24 blocs/jour au lieu de 28 800)
 
 **Heartbeat conditionnel**
@@ -78,15 +115,17 @@ Format : `MAJEUR.MINEUR.CORRECTIF` — les versions `0.x.y` sont des versions de
 - Zéro bloc vide produit en période d'inactivité totale
 
 **Δ1 — Répartition des frais 80/20**
-- Nouveau modèle : 80 % pour le validateur (`VALIDATOR_FEE_BPS = 8 000`), 20 % vers le treasury
+- Nouveau modèle : 80 % pour le validateur (`VALIDATOR_FEE_BPS = 8000`), 20 % vers le treasury
 - Champ `treasury` ajouté dans `WorldState`
-- Remplacement de la répartition tripartite (staking / validateur / melt) par le modèle 80/20
+- `treasury_balance()` : accesseur dédié
+- Remplacement de la répartition tripartite (staking/validateur/melt) par le modèle 80/20
 
 **Δ2 — Transactions sponsorisées (gasless UX)**
 - Champs optionnels `sponsor`, `sponsor_pub_key`, `sponsor_signature` dans `Transaction`
 - `with_sponsor(keypair)` : builder method
 - `signing_bytes()` intègre l'adresse sponsor pour le binding cryptographique
 - `apply_transfer()` : montant débité au sender, frais débités au sponsor si présent
+- Validation de la clé/adresse/signature sponsor dans `apply_transaction()`
 
 **Δ3 — Format wire Borsh pour P2P**
 - `BorshSerialize` / `BorshDeserialize` sur : `Address`, `PublicKey`, `VinxSignature`, `Amount`, `Transaction`, `Block`, `BlockHeader`, `BlockSignature`, `P2pMessage`
@@ -100,7 +139,7 @@ Format : `MAJEUR.MINEUR.CORRECTIF` — les versions `0.x.y` sont des versions de
 
 ## [0.14.0] — 2026-06-24
 
-### Robustesse protocole (A–E)
+### Robustesse protocole (A-E)
 
 **A — TTL & replay protection**
 - Champ `expires_at_height` dans `Transaction` : TTL par hauteur de bloc
@@ -116,18 +155,20 @@ Format : `MAJEUR.MINEUR.CORRECTIF` — les versions `0.x.y` sont des versions de
 
 **C — Chain IDs**
 - Module `chain_id.rs` : `MAINNET = 1`, `TESTNET = 7`, `DEVNET = 42`
-- `WorldState.chain_id` avec default serde ; `GenesisConfig.chain_id` câblé à la genèse
+- `WorldState.chain_id` avec default serde
+- `GenesisConfig.chain_id` câblé à la genèse
 - Flag CLI `--chain-id` dans `vinx-node`
 
 **D — Bootstrap P2P & réputation des pairs**
 - `bootstrap_peers` dans `NodeConfig` : dialés au démarrage P2P
 - `peer_reputation: HashMap<PeerId, i32>` dans la boucle d'événements
-- Messages gossip invalides décrémentent le score ; bannissement à −5 via `blacklist_peer`
+- Messages gossip invalides décrémentent le score ; bannissement à -5 via `blacklist_peer`
 - Flag CLI `--bootstrap-peers`
 
 **E — Expérience développeur**
 - `GET /tx/estimate` : `base_fee`, `recommended_fee`, pression mempool
 - `GET /tx/:hash/receipt` : `TxReceipt` avec succès/erreur par tx
+- `TxReceipt` stocké dans `Node.receipts` à chaque tick
 - `Mempool::prune_expired(height)` : supprime les tx expirées à chaque tick
 - Rate limiting par adresse dans le mempool : 50 tx pendantes max par émetteur
 
@@ -195,7 +236,7 @@ Format : `MAJEUR.MINEUR.CORRECTIF` — les versions `0.x.y` sont des versions de
 
 ### Gouvernance admin-only & distribution pool
 
-Refonte fondamentale du modèle de gouvernance : VinX Labs conserve le contrôle exclusif du protocole on-chain. Suppression complète du système de vote entre validateurs.
+Refonte fondamentale du modèle de gouvernance suite à la décision de design : VinX Labs conserve le contrôle exclusif du protocole on-chain. Suppression complète du système de vote entre validateurs.
 
 **Gouvernance**
 - Suppression du système de propositions et de vote on-chain (`SubmitProposal` 0x0B, `VoteProposal` 0x0C)
@@ -213,12 +254,12 @@ Refonte fondamentale du modèle de gouvernance : VinX Labs conserve le contrôle
 - Correction de `storage_test.rs` qui contenait une valeur erronée (21 milliards au lieu de 21 millions)
 
 **SDK TypeScript**
-- Suppression des types `ProposalResponse`, `ProposalListResponse` et des méthodes `proposals()` / `proposal()`
+- Suppression des types `ProposalResponse`, `ProposalListResponse` et des méthodes `proposals()` / `proposal()` (routes `/governance/proposals` supprimées)
 - Ajout de `distribution_pool` dans `NetworkStatsResponse`
 
 **Infrastructure**
 - Fusion de la branche `claude/awesome-gauss-IMII2` dans `main` (13 commits)
-- Suppression des doublons de tests introduits par le merge
+- Suppression des doublons de tests introduits par le merge (`make_block`, tests Merkle)
 - 42 tests Rust + 17 tests SDK Jest — zéro échec
 
 ---
@@ -251,7 +292,7 @@ Refonte fondamentale du modèle de gouvernance : VinX Labs conserve le contrôle
 ### Frais dynamiques, slashing, HD wallet, SDK TypeScript & CI
 
 **Économie & frais**
-- Frais dynamiques style EIP-1559 : multiplicateur ×1 à ×3 selon la charge du mempool (>80 % → surge)
+- Frais dynamiques style EIP-1559 : multiplicateur ×1 à ×3 selon la charge du mempool (>80% → surge)
 - Répartition des frais 40 % staking / 30 % validateur / 30 % melt pool
 - Fee floor configurable, `base_fee` recalculé à chaque bloc
 - File d'attente mempool triée par priorité de frais (highest-fee-first)
@@ -291,7 +332,7 @@ Refonte fondamentale du modèle de gouvernance : VinX Labs conserve le contrôle
 **Synchronisation**
 - Ordre strict des transactions par nonce dans le mempool (rejection si nonce incorrect)
 - Synchronisation de blocs au démarrage depuis un pair de confiance (`--sync-peer` HTTP)
-- Endpoint `GET /chain/sync?from=N&limit=L` pour la synchronisation légère
+- Endpoint GET `/chain/sync?from=N&limit=L` pour la synchronisation légère
 - Historique des transactions par compte (`/account/:address/txs`) avec pagination
 
 **Infrastructure**
