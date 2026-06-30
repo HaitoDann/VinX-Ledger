@@ -101,6 +101,26 @@ export interface ChainSyncResponse {
   blocks: BlockResponse[];
 }
 
+export interface MerkleProofStep {
+  sibling: string;        // hex-encoded SHA-256 hash of the sibling node
+  sibling_is_right: boolean; // true = sibling is the right child, current is left
+}
+
+export interface MerkleProofResponse {
+  address: string;
+  leaf_hash: string;   // hex SHA-256 of the account leaf
+  state_root: string;  // hex SHA-256 of the Merkle state root
+  proof: MerkleProofStep[];
+  valid: boolean;      // server-side verification result (use verifyMerkleProof for client-side)
+}
+
+export interface FaucetResponse {
+  accepted: boolean;
+  tx_hash: string;
+  amount_atoms: string;
+  to: string;
+}
+
 // ─── Transaction payload ──────────────────────────────────────────────────────
 
 export interface SignedTransaction {
@@ -223,6 +243,80 @@ export class VinxClient {
   blockEvents(): EventSource {
     return new EventSource(`${this.baseUrl}/events`);
   }
+
+  /**
+   * Fetch the Merkle inclusion proof for an account in the current state root.
+   * Use `verifyMerkleProof` to verify the proof client-side.
+   */
+  accountProof(address: string): Promise<MerkleProofResponse> {
+    return this.get(`/account/${address}/proof`);
+  }
+
+  /**
+   * Request testnet tokens from the faucet.
+   * The node must have a faucet keypair configured.
+   */
+  faucetRequest(address: string): Promise<FaucetResponse> {
+    return this.post("/faucet/request", { address });
+  }
+}
+
+// ─── Light client — Merkle proof verification ─────────────────────────────────
+
+function hexToBytes(hex: string): Uint8Array {
+  const bytes = new Uint8Array(hex.length / 2);
+  for (let i = 0; i < hex.length; i += 2) {
+    bytes[i / 2] = parseInt(hex.slice(i, i + 2), 16);
+  }
+  return bytes;
+}
+
+function bytesToHex(bytes: Uint8Array): string {
+  return Array.from(bytes)
+    .map((b) => b.toString(16).padStart(2, "0"))
+    .join("");
+}
+
+async function sha256Concat(leftHex: string, rightHex: string): Promise<string> {
+  const left = hexToBytes(leftHex);
+  const right = hexToBytes(rightHex);
+  const combined = new Uint8Array(left.length + right.length);
+  combined.set(left);
+  combined.set(right, left.length);
+  const hashBuffer = await globalThis.crypto.subtle.digest("SHA-256", combined);
+  return bytesToHex(new Uint8Array(hashBuffer));
+}
+
+/**
+ * Verify a Merkle inclusion proof client-side without trusting the server.
+ *
+ * Reconstructs the Merkle root from the leaf hash and proof steps, then
+ * compares it against the expected `stateRoot`. Returns `true` if the proof
+ * is valid (leaf is included in the tree that produces `stateRoot`).
+ *
+ * All hash values must be lowercase hex strings (64 chars / 32 bytes).
+ *
+ * @example
+ * const proof = await client.accountProof("vinx1abc...");
+ * const valid = await verifyMerkleProof(proof.leaf_hash, proof.proof, proof.state_root);
+ */
+export async function verifyMerkleProof(
+  leafHash: string,
+  proof: MerkleProofStep[],
+  stateRoot: string
+): Promise<boolean> {
+  let current = leafHash.toLowerCase();
+  for (const step of proof) {
+    const sibling = step.sibling.toLowerCase();
+    if (step.sibling_is_right) {
+      // current node is the left child
+      current = await sha256Concat(current, sibling);
+    } else {
+      // sibling is the left child, current is right
+      current = await sha256Concat(sibling, current);
+    }
+  }
+  return current === stateRoot.toLowerCase();
 }
 
 export default VinxClient;

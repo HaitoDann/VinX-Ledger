@@ -1,4 +1,5 @@
 use crate::CryptoError;
+use borsh::{BorshDeserialize, BorshSerialize};
 use ed25519_dalek::{Signer, Verifier};
 use rand::rngs::OsRng;
 use serde::{Deserialize, Deserializer, Serialize, Serializer};
@@ -8,11 +9,11 @@ pub struct KeyPair {
     signing_key: ed25519_dalek::SigningKey,
 }
 
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, BorshSerialize, BorshDeserialize)]
 pub struct PublicKey(pub(crate) [u8; 32]);
 
 /// Ed25519 signature (64 bytes), serialized as a lowercase hex string.
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq, BorshSerialize, BorshDeserialize)]
 pub struct VinxSignature(pub(crate) [u8; 64]);
 
 impl Serialize for VinxSignature {
@@ -23,7 +24,7 @@ impl Serialize for VinxSignature {
 
 impl<'de> Deserialize<'de> for VinxSignature {
     fn deserialize<D: Deserializer<'de>>(d: D) -> Result<Self, D::Error> {
-        let hex_str = String::deserialize(d)?;
+        let hex_str = <String as serde::Deserialize>::deserialize(d)?;
         let bytes = hex::decode(&hex_str).map_err(serde::de::Error::custom)?;
         let arr: [u8; 64] = bytes
             .try_into()
@@ -97,7 +98,10 @@ mod tests {
         let kp = KeyPair::generate();
         let pk = kp.public_key();
         let sig = kp.sign(b"original message");
-        assert_eq!(pk.verify(b"tampered message", &sig), Err(CryptoError::InvalidSignature));
+        assert_eq!(
+            pk.verify(b"tampered message", &sig),
+            Err(CryptoError::InvalidSignature)
+        );
     }
 
     #[test]
@@ -106,7 +110,10 @@ mod tests {
         let kp2 = KeyPair::generate();
         let msg = b"pay alice 50 VinX";
         let sig = kp1.sign(msg);
-        assert_eq!(kp2.public_key().verify(msg, &sig), Err(CryptoError::InvalidSignature));
+        assert_eq!(
+            kp2.public_key().verify(msg, &sig),
+            Err(CryptoError::InvalidSignature)
+        );
     }
 
     #[test]

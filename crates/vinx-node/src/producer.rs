@@ -1,5 +1,11 @@
-use crate::{chain::Chain, config::NodeConfig, mempool::{is_future_nonce, Mempool}, NodeError};
-use vinx_core::{amount::Amount, Block, BlockHeader, BlockSignature, ValidatorSet};
+use crate::{
+    chain::Chain,
+    config::NodeConfig,
+    mempool::{is_future_nonce, Mempool},
+    NodeError,
+};
+use vinx_core::{amount::Amount, Block, BlockHeader, BlockSignature, Transaction, ValidatorSet};
+use vinx_crypto::sha256;
 use vinx_state::WorldState;
 
 /// Produces the next block: applies mempool transactions, distributes staking rewards,
@@ -29,7 +35,10 @@ pub fn produce_block(
     // Flush staged (unverified) transactions via parallel sig verification pipeline
     let admitted = mempool.flush_staged();
     if admitted > 0 {
-        tracing::debug!(admitted, "Staged transactions verified and admitted in parallel");
+        tracing::debug!(
+            admitted,
+            "Staged transactions verified and admitted in parallel"
+        );
     }
 
     // Update dynamic base fee from mempool pressure (EIP-1559-style surge pricing)
@@ -63,7 +72,10 @@ pub fn produce_block(
         }
     }
     if !requeue_buf.is_empty() {
-        tracing::debug!(count = requeue_buf.len(), "Requeueing future-nonce transactions");
+        tracing::debug!(
+            count = requeue_buf.len(),
+            "Requeueing future-nonce transactions"
+        );
         mempool.requeue(requeue_buf);
     }
     if rejected > 0 {
@@ -94,6 +106,7 @@ pub fn produce_block(
 
     // Compute Merkle root over all account states after all mutations
     let state_root = state.compute_state_root();
+    let receipts_root = compute_receipts_root(&block_txs);
 
     let header = BlockHeader {
         height: next_height,
@@ -103,6 +116,7 @@ pub fn produce_block(
         tx_count: block_txs.len() as u32,
         state_root,
         base_fee: current_base_fee.atoms() as u64,
+        receipts_root,
     };
     let mut block = Block {
         header,
@@ -130,6 +144,128 @@ pub fn produce_block(
     Ok(block)
 }
 
+/// Produces a block as a backup validator stepping in for an offline scheduled leader.
+/// Skips the round-robin leader check — any registered validator may call this after
+/// the slot timeout has expired.
+pub fn produce_block_backup(
+    state: &mut WorldState,
+    chain: &mut Chain,
+    mempool: &mut Mempool,
+    config: &NodeConfig,
+    validator_set: &ValidatorSet,
+    timestamp: u64,
+) -> Result<Block, NodeError> {
+    // Only registered validators may step in
+    if !validator_set.contains(&config.validator_address) {
+        return Err(NodeError::Consensus(
+            "backup producer is not a registered validator".into(),
+        ));
+    }
+    produce_block_inner(state, chain, mempool, config, validator_set, timestamp)
+}
+
+fn produce_block_inner(
+    state: &mut WorldState,
+    chain: &mut Chain,
+    mempool: &mut Mempool,
+    config: &NodeConfig,
+    _validator_set: &ValidatorSet,
+    timestamp: u64,
+) -> Result<Block, NodeError> {
+    let next_height = chain.tip_height() + 1;
+    let prev_hash = chain.tip_hash();
+
+    let admitted = mempool.flush_staged();
+    if admitted > 0 {
+        tracing::debug!(admitted, "Staged transactions verified and admitted");
+    }
+
+    state.update_base_fee(mempool.size(), config.max_block_txs);
+    let current_base_fee = state.base_fee;
+
+    let mut block_txs: Vec<vinx_core::Transaction> = Vec::new();
+    let pending = mempool.drain(config.max_block_txs);
+    let mut rejected = 0usize;
+    let mut requeue_buf: Vec<vinx_core::Transaction> = Vec::new();
+    for tx in pending {
+        match state.apply_transaction(&tx) {
+            Ok(()) => block_txs.push(tx),
+            Err(e) => {
+                tracing::debug!(error = %e, "Transaction rejected during block production");
+                if is_future_nonce(&e) {
+                    requeue_buf.push(tx);
+                } else {
+                    rejected += 1;
+                }
+            }
+        }
+    }
+    if !requeue_buf.is_empty() {
+        mempool.requeue(requeue_buf);
+    }
+    if rejected > 0 {
+        tracing::warn!(rejected, "Transactions dropped from block");
+    }
+
+    state.block_height = next_height;
+    state.check_auto_unfreeze();
+    state.check_upgrade_activation();
+
+    let validator_reward = state.flush_validator_fee_pool();
+    if validator_reward > Amount::ZERO {
+        state.credit(&config.validator_address, validator_reward);
+    }
+    let rewards = state.distribute_staking_rewards();
+    if rewards > Amount::ZERO {
+        tracing::debug!(rewards = %rewards, "Staking rewards distributed");
+    }
+
+    let state_root = state.compute_state_root();
+    let receipts_root = compute_receipts_root(&block_txs);
+    let header = BlockHeader {
+        height: next_height,
+        prev_hash,
+        timestamp,
+        validator: config.validator_address.clone(),
+        tx_count: block_txs.len() as u32,
+        state_root,
+        base_fee: current_base_fee.atoms() as u64,
+        receipts_root,
+    };
+    let mut block = Block {
+        header,
+        transactions: block_txs,
+        signatures: Vec::new(),
+    };
+    let header_hash = block.hash();
+    block.signatures.push(BlockSignature {
+        validator: config.validator_address.clone(),
+        pub_key: config.validator_keypair.public_key(),
+        signature: config.validator_keypair.sign(&header_hash),
+    });
+    chain.push(block.clone());
+
+    tracing::info!(
+        height = next_height,
+        txs = block.header.tx_count,
+        "Block produced (backup)"
+    );
+    Ok(block)
+}
+
+/// Computes a SHA-256 receipts root from the ordered list of included transactions.
+/// Empty blocks get the zero hash.  Non-empty blocks: sha256(hash0 || hash1 || ...).
+fn compute_receipts_root(txs: &[Transaction]) -> [u8; 32] {
+    if txs.is_empty() {
+        return [0u8; 32];
+    }
+    let mut bytes = Vec::with_capacity(txs.len() * 32);
+    for tx in txs {
+        bytes.extend_from_slice(&tx.hash());
+    }
+    sha256(&bytes)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -149,6 +285,7 @@ mod tests {
         let state = create_genesis_state(&GenesisConfig {
             admin_address: admin_addr,
             validator_address: validator_addr.clone(),
+            chain_id: vinx_core::CHAIN_ID_DEVNET,
         });
 
         let (chain, _) = Chain::new_with_genesis(validator_addr.clone(), 0);
@@ -161,14 +298,30 @@ mod tests {
     #[test]
     fn test_produce_first_block_height() {
         let (mut state, mut chain, mut mempool, config) = setup();
-        let block = produce_block(&mut state, &mut chain, &mut mempool, &config, &config.validator_set,1_000).unwrap();
+        let block = produce_block(
+            &mut state,
+            &mut chain,
+            &mut mempool,
+            &config,
+            &config.validator_set,
+            1_000,
+        )
+        .unwrap();
         assert_eq!(block.header.height, 1);
     }
 
     #[test]
     fn test_first_block_has_no_transactions() {
         let (mut state, mut chain, mut mempool, config) = setup();
-        let block = produce_block(&mut state, &mut chain, &mut mempool, &config, &config.validator_set,1_000).unwrap();
+        let block = produce_block(
+            &mut state,
+            &mut chain,
+            &mut mempool,
+            &config,
+            &config.validator_set,
+            1_000,
+        )
+        .unwrap();
         assert_eq!(block.transactions.len(), 0);
     }
 
@@ -176,7 +329,15 @@ mod tests {
     fn test_produce_consecutive_blocks() {
         let (mut state, mut chain, mut mempool, config) = setup();
         for i in 1..=5 {
-            let block = produce_block(&mut state, &mut chain, &mut mempool, &config, &config.validator_set,i * 10).unwrap();
+            let block = produce_block(
+                &mut state,
+                &mut chain,
+                &mut mempool,
+                &config,
+                &config.validator_set,
+                i * 10,
+            )
+            .unwrap();
             assert_eq!(block.header.height, i);
         }
         assert_eq!(chain.tip_height(), 5);
@@ -195,11 +356,20 @@ mod tests {
 
         let amount = Amount::from_vinx(100);
         let fee = amount.calculate_fee(Amount::from_atoms(DEFAULT_FEE_FLOOR_ATOMS));
-        let tx = vinx_core::Transaction::new_transfer(&sender_kp, receiver_addr.clone(), amount, fee, 0);
+        let tx =
+            vinx_core::Transaction::new_transfer(&sender_kp, receiver_addr.clone(), amount, fee, 0);
 
         mempool.add(tx).unwrap();
 
-        let block = produce_block(&mut state, &mut chain, &mut mempool, &config, &config.validator_set,1_000).unwrap();
+        let block = produce_block(
+            &mut state,
+            &mut chain,
+            &mut mempool,
+            &config,
+            &config.validator_set,
+            1_000,
+        )
+        .unwrap();
 
         assert_eq!(block.header.tx_count, 1);
         assert_eq!(state.account_balance(&receiver_addr), amount);
@@ -218,7 +388,15 @@ mod tests {
 
         mempool.add(bad_tx).unwrap();
 
-        let block = produce_block(&mut state, &mut chain, &mut mempool, &config, &config.validator_set,1_000).unwrap();
+        let block = produce_block(
+            &mut state,
+            &mut chain,
+            &mut mempool,
+            &config,
+            &config.validator_set,
+            1_000,
+        )
+        .unwrap();
 
         assert_eq!(block.header.tx_count, 0);
         assert_eq!(mempool.size(), 0);
@@ -227,8 +405,24 @@ mod tests {
     #[test]
     fn test_prev_hash_links_blocks() {
         let (mut state, mut chain, mut mempool, config) = setup();
-        let b1 = produce_block(&mut state, &mut chain, &mut mempool, &config, &config.validator_set,10).unwrap();
-        let b2 = produce_block(&mut state, &mut chain, &mut mempool, &config, &config.validator_set,20).unwrap();
+        let b1 = produce_block(
+            &mut state,
+            &mut chain,
+            &mut mempool,
+            &config,
+            &config.validator_set,
+            10,
+        )
+        .unwrap();
+        let b2 = produce_block(
+            &mut state,
+            &mut chain,
+            &mut mempool,
+            &config,
+            &config.validator_set,
+            20,
+        )
+        .unwrap();
         assert_eq!(b2.header.prev_hash, b1.hash());
     }
 
@@ -242,24 +436,44 @@ mod tests {
 
         let amount = Amount::from_vinx(1_000);
         let fee = Amount::from_vinx(1); // explicit fee > floor
-        let tx = vinx_core::Transaction::new_transfer(&sender_kp, sender_addr.clone(), amount, fee, 0);
+        let tx =
+            vinx_core::Transaction::new_transfer(&sender_kp, sender_addr.clone(), amount, fee, 0);
         mempool.add(tx).unwrap();
 
         let validator_addr = config.validator_address.clone();
         let balance_before = state.account_balance(&validator_addr);
 
-        produce_block(&mut state, &mut chain, &mut mempool, &config, &config.validator_set, 1_000).unwrap();
+        produce_block(
+            &mut state,
+            &mut chain,
+            &mut mempool,
+            &config,
+            &config.validator_set,
+            1_000,
+        )
+        .unwrap();
 
         let balance_after = state.account_balance(&validator_addr);
         let expected_reward = Amount::validator_share(fee);
         assert!(balance_after > balance_before);
-        assert_eq!(balance_after.checked_sub(balance_before).unwrap(), expected_reward);
+        assert_eq!(
+            balance_after.checked_sub(balance_before).unwrap(),
+            expected_reward
+        );
     }
 
     #[test]
     fn test_base_fee_in_header() {
         let (mut state, mut chain, mut mempool, config) = setup();
-        let block = produce_block(&mut state, &mut chain, &mut mempool, &config, &config.validator_set, 1_000).unwrap();
+        let block = produce_block(
+            &mut state,
+            &mut chain,
+            &mut mempool,
+            &config,
+            &config.validator_set,
+            1_000,
+        )
+        .unwrap();
         // At zero mempool load, base_fee == fee_floor
         assert_eq!(block.header.base_fee, DEFAULT_FEE_FLOOR_ATOMS as u64);
     }

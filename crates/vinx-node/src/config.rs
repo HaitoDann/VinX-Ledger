@@ -1,5 +1,5 @@
 use std::path::PathBuf;
-use vinx_core::ValidatorSet;
+use vinx_core::{chain_id::CHAIN_ID_DEVNET, ValidatorSet};
 use vinx_crypto::{Address, KeyPair};
 
 #[derive(Clone)]
@@ -26,6 +26,16 @@ pub struct NodeConfig {
     pub sync_peer_rpc: Option<String>,
     /// Bearer token required for admin routes. `None` = no auth required.
     pub admin_token: Option<String>,
+    /// Keypair used to sign faucet transfer transactions. `None` = faucet disabled.
+    pub faucet_keypair: Option<KeyPair>,
+    /// Atoms to drip per faucet request (default: 100 VinX).
+    pub faucet_amount_atoms: u128,
+    /// Seconds a given address must wait between faucet requests (default: 86 400 = 24 h).
+    pub faucet_cooldown_secs: u64,
+    /// Chain ID for transaction replay protection (1 = mainnet, 7 = testnet, 42 = devnet).
+    pub chain_id: u32,
+    /// Bootstrap peer multiaddrs dialed on P2P startup for initial peer discovery.
+    pub bootstrap_peers: Vec<String>,
 }
 
 impl NodeConfig {
@@ -45,6 +55,11 @@ impl NodeConfig {
             peer_addrs: vec![],
             sync_peer_rpc: None,
             admin_token: None,
+            faucet_keypair: None,
+            faucet_amount_atoms: 100 * 1_000_000_000_000_000_000, // 100 VinX
+            faucet_cooldown_secs: 86_400,
+            chain_id: CHAIN_ID_DEVNET,
+            bootstrap_peers: vec![],
         }
     }
 
@@ -85,6 +100,23 @@ impl NodeConfig {
 
     pub fn with_admin_token(mut self, token: impl Into<String>) -> Self {
         self.admin_token = Some(token.into());
+        self
+    }
+
+    pub fn with_faucet(mut self, keypair: KeyPair, amount_atoms: u128, cooldown_secs: u64) -> Self {
+        self.faucet_keypair = Some(keypair);
+        self.faucet_amount_atoms = amount_atoms;
+        self.faucet_cooldown_secs = cooldown_secs;
+        self
+    }
+
+    pub fn with_chain_id(mut self, chain_id: u32) -> Self {
+        self.chain_id = chain_id;
+        self
+    }
+
+    pub fn with_bootstrap_peers(mut self, peers: Vec<String>) -> Self {
+        self.bootstrap_peers = peers;
         self
     }
 }

@@ -1,12 +1,13 @@
-use std::collections::HashSet;
 use crate::transaction::Transaction;
 use crate::validator_set::ValidatorSet;
+use borsh::{BorshDeserialize, BorshSerialize};
 use serde::{Deserialize, Serialize};
+use std::collections::HashSet;
 use vinx_crypto::{sha256, Address, Hash32, PublicKey, VinxSignature};
 
 pub const GENESIS_PREV_HASH: Hash32 = [0u8; 32];
 
-#[derive(Clone, Debug, Serialize, Deserialize)]
+#[derive(Clone, Debug, Serialize, Deserialize, BorshSerialize, BorshDeserialize)]
 pub struct BlockHeader {
     pub height: u64,
     pub prev_hash: Hash32,
@@ -19,11 +20,14 @@ pub struct BlockHeader {
     /// Dynamic fee floor at block production time, in atoms.
     #[serde(default)]
     pub base_fee: u64,
+    /// SHA-256 Merkle root of transaction receipts in this block.
+    #[serde(default)]
+    pub receipts_root: Hash32,
 }
 
 impl BlockHeader {
     pub fn hash(&self) -> Hash32 {
-        let mut bytes = Vec::with_capacity(144);
+        let mut bytes = Vec::with_capacity(176);
         bytes.extend_from_slice(&self.height.to_be_bytes());
         bytes.extend_from_slice(&self.prev_hash);
         bytes.extend_from_slice(&self.timestamp.to_be_bytes());
@@ -31,12 +35,13 @@ impl BlockHeader {
         bytes.extend_from_slice(&self.tx_count.to_be_bytes());
         bytes.extend_from_slice(&self.state_root);
         bytes.extend_from_slice(&self.base_fee.to_be_bytes());
+        bytes.extend_from_slice(&self.receipts_root);
         sha256(&bytes)
     }
 }
 
 /// One validator's co-signature on a block header hash.
-#[derive(Clone, Debug, Serialize, Deserialize)]
+#[derive(Clone, Debug, Serialize, Deserialize, BorshSerialize, BorshDeserialize)]
 pub struct BlockSignature {
     /// Address of the signing validator.
     pub validator: Address,
@@ -56,7 +61,7 @@ pub struct SlashEvidence {
     pub sig_b: BlockSignature,
 }
 
-#[derive(Clone, Debug, Serialize, Deserialize)]
+#[derive(Clone, Debug, Serialize, Deserialize, BorshSerialize, BorshDeserialize)]
 pub struct Block {
     pub header: BlockHeader,
     pub transactions: Vec<Transaction>,
@@ -115,6 +120,7 @@ mod tests {
             tx_count: 0,
             state_root: [0u8; 32],
             base_fee: 0,
+            receipts_root: [0u8; 32],
         }
     }
 
@@ -128,6 +134,7 @@ mod tests {
                 tx_count: 0,
                 state_root: [0u8; 32],
                 base_fee: 0,
+                receipts_root: [0u8; 32],
             },
             transactions: vec![],
             signatures: vec![],

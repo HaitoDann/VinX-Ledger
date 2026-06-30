@@ -34,7 +34,12 @@ pub async fn sync_from_peer(
 
     loop {
         let from = chain.tip_height() + 1;
-        let url = format!("{}/chain/sync?from={}&limit={}", peer_rpc_url.trim_end_matches('/'), from, batch);
+        let url = format!(
+            "{}/chain/sync?from={}&limit={}",
+            peer_rpc_url.trim_end_matches('/'),
+            from,
+            batch
+        );
 
         let resp = match client.get(&url).send().await {
             Ok(r) => r,

@@ -1,6 +1,7 @@
-use std::path::{Path, PathBuf};
 use clap::Parser;
+use std::path::{Path, PathBuf};
 use tracing_subscriber::EnvFilter;
+use vinx_core::CHAIN_ID_DEVNET;
 use vinx_crypto::{Address, KeyPair};
 use vinx_node::{chain::Chain, config::NodeConfig, storage::Storage};
 use vinx_state::{create_genesis_state, GenesisConfig};
@@ -19,6 +20,13 @@ struct NodeConfigFile {
     admin_key_file: Option<PathBuf>,
     sync_peer_rpc: Option<String>,
     admin_token: Option<String>,
+    /// Path to a JSON key file for the faucet account. If the file doesn't
+    /// exist it is generated automatically (the account still needs funding).
+    faucet_key_file: Option<PathBuf>,
+    /// Atoms to drip per faucet request (default: 100 VinX = 100 × 10¹⁸ atoms).
+    faucet_amount_atoms: Option<u128>,
+    /// Cooldown between faucet requests per address in seconds (default: 86 400 = 24 h).
+    faucet_cooldown_secs: Option<u64>,
 }
 
 impl NodeConfigFile {
@@ -65,6 +73,12 @@ struct Args {
     /// RPC URL of a trusted peer to sync from on startup, e.g. http://1.2.3.4:8545
     #[arg(long)]
     sync_peer: Option<String>,
+    /// Chain ID: 1=mainnet, 7=testnet, 42=devnet (default: 42)
+    #[arg(long, default_value_t = CHAIN_ID_DEVNET)]
+    chain_id: u32,
+    /// Hardcoded bootstrap peers (repeatable, in addition to --peers)
+    #[arg(long, num_args = 0..)]
+    bootstrap_peers: Vec<String>,
 }
 
 // ─── Key file helpers ─────────────────────────────────────────────────────────
@@ -80,7 +94,13 @@ impl KeyFile {
         let kp = KeyPair::generate();
         let address = Address::from_public_key(&kp.public_key()).to_string();
         let secret_key_hex = hex::encode(kp.secret_bytes());
-        (Self { address, secret_key_hex }, kp)
+        (
+            Self {
+                address,
+                secret_key_hex,
+            },
+            kp,
+        )
     }
 
     fn load_or_generate(path: &Path) -> (Self, KeyPair) {
@@ -113,7 +133,10 @@ async fn main() {
     let args = Args::parse();
 
     // Config file: --config path, or config.toml if it exists, or empty defaults
-    let cfg_path = args.config.clone().unwrap_or_else(|| PathBuf::from("config.toml"));
+    let cfg_path = args
+        .config
+        .clone()
+        .unwrap_or_else(|| PathBuf::from("config.toml"));
     let file_cfg = if cfg_path.exists() {
         NodeConfigFile::load(&cfg_path)
     } else {
@@ -122,20 +145,32 @@ async fn main() {
 
     // CLI flag > config file > hardcoded default
     let block_time = args.block_time.or(file_cfg.block_time_secs).unwrap_or(3);
-    let rpc_listen = args.rpc_listen.or(file_cfg.rpc_listen)
+    let rpc_listen = args
+        .rpc_listen
+        .or(file_cfg.rpc_listen)
         .unwrap_or_else(|| "0.0.0.0:8545".to_string());
     let p2p_listen = args.p2p_listen.or(file_cfg.p2p_listen);
-    let data_dir = args.data_dir.or(file_cfg.data_dir)
+    let data_dir = args
+        .data_dir
+        .or(file_cfg.data_dir)
         .unwrap_or_else(|| PathBuf::from("devnet"));
-    let peers = if !args.peers.is_empty() { args.peers } else { file_cfg.peers.unwrap_or_default() };
+    let peers = if !args.peers.is_empty() {
+        args.peers
+    } else {
+        file_cfg.peers.unwrap_or_default()
+    };
+    let bootstrap_peers = args.bootstrap_peers;
+    let chain_id = args.chain_id;
     let max_block_txs = file_cfg.max_block_txs.unwrap_or(1_000);
     let sync_peer_rpc = args.sync_peer.or(file_cfg.sync_peer_rpc);
 
     std::fs::create_dir_all(&data_dir).expect("create data dir");
 
-    let validator_key_path = file_cfg.validator_key_file
+    let validator_key_path = file_cfg
+        .validator_key_file
         .unwrap_or_else(|| data_dir.join("validator.json"));
-    let admin_key_path = file_cfg.admin_key_file
+    let admin_key_path = file_cfg
+        .admin_key_file
         .unwrap_or_else(|| data_dir.join("admin.json"));
 
     let (admin_kf, _admin_kp) = KeyFile::load_or_generate(&admin_key_path);
@@ -160,6 +195,7 @@ async fn main() {
             let state = create_genesis_state(&GenesisConfig {
                 admin_address: admin_addr.clone(),
                 validator_address: validator_addr.clone(),
+                chain_id,
             });
             let (chain, _genesis) = Chain::new_with_genesis(validator_addr.clone(), timestamp);
             (state, chain, false)
@@ -177,6 +213,10 @@ async fn main() {
     if !peers.is_empty() {
         config = config.with_peers(peers);
     }
+    if !bootstrap_peers.is_empty() {
+        config = config.with_bootstrap_peers(bootstrap_peers);
+    }
+    config = config.with_chain_id(chain_id);
     if let Some(ref url) = sync_peer_rpc {
         config = config.with_sync_peer(url.clone());
     }
@@ -184,6 +224,22 @@ async fn main() {
         config = config.with_admin_token(token);
     }
     config.max_block_txs = max_block_txs;
+
+    // Optional faucet — only enabled when faucet_key_file is set in config.toml.
+    if let Some(ref faucet_path) = file_cfg.faucet_key_file {
+        let (faucet_kf, faucet_kp) = KeyFile::load_or_generate(faucet_path);
+        let amount = file_cfg
+            .faucet_amount_atoms
+            .unwrap_or(100 * 1_000_000_000_000_000_000);
+        let cooldown = file_cfg.faucet_cooldown_secs.unwrap_or(86_400);
+        tracing::info!(
+            address = %faucet_kf.address,
+            amount_atoms = amount,
+            cooldown_secs = cooldown,
+            "Faucet enabled"
+        );
+        config = config.with_faucet(faucet_kp, amount, cooldown);
+    }
 
     // Startup chain sync from trusted peer (if configured)
     if let Some(ref peer_url) = sync_peer_rpc {
@@ -193,7 +249,8 @@ async fn main() {
             &mut state,
             &mut chain,
             &config.validator_set,
-        ).await;
+        )
+        .await;
         if applied > 0 {
             tracing::info!(applied, tip = chain.tip_height(), "Chain sync complete");
         } else {
@@ -201,9 +258,36 @@ async fn main() {
         }
     }
 
-    print_banner(&admin_kf.address, &validator_kf.address, state.block_height, resumed, &rpc_listen);
+    let faucet_addr = file_cfg.faucet_key_file.as_ref().and_then(|p| {
+        let json = std::fs::read_to_string(p).ok()?;
+        let kf: KeyFile = serde_json::from_str(&json).ok()?;
+        Some(kf.address)
+    });
+    print_banner(
+        &admin_kf.address,
+        &validator_kf.address,
+        faucet_addr.as_deref(),
+        state.block_height,
+        resumed,
+        &rpc_listen,
+    );
 
     let node = vinx_node::Node::new_with_p2p(state, chain, config).await;
+
+    // Restore mempool from last persist — re-validate each tx against current state.
+    if let Some(txs) = storage.load_mempool() {
+        let total = txs.len();
+        if total > 0 {
+            let mut mp = node.mempool.write().await;
+            let mut restored = 0usize;
+            for tx in txs {
+                if mp.add(tx).is_ok() {
+                    restored += 1;
+                }
+            }
+            tracing::info!(restored, total, "Mempool restored from disk");
+        }
+    }
 
     let block_node = std::sync::Arc::clone(&node);
     tokio::spawn(async move { block_node.run_block_producer().await });
@@ -214,16 +298,33 @@ async fn main() {
     }
 }
 
-fn print_banner(admin: &str, validator: &str, height: u64, resumed: bool, rpc: &str) {
+fn print_banner(
+    admin: &str,
+    validator: &str,
+    faucet: Option<&str>,
+    height: u64,
+    resumed: bool,
+    rpc: &str,
+) {
     let line = "═".repeat(62);
-    let mode = if resumed { format!("Reprise depuis le bloc {height}") } else { "Nouveau genesis".to_string() };
+    let mode = if resumed {
+        format!("Reprise depuis le bloc {height}")
+    } else {
+        "Nouveau genesis".to_string()
+    };
     println!("\n{line}");
     println!("  VinX Ledger — DEVNET  (RPC: {rpc})");
     println!("  {mode}");
     println!("{line}");
     println!("  Admin     : {admin}");
-    println!("             21,000,000.00 VINX");
+    println!("               21,000,000.00 VINX");
     println!("  Validator : {validator}");
+    if let Some(fa) = faucet {
+        println!("  Faucet    : {fa}");
+        println!("    POST {rpc}/faucet/request  {{\"address\":\"vinx1...\"}}");
+    } else {
+        println!("  Faucet    : désactivé  (ajouter faucet_key_file dans config.toml)");
+    }
     println!("{line}");
     println!("  Générer un wallet :");
     println!("    cargo run -p vinx-wallet -- keygen --output my-wallet.json");

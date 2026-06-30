@@ -10,6 +10,8 @@ pub struct GenesisConfig {
     pub admin_address: Address,
     /// Initial PoA validator — the node that proposes block 1 and beyond.
     pub validator_address: Address,
+    /// Chain ID for replay protection (CHAIN_ID_MAINNET / TESTNET / DEVNET).
+    pub chain_id: u32,
 }
 
 /// Builds the initial chain state from the genesis configuration.
@@ -33,6 +35,7 @@ pub fn create_genesis_state(config: &GenesisConfig) -> WorldState {
     state.admin_address = Some(config.admin_address.clone());
     // Initial validator set — admin can add/remove validators via governance transactions
     state.validator_set = ValidatorSet::single(config.validator_address.clone());
+    state.chain_id = config.chain_id;
 
     state
 }
@@ -41,6 +44,7 @@ pub fn create_genesis_state(config: &GenesisConfig) -> WorldState {
 mod tests {
     use super::*;
     use vinx_core::amount::{ADMIN_ALLOCATION_ATOMS, COFFRE_MATURITY_ATOMS, MAX_SUPPLY_ATOMS};
+    use vinx_core::CHAIN_ID_DEVNET;
     use vinx_crypto::KeyPair;
 
     fn genesis() -> (WorldState, Address) {
@@ -51,6 +55,7 @@ mod tests {
         let state = create_genesis_state(&GenesisConfig {
             admin_address: admin_addr.clone(),
             validator_address: validator_addr,
+            chain_id: CHAIN_ID_DEVNET,
         });
         (state, admin_addr)
     }
@@ -78,7 +83,10 @@ mod tests {
 
     #[test]
     fn test_admin_plus_coffre_equals_max_supply() {
-        assert_eq!(ADMIN_ALLOCATION_ATOMS + COFFRE_MATURITY_ATOMS, MAX_SUPPLY_ATOMS);
+        assert_eq!(
+            ADMIN_ALLOCATION_ATOMS + COFFRE_MATURITY_ATOMS,
+            MAX_SUPPLY_ATOMS
+        );
     }
 
     #[test]
@@ -103,6 +111,7 @@ mod tests {
         let state = create_genesis_state(&GenesisConfig {
             admin_address: admin_addr,
             validator_address: validator_addr.clone(),
+            chain_id: CHAIN_ID_DEVNET,
         });
         assert!(state.validator_set.contains(&validator_addr));
         assert_eq!(state.validator_set.len(), 1);

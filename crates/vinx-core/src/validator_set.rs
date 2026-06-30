@@ -66,6 +66,16 @@ impl ValidatorSet {
         true
     }
 
+    /// Returns the index of `addr` in the validator list, or None if not present.
+    pub fn index_of(&self, addr: &Address) -> Option<usize> {
+        self.validators.iter().position(|a| a == addr)
+    }
+
+    /// Round-robin leader index for `height`.
+    pub fn leader_idx_at(&self, height: u64) -> usize {
+        (height as usize) % self.validators.len()
+    }
+
     /// Removes a validator by address. Returns false if not found.
     /// Will not remove the last validator (preserves the invariant of non-empty set).
     pub fn remove(&mut self, addr: &Address) -> bool {

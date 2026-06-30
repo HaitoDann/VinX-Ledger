@@ -1,3 +1,5 @@
+use std::collections::HashMap;
+
 use serde::{Deserialize, Serialize};
 use vinx_core::{Account, Block, ProtocolVersion, ScheduledUpgrade, Transaction, ValidatorSet};
 use vinx_crypto::Hash32;
@@ -139,20 +141,90 @@ impl TxWithBlockResponse {
 }
 
 #[derive(Serialize)]
+pub struct ValidatorInfo {
+    pub address: String,
+    /// True if this validator is the round-robin leader for the next block.
+    pub is_next_leader: bool,
+    /// Last block height produced by this validator (None = never seen on this node).
+    pub last_seen_height: Option<u64>,
+    /// Considered online if it produced a block within the last 10 slots.
+    pub online: bool,
+    /// True when the validator has been offline for too many consecutive blocks and
+    /// has been temporarily suspended from the round-robin by liveness eviction.
+    pub suspended: bool,
+}
+
+#[derive(Serialize)]
 pub struct ValidatorSetResponse {
     pub count: usize,
     pub quorum: usize,
-    pub validators: Vec<String>,
+    pub next_leader: String,
+    pub validators: Vec<ValidatorInfo>,
 }
 
 impl ValidatorSetResponse {
-    pub fn from_validator_set(vs: &ValidatorSet) -> Self {
+    pub fn from_validator_set(
+        vs: &ValidatorSet,
+        next_height: u64,
+        liveness: &HashMap<String, u64>,
+        slot_window: u64,
+        suspended: &std::collections::HashSet<String>,
+    ) -> Self {
+        let next_leader = vs.leader_at(next_height).to_string();
+        let validators = vs
+            .validators()
+            .iter()
+            .map(|a| {
+                let addr_str = a.to_string();
+                let last_seen = liveness.get(&addr_str).copied();
+                let online =
+                    last_seen.map_or(false, |h| next_height.saturating_sub(h) <= slot_window);
+                ValidatorInfo {
+                    is_next_leader: addr_str == next_leader,
+                    suspended: suspended.contains(&addr_str),
+                    address: addr_str,
+                    last_seen_height: last_seen,
+                    online,
+                }
+            })
+            .collect();
         Self {
             count: vs.len(),
             quorum: vs.quorum(),
-            validators: vs.validators().iter().map(|a| a.to_string()).collect(),
+            next_leader,
+            validators,
         }
     }
+}
+
+// ─── Validator join request ───────────────────────────────────────────────────
+
+#[derive(Deserialize)]
+pub struct ValidatorJoinRequestBody {
+    pub address: String,
+    pub p2p_multiaddr: Option<String>,
+    pub message: Option<String>,
+}
+
+#[derive(Serialize)]
+pub struct ValidatorJoinResponse {
+    pub accepted: bool,
+    pub address: String,
+    pub note: &'static str,
+}
+
+#[derive(Serialize)]
+pub struct ValidatorJoinListResponse {
+    pub count: usize,
+    pub requests: Vec<ValidatorJoinRequestItem>,
+}
+
+#[derive(Serialize)]
+pub struct ValidatorJoinRequestItem {
+    pub address: String,
+    pub p2p_multiaddr: Option<String>,
+    pub message: Option<String>,
+    pub submitted_at: u64,
 }
 
 #[derive(Serialize)]
@@ -241,4 +313,68 @@ pub struct MerkleProofResponse {
 pub struct MerkleProofStepResponse {
     pub sibling: String,
     pub sibling_is_right: bool,
+}
+
+// ─── Batch transaction submission ────────────────────────────────────────────
+
+#[derive(Serialize)]
+pub struct BatchTxResult {
+    pub tx_hash: String,
+    pub accepted: bool,
+    pub error: Option<String>,
+}
+
+#[derive(Serialize)]
+pub struct TxBatchResponse {
+    pub total: usize,
+    pub accepted: usize,
+    pub results: Vec<BatchTxResult>,
+}
+
+// ─── Snapshot import ─────────────────────────────────────────────────────────
+
+#[derive(Serialize)]
+pub struct SnapshotImportResponse {
+    pub imported: bool,
+    pub height: u64,
+    pub validator_count: usize,
+}
+
+// ─── Receipts ────────────────────────────────────────────────────────────────
+
+#[derive(Serialize)]
+pub struct TxReceiptResponse {
+    pub tx_hash: String,
+    pub block_height: u64,
+    pub success: bool,
+    pub error: Option<String>,
+}
+
+// ─── Fee estimation ───────────────────────────────────────────────────────────
+
+#[derive(Serialize)]
+pub struct FeeEstimateResponse {
+    /// Current dynamic base fee in atoms (1× at low load, up to 3× at full mempool).
+    pub base_fee_atoms: String,
+    /// Recommended minimum fee for a standard 100 VinX transfer at the current base fee.
+    pub recommended_fee_atoms: String,
+    /// Mempool occupancy: pending / max.
+    pub mempool_pending: usize,
+    pub mempool_max: usize,
+}
+
+// ─── Faucet ──────────────────────────────────────────────────────────────────
+
+#[derive(serde::Deserialize)]
+pub struct FaucetRequest {
+    pub address: String,
+}
+
+#[derive(Serialize)]
+pub struct FaucetResponse {
+    pub accepted: bool,
+    pub tx_hash: String,
+    /// Atoms sent as a string to avoid JSON precision loss.
+    pub amount_atoms: String,
+    pub to: String,
 }

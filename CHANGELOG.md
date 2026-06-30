@@ -5,6 +5,36 @@ Format : `MAJEUR.MINEUR.CORRECTIF` — les versions `0.x.y` sont des versions de
 
 ---
 
+## [0.20.0] — 2026-06-30
+
+### Quatre optimisations RPC & consensus
+
+**D. `POST /tx/batch` — soumission par lot avec vérification parallèle (`vinx-node`)**
+- Nouvel endpoint `POST /tx/batch` acceptant un tableau de 1 à 100 transactions
+- Vérification des signatures en parallèle via **rayon** (aucun verrou tenu pendant le travail CPU)
+- Résultats par transaction : `{ tx_hash, accepted, error? }` — les échecs n'affectent pas les autres
+- Compteurs de métriques (`tx_submitted_ok` / `tx_submitted_err`) mis à jour par lot
+
+**C. `POST /snapshot` — import de snapshot (`vinx-node`)**
+- Nouvel endpoint `POST /snapshot` (admin-only) symétrique de `GET /snapshot`
+- Accepte le corps JSON produit par `GET /snapshot` et remplace l'état mondial en live
+- Met à jour `validator_set` et efface les validateurs suspendus après import
+- Utile pour le fast-sync de nouveaux nœuds sans rejouer tous les blocs
+
+**E. Compaction automatique du chain store (`vinx-node`)**
+- Le producteur de blocs appelle désormais `chain.compact_old_txs(BLOCK_RETENTION_COUNT)` toutes les 500 blocs automatiquement (en plus du `prune` existant toutes les 1 000 blocs)
+- Libère la mémoire des données d'index des transactions trop anciennes sans intervention manuelle via `/admin/compact`
+
+**F. Éviction de vivacité des validateurs (`vinx-node`)**
+- Nouveau champ `suspended_validators: Arc<RwLock<HashSet<String>>>` dans `Node`
+- Après chaque bloc, le producteur détecte les validateurs absents depuis ≥ 50 blocs consécutifs et les marque comme « suspendus » (sauf le nœud lui-même)
+- Les validateurs qui reviennent (bloc reçu en P2P) sont automatiquement réhabilités
+- `GET /validators` expose le champ `suspended` par validateur
+- `try_backup_production` : si le leader planifié est suspendu, le délai d'activation des backups est divisé par 2 (réponse plus rapide aux leaders morts)
+
+---
+
+
 ## [0.19.0] — 2026-06-30
 
 ### Incremental Merkle tree — O(log n) state root par bloc

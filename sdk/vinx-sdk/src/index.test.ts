@@ -1,4 +1,4 @@
-import { VinxClient } from './index';
+import { VinxClient, verifyMerkleProof, MerkleProofStep } from './index';
 
 const BASE = 'http://localhost:8080';
 
@@ -169,6 +169,99 @@ describe('VinxClient.chainSync()', () => {
     const result = await client.chainSync(0, 50);
     expect(spy).toHaveBeenCalledWith(`${BASE}/chain/sync?from=0&limit=50`);
     expect(result.from).toBe(0);
+  });
+});
+
+describe('VinxClient.accountProof()', () => {
+  it('calls GET /account/:address/proof', async () => {
+    const addr = 'vinx1abc';
+    const payload = {
+      address: addr,
+      leaf_hash: 'aa'.repeat(32),
+      state_root: 'bb'.repeat(32),
+      proof: [{ sibling: 'cc'.repeat(32), sibling_is_right: true }],
+      valid: true,
+    };
+    const spy = mockFetch(payload);
+    const client = new VinxClient(BASE);
+    const result = await client.accountProof(addr);
+    expect(spy).toHaveBeenCalledWith(`${BASE}/account/${addr}/proof`);
+    expect(result.address).toBe(addr);
+    expect(result.proof).toHaveLength(1);
+    expect(result.valid).toBe(true);
+  });
+});
+
+describe('VinxClient.faucetRequest()', () => {
+  it('calls POST /faucet/request with address', async () => {
+    const addr = 'vinx1abc';
+    const payload = { accepted: true, tx_hash: 'deadbeef', amount_atoms: '100000000000000000000', to: addr };
+    const spy = mockFetch(payload);
+    const client = new VinxClient(BASE);
+    const result = await client.faucetRequest(addr);
+    expect(spy).toHaveBeenCalledWith(
+      `${BASE}/faucet/request`,
+      expect.objectContaining({ method: 'POST', body: JSON.stringify({ address: addr }) })
+    );
+    expect(result.accepted).toBe(true);
+    expect(result.to).toBe(addr);
+  });
+});
+
+describe('verifyMerkleProof()', () => {
+  it('returns true for a single-leaf tree (empty proof)', async () => {
+    // Single leaf: root == leaf itself (no hashing needed; proof is empty)
+    const leaf = 'ab'.repeat(32);
+    const valid = await verifyMerkleProof(leaf, [], leaf);
+    expect(valid).toBe(true);
+  });
+
+  it('returns false when leaf does not match root', async () => {
+    const leaf = 'aa'.repeat(32);
+    const root = 'bb'.repeat(32);
+    const valid = await verifyMerkleProof(leaf, [], root);
+    expect(valid).toBe(false);
+  });
+
+  it('correctly reconstructs root with a single proof step', async () => {
+    // Compute SHA-256(leaf || sibling) as the expected root
+    const leafHex = '01'.repeat(32);
+    const siblingHex = '02'.repeat(32);
+    // Compute expected root using crypto.subtle
+    const leafBytes = Uint8Array.from({ length: 32 }, () => 0x01);
+    const siblingBytes = Uint8Array.from({ length: 32 }, () => 0x02);
+    const combined = new Uint8Array(64);
+    combined.set(leafBytes);
+    combined.set(siblingBytes, 32);
+    const hashBuf = await globalThis.crypto.subtle.digest('SHA-256', combined);
+    const expectedRoot = Array.from(new Uint8Array(hashBuf))
+      .map(b => b.toString(16).padStart(2, '0'))
+      .join('');
+
+    const proof: MerkleProofStep[] = [{ sibling: siblingHex, sibling_is_right: true }];
+    const valid = await verifyMerkleProof(leafHex, proof, expectedRoot);
+    expect(valid).toBe(true);
+  });
+
+  it('returns false with tampered sibling', async () => {
+    const leafHex = '01'.repeat(32);
+    const siblingHex = '02'.repeat(32);
+    const tamperedSibling = '03'.repeat(32);
+    // Compute root using the real sibling
+    const leafBytes = Uint8Array.from({ length: 32 }, () => 0x01);
+    const siblingBytes = Uint8Array.from({ length: 32 }, () => 0x02);
+    const combined = new Uint8Array(64);
+    combined.set(leafBytes);
+    combined.set(siblingBytes, 32);
+    const hashBuf = await globalThis.crypto.subtle.digest('SHA-256', combined);
+    const expectedRoot = Array.from(new Uint8Array(hashBuf))
+      .map(b => b.toString(16).padStart(2, '0'))
+      .join('');
+
+    // Use the tampered sibling — should produce a different root
+    const proof: MerkleProofStep[] = [{ sibling: tamperedSibling, sibling_is_right: true }];
+    const valid = await verifyMerkleProof(leafHex, proof, expectedRoot);
+    expect(valid).toBe(false);
   });
 });
 

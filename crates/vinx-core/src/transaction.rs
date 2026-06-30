@@ -1,9 +1,11 @@
 use crate::amount::Amount;
+use crate::chain_id::CHAIN_ID_DEVNET;
 use crate::protocol::ProtocolVersion;
+use borsh::{BorshDeserialize, BorshSerialize};
 use serde::{Deserialize, Serialize};
 use vinx_crypto::{sha256, Address, Hash32, KeyPair, PublicKey, VinxSignature};
 
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, BorshSerialize, BorshDeserialize)]
 pub enum TransactionType {
     Transfer,
     Stake,
@@ -42,7 +44,7 @@ impl TransactionType {
     }
 }
 
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, BorshSerialize, BorshDeserialize)]
 pub struct Transaction {
     pub tx_type: TransactionType,
     pub from: Address,
@@ -51,12 +53,35 @@ pub struct Transaction {
     /// Fee the sender explicitly agrees to pay (validated against protocol minimum).
     pub fee: Amount,
     pub nonce: u64,
+    /// Chain this transaction is valid on — prevents cross-network replay attacks.
+    /// Must match the node's configured chain ID (CHAIN_ID_MAINNET / TESTNET / DEVNET).
+    #[serde(default = "default_chain_id")]
+    pub chain_id: u32,
+    /// Block height after which this transaction is invalid.
+    /// `None` = no expiry (valid until included or evicted from mempool).
+    #[serde(default)]
+    pub expires_at_height: Option<u64>,
     /// Extra typed data for specialized transactions (empty for standard ops).
     /// AnnounceUpgrade: 14 bytes = major(2) || minor(2) || patch(2) || activation_height(8)
     pub payload: Vec<u8>,
     /// Sender's public key — used to verify `from` ownership.
     pub pub_key: Option<PublicKey>,
     pub signature: Option<VinxSignature>,
+    /// Optional sponsor: third party who pays the fee (gasless UX).
+    /// When set, the fee is debited from `sponsor` instead of `from`.
+    #[serde(default)]
+    pub sponsor: Option<Address>,
+    /// Sponsor's public key — proves sponsor identity.
+    #[serde(default)]
+    pub sponsor_pub_key: Option<PublicKey>,
+    /// Sponsor's signature over the transaction's signing bytes.
+    /// Proves the sponsor consented to pay the fee for this exact transaction.
+    #[serde(default)]
+    pub sponsor_signature: Option<VinxSignature>,
+}
+
+fn default_chain_id() -> u32 {
+    CHAIN_ID_DEVNET
 }
 
 impl Transaction {
@@ -73,8 +98,25 @@ impl Transaction {
         bytes.extend_from_slice(&self.amount.atoms().to_be_bytes());
         bytes.extend_from_slice(&self.fee.atoms().to_be_bytes());
         bytes.extend_from_slice(&self.nonce.to_be_bytes());
+        bytes.extend_from_slice(&self.chain_id.to_be_bytes());
+        match self.expires_at_height {
+            Some(h) => {
+                bytes.push(1u8);
+                bytes.extend_from_slice(&h.to_be_bytes());
+            }
+            None => bytes.push(0u8),
+        }
         if !self.payload.is_empty() {
             bytes.extend_from_slice(&self.payload);
+        }
+        // Include sponsor address so the sponsor signature commits to it
+        if let Some(ref sponsor) = self.sponsor {
+            bytes.push(1u8);
+            let s = sponsor.as_str().as_bytes();
+            bytes.push(s.len() as u8);
+            bytes.extend_from_slice(s);
+        } else {
+            bytes.push(0u8);
         }
         bytes
     }
@@ -108,9 +150,14 @@ impl Transaction {
             amount,
             fee,
             nonce,
+            chain_id: CHAIN_ID_DEVNET,
+            expires_at_height: None,
             payload: vec![],
             pub_key: Some(pk),
             signature: None,
+            sponsor: None,
+            sponsor_pub_key: None,
+            sponsor_signature: None,
         };
         tx.signature = Some(keypair.sign(&tx.signing_bytes()));
         tx
@@ -128,9 +175,14 @@ impl Transaction {
             amount,
             fee,
             nonce,
+            chain_id: CHAIN_ID_DEVNET,
+            expires_at_height: None,
             payload: vec![],
             pub_key: Some(pk),
             signature: None,
+            sponsor: None,
+            sponsor_pub_key: None,
+            sponsor_signature: None,
         };
         tx.signature = Some(keypair.sign(&tx.signing_bytes()));
         tx
@@ -148,9 +200,14 @@ impl Transaction {
             amount,
             fee,
             nonce,
+            chain_id: CHAIN_ID_DEVNET,
+            expires_at_height: None,
             payload: vec![],
             pub_key: Some(pk),
             signature: None,
+            sponsor: None,
+            sponsor_pub_key: None,
+            sponsor_signature: None,
         };
         tx.signature = Some(keypair.sign(&tx.signing_bytes()));
         tx
@@ -167,9 +224,14 @@ impl Transaction {
             amount: Amount::ZERO,
             fee: Amount::ZERO,
             nonce,
+            chain_id: CHAIN_ID_DEVNET,
+            expires_at_height: None,
             payload: vec![],
             pub_key: Some(pk),
             signature: None,
+            sponsor: None,
+            sponsor_pub_key: None,
+            sponsor_signature: None,
         };
         tx.signature = Some(keypair.sign(&tx.signing_bytes()));
         tx
@@ -186,9 +248,14 @@ impl Transaction {
             amount: Amount::ZERO,
             fee: Amount::ZERO,
             nonce,
+            chain_id: CHAIN_ID_DEVNET,
+            expires_at_height: None,
             payload: vec![],
             pub_key: Some(pk),
             signature: None,
+            sponsor: None,
+            sponsor_pub_key: None,
+            sponsor_signature: None,
         };
         tx.signature = Some(keypair.sign(&tx.signing_bytes()));
         tx
@@ -219,9 +286,14 @@ impl Transaction {
             amount: Amount::ZERO,
             fee: Amount::ZERO,
             nonce,
+            chain_id: CHAIN_ID_DEVNET,
+            expires_at_height: None,
             payload,
             pub_key: Some(pk),
             signature: None,
+            sponsor: None,
+            sponsor_pub_key: None,
+            sponsor_signature: None,
         };
         tx.signature = Some(keypair.sign(&tx.signing_bytes()));
         tx
@@ -236,9 +308,7 @@ impl Transaction {
         let major = u16::from_be_bytes([self.payload[0], self.payload[1]]);
         let minor = u16::from_be_bytes([self.payload[2], self.payload[3]]);
         let patch = u16::from_be_bytes([self.payload[4], self.payload[5]]);
-        let activation_height = u64::from_be_bytes(
-            self.payload[6..14].try_into().ok()?
-        );
+        let activation_height = u64::from_be_bytes(self.payload[6..14].try_into().ok()?);
         Some((ProtocolVersion::new(major, minor, patch), activation_height))
     }
 
@@ -253,9 +323,14 @@ impl Transaction {
             amount: Amount::ZERO,
             fee: Amount::ZERO,
             nonce,
+            chain_id: CHAIN_ID_DEVNET,
+            expires_at_height: None,
             payload: vec![],
             pub_key: Some(pk),
             signature: None,
+            sponsor: None,
+            sponsor_pub_key: None,
+            sponsor_signature: None,
         };
         tx.signature = Some(keypair.sign(&tx.signing_bytes()));
         tx
@@ -272,16 +347,26 @@ impl Transaction {
             amount: Amount::ZERO,
             fee: Amount::ZERO,
             nonce,
+            chain_id: CHAIN_ID_DEVNET,
+            expires_at_height: None,
             payload: vec![],
             pub_key: Some(pk),
             signature: None,
+            sponsor: None,
+            sponsor_pub_key: None,
+            sponsor_signature: None,
         };
         tx.signature = Some(keypair.sign(&tx.signing_bytes()));
         tx
     }
 
     /// Constructs a SlashValidator tx with equivocation evidence.
-    pub fn new_slash_validator(keypair: &KeyPair, validator: Address, evidence: &crate::block::SlashEvidence, nonce: u64) -> Self {
+    pub fn new_slash_validator(
+        keypair: &KeyPair,
+        validator: Address,
+        evidence: &crate::block::SlashEvidence,
+        nonce: u64,
+    ) -> Self {
         let pk = keypair.public_key();
         let from = Address::from_public_key(&pk);
         let payload = bincode::serialize(evidence).expect("slash evidence serializable");
@@ -292,9 +377,14 @@ impl Transaction {
             amount: Amount::ZERO,
             fee: Amount::ZERO,
             nonce,
+            chain_id: CHAIN_ID_DEVNET,
+            expires_at_height: None,
             payload,
             pub_key: Some(pk),
             signature: None,
+            sponsor: None,
+            sponsor_pub_key: None,
+            sponsor_signature: None,
         };
         tx.signature = Some(keypair.sign(&tx.signing_bytes()));
         tx
@@ -302,11 +392,15 @@ impl Transaction {
 
     /// Constructs and signs an AdminAction transaction (admin only).
     /// The `action` is a GovernanceAction that will be executed immediately on-chain.
-    pub fn new_admin_action(keypair: &KeyPair, action: &crate::governance::GovernanceAction, nonce: u64) -> Self {
+    pub fn new_admin_action(
+        keypair: &KeyPair,
+        action: &crate::governance::GovernanceAction,
+        nonce: u64,
+    ) -> Self {
         let pk = keypair.public_key();
         let from = Address::from_public_key(&pk);
-        let payload = bincode::serialize(action)
-            .expect("GovernanceAction serialization is infallible");
+        let payload =
+            bincode::serialize(action).expect("GovernanceAction serialization is infallible");
         let mut tx = Self {
             tx_type: TransactionType::AdminAction,
             from: from.clone(),
@@ -314,9 +408,14 @@ impl Transaction {
             amount: Amount::ZERO,
             fee: Amount::ZERO,
             nonce,
+            chain_id: CHAIN_ID_DEVNET,
+            expires_at_height: None,
             payload,
             pub_key: Some(pk),
             signature: None,
+            sponsor: None,
+            sponsor_pub_key: None,
+            sponsor_signature: None,
         };
         tx.signature = Some(keypair.sign(&tx.signing_bytes()));
         tx
@@ -331,10 +430,39 @@ impl Transaction {
             amount,
             fee: Amount::ZERO,
             nonce: 0,
+            chain_id: CHAIN_ID_DEVNET,
+            expires_at_height: None,
             payload: vec![],
             pub_key: None,
             signature: None,
+            sponsor: None,
+            sponsor_pub_key: None,
+            sponsor_signature: None,
         }
+    }
+
+    /// Builder: override the chain ID (use CHAIN_ID_MAINNET / TESTNET / DEVNET).
+    pub fn with_chain_id(mut self, chain_id: u32) -> Self {
+        self.chain_id = chain_id;
+        self
+    }
+
+    /// Builder: set block-height expiry for this transaction.
+    pub fn with_expiry(mut self, height: u64) -> Self {
+        self.expires_at_height = Some(height);
+        self
+    }
+
+    /// Builder: attach a sponsor who will pay the fee instead of the sender.
+    /// `keypair` is the sponsor's keypair. Call after all other fields are set,
+    /// since the sponsor signs the transaction's current signing bytes.
+    pub fn with_sponsor(mut self, keypair: &KeyPair) -> Self {
+        let pk = keypair.public_key();
+        let addr = Address::from_public_key(&pk);
+        self.sponsor = Some(addr);
+        self.sponsor_pub_key = Some(keypair.public_key());
+        self.sponsor_signature = Some(keypair.sign(&self.signing_bytes()));
+        self
     }
 }
 

@@ -12,3 +12,4 @@ bech32 = { workspace = true }
 serde = { workspace = true }
 hex = { workspace = true }
 thiserror = { workspace = true }
+borsh = { workspace = true }

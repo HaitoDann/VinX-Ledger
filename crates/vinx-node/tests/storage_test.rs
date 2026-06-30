@@ -41,7 +41,7 @@ fn test_storage_roundtrip() {
     let (_, admin) = make_addr();
     let (_, validator) = make_addr();
 
-    let state = create_genesis_state(&GenesisConfig {
+    let state = create_genesis_state(&GenesisConfig { chain_id: vinx_core::CHAIN_ID_DEVNET,
         admin_address: admin.clone(),
         validator_address: validator.clone(),
     });
@@ -55,7 +55,10 @@ fn test_storage_roundtrip() {
 
     let (loaded_state, loaded_chain) = storage.load().expect("should load");
     assert_eq!(loaded_state.block_height, state.block_height);
-    assert_eq!(loaded_state.account_balance(&admin), Amount::from_vinx(21_000_000));
+    assert_eq!(
+        loaded_state.account_balance(&admin),
+        Amount::from_vinx(21_000_000)
+    );
     assert_eq!(loaded_chain.tip_height(), chain.tip_height());
     assert_eq!(loaded_chain.tip_hash(), chain.tip_hash());
 }
@@ -75,24 +78,19 @@ async fn test_state_persists_across_node_restarts() {
 
     // ── First run: produce 5 blocks ──────────────────────────────────────────
     {
-        let state = create_genesis_state(&GenesisConfig {
+        let state = create_genesis_state(&GenesisConfig { chain_id: vinx_core::CHAIN_ID_DEVNET,
             admin_address: admin_addr.clone(),
             validator_address: validator_addr.clone(),
         });
         let (chain, _) = Chain::new_with_genesis(validator_addr.clone(), 0);
-        let config = NodeConfig::new(validator_kp.clone())
-            .with_data_dir(tmp.path());
+        let config = NodeConfig::new(validator_kp.clone()).with_data_dir(tmp.path());
         let node = Node::new(state, chain, config);
 
         for _ in 0..5 {
             node.tick().await.unwrap();
         }
-        // Persist manually (block producer normally does this after each tick)
-        {
-            let state = node.state.read().await;
-            let chain = node.chain.read().await;
-            Storage::new(tmp.path()).save(&state, &chain).unwrap();
-        }
+        // Persist via the node's own storage (avoids opening a second redb instance)
+        node.persist().await;
         assert_eq!(node.chain.read().await.tip_height(), 5);
     }
 
@@ -104,6 +102,9 @@ async fn test_state_persists_across_node_restarts() {
         // Height and state should be exactly where we left off
         assert_eq!(chain.tip_height(), 5);
         assert_eq!(state.block_height, 5);
-        assert_eq!(state.account_balance(&admin_addr), Amount::from_vinx(21_000_000));
+        assert_eq!(
+            state.account_balance(&admin_addr),
+            Amount::from_vinx(21_000_000)
+        );
     }
 }

@@ -1,0 +1,19 @@
+global:
+  scrape_interval: 15s
+  evaluation_interval: 15s
+
+scrape_configs:
+  - job_name: vinx-node1
+    static_configs:
+      - targets: ["node1:8545"]
+    metrics_path: /metrics
+
+  - job_name: vinx-node2
+    static_configs:
+      - targets: ["node2:8545"]
+    metrics_path: /metrics
+
+  - job_name: vinx-node3
+    static_configs:
+      - targets: ["node3:8545"]
+    metrics_path: /metrics

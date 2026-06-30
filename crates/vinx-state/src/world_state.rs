@@ -1,16 +1,17 @@
 use serde::{Deserialize, Serialize};
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use vinx_core::{
     amount::{
         Amount, DEFAULT_FEE_FLOOR_ATOMS, FREEZE_DURATION_BLOCKS, MIN_STAKE_ATOMS,
         STAKING_DISTRIBUTION_INTERVAL,
     },
     block::SlashEvidence,
+    chain_id::CHAIN_ID_DEVNET,
     governance::{CoffreCondition, GovernanceAction},
     protocol::{ProtocolVersion, ScheduledUpgrade},
     Account, CoreError, Transaction, TransactionType, ValidatorSet,
 };
-use vinx_crypto::{merkle_root, sha256, Address, Hash32};
+use vinx_crypto::{sha256, Address, Hash32, IncrementalMerkleTree};
 
 /// In-memory representation of the full chain state.
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -35,6 +36,10 @@ pub struct WorldState {
     /// 30% of every transaction fee accumulates here.
     #[serde(default)]
     pub validator_fee_pool: Amount,
+    /// Protocol treasury: accumulates 20% of every transaction fee.
+    /// Governed by admin — funds protocol development, audits, public policy.
+    #[serde(default)]
+    pub treasury: Amount,
     /// Coffre Maturité: locked until 3 governance conditions are met.
     pub coffre_maturity: Amount,
     #[serde(default)]
@@ -52,10 +57,30 @@ pub struct WorldState {
     pub pending_upgrade: Option<ScheduledUpgrade>,
     /// Active PoA validator set. Admin can add/remove validators via governance txs.
     pub validator_set: ValidatorSet,
+    /// Chain ID for replay protection — transactions must match this value.
+    #[serde(default = "default_chain_id")]
+    pub chain_id: u32,
+    /// Incremental Merkle tree over sorted account leaf hashes.
+    /// Not persisted — rebuilt lazily on the first `compute_state_root` call after load.
+    #[serde(skip)]
+    merkle_tree: IncrementalMerkleTree,
+    /// Maps address string → leaf index in `merkle_tree.leaves()`.
+    #[serde(skip)]
+    leaf_index: HashMap<String, usize>,
+    /// Accounts modified since the last `compute_state_root` call.
+    #[serde(skip)]
+    dirty_addrs: HashSet<String>,
+    /// True when an account was added/removed — requires a full O(n) rebuild.
+    #[serde(skip)]
+    needs_rebuild: bool,
 }
 
 fn default_fee_floor() -> Amount {
     Amount::from_atoms(DEFAULT_FEE_FLOOR_ATOMS)
+}
+
+fn default_chain_id() -> u32 {
+    CHAIN_ID_DEVNET
 }
 
 impl Default for WorldState {
@@ -77,6 +102,7 @@ impl WorldState {
             fee_floor,
             base_fee: fee_floor,
             validator_fee_pool: Amount::ZERO,
+            treasury: Amount::ZERO,
             coffre_maturity: Amount::ZERO,
             coffre_mica_casp: false,
             coffre_external_audit: false,
@@ -86,6 +112,65 @@ impl WorldState {
             pending_upgrade: None,
             // Placeholder — always overwritten by create_genesis_state before use.
             validator_set: ValidatorSet::single(Address::zero()),
+            chain_id: CHAIN_ID_DEVNET,
+            merkle_tree: IncrementalMerkleTree::new(),
+            leaf_index: HashMap::new(),
+            dirty_addrs: HashSet::new(),
+            needs_rebuild: false,
+        }
+    }
+
+    /// Marks an account address as dirty.
+    /// If the address is not yet in the leaf index (new account), triggers a full rebuild.
+    #[inline]
+    fn mark_dirty(&mut self, addr: &str) {
+        if !self.leaf_index.contains_key(addr) {
+            self.needs_rebuild = true;
+        }
+        self.dirty_addrs.insert(addr.to_string());
+    }
+
+    /// O(n) full rebuild of the incremental tree — sorts all accounts, hashes each leaf,
+    /// rebuilds the `leaf_index` map and all internal tree levels.
+    fn full_rebuild(&mut self) {
+        let mut entries: Vec<&Account> = self.accounts.values().collect();
+        entries.sort_by_key(|a| a.address.as_str());
+        self.leaf_index.clear();
+        let leaves: Vec<Hash32> = entries
+            .iter()
+            .enumerate()
+            .map(|(i, a)| {
+                self.leaf_index.insert(a.address.to_string(), i);
+                hash_account(a)
+            })
+            .collect();
+        self.merkle_tree.rebuild(&leaves);
+        self.dirty_addrs.clear();
+        self.needs_rebuild = false;
+    }
+
+    /// Applies pending dirty-leaf updates to the tree, rebuilding fully if needed.
+    fn flush_dirty(&mut self) {
+        // Lazy full build on first call after deserialization or genesis.
+        if self.leaf_index.is_empty() && !self.accounts.is_empty() {
+            self.full_rebuild();
+            return;
+        }
+        if self.dirty_addrs.is_empty() && !self.needs_rebuild {
+            return;
+        }
+        if self.needs_rebuild {
+            self.full_rebuild();
+        } else {
+            // O(|dirty| × log n) — only update changed leaf paths.
+            let dirty: Vec<String> = std::mem::take(&mut self.dirty_addrs).into_iter().collect();
+            for addr in dirty {
+                if let (Some(&idx), Some(account)) =
+                    (self.leaf_index.get(&addr), self.accounts.get(&addr))
+                {
+                    self.merkle_tree.update_leaf(idx, hash_account(account));
+                }
+            }
         }
     }
 
@@ -119,6 +204,7 @@ impl WorldState {
         if amount == Amount::ZERO {
             return;
         }
+        self.mark_dirty(addr.as_str());
         let acc = self
             .accounts
             .entry(addr.as_str().to_string())
@@ -151,6 +237,25 @@ impl WorldState {
             .unwrap_or(Amount::ZERO)
     }
 
+    pub fn treasury_balance(&self) -> Amount {
+        self.treasury
+    }
+
+    /// Returns true when the chain must keep advancing even with an empty mempool.
+    ///
+    /// Two conditions require a periodic heartbeat block:
+    /// - A protocol upgrade is scheduled (activation triggered by reaching a block height).
+    /// - At least one account is frozen (auto-unfreeze triggered by block height elapsed).
+    ///
+    /// When neither condition holds, the node can sleep indefinitely until the next
+    /// transaction arrives — no heartbeat needed, no wasted storage.
+    pub fn has_pending_time_sensitive_ops(&self) -> bool {
+        if self.pending_upgrade.is_some() {
+            return true;
+        }
+        self.accounts.values().any(|a| a.frozen)
+    }
+
     pub fn is_frozen(&self, address: &Address) -> bool {
         self.accounts
             .get(address.as_str())
@@ -159,11 +264,13 @@ impl WorldState {
     }
 
     pub(crate) fn insert_account(&mut self, account: Account) {
+        self.mark_dirty(account.address.as_str());
         self.accounts
             .insert(account.address.as_str().to_string(), account);
     }
 
     pub fn credit_for_test(&mut self, address: Address, amount: Amount) {
+        self.mark_dirty(address.as_str());
         let acc = self
             .accounts
             .entry(address.as_str().to_string())
@@ -173,6 +280,22 @@ impl WorldState {
 
     pub fn apply_transaction(&mut self, tx: &Transaction) -> Result<(), CoreError> {
         if tx.tx_type != TransactionType::Emission {
+            // Chain-ID replay protection
+            if tx.chain_id != self.chain_id {
+                return Err(CoreError::InvalidTransaction(format!(
+                    "chain_id mismatch: tx={} state={}",
+                    tx.chain_id, self.chain_id
+                )));
+            }
+            // TTL check
+            if let Some(expires) = tx.expires_at_height {
+                if self.block_height >= expires {
+                    return Err(CoreError::InvalidTransaction(format!(
+                        "transaction expired at height {} (current {})",
+                        expires, self.block_height
+                    )));
+                }
+            }
             let pk = tx.pub_key.as_ref().ok_or(CoreError::InvalidSignature)?;
             let derived = Address::from_public_key(pk);
             if derived != tx.from {
@@ -180,6 +303,22 @@ impl WorldState {
             }
             let sig = tx.signature.as_ref().ok_or(CoreError::InvalidSignature)?;
             pk.verify(&tx.signing_bytes(), sig)?;
+
+            // Sponsored transaction: validate sponsor's key and signature
+            if let Some(ref sponsor_addr) = tx.sponsor {
+                let spk = tx
+                    .sponsor_pub_key
+                    .as_ref()
+                    .ok_or(CoreError::InvalidSignature)?;
+                if &Address::from_public_key(spk) != sponsor_addr {
+                    return Err(CoreError::PubKeyMismatch);
+                }
+                let ssig = tx
+                    .sponsor_signature
+                    .as_ref()
+                    .ok_or(CoreError::InvalidSignature)?;
+                spk.verify(&tx.signing_bytes(), ssig)?;
+            }
         }
 
         match &tx.tx_type {
@@ -217,10 +356,17 @@ impl WorldState {
                 tx.fee, expected_fee
             )));
         }
-        let total_debit = tx
-            .amount
-            .checked_add(tx.fee)
-            .ok_or(CoreError::AmountOverflow)?;
+
+        // Sponsored tx: sender pays only the transfer amount; sponsor pays the fee separately
+        let (sender_debit, fee_payer) = if let Some(ref sponsor_addr) = tx.sponsor {
+            (tx.amount, sponsor_addr.clone())
+        } else {
+            let total = tx
+                .amount
+                .checked_add(tx.fee)
+                .ok_or(CoreError::AmountOverflow)?;
+            (total, tx.from.clone())
+        };
 
         {
             let sender = self
@@ -236,11 +382,26 @@ impl WorldState {
                     got: tx.nonce,
                 });
             }
-            if sender.balance < total_debit {
+            if sender.balance < sender_debit {
                 return Err(CoreError::InsufficientBalance);
             }
-            sender.balance = sender.balance.checked_sub(total_debit).unwrap();
+            sender.balance = sender.balance.checked_sub(sender_debit).unwrap();
             sender.nonce += 1;
+        }
+
+        // Debit fee from sponsor (if different from sender)
+        if fee_payer != tx.from {
+            let sponsor_acc = self
+                .accounts
+                .get_mut(fee_payer.as_str())
+                .ok_or(CoreError::InsufficientBalance)?;
+            if sponsor_acc.frozen {
+                return Err(CoreError::AccountFrozen);
+            }
+            if sponsor_acc.balance < tx.fee {
+                return Err(CoreError::InsufficientBalance);
+            }
+            sponsor_acc.balance = sponsor_acc.balance.checked_sub(tx.fee).unwrap();
         }
 
         let receiver = self
@@ -252,13 +413,23 @@ impl WorldState {
             .checked_add(tx.amount)
             .ok_or(CoreError::AmountOverflow)?;
 
-        // Fee split: 40% staking / 30% validator / 30% melt (redistribution pool)
-        let staking = Amount::staking_share(tx.fee);
-        let validator_reward = Amount::validator_share(tx.fee);
-        let melt = Amount::melt_share(tx.fee);
-        self.staking_pool = self.staking_pool.checked_add(staking).ok_or(CoreError::AmountOverflow)?;
-        self.validator_fee_pool = self.validator_fee_pool.checked_add(validator_reward).ok_or(CoreError::AmountOverflow)?;
-        self.melt_pool = self.melt_pool.checked_add(melt).ok_or(CoreError::AmountOverflow)?;
+        // Fee split: 80% validator / 20% treasury
+        let validator_cut = Amount::validator_share(tx.fee);
+        let treasury_cut = Amount::treasury_share(tx.fee);
+        self.validator_fee_pool = self
+            .validator_fee_pool
+            .checked_add(validator_cut)
+            .ok_or(CoreError::AmountOverflow)?;
+        self.treasury = self
+            .treasury
+            .checked_add(treasury_cut)
+            .ok_or(CoreError::AmountOverflow)?;
+
+        self.mark_dirty(tx.from.as_str());
+        self.mark_dirty(tx.to.as_str());
+        if fee_payer != tx.from {
+            self.mark_dirty(fee_payer.as_str());
+        }
 
         Ok(())
     }
@@ -294,6 +465,7 @@ impl WorldState {
             .checked_add(tx.amount)
             .ok_or(CoreError::AmountOverflow)?;
         account.nonce += 1;
+        self.mark_dirty(tx.from.as_str());
         Ok(())
     }
 
@@ -323,6 +495,7 @@ impl WorldState {
             account.stake_since = 0;
         }
         account.nonce += 1;
+        self.mark_dirty(tx.from.as_str());
         Ok(())
     }
 
@@ -343,7 +516,9 @@ impl WorldState {
         let target = self
             .accounts
             .get_mut(tx.to.as_str())
-            .ok_or(CoreError::InvalidTransaction("target account does not exist".to_string()))?;
+            .ok_or(CoreError::InvalidTransaction(
+                "target account does not exist".to_string(),
+            ))?;
         if target.frozen {
             return Err(CoreError::InvalidTransaction(
                 "account is already frozen".to_string(),
@@ -351,6 +526,8 @@ impl WorldState {
         }
         target.frozen = true;
         target.frozen_since = self.block_height;
+        self.mark_dirty(tx.from.as_str());
+        self.mark_dirty(tx.to.as_str());
         Ok(())
     }
 
@@ -371,9 +548,13 @@ impl WorldState {
         let target = self
             .accounts
             .get_mut(tx.to.as_str())
-            .ok_or(CoreError::InvalidTransaction("target account does not exist".to_string()))?;
+            .ok_or(CoreError::InvalidTransaction(
+                "target account does not exist".to_string(),
+            ))?;
         target.frozen = false;
         target.frozen_since = 0;
+        self.mark_dirty(tx.from.as_str());
+        self.mark_dirty(tx.to.as_str());
         Ok(())
     }
 
@@ -412,6 +593,7 @@ impl WorldState {
             });
         }
         sender.nonce += 1;
+        self.mark_dirty(tx.from.as_str());
 
         self.pending_upgrade = Some(ScheduledUpgrade {
             version: new_version,
@@ -440,10 +622,14 @@ impl WorldState {
             .get_mut(tx.from.as_str())
             .ok_or(CoreError::InsufficientBalance)?;
         if sender.nonce != tx.nonce {
-            return Err(CoreError::InvalidNonce { expected: sender.nonce, got: tx.nonce });
+            return Err(CoreError::InvalidNonce {
+                expected: sender.nonce,
+                got: tx.nonce,
+            });
         }
         sender.nonce += 1;
         self.validator_set.add(tx.to.clone());
+        self.mark_dirty(tx.from.as_str());
         tracing::info!(validator = %tx.to, "Validator added to set");
         Ok(())
     }
@@ -465,10 +651,14 @@ impl WorldState {
             .get_mut(tx.from.as_str())
             .ok_or(CoreError::InsufficientBalance)?;
         if sender.nonce != tx.nonce {
-            return Err(CoreError::InvalidNonce { expected: sender.nonce, got: tx.nonce });
+            return Err(CoreError::InvalidNonce {
+                expected: sender.nonce,
+                got: tx.nonce,
+            });
         }
         sender.nonce += 1;
         self.validator_set.remove(&tx.to);
+        self.mark_dirty(tx.from.as_str());
         tracing::info!(validator = %tx.to, "Validator removed from set");
         Ok(())
     }
@@ -477,18 +667,23 @@ impl WorldState {
     /// and automatically unfreezes them. Called by the block producer on every block.
     pub fn check_auto_unfreeze(&mut self) {
         let height = self.block_height;
+        let mut unfrozen: Vec<String> = Vec::new();
         for account in self.accounts.values_mut() {
             if account.frozen
                 && height.saturating_sub(account.frozen_since) >= FREEZE_DURATION_BLOCKS
             {
                 account.frozen = false;
                 account.frozen_since = 0;
+                unfrozen.push(account.address.to_string());
                 tracing::info!(
                     address = %account.address,
                     height,
                     "Account automatically unfrozen (12-month limit reached)"
                 );
             }
+        }
+        for addr in unfrozen {
+            self.mark_dirty(&addr);
         }
     }
 
@@ -516,9 +711,7 @@ impl WorldState {
 
     /// Distributes staking pool every STAKING_DISTRIBUTION_INTERVAL blocks.
     pub fn distribute_staking_rewards(&mut self) -> Amount {
-        if self.block_height == 0
-            || self.block_height % STAKING_DISTRIBUTION_INTERVAL != 0
-        {
+        if self.block_height == 0 || self.block_height % STAKING_DISTRIBUTION_INTERVAL != 0 {
             return Amount::ZERO;
         }
         if self.staking_pool == Amount::ZERO {
@@ -533,6 +726,7 @@ impl WorldState {
         let pool = self.staking_pool.atoms();
         let mut distributed = 0u128;
 
+        let mut rewarded: Vec<String> = Vec::new();
         for account in self.accounts.values_mut() {
             if account.staked == Amount::ZERO {
                 continue;
@@ -548,7 +742,11 @@ impl WorldState {
             if reward > 0 {
                 account.balance = account.balance.saturating_add(Amount::from_atoms(reward));
                 distributed = distributed.saturating_add(reward);
+                rewarded.push(account.address.to_string());
             }
+        }
+        for addr in rewarded {
+            self.mark_dirty(&addr);
         }
 
         self.staking_pool = self
@@ -560,11 +758,13 @@ impl WorldState {
     }
 
     /// Merkle root of the account state after sorting accounts by address.
-    pub fn compute_state_root(&self) -> Hash32 {
-        let mut entries: Vec<&Account> = self.accounts.values().collect();
-        entries.sort_by_key(|a| a.address.as_str());
-        let leaves: Vec<Hash32> = entries.iter().map(|a| hash_account(a)).collect();
-        merkle_root(&leaves)
+    ///
+    /// On a cold start (after deserialization) or when new accounts are added: O(n) full rebuild.
+    /// When only existing accounts changed: O(|dirty| × log n) incremental update — typically
+    /// O(txs_per_block × log n), orders of magnitude faster than O(n) for large account sets.
+    pub fn compute_state_root(&mut self) -> Hash32 {
+        self.flush_dirty();
+        self.merkle_tree.root()
     }
 
     fn apply_slash_validator(&mut self, tx: &Transaction) -> Result<(), CoreError> {
@@ -575,33 +775,53 @@ impl WorldState {
 
         // Both signatures must be from the same validator (the target)
         if evidence.sig_a.validator != *target || evidence.sig_b.validator != *target {
-            return Err(CoreError::InvalidTransaction("evidence validator mismatch".to_string()));
+            return Err(CoreError::InvalidTransaction(
+                "evidence validator mismatch".to_string(),
+            ));
         }
 
         if Address::from_public_key(&evidence.sig_a.pub_key) != *target {
-            return Err(CoreError::InvalidTransaction("sig_a pubkey/address mismatch".to_string()));
+            return Err(CoreError::InvalidTransaction(
+                "sig_a pubkey/address mismatch".to_string(),
+            ));
         }
         if Address::from_public_key(&evidence.sig_b.pub_key) != *target {
-            return Err(CoreError::InvalidTransaction("sig_b pubkey/address mismatch".to_string()));
+            return Err(CoreError::InvalidTransaction(
+                "sig_b pubkey/address mismatch".to_string(),
+            ));
         }
 
         // Signatures must be different (they signed different things)
         if evidence.sig_a.signature == evidence.sig_b.signature {
-            return Err(CoreError::InvalidTransaction("signatures are identical — not equivocation".to_string()));
+            return Err(CoreError::InvalidTransaction(
+                "signatures are identical — not equivocation".to_string(),
+            ));
         }
 
         if !self.validator_set.contains(target) {
-            return Err(CoreError::InvalidTransaction("target is not a validator".to_string()));
+            return Err(CoreError::InvalidTransaction(
+                "target is not a validator".to_string(),
+            ));
         }
 
-        let sender = self.accounts.get_mut(tx.from.as_str()).ok_or(CoreError::InsufficientBalance)?;
+        let sender = self
+            .accounts
+            .get_mut(tx.from.as_str())
+            .ok_or(CoreError::InsufficientBalance)?;
         if sender.nonce != tx.nonce {
-            return Err(CoreError::InvalidNonce { expected: sender.nonce, got: tx.nonce });
+            return Err(CoreError::InvalidNonce {
+                expected: sender.nonce,
+                got: tx.nonce,
+            });
         }
         sender.nonce += 1;
 
         // Slash: redirect the validator's stake to the redistribution pool
-        let slashed = self.accounts.get(target.as_str()).map(|a| a.staked).unwrap_or(Amount::ZERO);
+        let slashed = self
+            .accounts
+            .get(target.as_str())
+            .map(|a| a.staked)
+            .unwrap_or(Amount::ZERO);
         if slashed > Amount::ZERO {
             // 10% bounty to the reporter
             let bounty = Amount::from_atoms(slashed.atoms() / 10);
@@ -612,9 +832,12 @@ impl WorldState {
                 acc.staked = Amount::ZERO;
                 acc.stake_since = 0;
             }
-            self.credit(&tx.from, bounty);
+            self.mark_dirty(target.as_str());
+            self.credit(&tx.from, bounty); // credit() also calls mark_dirty(tx.from)
             self.melt_pool = self.melt_pool.saturating_add(to_melt);
         }
+
+        self.mark_dirty(tx.from.as_str());
 
         // Remove from validator set (can't produce blocks anymore)
         if self.validator_set.len() > 1 {
@@ -631,12 +854,19 @@ impl WorldState {
         // Require sender to be the admin
         self.check_admin(tx)?;
 
-        let action: GovernanceAction = bincode::deserialize(&tx.payload)
-            .map_err(|_| CoreError::InvalidTransaction("malformed governance action payload".to_string()))?;
+        let action: GovernanceAction = bincode::deserialize(&tx.payload).map_err(|_| {
+            CoreError::InvalidTransaction("malformed governance action payload".to_string())
+        })?;
 
-        let sender = self.accounts.get_mut(tx.from.as_str()).ok_or(CoreError::InsufficientBalance)?;
+        let sender = self
+            .accounts
+            .get_mut(tx.from.as_str())
+            .ok_or(CoreError::InsufficientBalance)?;
         if sender.nonce != tx.nonce {
-            return Err(CoreError::InvalidNonce { expected: sender.nonce, got: tx.nonce });
+            return Err(CoreError::InvalidNonce {
+                expected: sender.nonce,
+                got: tx.nonce,
+            });
         }
         sender.nonce += 1;
 
@@ -660,7 +890,10 @@ impl WorldState {
                 }
                 tracing::info!(atoms, "Admin: fee floor updated");
             }
-            GovernanceAction::ScheduleUpgrade { version, activation_height } => {
+            GovernanceAction::ScheduleUpgrade {
+                version,
+                activation_height,
+            } => {
                 if self.pending_upgrade.is_none() {
                     self.pending_upgrade = Some(vinx_core::ScheduledUpgrade {
                         version: version.clone(),
@@ -690,7 +923,8 @@ impl WorldState {
                 tracing::info!(?condition, "Admin: Coffre condition marked");
             }
             GovernanceAction::UnlockCoffre => {
-                if self.coffre_mica_casp && self.coffre_external_audit && self.coffre_public_policy {
+                if self.coffre_mica_casp && self.coffre_external_audit && self.coffre_public_policy
+                {
                     let amount = self.coffre_maturity;
                     self.distribution_pool = self.distribution_pool.saturating_add(amount);
                     self.circulating_supply = self.circulating_supply.saturating_add(amount);
@@ -698,12 +932,13 @@ impl WorldState {
                     tracing::info!(%amount, "Admin: Coffre Maturité unlocked → distribution pool");
                 } else {
                     return Err(CoreError::InvalidTransaction(
-                        "UnlockCoffre rejected: not all 3 conditions are met".to_string()
+                        "UnlockCoffre rejected: not all 3 conditions are met".to_string(),
                     ));
                 }
             }
         }
 
+        self.mark_dirty(tx.from.as_str());
         Ok(())
     }
 
@@ -876,10 +1111,18 @@ mod tests {
         let target_addr = Address::from_public_key(&target_kp.public_key());
         state.credit_for_test(target_addr.clone(), Amount::from_vinx(100));
 
-        state.apply_transaction(&Transaction::new_freeze(&admin_kp, target_addr.clone(), 0)).unwrap();
+        state
+            .apply_transaction(&Transaction::new_freeze(&admin_kp, target_addr.clone(), 0))
+            .unwrap();
         assert!(state.is_frozen(&target_addr));
 
-        state.apply_transaction(&Transaction::new_unfreeze(&admin_kp, target_addr.clone(), 1)).unwrap();
+        state
+            .apply_transaction(&Transaction::new_unfreeze(
+                &admin_kp,
+                target_addr.clone(),
+                1,
+            ))
+            .unwrap();
         assert!(!state.is_frozen(&target_addr));
         assert_eq!(state.accounts[target_addr.as_str()].frozen_since, 0);
     }
@@ -939,12 +1182,7 @@ mod tests {
     fn test_upgrade_too_soon_rejected() {
         let (mut state, admin_kp, _) = admin_state();
         // 1 block is way too short
-        let tx = Transaction::new_announce_upgrade(
-            &admin_kp,
-            ProtocolVersion::new(2, 0, 0),
-            1,
-            0,
-        );
+        let tx = Transaction::new_announce_upgrade(&admin_kp, ProtocolVersion::new(2, 0, 0), 1, 0);
         assert!(matches!(
             state.apply_transaction(&tx),
             Err(CoreError::UpgradeViolation(_))
@@ -957,12 +1195,14 @@ mod tests {
         let notice = vinx_core::amount::UPGRADE_NOTICE_PATCH_BLOCKS;
         let activation = notice + 1;
 
-        state.apply_transaction(&Transaction::new_announce_upgrade(
-            &admin_kp,
-            ProtocolVersion::new(1, 0, 1),
-            activation,
-            0,
-        )).unwrap();
+        state
+            .apply_transaction(&Transaction::new_announce_upgrade(
+                &admin_kp,
+                ProtocolVersion::new(1, 0, 1),
+                activation,
+                0,
+            ))
+            .unwrap();
 
         // Not yet activated
         state.block_height = activation - 1;
@@ -998,7 +1238,7 @@ mod tests {
 
     #[test]
     fn test_state_root_empty_is_zero() {
-        let s = WorldState::new();
+        let mut s = WorldState::new();
         assert_eq!(s.compute_state_root(), [0u8; 32]);
     }
 

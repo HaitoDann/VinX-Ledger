@@ -4,6 +4,9 @@ version.workspace = true
 edition.workspace = true
 authors.workspace = true
 
+[dev-dependencies]
+proptest = "1"
+
 [dependencies]
 vinx-crypto = { path = "../vinx-crypto" }
 vinx-core = { path = "../vinx-core" }

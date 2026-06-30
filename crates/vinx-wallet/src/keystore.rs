@@ -14,31 +14,34 @@ impl KeyStore {
         let kp = KeyPair::generate();
         let address = Address::from_public_key(&kp.public_key()).to_string();
         let secret_key_hex = hex::encode(kp.secret_bytes());
-        (Self { address, secret_key_hex }, kp)
+        (
+            Self {
+                address,
+                secret_key_hex,
+            },
+            kp,
+        )
     }
 
     pub fn load(path: &Path) -> Result<Self, WalletError> {
-        let content = std::fs::read_to_string(path).map_err(|e| {
-            WalletError::Keystore(format!("cannot read {}: {}", path.display(), e))
-        })?;
-        serde_json::from_str(&content).map_err(|e| {
-            WalletError::Keystore(format!("invalid keystore file: {}", e))
-        })
+        let content = std::fs::read_to_string(path)
+            .map_err(|e| WalletError::Keystore(format!("cannot read {}: {}", path.display(), e)))?;
+        serde_json::from_str(&content)
+            .map_err(|e| WalletError::Keystore(format!("invalid keystore file: {}", e)))
     }
 
     pub fn save(&self, path: &Path) -> Result<(), WalletError> {
         let json = serde_json::to_string_pretty(self)?;
-        std::fs::write(path, json).map_err(|e| {
-            WalletError::Keystore(format!("cannot write {}: {}", path.display(), e))
-        })
+        std::fs::write(path, json)
+            .map_err(|e| WalletError::Keystore(format!("cannot write {}: {}", path.display(), e)))
     }
 
     pub fn to_keypair(&self) -> Result<KeyPair, WalletError> {
         let bytes = hex::decode(&self.secret_key_hex)
             .map_err(|e| WalletError::Keystore(format!("invalid secret key hex: {}", e)))?;
-        let arr: [u8; 32] = bytes.try_into().map_err(|_| {
-            WalletError::Keystore("secret key must be 32 bytes".to_string())
-        })?;
+        let arr: [u8; 32] = bytes
+            .try_into()
+            .map_err(|_| WalletError::Keystore("secret key must be 32 bytes".to_string()))?;
         Ok(KeyPair::from_secret_bytes(&arr))
     }
 

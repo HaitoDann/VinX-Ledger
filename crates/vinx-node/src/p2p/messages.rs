@@ -1,15 +1,26 @@
+use borsh::{BorshDeserialize, BorshSerialize};
 use serde::{Deserialize, Serialize};
 use vinx_core::{Block, BlockSignature, Transaction};
+use zstd;
+
+/// Messages plus courts que ce seuil sont envoyés bruts (overhead de compression > gain).
+const COMPRESSION_THRESHOLD: usize = 512;
+const FLAG_RAW: u8 = 0x00;
+const FLAG_ZSTD: u8 = 0x01;
 
 /// Messages exchanged over the GossipSub P2P network.
-#[derive(Clone, Debug, Serialize, Deserialize)]
+/// Wire format: Borsh (deterministic, compact, no schema needed).
+#[derive(Clone, Debug, Serialize, Deserialize, BorshSerialize, BorshDeserialize)]
 pub enum P2pMessage {
     /// A new block produced by the leader of that height.
     NewBlock(Block),
     /// A new transaction submitted by a user.
     NewTransaction(Transaction),
     /// A co-signature for an already-announced block.
-    BlockCoSignature { height: u64, signature: BlockSignature },
+    BlockCoSignature {
+        height: u64,
+        signature: BlockSignature,
+    },
     /// Request blocks starting from `from_height` (sent when a node detects it's behind).
     SyncRequest { from_height: u64, limit: u32 },
     /// Response to SyncRequest with the requested block range.
@@ -18,11 +29,29 @@ pub enum P2pMessage {
 
 impl P2pMessage {
     pub fn encode(&self) -> Vec<u8> {
-        bincode::serialize(self).unwrap_or_default()
+        let raw = borsh::to_vec(self).unwrap_or_default();
+        if raw.len() >= COMPRESSION_THRESHOLD {
+            if let Ok(compressed) = zstd::encode_all(&raw[..], 1) {
+                let mut out = Vec::with_capacity(1 + compressed.len());
+                out.push(FLAG_ZSTD);
+                out.extend_from_slice(&compressed);
+                return out;
+            }
+        }
+        let mut out = Vec::with_capacity(1 + raw.len());
+        out.push(FLAG_RAW);
+        out.extend_from_slice(&raw);
+        out
     }
 
     pub fn decode(bytes: &[u8]) -> Option<Self> {
-        bincode::deserialize(bytes).ok()
+        let (&flag, payload) = bytes.split_first()?;
+        let raw = match flag {
+            FLAG_RAW => payload.to_vec(),
+            FLAG_ZSTD => zstd::decode_all(payload).ok()?,
+            _ => return None,
+        };
+        borsh::from_slice(&raw).ok()
     }
 
     /// GossipSub topic name for this message type.
@@ -56,6 +85,7 @@ mod tests {
                 tx_count: 0,
                 state_root: [0u8; 32],
                 base_fee: 0,
+                receipts_root: [0u8; 32],
             },
             transactions: vec![],
             signatures: vec![],
@@ -83,19 +113,33 @@ mod tests {
             },
         };
         let decoded = P2pMessage::decode(&msg.encode()).unwrap();
-        assert!(matches!(decoded, P2pMessage::BlockCoSignature { height: 1, .. }));
+        assert!(matches!(
+            decoded,
+            P2pMessage::BlockCoSignature { height: 1, .. }
+        ));
     }
 
     #[test]
     fn test_sync_request_roundtrip() {
-        let msg = P2pMessage::SyncRequest { from_height: 42, limit: 100 };
+        let msg = P2pMessage::SyncRequest {
+            from_height: 42,
+            limit: 100,
+        };
         let decoded = P2pMessage::decode(&msg.encode()).unwrap();
-        assert!(matches!(decoded, P2pMessage::SyncRequest { from_height: 42, limit: 100 }));
+        assert!(matches!(
+            decoded,
+            P2pMessage::SyncRequest {
+                from_height: 42,
+                limit: 100
+            }
+        ));
     }
 
     #[test]
     fn test_sync_response_roundtrip() {
-        let msg = P2pMessage::SyncResponse { blocks: vec![dummy_block()] };
+        let msg = P2pMessage::SyncResponse {
+            blocks: vec![dummy_block()],
+        };
         let decoded = P2pMessage::decode(&msg.encode()).unwrap();
         if let P2pMessage::SyncResponse { blocks } = decoded {
             assert_eq!(blocks.len(), 1);
@@ -110,9 +154,43 @@ mod tests {
     }
 
     #[test]
+    fn test_compression_roundtrip_large_message() {
+        // SyncResponse with many blocks triggers compression
+        let blocks: Vec<Block> = (0..20).map(|i| {
+            let mut b = dummy_block();
+            b.header.height = i;
+            b
+        }).collect();
+        let msg = P2pMessage::SyncResponse { blocks };
+        let encoded = msg.encode();
+        assert_eq!(encoded[0], FLAG_ZSTD, "large message should be compressed");
+        let decoded = P2pMessage::decode(&encoded).unwrap();
+        assert!(matches!(decoded, P2pMessage::SyncResponse { .. }));
+    }
+
+    #[test]
+    fn test_small_message_stays_raw() {
+        let msg = P2pMessage::SyncRequest { from_height: 1, limit: 10 };
+        let encoded = msg.encode();
+        assert_eq!(encoded[0], FLAG_RAW, "small message should stay raw");
+        let decoded = P2pMessage::decode(&encoded).unwrap();
+        assert!(matches!(decoded, P2pMessage::SyncRequest { from_height: 1, limit: 10 }));
+    }
+
+    #[test]
     fn test_topic_names() {
         assert_eq!(P2pMessage::NewBlock(dummy_block()).topic(), "vinx/blocks/1");
-        assert_eq!(P2pMessage::SyncRequest { from_height: 0, limit: 1 }.topic(), "vinx/sync/1");
-        assert_eq!(P2pMessage::SyncResponse { blocks: vec![] }.topic(), "vinx/sync/1");
+        assert_eq!(
+            P2pMessage::SyncRequest {
+                from_height: 0,
+                limit: 1
+            }
+            .topic(),
+            "vinx/sync/1"
+        );
+        assert_eq!(
+            P2pMessage::SyncResponse { blocks: vec![] }.topic(),
+            "vinx/sync/1"
+        );
     }
 }

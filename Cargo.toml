@@ -9,7 +9,7 @@ members = [
 resolver = "2"
 
 [workspace.package]
-version = "0.1.0"
+version = "0.1.0-alpha.1"
 edition = "2021"
 authors = ["VinX Labs"]
 
@@ -27,4 +27,6 @@ axum = { version = "0.7", features = ["ws"] }
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 bincode = "1"
+borsh = { version = "1", features = ["derive"] }
 rayon = "1"
+zstd = "0.13"

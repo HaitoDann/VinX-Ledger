@@ -10,12 +10,12 @@ use keystore::KeyStore;
 use std::path::PathBuf;
 
 use clap::{Parser, Subcommand};
+#[allow(unused_imports)]
+use hex;
 use std::str::FromStr;
 use vinx_core::amount::DEFAULT_FEE_FLOOR_ATOMS;
 use vinx_core::{Amount, GovernanceAction, ProtocolVersion, Transaction};
 use vinx_crypto::Address;
-#[allow(unused_imports)]
-use hex;
 
 // ─── CLI definition ───────────────────────────────────────────────────────────
 
@@ -223,35 +223,66 @@ async fn run(cmd: Commands) -> Result<(), WalletError> {
         Commands::Keygen { output } => cmd_keygen(&output),
         Commands::Address { wallet } => cmd_address(&wallet),
         Commands::Balance { address, node } => cmd_balance(&address, &node).await,
-        Commands::Transfer { to, amount, wallet, node } => {
-            cmd_transfer(&to, &amount, &wallet, &node).await
-        }
-        Commands::Stake { amount, wallet, node } => cmd_stake(&amount, &wallet, &node).await,
-        Commands::Unstake { amount, wallet, node } => cmd_unstake(&amount, &wallet, &node).await,
+        Commands::Transfer {
+            to,
+            amount,
+            wallet,
+            node,
+        } => cmd_transfer(&to, &amount, &wallet, &node).await,
+        Commands::Stake {
+            amount,
+            wallet,
+            node,
+        } => cmd_stake(&amount, &wallet, &node).await,
+        Commands::Unstake {
+            amount,
+            wallet,
+            node,
+        } => cmd_unstake(&amount, &wallet, &node).await,
         Commands::Block { height, node } => cmd_block(height, &node).await,
         Commands::Status { node } => cmd_status(&node).await,
         Commands::Tx { hash, node } => cmd_tx(&hash, &node).await,
-        Commands::Freeze { target, wallet, node } => cmd_freeze(&target, &wallet, &node).await,
-        Commands::Unfreeze { target, wallet, node } => cmd_unfreeze(&target, &wallet, &node).await,
-        Commands::AnnounceUpgrade { version, activation_height, wallet, node } => {
-            cmd_announce_upgrade(&version, activation_height, &wallet, &node).await
-        }
-        Commands::AddValidator { validator, wallet, node } => {
-            cmd_add_validator(&validator, &wallet, &node).await
-        }
-        Commands::RemoveValidator { validator, wallet, node } => {
-            cmd_remove_validator(&validator, &wallet, &node).await
-        }
+        Commands::Freeze {
+            target,
+            wallet,
+            node,
+        } => cmd_freeze(&target, &wallet, &node).await,
+        Commands::Unfreeze {
+            target,
+            wallet,
+            node,
+        } => cmd_unfreeze(&target, &wallet, &node).await,
+        Commands::AnnounceUpgrade {
+            version,
+            activation_height,
+            wallet,
+            node,
+        } => cmd_announce_upgrade(&version, activation_height, &wallet, &node).await,
+        Commands::AddValidator {
+            validator,
+            wallet,
+            node,
+        } => cmd_add_validator(&validator, &wallet, &node).await,
+        Commands::RemoveValidator {
+            validator,
+            wallet,
+            node,
+        } => cmd_remove_validator(&validator, &wallet, &node).await,
         Commands::Validators { node } => cmd_validators(&node).await,
         Commands::Protocol { node } => cmd_protocol(&node).await,
-        Commands::History { address, limit, offset, node } => {
-            cmd_history(&address, limit, offset, &node).await
-        }
+        Commands::History {
+            address,
+            limit,
+            offset,
+            node,
+        } => cmd_history(&address, limit, offset, &node).await,
         Commands::NewWallet { output } => cmd_new_wallet(&output),
         Commands::RestoreWallet { output } => cmd_restore_wallet(&output),
-        Commands::AdminAction { action, wallet, node } => {
-            cmd_admin_action(&action, &wallet, &node).await
-        }
+        Commands::AdminAction {
+            action,
+            wallet,
+            node,
+        } => cmd_admin_action(&action, &wallet, &node).await,
         Commands::NetworkStats { node } => cmd_network_stats(&node).await,
     }
 }
@@ -384,8 +415,10 @@ async fn cmd_block(height: u64, node: &str) -> Result<(), WalletError> {
         println!();
         println!("Transactions:");
         for tx in &block.transactions {
-            println!("  {:?}  {}  {}  →  {}  fee {}",
-                tx.tx_type, tx.hash, tx.from, tx.to, tx.fee);
+            println!(
+                "  {:?}  {}  {}  →  {}  fee {}",
+                tx.tx_type, tx.hash, tx.from, tx.to, tx.fee
+            );
         }
     }
     Ok(())
@@ -601,11 +634,14 @@ async fn cmd_history(
         return Ok(());
     }
     println!();
-    println!("{:<8} {:<12} {:<16} {:<20} {}",
-        "Block", "Type", "Amount", "Fee", "Hash");
+    println!(
+        "{:<8} {:<12} {:<16} {:<20} {}",
+        "Block", "Type", "Amount", "Fee", "Hash"
+    );
     println!("{}", "-".repeat(80));
     for tx in &info.txs {
-        println!("{:<8} {:<12} {:<16} {:<20} {}",
+        println!(
+            "{:<8} {:<12} {:<16} {:<20} {}",
             tx.block_height,
             tx.tx_type,
             tx.amount,
@@ -615,7 +651,8 @@ async fn cmd_history(
     }
     if info.total > offset + info.txs.len() {
         println!();
-        println!("Showing {}-{} of {}. Use --offset {} to see more.",
+        println!(
+            "Showing {}-{} of {}. Use --offset {} to see more.",
             offset + 1,
             offset + info.txs.len(),
             info.total,
@@ -637,7 +674,8 @@ fn cmd_new_wallet(output: &PathBuf) -> Result<(), WalletError> {
     let mnemonic = Mnemonic::from_entropy(&entropy)
         .map_err(|e| WalletError::Keystore(format!("mnemonic generation failed: {}", e)))?;
     let seed = mnemonic.to_seed("");
-    let key_bytes: [u8; 32] = seed[..32].try_into()
+    let key_bytes: [u8; 32] = seed[..32]
+        .try_into()
         .map_err(|_| WalletError::Keystore("seed too short".to_string()))?;
     let kp = vinx_crypto::KeyPair::from_secret_bytes(&key_bytes);
     let address = Address::from_public_key(&kp.public_key()).to_string();
@@ -660,13 +698,18 @@ fn cmd_restore_wallet(output: &PathBuf) -> Result<(), WalletError> {
     print!("Enter your 12-word mnemonic: ");
     let _ = std::io::Write::flush(&mut std::io::stdout());
     let stdin = io::stdin();
-    let line = stdin.lock().lines().next()
+    let line = stdin
+        .lock()
+        .lines()
+        .next()
         .ok_or_else(|| WalletError::Keystore("no input".to_string()))?
         .map_err(|e| WalletError::Keystore(format!("read error: {}", e)))?;
-    let mnemonic: bip39::Mnemonic = line.parse()
+    let mnemonic: bip39::Mnemonic = line
+        .parse()
         .map_err(|e: bip39::Error| WalletError::Keystore(format!("invalid mnemonic: {}", e)))?;
     let seed = mnemonic.to_seed("");
-    let key_bytes: [u8; 32] = seed[..32].try_into()
+    let key_bytes: [u8; 32] = seed[..32]
+        .try_into()
         .map_err(|_| WalletError::Keystore("seed too short".to_string()))?;
     let kp = vinx_crypto::KeyPair::from_secret_bytes(&key_bytes);
     let address = Address::from_public_key(&kp.public_key()).to_string();
@@ -681,7 +724,11 @@ fn cmd_restore_wallet(output: &PathBuf) -> Result<(), WalletError> {
     Ok(())
 }
 
-async fn cmd_admin_action(action_json: &str, wallet: &PathBuf, node: &str) -> Result<(), WalletError> {
+async fn cmd_admin_action(
+    action_json: &str,
+    wallet: &PathBuf,
+    node: &str,
+) -> Result<(), WalletError> {
     // Parse the action from JSON
     let action: GovernanceAction = serde_json::from_str(action_json)
         .map_err(|e| WalletError::NodeError(format!("invalid action JSON: {}", e)))?;

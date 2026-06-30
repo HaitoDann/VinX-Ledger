@@ -1,24 +1,25 @@
 pub mod messages;
 
+use std::collections::HashMap;
 use std::sync::Arc;
 use std::time::Duration;
 
+use futures::StreamExt;
 use libp2p::{
     gossipsub::{self, IdentTopic, TopicHash},
-    identify,
-    mdns,
-    noise,
+    identify, mdns, noise, quic,
     swarm::{NetworkBehaviour, SwarmEvent},
     tcp, yamux, Multiaddr, PeerId, SwarmBuilder,
 };
-use futures::StreamExt;
 use tokio::sync::{mpsc, RwLock};
 use tracing::{debug, info, warn};
 
-use crate::{chain::Chain, config::NodeConfig, mempool::Mempool, NodeError};
+use crate::{chain::Chain, config::NodeConfig, mempool::Mempool, node::NodeMetrics, NodeError};
 use messages::P2pMessage;
+use rayon::prelude::*;
+use std::sync::atomic::Ordering;
 use vinx_core::{Block, BlockSignature, Transaction, ValidatorSet};
-use vinx_crypto::Address;
+use vinx_crypto::{Address, Hash32};
 use vinx_state::WorldState;
 
 pub enum P2pCommand {
@@ -34,13 +35,24 @@ pub struct P2pHandle {
 
 impl P2pHandle {
     pub fn broadcast_block(&self, block: &Block) {
-        let _ = self.cmd_tx.send(P2pCommand::Broadcast(P2pMessage::NewBlock(block.clone())));
+        let _ = self
+            .cmd_tx
+            .send(P2pCommand::Broadcast(P2pMessage::NewBlock(block.clone())));
     }
     pub fn broadcast_tx(&self, tx: &Transaction) {
-        let _ = self.cmd_tx.send(P2pCommand::Broadcast(P2pMessage::NewTransaction(tx.clone())));
+        let _ = self
+            .cmd_tx
+            .send(P2pCommand::Broadcast(P2pMessage::NewTransaction(
+                tx.clone(),
+            )));
     }
     pub fn broadcast_signature(&self, height: u64, signature: BlockSignature) {
-        let _ = self.cmd_tx.send(P2pCommand::Broadcast(P2pMessage::BlockCoSignature { height, signature }));
+        let _ = self
+            .cmd_tx
+            .send(P2pCommand::Broadcast(P2pMessage::BlockCoSignature {
+                height,
+                signature,
+            }));
     }
     pub fn shutdown(&self) {
         let _ = self.cmd_tx.send(P2pCommand::Shutdown);
@@ -62,6 +74,7 @@ pub async fn start(
     mempool: Arc<RwLock<Mempool>>,
     state: Arc<RwLock<WorldState>>,
     validator_set: Arc<RwLock<ValidatorSet>>,
+    metrics: NodeMetrics,
 ) -> Result<P2pHandle, NodeError> {
     let (cmd_tx, cmd_rx) = mpsc::unbounded_channel::<P2pCommand>();
 
@@ -87,8 +100,13 @@ pub async fn start(
 
     let mut swarm = SwarmBuilder::with_existing_identity(libp2p_kp)
         .with_tokio()
-        .with_tcp(tcp::Config::default(), noise::Config::new, yamux::Config::default)
+        .with_tcp(
+            tcp::Config::default(),
+            noise::Config::new,
+            yamux::Config::default,
+        )
         .map_err(|e| NodeError::Config(format!("P2P TCP setup failed: {e}")))?
+        .with_quic()
         .with_behaviour(|key| {
             let gossipsub_config = gossipsub::ConfigBuilder::default()
                 .heartbeat_interval(Duration::from_secs(1))
@@ -98,30 +116,66 @@ pub async fn start(
             let gossipsub = gossipsub::Behaviour::new(
                 gossipsub::MessageAuthenticity::Signed(key.clone()),
                 gossipsub_config,
-            ).expect("valid gossipsub behaviour");
+            )
+            .expect("valid gossipsub behaviour");
             let identify = identify::Behaviour::new(identify::Config::new(
                 "/vinx/1.0.0".to_string(),
                 key.public(),
             ));
-            let mdns = mdns::tokio::Behaviour::new(mdns::Config::default(), key.public().to_peer_id())
-                .expect("valid mDNS behaviour");
-            Ok(VinxBehaviour { gossipsub, identify, mdns })
+            let mdns =
+                mdns::tokio::Behaviour::new(mdns::Config::default(), key.public().to_peer_id())
+                    .expect("valid mDNS behaviour");
+            Ok(VinxBehaviour {
+                gossipsub,
+                identify,
+                mdns,
+            })
         })
         .map_err(|e| NodeError::Config(format!("P2P behaviour setup failed: {e}")))?
         .build();
 
-    let _topic_map: Vec<(TopicHash, IdentTopic)> = TOPICS.iter().map(|t| {
-        let topic = IdentTopic::new(*t);
-        swarm.behaviour_mut().gossipsub.subscribe(&topic).expect("subscribe ok");
-        (topic.hash(), topic)
-    }).collect();
+    let _topic_map: Vec<(TopicHash, IdentTopic)> = TOPICS
+        .iter()
+        .map(|t| {
+            let topic = IdentTopic::new(*t);
+            swarm
+                .behaviour_mut()
+                .gossipsub
+                .subscribe(&topic)
+                .expect("subscribe ok");
+            (topic.hash(), topic)
+        })
+        .collect();
 
-    swarm.listen_on(listen_addr.clone())
+    swarm
+        .listen_on(listen_addr.clone())
         .map_err(|e| NodeError::Config(format!("P2P listen failed: {e}")))?;
 
+    // Also listen on QUIC (same port as TCP, different protocol)
+    let quic_listen = config
+        .p2p_listen
+        .as_deref()
+        .unwrap_or("/ip4/0.0.0.0/tcp/9000")
+        .replace("/tcp/", "/udp/");
+    let quic_addr_str = format!("{}/quic-v1", quic_listen);
+    if let Ok(addr) = quic_addr_str.parse::<Multiaddr>() {
+        let _ = swarm.listen_on(addr);
+    }
+
+    // Dial explicitly configured peers (e.g. from config file)
     for peer_addr in &config.peer_addrs {
         if let Ok(addr) = peer_addr.parse::<Multiaddr>() {
             let _ = swarm.dial(addr);
+        }
+    }
+    // Dial hardcoded bootstrap peers for initial network discovery
+    for peer_addr in &config.bootstrap_peers {
+        match peer_addr.parse::<Multiaddr>() {
+            Ok(addr) => {
+                info!(addr = %addr, "Dialing bootstrap peer");
+                let _ = swarm.dial(addr);
+            }
+            Err(e) => warn!(addr = %peer_addr, error = %e, "Invalid bootstrap peer address"),
         }
     }
 
@@ -131,11 +185,27 @@ pub async fn start(
     let local_addr = config.validator_address.clone();
 
     tokio::spawn(async move {
-        run_event_loop(swarm, cmd_rx, chain, mempool, state, validator_set, local_kp, local_addr).await;
+        run_event_loop(
+            swarm,
+            cmd_rx,
+            chain,
+            mempool,
+            state,
+            validator_set,
+            local_kp,
+            local_addr,
+            metrics,
+        )
+        .await;
     });
 
-    Ok(P2pHandle { cmd_tx, local_peer_id })
+    Ok(P2pHandle {
+        cmd_tx,
+        local_peer_id,
+    })
 }
+
+const BAN_THRESHOLD: i32 = -5;
 
 async fn run_event_loop(
     mut swarm: libp2p::Swarm<VinxBehaviour>,
@@ -146,7 +216,10 @@ async fn run_event_loop(
     validator_set: Arc<RwLock<ValidatorSet>>,
     local_kp: vinx_crypto::KeyPair,
     local_addr: Address,
+    metrics: NodeMetrics,
 ) {
+    let mut reputation: HashMap<PeerId, i32> = HashMap::new();
+
     loop {
         tokio::select! {
             cmd = cmd_rx.recv() => {
@@ -165,7 +238,7 @@ async fn run_event_loop(
             }
             event = swarm.next() => {
                 if let Some(event) = event {
-                    handle_swarm_event(event, &chain, &mempool, &state, &validator_set, &local_kp, &local_addr, &mut swarm).await;
+                    handle_swarm_event(event, &chain, &mempool, &state, &validator_set, &local_kp, &local_addr, &mut swarm, &mut reputation, &metrics).await;
                 }
             }
         }
@@ -181,6 +254,8 @@ async fn handle_swarm_event(
     local_kp: &vinx_crypto::KeyPair,
     local_addr: &Address,
     swarm: &mut libp2p::Swarm<VinxBehaviour>,
+    reputation: &mut HashMap<PeerId, i32>,
+    metrics: &NodeMetrics,
 ) {
     match event {
         SwarmEvent::NewListenAddr { address, .. } => {
@@ -204,19 +279,46 @@ async fn handle_swarm_event(
         SwarmEvent::Behaviour(VinxBehaviourEvent::Mdns(mdns::Event::Expired(peers))) => {
             for (peer_id, _) in peers {
                 debug!(peer = %peer_id, "mDNS peer expired");
-                swarm.behaviour_mut().gossipsub.remove_explicit_peer(&peer_id);
+                swarm
+                    .behaviour_mut()
+                    .gossipsub
+                    .remove_explicit_peer(&peer_id);
             }
         }
 
-        SwarmEvent::Behaviour(VinxBehaviourEvent::Gossipsub(
-            gossipsub::Event::Message { message, .. },
-        )) => {
-            let Some(msg) = P2pMessage::decode(&message.data) else { return };
-            dispatch_message(msg, chain, mempool, state, validator_set, local_kp, local_addr, swarm).await;
+        SwarmEvent::Behaviour(VinxBehaviourEvent::Gossipsub(gossipsub::Event::Message {
+            message,
+            propagation_source,
+            ..
+        })) => {
+            let Some(msg) = P2pMessage::decode(&message.data) else {
+                // Undecipherable message — penalize sender
+                let score = reputation.entry(propagation_source).or_insert(0);
+                *score -= 1;
+                if *score <= BAN_THRESHOLD {
+                    warn!(peer = %propagation_source, score, "Banning peer for invalid messages");
+                    swarm.behaviour_mut().gossipsub.blacklist_peer(&propagation_source);
+                }
+                return;
+            };
+            dispatch_message(
+                msg,
+                chain,
+                mempool,
+                state,
+                validator_set,
+                local_kp,
+                local_addr,
+                swarm,
+                metrics,
+            )
+            .await;
         }
 
         SwarmEvent::Behaviour(VinxBehaviourEvent::Identify(identify::Event::Received {
-            peer_id, info, ..
+            peer_id,
+            info,
+            ..
         })) => {
             debug!(peer = %peer_id, protocols = ?info.protocols, "Peer identified");
             for addr in info.listen_addrs {
@@ -228,6 +330,19 @@ async fn handle_swarm_event(
     }
 }
 
+/// Verifies all co-signatures on a block in parallel (rayon).
+/// Returns `true` only if every signature has a valid pubkey→address binding
+/// and a valid ed25519 signature over `block_hash`.
+/// The proposer signature is included in the same pass.
+fn verify_block_signatures_parallel(sigs: &[BlockSignature], block_hash: &Hash32) -> bool {
+    sigs.par_iter().all(|sig| {
+        if Address::from_public_key(&sig.pub_key) != sig.validator {
+            return false;
+        }
+        sig.pub_key.verify(block_hash, &sig.signature).is_ok()
+    })
+}
+
 async fn dispatch_message(
     msg: P2pMessage,
     chain: &Arc<RwLock<Chain>>,
@@ -237,9 +352,11 @@ async fn dispatch_message(
     local_kp: &vinx_crypto::KeyPair,
     local_addr: &Address,
     swarm: &mut libp2p::Swarm<VinxBehaviour>,
+    metrics: &NodeMetrics,
 ) {
     match msg {
         P2pMessage::NewTransaction(tx) => {
+            metrics.p2p_tx_recv.fetch_add(1, Ordering::Relaxed);
             // Stage for deferred parallel verification (flush_staged() called at block production)
             mempool.write().await.stage(tx);
         }
@@ -259,10 +376,17 @@ async fn dispatch_message(
                 if height > expected {
                     // Behind — request missing blocks
                     let limit = (height - expected).min(200) as u32 + 1;
-                    let req = P2pMessage::SyncRequest { from_height: expected, limit };
+                    let req = P2pMessage::SyncRequest {
+                        from_height: expected,
+                        limit,
+                    };
                     let topic = IdentTopic::new(req.topic());
                     let _ = swarm.behaviour_mut().gossipsub.publish(topic, req.encode());
-                    debug!(our = expected, peer = height, "Sent SyncRequest to catch up");
+                    debug!(
+                        our = expected,
+                        peer = height,
+                        "Sent SyncRequest to catch up"
+                    );
                     return;
                 }
                 if block.header.prev_hash != chain_guard.tip_hash() {
@@ -277,18 +401,15 @@ async fn dispatch_message(
                 return;
             }
 
-            // 3. Proposer signature cryptographic verification
+            // 3. Signature verification — proposer must be present; all sigs verified in parallel.
             let block_hash = block.hash();
-            match block.signatures.iter().find(|s| s.validator == block.header.validator) {
-                None => { warn!(height, "P2P block missing proposer sig"); return; }
-                Some(sig) => {
-                    if Address::from_public_key(&sig.pub_key) != sig.validator {
-                        warn!(height, "P2P block proposer pubkey/address mismatch"); return;
-                    }
-                    if sig.pub_key.verify(&block_hash, &sig.signature).is_err() {
-                        warn!(height, "P2P block proposer sig invalid"); return;
-                    }
-                }
+            if !block.signatures.iter().any(|s| s.validator == block.header.validator) {
+                warn!(height, "P2P block missing proposer sig");
+                return;
+            }
+            if !verify_block_signatures_parallel(&block.signatures, &block_hash) {
+                warn!(height, "P2P block has invalid signature(s)");
+                return;
             }
 
             // 4. State transition with rollback
@@ -326,11 +447,16 @@ async fn dispatch_message(
                 }
                 ok
             };
-            if !applied { return; }
+            if !applied {
+                return;
+            }
 
             // 5. Commit
-            { chain.write().await.push(block.clone()); }
+            {
+                chain.write().await.push(block.clone());
+            }
             info!(height, "P2P: block validated and applied");
+            metrics.p2p_blocks_recv.fetch_add(1, Ordering::Relaxed);
 
             // 6. Co-sign if we're a validator
             let vs = validator_set.read().await.clone();
@@ -340,15 +466,23 @@ async fn dispatch_message(
                     pub_key: local_kp.public_key(),
                     signature: local_kp.sign(&block_hash),
                 };
-                let co_msg = P2pMessage::BlockCoSignature { height, signature: sig.clone() };
+                let co_msg = P2pMessage::BlockCoSignature {
+                    height,
+                    signature: sig.clone(),
+                };
                 let topic = IdentTopic::new(co_msg.topic());
-                let _ = swarm.behaviour_mut().gossipsub.publish(topic, co_msg.encode());
+                let _ = swarm
+                    .behaviour_mut()
+                    .gossipsub
+                    .publish(topic, co_msg.encode());
                 debug!(height, "Co-signed block");
 
                 let mut c = chain.write().await;
                 c.record_signature(local_addr.as_str(), height, block_hash);
                 let finalized = c.add_co_signature(height, sig, &vs);
-                if finalized { info!(height, "Block finalized after co-signing"); }
+                if finalized {
+                    info!(height, "Block finalized after co-signing");
+                }
             }
         }
 
@@ -368,10 +502,17 @@ async fn dispatch_message(
                 let c = chain.read().await;
                 match c.get_block(height) {
                     Some(b) => b.hash(),
-                    None => { debug!(height, "P2P co-sig for unknown height"); return; }
+                    None => {
+                        debug!(height, "P2P co-sig for unknown height");
+                        return;
+                    }
                 }
             };
-            if signature.pub_key.verify(&block_hash, &signature.signature).is_err() {
+            if signature
+                .pub_key
+                .verify(&block_hash, &signature.signature)
+                .is_err()
+            {
                 warn!(height, validator = %signature.validator, "P2P co-sig invalid crypto");
                 return;
             }
@@ -382,7 +523,9 @@ async fn dispatch_message(
                 return;
             }
             let finalized = c.add_co_signature(height, signature, &vs);
-            if finalized { info!(height, "Block finalized via co-signatures"); }
+            if finalized {
+                info!(height, "Block finalized via co-signatures");
+            }
         }
 
         // Respond to sync requests with our stored blocks
@@ -398,7 +541,10 @@ async fn dispatch_message(
                 let n = blocks.len();
                 let resp = P2pMessage::SyncResponse { blocks };
                 let topic = IdentTopic::new(resp.topic());
-                let _ = swarm.behaviour_mut().gossipsub.publish(topic, resp.encode());
+                let _ = swarm
+                    .behaviour_mut()
+                    .gossipsub
+                    .publish(topic, resp.encode());
                 debug!(from = from_height, count = n, "Served SyncResponse");
             }
         }
@@ -414,10 +560,20 @@ async fn dispatch_message(
                 }
                 let vs = validator_set.read().await.clone();
                 if vs.leader_at(height) != &block.header.validator {
-                    warn!(height, "SyncResponse block wrong proposer"); break;
+                    warn!(height, "SyncResponse block wrong proposer");
+                    break;
                 }
                 if block.header.prev_hash != chain.read().await.tip_hash() {
-                    warn!(height, "SyncResponse block wrong prev_hash"); break;
+                    warn!(height, "SyncResponse block wrong prev_hash");
+                    break;
+                }
+                // Verify all bundled co-signatures in parallel before applying state.
+                let block_hash = block.hash();
+                if !block.signatures.is_empty()
+                    && !verify_block_signatures_parallel(&block.signatures, &block_hash)
+                {
+                    warn!(height, "SyncResponse block has invalid signature(s)");
+                    break;
                 }
                 let ok = {
                     let mut sg = state.write().await;
@@ -425,7 +581,10 @@ async fn dispatch_message(
                     let mut ok = true;
                     for tx in &block.transactions {
                         if let Err(e) = sg.apply_transaction(tx) {
-                            warn!(height, error=%e, "SyncResponse tx failed"); *sg = snapshot.clone(); ok = false; break;
+                            warn!(height, error=%e, "SyncResponse tx failed");
+                            *sg = snapshot.clone();
+                            ok = false;
+                            break;
                         }
                     }
                     if ok {
@@ -433,13 +592,18 @@ async fn dispatch_message(
                         sg.check_auto_unfreeze();
                         sg.check_upgrade_activation();
                         let r = sg.flush_validator_fee_pool();
-                        if r > vinx_core::amount::Amount::ZERO { sg.credit(&block.header.validator, r); }
+                        if r > vinx_core::amount::Amount::ZERO {
+                            sg.credit(&block.header.validator, r);
+                        }
                         let _rw = sg.distribute_staking_rewards();
                         let root = sg.compute_state_root();
                         if root != block.header.state_root {
-                            warn!(height, "SyncResponse state_root mismatch"); *sg = snapshot.clone(); ok = false;
+                            warn!(height, "SyncResponse state_root mismatch");
+                            *sg = snapshot.clone();
+                            ok = false;
                         } else {
-                            let nv = sg.validator_set.clone(); drop(sg);
+                            let nv = sg.validator_set.clone();
+                            drop(sg);
                             *validator_set.write().await = nv;
                         }
                     }

@@ -10,10 +10,18 @@ pub struct ProtocolVersion {
 }
 
 impl ProtocolVersion {
-    pub const GENESIS: Self = Self { major: 1, minor: 0, patch: 0 };
+    pub const GENESIS: Self = Self {
+        major: 1,
+        minor: 0,
+        patch: 0,
+    };
 
     pub fn new(major: u16, minor: u16, patch: u16) -> Self {
-        Self { major, minor, patch }
+        Self {
+            major,
+            minor,
+            patch,
+        }
     }
 
     /// Returns the upgrade type implied by moving from `self` to `next`.
@@ -41,10 +49,20 @@ impl std::str::FromStr for ProtocolVersion {
         if parts.len() != 3 {
             return Err(format!("expected X.Y.Z, got '{}'", s));
         }
-        let major = parts[0].parse::<u16>().map_err(|_| format!("invalid major: {}", parts[0]))?;
-        let minor = parts[1].parse::<u16>().map_err(|_| format!("invalid minor: {}", parts[1]))?;
-        let patch = parts[2].parse::<u16>().map_err(|_| format!("invalid patch: {}", parts[2]))?;
-        Ok(ProtocolVersion { major, minor, patch })
+        let major = parts[0]
+            .parse::<u16>()
+            .map_err(|_| format!("invalid major: {}", parts[0]))?;
+        let minor = parts[1]
+            .parse::<u16>()
+            .map_err(|_| format!("invalid minor: {}", parts[1]))?;
+        let patch = parts[2]
+            .parse::<u16>()
+            .map_err(|_| format!("invalid patch: {}", parts[2]))?;
+        Ok(ProtocolVersion {
+            major,
+            minor,
+            patch,
+        })
     }
 }
 
@@ -87,9 +105,18 @@ mod tests {
     #[test]
     fn test_upgrade_type_detection() {
         let v100 = ProtocolVersion::new(1, 0, 0);
-        assert_eq!(v100.upgrade_type(&ProtocolVersion::new(1, 0, 1)), UpgradeType::Patch);
-        assert_eq!(v100.upgrade_type(&ProtocolVersion::new(1, 1, 0)), UpgradeType::Minor);
-        assert_eq!(v100.upgrade_type(&ProtocolVersion::new(2, 0, 0)), UpgradeType::Major);
+        assert_eq!(
+            v100.upgrade_type(&ProtocolVersion::new(1, 0, 1)),
+            UpgradeType::Patch
+        );
+        assert_eq!(
+            v100.upgrade_type(&ProtocolVersion::new(1, 1, 0)),
+            UpgradeType::Minor
+        );
+        assert_eq!(
+            v100.upgrade_type(&ProtocolVersion::new(2, 0, 0)),
+            UpgradeType::Major
+        );
     }
 
     #[test]
@@ -101,8 +128,14 @@ mod tests {
     #[test]
     fn test_from_str() {
         use std::str::FromStr;
-        assert_eq!(ProtocolVersion::from_str("1.0.0").unwrap(), ProtocolVersion::GENESIS);
-        assert_eq!(ProtocolVersion::from_str("2.3.14").unwrap(), ProtocolVersion::new(2, 3, 14));
+        assert_eq!(
+            ProtocolVersion::from_str("1.0.0").unwrap(),
+            ProtocolVersion::GENESIS
+        );
+        assert_eq!(
+            ProtocolVersion::from_str("2.3.14").unwrap(),
+            ProtocolVersion::new(2, 3, 14)
+        );
         assert!(ProtocolVersion::from_str("bad").is_err());
         assert!(ProtocolVersion::from_str("1.2").is_err());
     }
