@@ -1,4 +1,6 @@
+use lru::LruCache;
 use std::collections::HashMap;
+use std::num::NonZeroUsize;
 use std::sync::Arc;
 use std::time::{Instant, SystemTime, UNIX_EPOCH};
 use tokio::sync::{broadcast, Mutex, RwLock};
@@ -64,7 +66,9 @@ pub struct Node {
     /// Pending validator join requests (in-memory, not persisted).
     pub validator_requests: Arc<Mutex<Vec<ValidatorJoinRequest>>>,
     /// Transaction receipts indexed by hex-encoded tx hash.
-    pub receipts: Arc<RwLock<HashMap<String, TxReceipt>>>,
+    pub receipts: Arc<RwLock<LruCache<String, TxReceipt>>>,
+    /// Cache LRU pour éviter de décoder les adresses bech32 à chaque requête RPC.
+    pub address_cache: tokio::sync::Mutex<LruCache<String, vinx_crypto::Address>>,
 }
 
 impl Node {
@@ -85,7 +89,8 @@ impl Node {
             last_block_instant: Arc::new(RwLock::new(Instant::now())),
             validator_liveness: Arc::new(RwLock::new(HashMap::new())),
             validator_requests: Arc::new(Mutex::new(Vec::new())),
-            receipts: Arc::new(RwLock::new(HashMap::new())),
+            receipts: Arc::new(RwLock::new(LruCache::new(NonZeroUsize::new(100_000).unwrap()))),
+            address_cache: tokio::sync::Mutex::new(LruCache::new(NonZeroUsize::new(1_024).unwrap())),
         })
     }
 
@@ -135,7 +140,8 @@ impl Node {
             last_block_instant: Arc::new(RwLock::new(Instant::now())),
             validator_liveness: Arc::new(RwLock::new(HashMap::new())),
             validator_requests: Arc::new(Mutex::new(Vec::new())),
-            receipts: Arc::new(RwLock::new(HashMap::new())),
+            receipts: Arc::new(RwLock::new(LruCache::new(NonZeroUsize::new(100_000).unwrap()))),
+            address_cache: tokio::sync::Mutex::new(LruCache::new(NonZeroUsize::new(1_024).unwrap())),
         })
     }
 
@@ -178,7 +184,12 @@ impl Node {
                 )
             })
             .collect::<HashMap<_, _>>();
-        self.receipts.write().await.extend(receipts);
+        {
+            let mut rx = self.receipts.write().await;
+            for (k, v) in receipts {
+                rx.put(k, v);
+            }
+        }
 
         self.after_block_produced(&block, &state.validator_set)
             .await;
@@ -405,6 +416,20 @@ impl Node {
                 .await;
             }
         }
+    }
+
+    /// Parses and caches a bech32 address string, returning an ApiError on failure.
+    pub async fn parse_address(&self, raw: &str) -> Result<vinx_crypto::Address, crate::rpc::handlers::ApiError> {
+        {
+            let mut cache = self.address_cache.lock().await;
+            if let Some(addr) = cache.get(raw) {
+                return Ok(addr.clone());
+            }
+        }
+        let addr = vinx_crypto::Address::from_bech32(raw)
+            .map_err(|e| crate::rpc::handlers::ApiError::BadRequest(e.to_string()))?;
+        self.address_cache.lock().await.put(raw.to_string(), addr.clone());
+        Ok(addr)
     }
 
     /// Starts the HTTP RPC server (blocks until shutdown).

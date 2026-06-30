@@ -70,8 +70,7 @@ pub async fn get_account(
     State(node): State<Arc<Node>>,
     Path(raw_address): Path<String>,
 ) -> ApiResult<AccountResponse> {
-    let address =
-        Address::from_bech32(&raw_address).map_err(|e| ApiError::BadRequest(e.to_string()))?;
+    let address = node.parse_address(&raw_address).await?;
     let state = node.state.read().await;
     match state.get_account(&address) {
         Some(account) => Ok(Json(AccountResponse::from_account(account))),
@@ -156,7 +155,7 @@ pub async fn post_validator_request(
     use crate::node::ValidatorJoinRequest;
 
     // Basic address format check
-    Address::from_bech32(&body.address).map_err(|e| ApiError::BadRequest(e.to_string()))?;
+    node.parse_address(&body.address).await?;
 
     let now = SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
@@ -243,8 +242,7 @@ pub async fn get_account_txs(
     Path(raw_address): Path<String>,
     Query(params): Query<PaginationParams>,
 ) -> ApiResult<AccountTxsResponse> {
-    let address =
-        Address::from_bech32(&raw_address).map_err(|e| ApiError::BadRequest(e.to_string()))?;
+    let address = node.parse_address(&raw_address).await?;
     let addr_str = address.to_string();
     let limit = params.limit.min(200);
 
@@ -500,8 +498,8 @@ pub async fn faucet_request(
             ApiError::BadRequest("Faucet is not enabled on this node".to_string())
         })?;
 
-    let to_addr = Address::from_bech32(&req.address)
-        .map_err(|e| ApiError::BadRequest(format!("Invalid address: {}", e)))?;
+    let to_addr = node.parse_address(&req.address).await
+        .map_err(|e| match e { ApiError::BadRequest(m) => ApiError::BadRequest(format!("Invalid address: {}", m)), e => e })?;
 
     let faucet_addr = Address::from_public_key(&faucet_kp.public_key());
 
@@ -565,8 +563,7 @@ pub async fn get_account_proof(
 ) -> ApiResult<MerkleProofResponse> {
     use vinx_crypto::{merkle_proof_for, merkle_root, sha256, verify_merkle_proof};
 
-    let address =
-        Address::from_bech32(&raw_address).map_err(|e| ApiError::BadRequest(e.to_string()))?;
+    let address = node.parse_address(&raw_address).await?;
 
     let state = node.state.read().await;
 
@@ -620,7 +617,7 @@ pub async fn get_tx_receipt(
     Path(hash_hex): Path<String>,
     State(node): State<Arc<Node>>,
 ) -> ApiResult<TxReceiptResponse> {
-    let receipts = node.receipts.read().await;
+    let mut receipts = node.receipts.write().await;
     let receipt = receipts
         .get(&hash_hex)
         .ok_or_else(|| ApiError::NotFound(format!("receipt not found for tx {hash_hex}")))?;

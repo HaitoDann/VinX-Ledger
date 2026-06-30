@@ -65,7 +65,10 @@ impl Mempool {
     /// The caller is responsible for verifying the signature before calling this.
     pub fn add(&mut self, tx: Transaction) -> Result<(), MempoolError> {
         if self.pending_count >= self.max_size {
-            return Err(MempoolError::Full);
+            if !self.try_evict_for(&tx) {
+                return Err(MempoolError::Full);
+            }
+            // eviction succeeded — slot is free, continue insertion
         }
         let hash = tx.hash();
         if !self.seen.insert(hash) {
@@ -224,6 +227,36 @@ impl Mempool {
         }
     }
 
+    /// Tente d'évincer la transaction avec le fee le plus bas si son fee est
+    /// strictement inférieur au fee de `incoming`. Retourne `true` si une
+    /// éviction a eu lieu (et le slot est maintenant libre).
+    fn try_evict_for(&mut self, incoming: &Transaction) -> bool {
+        let mut min_fee = incoming.fee.atoms();
+        let mut victim: Option<(String, u64)> = None;
+
+        for (addr, queue) in &self.queues {
+            for (&nonce, tx) in queue {
+                if tx.fee.atoms() < min_fee {
+                    min_fee = tx.fee.atoms();
+                    victim = Some((addr.clone(), nonce));
+                }
+            }
+        }
+
+        let (addr, nonce) = match victim {
+            Some(v) => v,
+            None => return false,
+        };
+        let queue = self.queues.get_mut(&addr).unwrap();
+        let evicted = queue.remove(&nonce).unwrap();
+        self.seen.remove(&evicted.hash());
+        if queue.is_empty() {
+            self.queues.remove(&addr);
+        }
+        self.pending_count -= 1;
+        true
+    }
+
     pub fn size(&self) -> usize {
         self.pending_count
     }
@@ -376,6 +409,35 @@ mod tests {
             Amount::from_vinx(fee_vinx),
             nonce,
         )
+    }
+
+    #[test]
+    fn test_fee_eviction_when_full() {
+        let mut mp = Mempool::new(1);
+        let kp_low = KeyPair::generate();
+        let kp_high = KeyPair::generate();
+        let to = dummy_addr();
+        // Fill mempool with a low-fee tx
+        mp.add(make_tx_with_fee(&kp_low, to.clone(), 0, 1)).unwrap();
+        assert_eq!(mp.size(), 1);
+        // Higher-fee tx should evict the low-fee one
+        mp.add(make_tx_with_fee(&kp_high, to.clone(), 0, 10)).unwrap();
+        assert_eq!(mp.size(), 1);
+        // The remaining tx should have the high fee
+        let drained = mp.drain(10);
+        assert_eq!(drained[0].fee, Amount::from_vinx(10));
+    }
+
+    #[test]
+    fn test_no_eviction_when_incoming_fee_not_higher() {
+        let mut mp = Mempool::new(1);
+        let kp = KeyPair::generate();
+        let to = dummy_addr();
+        mp.add(make_tx_with_fee(&kp, to.clone(), 0, 5)).unwrap();
+        // Same fee — no eviction, returns Full
+        let kp2 = KeyPair::generate();
+        assert_eq!(mp.add(make_tx_with_fee(&kp2, to, 0, 5)), Err(MempoolError::Full));
+        assert_eq!(mp.size(), 1);
     }
 
     #[test]
