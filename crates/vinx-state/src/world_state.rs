@@ -1,5 +1,5 @@
 use serde::{Deserialize, Serialize};
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use vinx_core::{
     amount::{
         Amount, DEFAULT_FEE_FLOOR_ATOMS, FREEZE_DURATION_BLOCKS, MIN_STAKE_ATOMS,
@@ -11,7 +11,7 @@ use vinx_core::{
     protocol::{ProtocolVersion, ScheduledUpgrade},
     Account, CoreError, Transaction, TransactionType, ValidatorSet,
 };
-use vinx_crypto::{merkle_root, sha256, Address, Hash32};
+use vinx_crypto::{sha256, Address, Hash32, IncrementalMerkleTree};
 
 /// In-memory representation of the full chain state.
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -60,10 +60,19 @@ pub struct WorldState {
     /// Chain ID for replay protection — transactions must match this value.
     #[serde(default = "default_chain_id")]
     pub chain_id: u32,
-    /// Cached Merkle root; `None` means the cache is stale and must be recomputed.
-    /// Not persisted — rebuilt on the first `compute_state_root` call after load.
+    /// Incremental Merkle tree over sorted account leaf hashes.
+    /// Not persisted — rebuilt lazily on the first `compute_state_root` call after load.
     #[serde(skip)]
-    cached_root: Option<Hash32>,
+    merkle_tree: IncrementalMerkleTree,
+    /// Maps address string → leaf index in `merkle_tree.leaves()`.
+    #[serde(skip)]
+    leaf_index: HashMap<String, usize>,
+    /// Accounts modified since the last `compute_state_root` call.
+    #[serde(skip)]
+    dirty_addrs: HashSet<String>,
+    /// True when an account was added/removed — requires a full O(n) rebuild.
+    #[serde(skip)]
+    needs_rebuild: bool,
 }
 
 fn default_fee_floor() -> Amount {
@@ -104,14 +113,65 @@ impl WorldState {
             // Placeholder — always overwritten by create_genesis_state before use.
             validator_set: ValidatorSet::single(Address::zero()),
             chain_id: CHAIN_ID_DEVNET,
-            cached_root: None,
+            merkle_tree: IncrementalMerkleTree::new(),
+            leaf_index: HashMap::new(),
+            dirty_addrs: HashSet::new(),
+            needs_rebuild: false,
         }
     }
 
-    /// Marks the cached state root stale so the next `compute_state_root` recomputes.
+    /// Marks an account address as dirty.
+    /// If the address is not yet in the leaf index (new account), triggers a full rebuild.
     #[inline]
-    fn invalidate_root_cache(&mut self) {
-        self.cached_root = None;
+    fn mark_dirty(&mut self, addr: &str) {
+        if !self.leaf_index.contains_key(addr) {
+            self.needs_rebuild = true;
+        }
+        self.dirty_addrs.insert(addr.to_string());
+    }
+
+    /// O(n) full rebuild of the incremental tree — sorts all accounts, hashes each leaf,
+    /// rebuilds the `leaf_index` map and all internal tree levels.
+    fn full_rebuild(&mut self) {
+        let mut entries: Vec<&Account> = self.accounts.values().collect();
+        entries.sort_by_key(|a| a.address.as_str());
+        self.leaf_index.clear();
+        let leaves: Vec<Hash32> = entries
+            .iter()
+            .enumerate()
+            .map(|(i, a)| {
+                self.leaf_index.insert(a.address.to_string(), i);
+                hash_account(a)
+            })
+            .collect();
+        self.merkle_tree.rebuild(&leaves);
+        self.dirty_addrs.clear();
+        self.needs_rebuild = false;
+    }
+
+    /// Applies pending dirty-leaf updates to the tree, rebuilding fully if needed.
+    fn flush_dirty(&mut self) {
+        // Lazy full build on first call after deserialization or genesis.
+        if self.leaf_index.is_empty() && !self.accounts.is_empty() {
+            self.full_rebuild();
+            return;
+        }
+        if self.dirty_addrs.is_empty() && !self.needs_rebuild {
+            return;
+        }
+        if self.needs_rebuild {
+            self.full_rebuild();
+        } else {
+            // O(|dirty| × log n) — only update changed leaf paths.
+            let dirty: Vec<String> = std::mem::take(&mut self.dirty_addrs).into_iter().collect();
+            for addr in dirty {
+                if let (Some(&idx), Some(account)) =
+                    (self.leaf_index.get(&addr), self.accounts.get(&addr))
+                {
+                    self.merkle_tree.update_leaf(idx, hash_account(account));
+                }
+            }
+        }
     }
 
     /// Updates the dynamic base fee based on current mempool pressure.
@@ -144,7 +204,7 @@ impl WorldState {
         if amount == Amount::ZERO {
             return;
         }
-        self.invalidate_root_cache();
+        self.mark_dirty(addr.as_str());
         let acc = self
             .accounts
             .entry(addr.as_str().to_string())
@@ -204,12 +264,13 @@ impl WorldState {
     }
 
     pub(crate) fn insert_account(&mut self, account: Account) {
+        self.mark_dirty(account.address.as_str());
         self.accounts
             .insert(account.address.as_str().to_string(), account);
     }
 
     pub fn credit_for_test(&mut self, address: Address, amount: Amount) {
-        self.invalidate_root_cache();
+        self.mark_dirty(address.as_str());
         let acc = self
             .accounts
             .entry(address.as_str().to_string())
@@ -218,7 +279,6 @@ impl WorldState {
     }
 
     pub fn apply_transaction(&mut self, tx: &Transaction) -> Result<(), CoreError> {
-        self.invalidate_root_cache();
         if tx.tx_type != TransactionType::Emission {
             // Chain-ID replay protection
             if tx.chain_id != self.chain_id {
@@ -365,6 +425,12 @@ impl WorldState {
             .checked_add(treasury_cut)
             .ok_or(CoreError::AmountOverflow)?;
 
+        self.mark_dirty(tx.from.as_str());
+        self.mark_dirty(tx.to.as_str());
+        if fee_payer != tx.from {
+            self.mark_dirty(fee_payer.as_str());
+        }
+
         Ok(())
     }
 
@@ -399,6 +465,7 @@ impl WorldState {
             .checked_add(tx.amount)
             .ok_or(CoreError::AmountOverflow)?;
         account.nonce += 1;
+        self.mark_dirty(tx.from.as_str());
         Ok(())
     }
 
@@ -428,6 +495,7 @@ impl WorldState {
             account.stake_since = 0;
         }
         account.nonce += 1;
+        self.mark_dirty(tx.from.as_str());
         Ok(())
     }
 
@@ -458,6 +526,8 @@ impl WorldState {
         }
         target.frozen = true;
         target.frozen_since = self.block_height;
+        self.mark_dirty(tx.from.as_str());
+        self.mark_dirty(tx.to.as_str());
         Ok(())
     }
 
@@ -483,6 +553,8 @@ impl WorldState {
             ))?;
         target.frozen = false;
         target.frozen_since = 0;
+        self.mark_dirty(tx.from.as_str());
+        self.mark_dirty(tx.to.as_str());
         Ok(())
     }
 
@@ -521,6 +593,7 @@ impl WorldState {
             });
         }
         sender.nonce += 1;
+        self.mark_dirty(tx.from.as_str());
 
         self.pending_upgrade = Some(ScheduledUpgrade {
             version: new_version,
@@ -556,6 +629,7 @@ impl WorldState {
         }
         sender.nonce += 1;
         self.validator_set.add(tx.to.clone());
+        self.mark_dirty(tx.from.as_str());
         tracing::info!(validator = %tx.to, "Validator added to set");
         Ok(())
     }
@@ -584,6 +658,7 @@ impl WorldState {
         }
         sender.nonce += 1;
         self.validator_set.remove(&tx.to);
+        self.mark_dirty(tx.from.as_str());
         tracing::info!(validator = %tx.to, "Validator removed from set");
         Ok(())
     }
@@ -592,14 +667,14 @@ impl WorldState {
     /// and automatically unfreezes them. Called by the block producer on every block.
     pub fn check_auto_unfreeze(&mut self) {
         let height = self.block_height;
-        let mut unfroze_any = false;
+        let mut unfrozen: Vec<String> = Vec::new();
         for account in self.accounts.values_mut() {
             if account.frozen
                 && height.saturating_sub(account.frozen_since) >= FREEZE_DURATION_BLOCKS
             {
                 account.frozen = false;
                 account.frozen_since = 0;
-                unfroze_any = true;
+                unfrozen.push(account.address.to_string());
                 tracing::info!(
                     address = %account.address,
                     height,
@@ -607,8 +682,8 @@ impl WorldState {
                 );
             }
         }
-        if unfroze_any {
-            self.cached_root = None;
+        for addr in unfrozen {
+            self.mark_dirty(&addr);
         }
     }
 
@@ -651,7 +726,7 @@ impl WorldState {
         let pool = self.staking_pool.atoms();
         let mut distributed = 0u128;
 
-        let mut reward_distributed = false;
+        let mut rewarded: Vec<String> = Vec::new();
         for account in self.accounts.values_mut() {
             if account.staked == Amount::ZERO {
                 continue;
@@ -667,11 +742,11 @@ impl WorldState {
             if reward > 0 {
                 account.balance = account.balance.saturating_add(Amount::from_atoms(reward));
                 distributed = distributed.saturating_add(reward);
-                reward_distributed = true;
+                rewarded.push(account.address.to_string());
             }
         }
-        if reward_distributed {
-            self.cached_root = None;
+        for addr in rewarded {
+            self.mark_dirty(&addr);
         }
 
         self.staking_pool = self
@@ -683,18 +758,13 @@ impl WorldState {
     }
 
     /// Merkle root of the account state after sorting accounts by address.
-    /// Result is cached and reused until the state changes, avoiding an O(n log n)
-    /// sort + hash pass on every block when no transactions have modified accounts.
+    ///
+    /// On a cold start (after deserialization) or when new accounts are added: O(n) full rebuild.
+    /// When only existing accounts changed: O(|dirty| × log n) incremental update — typically
+    /// O(txs_per_block × log n), orders of magnitude faster than O(n) for large account sets.
     pub fn compute_state_root(&mut self) -> Hash32 {
-        if let Some(root) = self.cached_root {
-            return root;
-        }
-        let mut entries: Vec<&Account> = self.accounts.values().collect();
-        entries.sort_by_key(|a| a.address.as_str());
-        let leaves: Vec<Hash32> = entries.iter().map(|a| hash_account(a)).collect();
-        let root = merkle_root(&leaves);
-        self.cached_root = Some(root);
-        root
+        self.flush_dirty();
+        self.merkle_tree.root()
     }
 
     fn apply_slash_validator(&mut self, tx: &Transaction) -> Result<(), CoreError> {
@@ -762,9 +832,12 @@ impl WorldState {
                 acc.staked = Amount::ZERO;
                 acc.stake_since = 0;
             }
-            self.credit(&tx.from, bounty);
+            self.mark_dirty(target.as_str());
+            self.credit(&tx.from, bounty); // credit() also calls mark_dirty(tx.from)
             self.melt_pool = self.melt_pool.saturating_add(to_melt);
         }
+
+        self.mark_dirty(tx.from.as_str());
 
         // Remove from validator set (can't produce blocks anymore)
         if self.validator_set.len() > 1 {
@@ -865,6 +938,7 @@ impl WorldState {
             }
         }
 
+        self.mark_dirty(tx.from.as_str());
         Ok(())
     }
 

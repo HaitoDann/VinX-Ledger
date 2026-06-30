@@ -1,6 +1,102 @@
 use crate::hash::{sha256, Hash32};
 use serde::{Deserialize, Serialize};
 
+// ── Incremental Merkle tree ───────────────────────────────────────────────────
+
+/// Merkle tree that recomputes only the O(log n) path from a changed leaf to the root.
+/// Full rebuild is O(n) and only required when the leaf count changes (new/removed account).
+///
+/// Layout: `levels[0]` = leaf hashes (sorted by address), `levels[k]` = k-th internal level.
+/// `levels.last()` is always `[root]`. Odd levels pad the last leaf to its right neighbour
+/// (same convention as `merkle_root`), so roots are identical for the same leaf set.
+#[derive(Clone, Debug, Default)]
+pub struct IncrementalMerkleTree {
+    levels: Vec<Vec<Hash32>>,
+}
+
+impl IncrementalMerkleTree {
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// O(n) full (re)build from a sorted leaf slice.
+    pub fn build(leaves: &[Hash32]) -> Self {
+        let mut tree = Self::new();
+        tree.rebuild(leaves);
+        tree
+    }
+
+    /// O(n) full rebuild — call when the leaf count changes (account added/removed).
+    pub fn rebuild(&mut self, leaves: &[Hash32]) {
+        self.levels.clear();
+        if leaves.is_empty() {
+            return;
+        }
+        self.levels.push(leaves.to_vec());
+        loop {
+            let prev = self.levels.last().unwrap();
+            if prev.len() == 1 {
+                break;
+            }
+            let len = prev.len();
+            let mut next = Vec::with_capacity((len + 1) / 2);
+            for i in (0..len).step_by(2) {
+                let l = prev[i];
+                let r = if i + 1 < len { prev[i + 1] } else { prev[i] };
+                next.push(hash_pair(l, r));
+            }
+            self.levels.push(next);
+        }
+    }
+
+    /// O(log n) single-leaf update for an existing leaf.
+    /// Propagates the change through all internal levels to the root.
+    pub fn update_leaf(&mut self, idx: usize, new_hash: Hash32) {
+        let Some(leaves) = self.levels.first() else { return };
+        if idx >= leaves.len() {
+            return;
+        }
+        self.levels[0][idx] = new_hash;
+        let mut node_idx = idx;
+        for lvl in 0..self.levels.len() - 1 {
+            let len = self.levels[lvl].len();
+            let parent = node_idx / 2;
+            let li = parent * 2;
+            let ri = li + 1;
+            let l = self.levels[lvl][li];
+            let r = if ri < len { self.levels[lvl][ri] } else { self.levels[lvl][li] };
+            self.levels[lvl + 1][parent] = hash_pair(l, r);
+            node_idx = parent;
+        }
+    }
+
+    /// Current Merkle root. Returns `[0u8; 32]` for an empty tree.
+    pub fn root(&self) -> Hash32 {
+        self.levels.last().map_or([0u8; 32], |top| top[0])
+    }
+
+    /// Number of leaves in the tree.
+    pub fn len(&self) -> usize {
+        self.levels.first().map_or(0, |l| l.len())
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.levels.is_empty()
+    }
+
+    /// Leaf hashes (sorted), compatible with `merkle_proof_for`.
+    pub fn leaves(&self) -> &[Hash32] {
+        self.levels.first().map_or(&[], |l| l.as_slice())
+    }
+}
+
+fn hash_pair(l: Hash32, r: Hash32) -> Hash32 {
+    let mut buf = [0u8; 64];
+    buf[..32].copy_from_slice(&l);
+    buf[32..].copy_from_slice(&r);
+    sha256(&buf)
+}
+
 /// Computes the Merkle root of a list of 32-byte leaf hashes.
 ///
 /// - Empty list  → `[0u8; 32]`
@@ -237,5 +333,72 @@ mod tests {
         let proof = merkle_proof_for(&leaves, 0).unwrap();
         let wrong_leaf = sha256(b"wrong");
         assert!(!verify_merkle_proof(&wrong_leaf, &proof, &root));
+    }
+
+    // ─── IncrementalMerkleTree tests ─────────────────────────────────────────
+
+    #[test]
+    fn test_incremental_empty_root_is_zero() {
+        let tree = IncrementalMerkleTree::new();
+        assert_eq!(tree.root(), [0u8; 32]);
+        assert!(tree.is_empty());
+    }
+
+    #[test]
+    fn test_incremental_root_matches_batch_for_various_counts() {
+        for n in 1u8..=10 {
+            let leaves: Vec<Hash32> = (0..n).map(|i| sha256(&[i])).collect();
+            let tree = IncrementalMerkleTree::build(&leaves);
+            assert_eq!(tree.root(), merkle_root(&leaves), "root mismatch for n={n}");
+        }
+    }
+
+    #[test]
+    fn test_incremental_update_leaf_matches_full_rebuild() {
+        let mut leaves: Vec<Hash32> = (0u8..6).map(|i| sha256(&[i])).collect();
+        let mut tree = IncrementalMerkleTree::build(&leaves);
+        let new_hash = sha256(b"updated");
+        leaves[2] = new_hash;
+        tree.update_leaf(2, new_hash);
+        assert_eq!(tree.root(), merkle_root(&leaves));
+    }
+
+    #[test]
+    fn test_incremental_update_all_leaves() {
+        let n = 7usize;
+        let mut leaves: Vec<Hash32> = (0..n).map(|i| sha256(&[i as u8])).collect();
+        let mut tree = IncrementalMerkleTree::build(&leaves);
+        for i in 0..n {
+            let h = sha256(&[i as u8, 0xff]);
+            leaves[i] = h;
+            tree.update_leaf(i, h);
+            assert_eq!(tree.root(), merkle_root(&leaves), "mismatch after update {i}");
+        }
+    }
+
+    #[test]
+    fn test_incremental_rebuild_resets_correctly() {
+        let leaves_a: Vec<Hash32> = (0u8..4).map(|i| sha256(&[i])).collect();
+        let mut tree = IncrementalMerkleTree::build(&leaves_a);
+        assert_eq!(tree.root(), merkle_root(&leaves_a));
+        let leaves_b: Vec<Hash32> = (0u8..5).map(|i| sha256(&[i, 1])).collect();
+        tree.rebuild(&leaves_b);
+        assert_eq!(tree.root(), merkle_root(&leaves_b));
+        assert_eq!(tree.len(), 5);
+    }
+
+    #[test]
+    fn test_incremental_proof_compatible_with_batch() {
+        let leaves: Vec<Hash32> = (0u8..5).map(|i| sha256(&[i])).collect();
+        let tree = IncrementalMerkleTree::build(&leaves);
+        assert_eq!(tree.leaves(), leaves.as_slice());
+        let root = tree.root();
+        for idx in 0..leaves.len() {
+            let proof = merkle_proof_for(tree.leaves(), idx).unwrap();
+            assert!(
+                verify_merkle_proof(&leaves[idx], &proof, &root),
+                "proof failed for index {idx}"
+            );
+        }
     }
 }
