@@ -5,6 +5,43 @@ Format : `MAJEUR.MINEUR.CORRECTIF` — les versions `0.x.y` sont des versions de
 
 ---
 
+## [0.17.0] — 2026-06-30
+
+### Rate limiting token bucket, métriques atomiques & WebSocket enrichi
+
+**Rate limiting — Token bucket par route**
+- Remplacement du compteur à fenêtre fixe par un token bucket (burst autorisé + refill continu)
+- Limites différenciées par type de route :
+  - `/health`, `/metrics`, `/ws`, `/events` : exempt (aucune limite)
+  - `/tx/submit` : 20 req burst, refill 20/min
+  - `/faucet/*` : 5 req burst, refill 5/heure
+  - Tout le reste : 100 req burst, refill 100/min
+- Chaque IP dispose de buckets indépendants par classe de route
+- Le nombre de requêtes rejetées est compté dans `NodeMetrics.ratelimit_hit`
+
+**Métriques Prometheus — Compteurs atomiques temps réel**
+- `NodeMetrics` : struct avec 8 champs `AtomicU64` sur le `Node`, partagée avec le `RateLimiter` via `Arc`
+- `GET /metrics` lit les compteurs d'activité sans aucun verrou (lock-free) ; seules les données économiques nécessitent encore un verrou
+- 8 nouvelles métriques s'ajoutent aux 8 existantes :
+  - `vinx_blocks_produced_total` — blocs produits par ce nœud
+  - `vinx_tx_submitted_total{status="ok"|"err"}` — tx acceptées / rejetées via RPC
+  - `vinx_tx_in_block_total` — tx incluses dans les blocs produits
+  - `vinx_p2p_blocks_received_total` — blocs reçus via P2P gossip
+  - `vinx_p2p_tx_received_total` — transactions reçues via P2P gossip
+  - `vinx_ratelimit_hit_total` — requêtes rejetées par le rate limiter
+  - `vinx_last_block_timestamp_seconds` — timestamp Unix du dernier bloc produit
+- Les compteurs sont incrémentés aux sites d'événement : `tick()`, `submit_tx`, P2P handlers
+
+**WebSocket — Ping/pong keepalive & événements enrichis**
+- `BlockEvent` étendu avec `base_fee_atoms`, `proposer` (adresse bech32 du validateur), `state_root` (hex)
+- Handler `/ws` réécrit avec `tokio::select!` sur trois branches :
+  - Réception d'un `BlockEvent` → envoi JSON enrichi
+  - Timer 30 s → envoi d'un `Ping` pour détecter les connexions silencieusement fermées
+  - Message entrant → gestion du `Close` et des frames Pong (ignorées)
+- SSE `/events` enrichi avec les mêmes champs supplémentaires
+
+---
+
 ## [0.16.0] — 2026-06-30
 
 ### Optimisations de performance — pruning, compression, cache & mempool

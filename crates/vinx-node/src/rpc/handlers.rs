@@ -9,7 +9,7 @@ use axum::{
     Json,
 };
 use futures::stream::{self, Stream};
-use std::{convert::Infallible, sync::Arc, time::SystemTime};
+use std::{convert::Infallible, sync::atomic::Ordering, sync::Arc, time::SystemTime};
 use tokio_stream::wrappers::BroadcastStream;
 use tokio_stream::StreamExt as _;
 use vinx_core::{amount::Amount, Transaction};
@@ -104,16 +104,16 @@ pub async fn submit_tx(
     }
 
     let tx_hash = hex::encode(tx.hash());
-    node.mempool
-        .write()
-        .await
-        .add(tx)
-        .map_err(|e| ApiError::BadRequest(e.to_string()))?;
-
-    Ok(Json(TxSubmitResponse {
-        accepted: true,
-        tx_hash,
-    }))
+    match node.mempool.write().await.add(tx) {
+        Ok(()) => {
+            node.metrics.tx_submitted_ok.fetch_add(1, Ordering::Relaxed);
+            Ok(Json(TxSubmitResponse { accepted: true, tx_hash }))
+        }
+        Err(e) => {
+            node.metrics.tx_submitted_err.fetch_add(1, Ordering::Relaxed);
+            Err(ApiError::BadRequest(e.to_string()))
+        }
+    }
 }
 
 pub async fn get_block(
@@ -313,6 +313,7 @@ pub async fn get_chain_sync(
 }
 
 /// Server-Sent Events stream: sends a JSON event on every new block.
+/// Each event carries: height, tx_count, hash, base_fee_atoms, proposer, state_root.
 pub async fn sse_events(
     State(node): State<Arc<Node>>,
 ) -> Sse<impl Stream<Item = Result<Event, Infallible>>> {
@@ -324,6 +325,9 @@ pub async fn sse_events(
                 "height": evt.height,
                 "tx_count": evt.tx_count,
                 "hash": evt.hash_hex,
+                "base_fee_atoms": evt.base_fee_atoms.to_string(),
+                "proposer": evt.proposer,
+                "state_root": evt.state_root_hex,
             });
             Ok(Event::default().data(data.to_string()))
         })
@@ -333,33 +337,60 @@ pub async fn sse_events(
 }
 
 /// WebSocket endpoint — streams new-block events as JSON messages.
-/// Connect with `ws://host:port/ws`. Each message is a JSON object:
-/// `{"type":"new_block","height":N,"tx_count":N,"hash":"hex"}`
+///
+/// Each message is a JSON object:
+/// `{"type":"new_block","height":N,"tx_count":N,"hash":"hex","base_fee_atoms":"N","proposer":"vinx1...","state_root":"hex"}`
+///
+/// Ping/pong keepalive is sent every 30 s to detect silently-closed connections.
 pub async fn ws_events(ws: WebSocketUpgrade, State(node): State<Arc<Node>>) -> impl IntoResponse {
     ws.on_upgrade(|socket| handle_ws_client(socket, node))
 }
 
 async fn handle_ws_client(mut socket: WebSocket, node: Arc<Node>) {
     let mut rx = node.block_events.subscribe();
+    let mut ping_interval =
+        tokio::time::interval(std::time::Duration::from_secs(30));
+    ping_interval.tick().await; // skip the immediate first tick
+
     loop {
-        match rx.recv().await {
-            Ok(evt) => {
-                let msg = serde_json::json!({
-                    "type": "new_block",
-                    "height": evt.height,
-                    "tx_count": evt.tx_count,
-                    "hash": evt.hash_hex,
-                });
-                if socket
-                    .send(Message::Text(msg.to_string().into()))
-                    .await
-                    .is_err()
-                {
+        tokio::select! {
+            result = rx.recv() => {
+                match result {
+                    Ok(evt) => {
+                        let msg = serde_json::json!({
+                            "type": "new_block",
+                            "height": evt.height,
+                            "tx_count": evt.tx_count,
+                            "hash": evt.hash_hex,
+                            "base_fee_atoms": evt.base_fee_atoms.to_string(),
+                            "proposer": evt.proposer,
+                            "state_root": evt.state_root_hex,
+                        });
+                        if socket
+                            .send(Message::Text(msg.to_string().into()))
+                            .await
+                            .is_err()
+                        {
+                            break;
+                        }
+                    }
+                    Err(tokio::sync::broadcast::error::RecvError::Closed) => break,
+                    Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => continue,
+                }
+            }
+            _ = ping_interval.tick() => {
+                // Keepalive ping — break if the client is gone
+                if socket.send(Message::Ping(vec![].into())).await.is_err() {
                     break;
                 }
             }
-            Err(tokio::sync::broadcast::error::RecvError::Closed) => break,
-            Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => continue,
+            msg = socket.recv() => {
+                match msg {
+                    Some(Ok(Message::Close(_))) | None => break,
+                    Some(Err(_)) => break,
+                    _ => {} // Pong and other frames — ignore
+                }
+            }
         }
     }
 }
@@ -402,7 +433,21 @@ pub async fn get_snapshot(
 }
 
 /// Returns node metrics in Prometheus text format.
+/// Activity counters (blocks, tx, P2P, rate-limit) are read from lock-free
+/// atomics on NodeMetrics — no lock acquired for those fields.
 pub async fn get_metrics(State(node): State<Arc<Node>>) -> impl IntoResponse {
+    // Lock-free reads — no contention on the hot path
+    let m = &node.metrics;
+    let blocks_produced = m.blocks_produced.load(Ordering::Relaxed);
+    let tx_ok = m.tx_submitted_ok.load(Ordering::Relaxed);
+    let tx_err = m.tx_submitted_err.load(Ordering::Relaxed);
+    let tx_in_block = m.tx_in_block.load(Ordering::Relaxed);
+    let p2p_blocks = m.p2p_blocks_recv.load(Ordering::Relaxed);
+    let p2p_tx = m.p2p_tx_recv.load(Ordering::Relaxed);
+    let rl_hit = m.ratelimit_hit.load(Ordering::Relaxed);
+    let last_block_secs = m.last_block_secs.load(Ordering::Relaxed);
+
+    // Economic state — lock required (changes only on block production)
     let height = node.chain.read().await.tip_height();
     let mempool_size = node.mempool.read().await.size();
     let state = node.state.read().await;
@@ -412,6 +457,7 @@ pub async fn get_metrics(State(node): State<Arc<Node>>) -> impl IntoResponse {
     let distribution_pool = state.distribution_pool.atoms();
     let circulating = state.circulating_supply.atoms();
     let validator_count = state.validator_set.len();
+    drop(state);
 
     let body = format!(
         "# HELP vinx_chain_height Current chain tip height\n\
@@ -437,7 +483,29 @@ pub async fn get_metrics(State(node): State<Arc<Node>>) -> impl IntoResponse {
          vinx_circulating_supply {circulating}\n\
          # HELP vinx_validator_count Number of active validators in the PoA set\n\
          # TYPE vinx_validator_count gauge\n\
-         vinx_validator_count {validator_count}\n"
+         vinx_validator_count {validator_count}\n\
+         # HELP vinx_blocks_produced_total Total blocks produced by this node\n\
+         # TYPE vinx_blocks_produced_total counter\n\
+         vinx_blocks_produced_total {blocks_produced}\n\
+         # HELP vinx_tx_submitted_total Transactions submitted via RPC, by outcome\n\
+         # TYPE vinx_tx_submitted_total counter\n\
+         vinx_tx_submitted_total{{status=\"ok\"}} {tx_ok}\n\
+         vinx_tx_submitted_total{{status=\"err\"}} {tx_err}\n\
+         # HELP vinx_tx_in_block_total Total transactions included in produced blocks\n\
+         # TYPE vinx_tx_in_block_total counter\n\
+         vinx_tx_in_block_total {tx_in_block}\n\
+         # HELP vinx_p2p_blocks_received_total Blocks received via P2P gossip\n\
+         # TYPE vinx_p2p_blocks_received_total counter\n\
+         vinx_p2p_blocks_received_total {p2p_blocks}\n\
+         # HELP vinx_p2p_tx_received_total Transactions received via P2P gossip\n\
+         # TYPE vinx_p2p_tx_received_total counter\n\
+         vinx_p2p_tx_received_total {p2p_tx}\n\
+         # HELP vinx_ratelimit_hit_total Requests rejected by the rate limiter\n\
+         # TYPE vinx_ratelimit_hit_total counter\n\
+         vinx_ratelimit_hit_total {rl_hit}\n\
+         # HELP vinx_last_block_timestamp_seconds Unix timestamp of the last produced block\n\
+         # TYPE vinx_last_block_timestamp_seconds gauge\n\
+         vinx_last_block_timestamp_seconds {last_block_secs}\n"
     );
 
     (

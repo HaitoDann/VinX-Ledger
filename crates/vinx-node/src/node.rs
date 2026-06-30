@@ -1,6 +1,7 @@
 use lru::LruCache;
 use std::collections::HashMap;
 use std::num::NonZeroUsize;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
 use std::time::{Instant, SystemTime, UNIX_EPOCH};
 use tokio::sync::{broadcast, Mutex, RwLock};
@@ -37,12 +38,69 @@ pub struct ValidatorJoinRequest {
     pub submitted_at: u64,
 }
 
-/// Events broadcast to SSE subscribers on each produced block.
+/// Real-time counters updated by the node as events occur.
+/// All fields are atomics — reads in `GET /metrics` never acquire any lock.
+#[derive(Clone)]
+pub struct NodeMetrics {
+    inner: Arc<NodeMetricsInner>,
+}
+
+pub struct NodeMetricsInner {
+    pub blocks_produced: AtomicU64,
+    /// Transactions successfully admitted to the mempool via RPC.
+    pub tx_submitted_ok: AtomicU64,
+    /// Transactions rejected at the RPC layer (bad sig, mempool full, etc.).
+    pub tx_submitted_err: AtomicU64,
+    /// Total transactions included in produced blocks.
+    pub tx_in_block: AtomicU64,
+    /// Blocks received via P2P gossip.
+    pub p2p_blocks_recv: AtomicU64,
+    /// Transactions received via P2P gossip.
+    pub p2p_tx_recv: AtomicU64,
+    /// Requests rejected by the rate limiter.
+    pub ratelimit_hit: AtomicU64,
+    /// Unix timestamp (seconds) of the last block produced or received.
+    pub last_block_secs: AtomicU64,
+}
+
+impl NodeMetrics {
+    fn new() -> Self {
+        Self {
+            inner: Arc::new(NodeMetricsInner {
+                blocks_produced: AtomicU64::new(0),
+                tx_submitted_ok: AtomicU64::new(0),
+                tx_submitted_err: AtomicU64::new(0),
+                tx_in_block: AtomicU64::new(0),
+                p2p_blocks_recv: AtomicU64::new(0),
+                p2p_tx_recv: AtomicU64::new(0),
+                ratelimit_hit: AtomicU64::new(0),
+                last_block_secs: AtomicU64::new(0),
+            }),
+        }
+    }
+}
+
+// Delegate atomic accessors through the Arc so NodeMetrics can be freely cloned
+// and shared between Node and RateLimiter without extra indirection.
+impl std::ops::Deref for NodeMetrics {
+    type Target = NodeMetricsInner;
+    fn deref(&self) -> &Self::Target {
+        &self.inner
+    }
+}
+
+/// Events broadcast to SSE/WebSocket subscribers on each produced block.
 #[derive(Clone, Debug)]
 pub struct BlockEvent {
     pub height: u64,
     pub tx_count: u32,
     pub hash_hex: String,
+    /// Dynamic base fee at the time of this block, in atoms.
+    pub base_fee_atoms: u64,
+    /// Bech32 address of the validator that produced this block.
+    pub proposer: String,
+    /// Hex-encoded account state root after this block.
+    pub state_root_hex: String,
 }
 
 pub struct Node {
@@ -55,7 +113,7 @@ pub struct Node {
     pub p2p: Option<P2pHandle>,
     /// Live validator set — updated after each block that modifies it.
     pub validator_set: Arc<RwLock<ValidatorSet>>,
-    /// Broadcast channel for new-block SSE events.
+    /// Broadcast channel for new-block SSE/WebSocket events.
     pub block_events: broadcast::Sender<BlockEvent>,
     /// Per-address faucet cooldown tracker + serialization lock for faucet requests.
     pub faucet_cooldowns: Arc<Mutex<HashMap<String, Instant>>>,
@@ -67,8 +125,10 @@ pub struct Node {
     pub validator_requests: Arc<Mutex<Vec<ValidatorJoinRequest>>>,
     /// Transaction receipts indexed by hex-encoded tx hash.
     pub receipts: Arc<RwLock<LruCache<String, TxReceipt>>>,
-    /// Cache LRU pour éviter de décoder les adresses bech32 à chaque requête RPC.
+    /// LRU cache for bech32 address decoding — avoids re-parsing on every RPC request.
     pub address_cache: tokio::sync::Mutex<LruCache<String, vinx_crypto::Address>>,
+    /// Lock-free real-time counters exposed on GET /metrics.
+    pub metrics: NodeMetrics,
 }
 
 impl Node {
@@ -91,6 +151,7 @@ impl Node {
             validator_requests: Arc::new(Mutex::new(Vec::new())),
             receipts: Arc::new(RwLock::new(LruCache::new(NonZeroUsize::new(100_000).unwrap()))),
             address_cache: tokio::sync::Mutex::new(LruCache::new(NonZeroUsize::new(1_024).unwrap())),
+            metrics: NodeMetrics::new(),
         })
     }
 
@@ -142,6 +203,7 @@ impl Node {
             validator_requests: Arc::new(Mutex::new(Vec::new())),
             receipts: Arc::new(RwLock::new(LruCache::new(NonZeroUsize::new(100_000).unwrap()))),
             address_cache: tokio::sync::Mutex::new(LruCache::new(NonZeroUsize::new(1_024).unwrap())),
+            metrics: NodeMetrics::new(),
         })
     }
 
@@ -202,6 +264,17 @@ impl Node {
             }
         }
 
+        // Update real-time metrics
+        let now_secs = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .map(|d| d.as_secs())
+            .unwrap_or(0);
+        self.metrics.blocks_produced.fetch_add(1, Ordering::Relaxed);
+        self.metrics
+            .tx_in_block
+            .fetch_add(block.header.tx_count as u64, Ordering::Relaxed);
+        self.metrics.last_block_secs.store(now_secs, Ordering::Relaxed);
+
         self.after_block_produced(&block, &state.validator_set)
             .await;
         Ok(block)
@@ -247,11 +320,14 @@ impl Node {
         // Reset the slot-timeout clock
         *self.last_block_instant.write().await = Instant::now();
 
-        // Broadcast SSE event
+        // Broadcast enriched event to SSE/WebSocket subscribers
         let event = BlockEvent {
             height: block.header.height,
             tx_count: block.header.tx_count,
             hash_hex: hex::encode(block.hash()),
+            base_fee_atoms: block.header.base_fee,
+            proposer: block.header.validator.to_string(),
+            state_root_hex: hex::encode(block.header.state_root),
         };
         let _ = self.block_events.send(event);
 

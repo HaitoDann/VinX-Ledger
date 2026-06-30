@@ -14,7 +14,7 @@ use crate::Node;
 use rate_limit::{rate_limit, RateLimiter};
 
 pub fn router(node: Arc<Node>) -> Router {
-    let limiter = RateLimiter::new();
+    let limiter = RateLimiter::new(node.metrics.clone());
     Router::new()
         .route("/", get(ui::index))
         .route("/health", get(handlers::health))
