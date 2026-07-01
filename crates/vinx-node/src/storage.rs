@@ -15,7 +15,9 @@ use zstd;
 /// v3: tx_index and account_tx_index are persisted (no rebuild_tx_index on boot).
 /// v4: accounts persisted per-key in a dedicated table; only changed rows are
 ///     written each block (O(dirty) instead of O(total accounts) per persist).
-const STORAGE_VERSION: u64 = 4;
+/// v5: addresses are stored as raw 20 bytes (Address is `[u8; 20]`); the accounts
+///     table is keyed by those bytes and bincode encodes addresses as 20 bytes.
+const STORAGE_VERSION: u64 = 5;
 
 /// zstd compression level — level 3 is the sweet spot: ~60-70% size reduction,
 /// negligible latency compared to disk I/O.
@@ -24,7 +26,7 @@ const ZSTD_LEVEL: i32 = 3;
 const STATE: TableDefinition<&str, &[u8]> = TableDefinition::new("state");
 /// Per-account rows: bech32 address → bincode(Account), stored uncompressed.
 /// Accounts are tiny (~100 B); per-row zstd framing would cost more than it saves.
-const ACCOUNTS: TableDefinition<&str, &[u8]> = TableDefinition::new("accounts");
+const ACCOUNTS: TableDefinition<&[u8], &[u8]> = TableDefinition::new("accounts");
 const META: TableDefinition<&str, u64> = TableDefinition::new("meta");
 
 pub struct Storage {
@@ -37,8 +39,8 @@ pub struct Storage {
 pub struct StateWrite {
     /// Serialized `WorldState` meta — every field except the accounts map.
     pub meta: Vec<u8>,
-    /// Changed account rows: (address, bincode(Account)). Empty on a no-op flush.
-    pub account_rows: Vec<(String, Vec<u8>)>,
+    /// Changed account rows: (20-byte address, bincode(Account)). Empty on a no-op flush.
+    pub account_rows: Vec<([u8; 20], Vec<u8>)>,
     /// When true, the accounts table is wiped before writing `account_rows`
     /// (used by full snapshot import to drop rows no longer present).
     pub replace_accounts: bool,
@@ -117,10 +119,10 @@ impl Storage {
         let dirty = state.take_persist_dirty();
         let mut account_rows = Vec::with_capacity(dirty.len());
         for addr in dirty {
-            if let Some(acc) = state.account_by_str(&addr) {
+            if let Some(acc) = state.account_by_addr(&addr) {
                 let bytes = bincode::serialize(acc)
                     .map_err(|e| Self::io_err(format!("serialize account: {e}")))?;
-                account_rows.push((addr, bytes));
+                account_rows.push((*addr.as_bytes(), bytes));
             }
         }
         let (chain, tx_index, account_tx_index) = Self::serialize_chain(chain)?;
@@ -178,7 +180,7 @@ impl Storage {
         {
             let mut atbl = tx.open_table(ACCOUNTS).map_err(Self::io_err)?;
             for (addr, bytes) in &w.account_rows {
-                atbl.insert(addr.as_str(), bytes.as_slice())
+                atbl.insert(addr.as_slice(), bytes.as_slice())
                     .map_err(Self::io_err)?;
             }
         }

@@ -183,7 +183,7 @@ pub async fn start(
     info!(peer_id = %local_peer_id, listen = %listen_addr, "P2P service started");
 
     let local_kp = config.validator_keypair.clone();
-    let local_addr = config.validator_address.clone();
+    let local_addr = config.validator_address;
 
     tokio::spawn(async move {
         run_event_loop(
@@ -473,7 +473,7 @@ async fn dispatch_message(
             let vs = validator_set.read().await.clone();
             if vs.contains(local_addr) {
                 let sig = BlockSignature {
-                    validator: local_addr.clone(),
+                    validator: *local_addr,
                     pub_key: local_kp.public_key(),
                     signature: local_kp.sign(&block_hash),
                 };
@@ -489,7 +489,7 @@ async fn dispatch_message(
                 debug!(height, "Co-signed block");
 
                 let mut c = chain.write().await;
-                c.record_signature(local_addr.as_str(), height, block_hash);
+                c.record_signature(local_addr, height, block_hash);
                 let finalized = c.add_co_signature(height, sig, &vs);
                 if finalized {
                     info!(height, "Block finalized after co-signing");
@@ -529,7 +529,7 @@ async fn dispatch_message(
             }
             // Double-sign (equivocation) detection
             let mut c = chain.write().await;
-            if c.record_signature(signature.validator.as_str(), height, block_hash) {
+            if c.record_signature(&signature.validator, height, block_hash) {
                 warn!(height, validator = %signature.validator, "EQUIVOCATION: double-sign detected, dropping");
                 return;
             }

@@ -4,37 +4,39 @@ use borsh::{BorshDeserialize, BorshSerialize};
 use serde::{Deserialize, Deserializer, Serialize, Serializer};
 use std::fmt;
 use std::str::FromStr;
-use std::sync::Arc;
 
 pub const BECH32_HRP: &str = "vinx";
 
-/// A VinX Ledger address in Bech32 format: `vinx1...`
-/// Derived from the first 20 bytes of SHA-256(public_key).
+/// Length in bytes of an address payload (first 20 bytes of SHA-256(pubkey)).
+pub const ADDRESS_LEN: usize = 20;
+
+/// A VinX Ledger address: the raw 20-byte payload (`SHA-256(public_key)[..20]`).
 ///
-/// Stored as `Arc<str>` rather than `String`: an address flows through blocks,
-/// transactions, signatures and validator sets being cloned constantly, and the
-/// bech32 string is immutable. `Arc<str>` makes every clone an O(1) refcount bump
-/// instead of a heap allocation, while `as_str()` still borrows the exact bech32
-/// bytes that `signing_bytes()`, the JSON API and the Merkle leaf hashing depend on.
-#[derive(Clone, Debug, PartialEq, Eq, Hash, PartialOrd, Ord)]
-pub struct Address(Arc<str>);
+/// The canonical form is the raw bytes — signatures ([`crate::Address::as_bytes`]
+/// via `signing_bytes`), Merkle leaf hashing and on-disk/wire encodings all operate
+/// on them directly. Bech32 (`vinx1...`) is purely a display/transport encoding
+/// applied at the edges (RPC JSON, CLI, logs). Storing the bytes makes `Address`
+/// `Copy`, 20 bytes inline with no heap allocation, and cheap to hash and compare.
+#[derive(Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
+pub struct Address([u8; ADDRESS_LEN]);
 
 impl Address {
     pub fn from_public_key(pk: &PublicKey) -> Self {
         let hash = sha256(pk.as_bytes());
-        let payload = &hash[..20];
-        let encoded = bech32::encode(BECH32_HRP, payload.to_base32(), Variant::Bech32)
-            .expect("bech32 encoding is infallible for valid inputs");
-        Address(Arc::from(encoded))
+        let mut payload = [0u8; ADDRESS_LEN];
+        payload.copy_from_slice(&hash[..ADDRESS_LEN]);
+        Address(payload)
+    }
+
+    /// Builds an address directly from its 20-byte payload.
+    pub fn from_bytes(bytes: [u8; ADDRESS_LEN]) -> Self {
+        Address(bytes)
     }
 
     /// Returns the canonical all-zeros placeholder address (`vinx1qqqq...`).
     /// Useful as a sentinel / uninitialized value.  Never holds real funds.
     pub fn zero() -> Self {
-        let payload = [0u8; 20];
-        let encoded = bech32::encode(BECH32_HRP, payload.to_base32(), Variant::Bech32)
-            .expect("bech32 encoding is infallible");
-        Address(Arc::from(encoded))
+        Address([0u8; ADDRESS_LEN])
     }
 
     pub fn from_bech32(s: &str) -> Result<Self, CryptoError> {
@@ -53,23 +55,41 @@ impl Address {
         }
         let payload = Vec::<u8>::from_base32(&data_u5)
             .map_err(|e| CryptoError::InvalidAddress(e.to_string()))?;
-        if payload.len() != 20 {
+        if payload.len() != ADDRESS_LEN {
             return Err(CryptoError::InvalidAddress(format!(
-                "expected 20-byte payload, got {}",
+                "expected {}-byte payload, got {}",
+                ADDRESS_LEN,
                 payload.len()
             )));
         }
-        Ok(Address(Arc::from(s.to_lowercase())))
+        let mut bytes = [0u8; ADDRESS_LEN];
+        bytes.copy_from_slice(&payload);
+        Ok(Address(bytes))
     }
 
-    pub fn as_str(&self) -> &str {
+    /// Returns the raw 20-byte payload — the canonical form used for signing,
+    /// hashing and binary encodings.
+    pub fn as_bytes(&self) -> &[u8; ADDRESS_LEN] {
         &self.0
+    }
+
+    /// Encodes the address to its bech32 string form (`vinx1...`).
+    /// Allocates — call only at display/transport boundaries, never in hot loops.
+    pub fn to_bech32(&self) -> String {
+        bech32::encode(BECH32_HRP, self.0.to_base32(), Variant::Bech32)
+            .expect("bech32 encoding is infallible for valid inputs")
     }
 }
 
 impl fmt::Display for Address {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(f, "{}", self.0)
+        write!(f, "{}", self.to_bech32())
+    }
+}
+
+impl fmt::Debug for Address {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "Address({})", self.to_bech32())
     }
 }
 
@@ -80,35 +100,42 @@ impl FromStr for Address {
     }
 }
 
-// Manual serde/borsh impls preserve the exact on-wire and on-disk formats of the
-// previous `Address(String)`: a plain string in serde (JSON stays `"vinx1..."`,
-// bincode stays length+UTF-8) and a borsh string (u32 length + UTF-8). This keeps
-// the switch to `Arc<str>` fully backward-compatible with clients and persisted data.
+// serde is format-aware: human-readable formats (JSON, used by the RPC API and CLI)
+// carry the bech32 string `"vinx1..."`, while binary formats (bincode on disk) carry
+// the raw 20 bytes. Borsh (P2P wire) is always the raw 20 bytes.
 impl Serialize for Address {
     fn serialize<S: Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
-        serializer.serialize_str(&self.0)
+        if serializer.is_human_readable() {
+            serializer.serialize_str(&self.to_bech32())
+        } else {
+            serde::Serialize::serialize(&self.0, serializer)
+        }
     }
 }
 
 impl<'de> Deserialize<'de> for Address {
     fn deserialize<D: Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
-        let s = <String as Deserialize>::deserialize(deserializer)?;
-        Ok(Address(Arc::from(s)))
+        if deserializer.is_human_readable() {
+            let s = <String as Deserialize>::deserialize(deserializer)?;
+            Address::from_bech32(&s).map_err(serde::de::Error::custom)
+        } else {
+            let bytes = <[u8; ADDRESS_LEN] as Deserialize>::deserialize(deserializer)?;
+            Ok(Address(bytes))
+        }
     }
 }
 
 impl BorshSerialize for Address {
     fn serialize<W: std::io::Write>(&self, writer: &mut W) -> std::io::Result<()> {
-        // Identical wire bytes to `String`: u32 little-endian length + UTF-8.
-        let s: &str = &self.0;
-        BorshSerialize::serialize(s, writer)
+        writer.write_all(&self.0)
     }
 }
 
 impl BorshDeserialize for Address {
     fn deserialize_reader<R: std::io::Read>(reader: &mut R) -> std::io::Result<Self> {
-        let s = String::deserialize_reader(reader)?;
-        Ok(Address(Arc::from(s)))
+        let mut bytes = [0u8; ADDRESS_LEN];
+        reader.read_exact(&mut bytes)?;
+        Ok(Address(bytes))
     }
 }
 
@@ -121,7 +148,7 @@ mod tests {
     fn test_address_starts_with_vinx1() {
         let kp = KeyPair::generate();
         let addr = Address::from_public_key(&kp.public_key());
-        assert!(addr.as_str().starts_with("vinx1"), "address: {}", addr);
+        assert!(addr.to_bech32().starts_with("vinx1"), "address: {}", addr);
     }
 
     #[test]
@@ -144,8 +171,17 @@ mod tests {
     fn test_address_roundtrip() {
         let kp = KeyPair::generate();
         let addr = Address::from_public_key(&kp.public_key());
-        let parsed = Address::from_bech32(addr.as_str()).unwrap();
+        let parsed = Address::from_bech32(&addr.to_bech32()).unwrap();
         assert_eq!(addr, parsed);
+        assert_eq!(addr.as_bytes(), parsed.as_bytes());
+    }
+
+    #[test]
+    fn test_from_public_key_is_sha256_prefix() {
+        let kp = KeyPair::generate();
+        let pk = kp.public_key();
+        let addr = Address::from_public_key(&pk);
+        assert_eq!(addr.as_bytes(), &sha256(pk.as_bytes())[..ADDRESS_LEN]);
     }
 
     #[test]
@@ -165,39 +201,59 @@ mod tests {
     fn test_address_display() {
         let kp = KeyPair::generate();
         let addr = Address::from_public_key(&kp.public_key());
-        assert_eq!(format!("{}", addr), addr.as_str());
+        assert_eq!(format!("{}", addr), addr.to_bech32());
     }
 
-    // The switch from `String` to `Arc<str>` must not change any serialized byte:
-    // clients sign over the bech32 string, the JSON API returns it, and persisted
-    // state / P2P wire encode it. These tests lock the format contract in place.
+    // Format contract for the 20-byte representation:
+    // - JSON (human-readable) carries the bech32 string, so the RPC API and the
+    //   TypeScript SDK are unaffected.
+    // - bincode (on disk) and borsh (P2P wire) carry the raw 20 bytes.
 
     #[test]
     fn test_json_is_the_bech32_string() {
         let addr = Address::from_public_key(&KeyPair::generate().public_key());
         let json = serde_json::to_string(&addr).unwrap();
-        assert_eq!(json, format!("\"{}\"", addr.as_str()));
+        assert_eq!(json, format!("\"{}\"", addr.to_bech32()));
         let back: Address = serde_json::from_str(&json).unwrap();
         assert_eq!(addr, back);
     }
 
     #[test]
-    fn test_bincode_matches_plain_string() {
+    fn test_bincode_is_raw_20_bytes() {
         let addr = Address::from_public_key(&KeyPair::generate().public_key());
-        let addr_bytes = bincode::serialize(&addr).unwrap();
-        let str_bytes = bincode::serialize(&addr.as_str().to_string()).unwrap();
-        assert_eq!(addr_bytes, str_bytes);
-        let back: Address = bincode::deserialize(&addr_bytes).unwrap();
+        let bytes = bincode::serialize(&addr).unwrap();
+        assert_eq!(bytes.len(), ADDRESS_LEN);
+        assert_eq!(bytes.as_slice(), addr.as_bytes());
+        let back: Address = bincode::deserialize(&bytes).unwrap();
         assert_eq!(addr, back);
     }
 
     #[test]
-    fn test_borsh_matches_plain_string() {
+    fn test_borsh_is_raw_20_bytes() {
         let addr = Address::from_public_key(&KeyPair::generate().public_key());
-        let addr_bytes = borsh::to_vec(&addr).unwrap();
-        let str_bytes = borsh::to_vec(&addr.as_str().to_string()).unwrap();
-        assert_eq!(addr_bytes, str_bytes);
-        let back: Address = borsh::from_slice(&addr_bytes).unwrap();
+        let bytes = borsh::to_vec(&addr).unwrap();
+        assert_eq!(bytes.len(), ADDRESS_LEN);
+        assert_eq!(bytes.as_slice(), addr.as_bytes());
+        let back: Address = borsh::from_slice(&bytes).unwrap();
         assert_eq!(addr, back);
+    }
+
+    #[test]
+    fn test_bech32_vector_for_js_cross_check() {
+        // These exact strings are decoded by the web UI's bech32Decode20 (rpc/ui.rs)
+        // back to the raw payloads below; keeping this stable guarantees the browser
+        // signer and the node agree on the 20-byte address bytes.
+        let a = Address::from_bech32("vinx1zyg3zyg3zyg3zyg3zyg3zyg3zyg3zyg3feqld3").unwrap();
+        assert_eq!(a.as_bytes(), &[0x11u8; 20]);
+        assert_eq!(Address::from_bytes([0x11u8; 20]).to_bech32(), a.to_bech32());
+    }
+
+    #[test]
+    fn test_address_is_copy() {
+        // Compile-time proof that Address is Copy: used by value without a move error.
+        let addr = Address::zero();
+        let a = addr;
+        let b = addr;
+        assert_eq!(a, b);
     }
 }

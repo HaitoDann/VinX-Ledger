@@ -16,7 +16,7 @@ pub struct Chain {
     account_tx_index: HashMap<String, Vec<String>>,
     /// Maps validator addr -> height -> set of block hashes signed (equivocation detection).
     #[serde(skip)]
-    slash_evidence: HashMap<String, HashMap<u64, HashSet<Hash32>>>,
+    slash_evidence: HashMap<Address, HashMap<u64, HashSet<Hash32>>>,
 }
 
 impl Chain {
@@ -186,11 +186,13 @@ impl Chain {
     /// Records that `validator` signed `block_hash` at `height`.
     /// Returns `true` if equivocation is detected (validator signed a DIFFERENT
     /// block at the same height — a slashable offense).
-    pub fn record_signature(&mut self, validator: &str, height: u64, block_hash: Hash32) -> bool {
-        let heights = self
-            .slash_evidence
-            .entry(validator.to_string())
-            .or_default();
+    pub fn record_signature(
+        &mut self,
+        validator: &Address,
+        height: u64,
+        block_hash: Hash32,
+    ) -> bool {
+        let heights = self.slash_evidence.entry(*validator).or_default();
         let hashes = heights.entry(height).or_default();
         if !hashes.is_empty() && !hashes.contains(&block_hash) {
             return true; // double-sign detected
@@ -311,13 +313,13 @@ mod tests {
             account_tx_index: HashMap::new(),
             slash_evidence: HashMap::new(),
         };
-        let addr = "vinx1test000";
+        let addr = Address::from_public_key(&KeyPair::generate().public_key());
         let hash_a = [1u8; 32];
         let hash_b = [2u8; 32];
 
-        assert!(!chain.record_signature(addr, 5, hash_a)); // first sig — ok
-        assert!(!chain.record_signature(addr, 5, hash_a)); // same hash — ok (idempotent)
-        assert!(chain.record_signature(addr, 5, hash_b)); // different hash — EQUIVOCATION
+        assert!(!chain.record_signature(&addr, 5, hash_a)); // first sig — ok
+        assert!(!chain.record_signature(&addr, 5, hash_a)); // same hash — ok (idempotent)
+        assert!(chain.record_signature(&addr, 5, hash_b)); // different hash — EQUIVOCATION
     }
 
     #[test]

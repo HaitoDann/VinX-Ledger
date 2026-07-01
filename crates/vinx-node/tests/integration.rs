@@ -197,7 +197,7 @@ async fn test_account_balance() {
 
     assert_eq!(
         resp["address"].as_str().unwrap(),
-        addr.as_str(),
+        addr.to_bech32(),
         "address field should match"
     );
 

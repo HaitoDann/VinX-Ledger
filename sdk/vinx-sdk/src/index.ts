@@ -9,6 +9,8 @@ export interface HealthResponse {
   status: string;
   height: number;
   mempool_pending: number;
+  /** Chain ID this node validates — sign transactions with it. */
+  chain_id: number;
 }
 
 export interface HeightResponse {

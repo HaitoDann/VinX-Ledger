@@ -19,7 +19,7 @@ pub struct WorldState {
     /// Accounts keyed by bech32 address. A `BTreeMap` (not `HashMap`) so iteration
     /// is already sorted by address — the Merkle leaf order — avoiding an O(n log n)
     /// sort on every state-root rebuild and every inclusion-proof lookup.
-    pub(crate) accounts: BTreeMap<String, Account>,
+    pub(crate) accounts: BTreeMap<Address, Account>,
     pub circulating_supply: Amount,
     pub block_height: u64,
     pub staking_pool: Amount,
@@ -69,10 +69,10 @@ pub struct WorldState {
     merkle_tree: IncrementalMerkleTree,
     /// Maps address string → leaf index in `merkle_tree.leaves()`.
     #[serde(skip)]
-    leaf_index: HashMap<String, usize>,
+    leaf_index: HashMap<Address, usize>,
     /// Accounts modified since the last `compute_state_root` call.
     #[serde(skip)]
-    dirty_addrs: HashSet<String>,
+    dirty_addrs: HashSet<Address>,
     /// True when an account was added/removed — requires a full O(n) rebuild.
     #[serde(skip)]
     needs_rebuild: bool,
@@ -81,7 +81,7 @@ pub struct WorldState {
     /// until `take_persist_dirty` drains it, so incremental persistence can write
     /// only the accounts that actually changed instead of the whole map.
     #[serde(skip)]
-    persist_dirty: HashSet<String>,
+    persist_dirty: HashSet<Address>,
 }
 
 fn default_fee_floor() -> Amount {
@@ -133,12 +133,12 @@ impl WorldState {
     /// Marks an account address as dirty.
     /// If the address is not yet in the leaf index (new account), triggers a full rebuild.
     #[inline]
-    fn mark_dirty(&mut self, addr: &str) {
+    fn mark_dirty(&mut self, addr: &Address) {
         if !self.leaf_index.contains_key(addr) {
             self.needs_rebuild = true;
         }
-        self.dirty_addrs.insert(addr.to_string());
-        self.persist_dirty.insert(addr.to_string());
+        self.dirty_addrs.insert(*addr);
+        self.persist_dirty.insert(*addr);
     }
 
     /// O(n) full rebuild of the incremental tree — sorts all accounts, hashes each leaf,
@@ -151,7 +151,7 @@ impl WorldState {
             .iter()
             .enumerate()
             .map(|(i, a)| {
-                self.leaf_index.insert(a.address.to_string(), i);
+                self.leaf_index.insert(a.address, i);
                 hash_account(a)
             })
             .collect();
@@ -174,7 +174,7 @@ impl WorldState {
             self.full_rebuild();
         } else {
             // O(|dirty| × log n) — only update changed leaf paths.
-            let dirty: Vec<String> = std::mem::take(&mut self.dirty_addrs).into_iter().collect();
+            let dirty: Vec<Address> = std::mem::take(&mut self.dirty_addrs).into_iter().collect();
             for addr in dirty {
                 if let (Some(&idx), Some(account)) =
                     (self.leaf_index.get(&addr), self.accounts.get(&addr))
@@ -215,16 +215,16 @@ impl WorldState {
         if amount == Amount::ZERO {
             return;
         }
-        self.mark_dirty(addr.as_str());
+        self.mark_dirty(addr);
         let acc = self
             .accounts
-            .entry(addr.as_str().to_string())
-            .or_insert_with(|| Account::new(addr.clone()));
+            .entry(*addr)
+            .or_insert_with(|| Account::new(*addr));
         acc.balance = acc.balance.saturating_add(amount);
     }
 
     pub fn get_account(&self, address: &Address) -> Option<&Account> {
-        self.accounts.get(address.as_str())
+        self.accounts.get(address)
     }
 
     /// Returns all accounts sorted by address (for Merkle proof computation).
@@ -235,14 +235,14 @@ impl WorldState {
 
     pub fn account_balance(&self, address: &Address) -> Amount {
         self.accounts
-            .get(address.as_str())
+            .get(address)
             .map(|a| a.balance)
             .unwrap_or(Amount::ZERO)
     }
 
     pub fn account_staked(&self, address: &Address) -> Amount {
         self.accounts
-            .get(address.as_str())
+            .get(address)
             .map(|a| a.staked)
             .unwrap_or(Amount::ZERO)
     }
@@ -268,7 +268,7 @@ impl WorldState {
 
     /// Drains and returns the set of account addresses modified since the last
     /// drain. Used by incremental persistence to write only changed rows.
-    pub fn take_persist_dirty(&mut self) -> Vec<String> {
+    pub fn take_persist_dirty(&mut self) -> Vec<Address> {
         std::mem::take(&mut self.persist_dirty)
             .into_iter()
             .collect()
@@ -277,24 +277,23 @@ impl WorldState {
     /// Marks every current account for persistence — used before a full save
     /// (genesis bootstrap, snapshot import) so the next flush writes the whole set.
     pub fn mark_all_persist_dirty(&mut self) {
-        self.persist_dirty = self.accounts.keys().cloned().collect();
+        self.persist_dirty = self.accounts.keys().copied().collect();
     }
 
-    /// Looks up an account by its raw address string (persistence row source).
-    pub fn account_by_str(&self, addr: &str) -> Option<&Account> {
+    /// Looks up an account by its address (persistence row source).
+    pub fn account_by_addr(&self, addr: &Address) -> Option<&Account> {
         self.accounts.get(addr)
     }
 
     /// Iterates over all `(address, account)` pairs — full-snapshot persistence.
-    pub fn accounts_iter(&self) -> impl Iterator<Item = (&String, &Account)> {
+    pub fn accounts_iter(&self) -> impl Iterator<Item = (&Address, &Account)> {
         self.accounts.iter()
     }
 
     /// Inserts an account loaded from storage **without** marking it dirty.
     /// The Merkle tree and indexes are rebuilt lazily on the first state-root call.
     pub fn load_account(&mut self, account: Account) {
-        self.accounts
-            .insert(account.address.as_str().to_string(), account);
+        self.accounts.insert(account.address, account);
     }
 
     /// Returns true when the chain must keep advancing even with an empty mempool.
@@ -314,22 +313,21 @@ impl WorldState {
 
     pub fn is_frozen(&self, address: &Address) -> bool {
         self.accounts
-            .get(address.as_str())
+            .get(address)
             .map(|a| a.frozen)
             .unwrap_or(false)
     }
 
     pub(crate) fn insert_account(&mut self, account: Account) {
-        self.mark_dirty(account.address.as_str());
-        self.accounts
-            .insert(account.address.as_str().to_string(), account);
+        self.mark_dirty(&account.address);
+        self.accounts.insert(account.address, account);
     }
 
     pub fn credit_for_test(&mut self, address: Address, amount: Amount) {
-        self.mark_dirty(address.as_str());
+        self.mark_dirty(&address);
         let acc = self
             .accounts
-            .entry(address.as_str().to_string())
+            .entry(address)
             .or_insert_with(|| Account::new(address));
         acc.balance = acc.balance.saturating_add(amount);
     }
@@ -452,19 +450,19 @@ impl WorldState {
 
         // Sponsored tx: sender pays only the transfer amount; sponsor pays the fee separately
         let (sender_debit, fee_payer) = if let Some(ref sponsor_addr) = tx.sponsor {
-            (tx.amount, sponsor_addr.clone())
+            (tx.amount, *sponsor_addr)
         } else {
             let total = tx
                 .amount
                 .checked_add(tx.fee)
                 .ok_or(CoreError::AmountOverflow)?;
-            (total, tx.from.clone())
+            (total, tx.from)
         };
 
         {
             let sender = self
                 .accounts
-                .get_mut(tx.from.as_str())
+                .get_mut(&tx.from)
                 .ok_or(CoreError::InsufficientBalance)?;
             if sender.frozen {
                 return Err(CoreError::AccountFrozen);
@@ -486,7 +484,7 @@ impl WorldState {
         if fee_payer != tx.from {
             let sponsor_acc = self
                 .accounts
-                .get_mut(fee_payer.as_str())
+                .get_mut(&fee_payer)
                 .ok_or(CoreError::InsufficientBalance)?;
             if sponsor_acc.frozen {
                 return Err(CoreError::AccountFrozen);
@@ -499,8 +497,8 @@ impl WorldState {
 
         let receiver = self
             .accounts
-            .entry(tx.to.as_str().to_string())
-            .or_insert_with(|| Account::new(tx.to.clone()));
+            .entry(tx.to)
+            .or_insert_with(|| Account::new(tx.to));
         receiver.balance = receiver
             .balance
             .checked_add(tx.amount)
@@ -518,10 +516,10 @@ impl WorldState {
             .checked_add(treasury_cut)
             .ok_or(CoreError::AmountOverflow)?;
 
-        self.mark_dirty(tx.from.as_str());
-        self.mark_dirty(tx.to.as_str());
+        self.mark_dirty(&tx.from);
+        self.mark_dirty(&tx.to);
         if fee_payer != tx.from {
-            self.mark_dirty(fee_payer.as_str());
+            self.mark_dirty(&fee_payer);
         }
 
         Ok(())
@@ -535,7 +533,7 @@ impl WorldState {
         }
         let account = self
             .accounts
-            .get_mut(tx.from.as_str())
+            .get_mut(&tx.from)
             .ok_or(CoreError::InsufficientBalance)?;
         if account.frozen {
             return Err(CoreError::AccountFrozen);
@@ -558,14 +556,14 @@ impl WorldState {
             .checked_add(tx.amount)
             .ok_or(CoreError::AmountOverflow)?;
         account.nonce += 1;
-        self.mark_dirty(tx.from.as_str());
+        self.mark_dirty(&tx.from);
         Ok(())
     }
 
     fn apply_unstake(&mut self, tx: &Transaction) -> Result<(), CoreError> {
         let account = self
             .accounts
-            .get_mut(tx.from.as_str())
+            .get_mut(&tx.from)
             .ok_or(CoreError::InsufficientBalance)?;
         if account.frozen {
             return Err(CoreError::AccountFrozen);
@@ -588,7 +586,7 @@ impl WorldState {
             account.stake_since = 0;
         }
         account.nonce += 1;
-        self.mark_dirty(tx.from.as_str());
+        self.mark_dirty(&tx.from);
         Ok(())
     }
 
@@ -596,7 +594,7 @@ impl WorldState {
         self.check_admin(tx)?;
         let sender = self
             .accounts
-            .get_mut(tx.from.as_str())
+            .get_mut(&tx.from)
             .ok_or(CoreError::InsufficientBalance)?;
         if sender.nonce != tx.nonce {
             return Err(CoreError::InvalidNonce {
@@ -608,7 +606,7 @@ impl WorldState {
 
         let target = self
             .accounts
-            .get_mut(tx.to.as_str())
+            .get_mut(&tx.to)
             .ok_or(CoreError::InvalidTransaction(
                 "target account does not exist".to_string(),
             ))?;
@@ -619,8 +617,8 @@ impl WorldState {
         }
         target.frozen = true;
         target.frozen_since = self.block_height;
-        self.mark_dirty(tx.from.as_str());
-        self.mark_dirty(tx.to.as_str());
+        self.mark_dirty(&tx.from);
+        self.mark_dirty(&tx.to);
         Ok(())
     }
 
@@ -628,7 +626,7 @@ impl WorldState {
         self.check_admin(tx)?;
         let sender = self
             .accounts
-            .get_mut(tx.from.as_str())
+            .get_mut(&tx.from)
             .ok_or(CoreError::InsufficientBalance)?;
         if sender.nonce != tx.nonce {
             return Err(CoreError::InvalidNonce {
@@ -640,14 +638,14 @@ impl WorldState {
 
         let target = self
             .accounts
-            .get_mut(tx.to.as_str())
+            .get_mut(&tx.to)
             .ok_or(CoreError::InvalidTransaction(
                 "target account does not exist".to_string(),
             ))?;
         target.frozen = false;
         target.frozen_since = 0;
-        self.mark_dirty(tx.from.as_str());
-        self.mark_dirty(tx.to.as_str());
+        self.mark_dirty(&tx.from);
+        self.mark_dirty(&tx.to);
         Ok(())
     }
 
@@ -677,7 +675,7 @@ impl WorldState {
 
         let sender = self
             .accounts
-            .get_mut(tx.from.as_str())
+            .get_mut(&tx.from)
             .ok_or(CoreError::InsufficientBalance)?;
         if sender.nonce != tx.nonce {
             return Err(CoreError::InvalidNonce {
@@ -686,7 +684,7 @@ impl WorldState {
             });
         }
         sender.nonce += 1;
-        self.mark_dirty(tx.from.as_str());
+        self.mark_dirty(&tx.from);
 
         self.pending_upgrade = Some(ScheduledUpgrade {
             version: new_version,
@@ -712,7 +710,7 @@ impl WorldState {
         }
         let sender = self
             .accounts
-            .get_mut(tx.from.as_str())
+            .get_mut(&tx.from)
             .ok_or(CoreError::InsufficientBalance)?;
         if sender.nonce != tx.nonce {
             return Err(CoreError::InvalidNonce {
@@ -721,8 +719,8 @@ impl WorldState {
             });
         }
         sender.nonce += 1;
-        self.validator_set.add(tx.to.clone());
-        self.mark_dirty(tx.from.as_str());
+        self.validator_set.add(tx.to);
+        self.mark_dirty(&tx.from);
         tracing::info!(validator = %tx.to, "Validator added to set");
         Ok(())
     }
@@ -741,7 +739,7 @@ impl WorldState {
         }
         let sender = self
             .accounts
-            .get_mut(tx.from.as_str())
+            .get_mut(&tx.from)
             .ok_or(CoreError::InsufficientBalance)?;
         if sender.nonce != tx.nonce {
             return Err(CoreError::InvalidNonce {
@@ -751,7 +749,7 @@ impl WorldState {
         }
         sender.nonce += 1;
         self.validator_set.remove(&tx.to);
-        self.mark_dirty(tx.from.as_str());
+        self.mark_dirty(&tx.from);
         tracing::info!(validator = %tx.to, "Validator removed from set");
         Ok(())
     }
@@ -760,14 +758,14 @@ impl WorldState {
     /// and automatically unfreezes them. Called by the block producer on every block.
     pub fn check_auto_unfreeze(&mut self) {
         let height = self.block_height;
-        let mut unfrozen: Vec<String> = Vec::new();
+        let mut unfrozen: Vec<Address> = Vec::new();
         for account in self.accounts.values_mut() {
             if account.frozen
                 && height.saturating_sub(account.frozen_since) >= FREEZE_DURATION_BLOCKS
             {
                 account.frozen = false;
                 account.frozen_since = 0;
-                unfrozen.push(account.address.to_string());
+                unfrozen.push(account.address);
                 tracing::info!(
                     address = %account.address,
                     height,
@@ -823,7 +821,7 @@ impl WorldState {
         let pool = self.staking_pool.atoms();
         let mut distributed = 0u128;
 
-        let mut rewarded: Vec<String> = Vec::new();
+        let mut rewarded: Vec<Address> = Vec::new();
         for account in self.accounts.values_mut() {
             if account.staked == Amount::ZERO {
                 continue;
@@ -839,7 +837,7 @@ impl WorldState {
             if reward > 0 {
                 account.balance = account.balance.saturating_add(Amount::from_atoms(reward));
                 distributed = distributed.saturating_add(reward);
-                rewarded.push(account.address.to_string());
+                rewarded.push(account.address);
             }
         }
         for addr in rewarded {
@@ -903,7 +901,7 @@ impl WorldState {
 
         let sender = self
             .accounts
-            .get_mut(tx.from.as_str())
+            .get_mut(&tx.from)
             .ok_or(CoreError::InsufficientBalance)?;
         if sender.nonce != tx.nonce {
             return Err(CoreError::InvalidNonce {
@@ -916,7 +914,7 @@ impl WorldState {
         // Slash: redirect the validator's stake to the redistribution pool
         let slashed = self
             .accounts
-            .get(target.as_str())
+            .get(target)
             .map(|a| a.staked)
             .unwrap_or(Amount::ZERO);
         if slashed > Amount::ZERO {
@@ -925,16 +923,16 @@ impl WorldState {
             // Remainder goes to the melt pool (redistribution reserve, not a burn)
             let to_melt = slashed.checked_sub(bounty).unwrap_or(Amount::ZERO);
 
-            if let Some(acc) = self.accounts.get_mut(target.as_str()) {
+            if let Some(acc) = self.accounts.get_mut(target) {
                 acc.staked = Amount::ZERO;
                 acc.stake_since = 0;
             }
-            self.mark_dirty(target.as_str());
+            self.mark_dirty(target);
             self.credit(&tx.from, bounty); // credit() also calls mark_dirty(tx.from)
             self.melt_pool = self.melt_pool.saturating_add(to_melt);
         }
 
-        self.mark_dirty(tx.from.as_str());
+        self.mark_dirty(&tx.from);
 
         // Remove from validator set (can't produce blocks anymore)
         if self.validator_set.len() > 1 {
@@ -957,7 +955,7 @@ impl WorldState {
 
         let sender = self
             .accounts
-            .get_mut(tx.from.as_str())
+            .get_mut(&tx.from)
             .ok_or(CoreError::InsufficientBalance)?;
         if sender.nonce != tx.nonce {
             return Err(CoreError::InvalidNonce {
@@ -970,7 +968,7 @@ impl WorldState {
         match action {
             GovernanceAction::AddValidator(addr) => {
                 if !self.validator_set.contains(&addr) {
-                    self.validator_set.add(addr.clone());
+                    self.validator_set.add(addr);
                     tracing::info!(%addr, "Admin: validator added");
                 }
             }
@@ -1008,7 +1006,7 @@ impl WorldState {
                 }
             }
             GovernanceAction::RotateAdmin(new_admin) => {
-                self.admin_address = Some(new_admin.clone());
+                self.admin_address = Some(new_admin);
                 tracing::info!(%new_admin, "Admin: admin key rotated");
             }
             GovernanceAction::MarkCoffreCondition(condition) => {
@@ -1035,7 +1033,7 @@ impl WorldState {
             }
         }
 
-        self.mark_dirty(tx.from.as_str());
+        self.mark_dirty(&tx.from);
         Ok(())
     }
 
@@ -1043,8 +1041,8 @@ impl WorldState {
     fn set_staked_for_test(&mut self, address: &Address, staked: Amount) {
         let acc = self
             .accounts
-            .entry(address.as_str().to_string())
-            .or_insert_with(|| vinx_core::Account::new(address.clone()));
+            .entry(*address)
+            .or_insert_with(|| vinx_core::Account::new(*address));
         acc.balance = Amount::ZERO;
         acc.staked = staked;
         acc.stake_since = 0;
@@ -1052,7 +1050,7 @@ impl WorldState {
 }
 
 fn hash_account(account: &Account) -> Hash32 {
-    let addr = account.address.as_str().as_bytes();
+    let addr = account.address.as_bytes();
     let mut buf = Vec::with_capacity(addr.len() + 16 + 8 + 16 + 1 + 8 + 8);
     buf.extend_from_slice(addr);
     buf.extend_from_slice(&account.balance.atoms().to_be_bytes());
@@ -1105,7 +1103,7 @@ mod tests {
         s.block_height = 100;
         let distributed = s.distribute_staking_rewards();
         assert_eq!(distributed, Amount::ZERO);
-        assert_eq!(s.accounts[addr.as_str()].balance, Amount::ZERO);
+        assert_eq!(s.accounts[&addr].balance, Amount::ZERO);
     }
 
     #[test]
@@ -1117,7 +1115,7 @@ mod tests {
         let distributed = s.distribute_staking_rewards();
         assert_eq!(distributed, Amount::from_vinx(50));
         assert_eq!(s.staking_pool, Amount::ZERO);
-        assert_eq!(s.accounts[addr.as_str()].balance, Amount::from_vinx(50));
+        assert_eq!(s.accounts[&addr].balance, Amount::from_vinx(50));
     }
 
     #[test]
@@ -1128,8 +1126,8 @@ mod tests {
         s.staking_pool = Amount::from_vinx(400);
         s.block_height = 100;
         s.distribute_staking_rewards();
-        assert_eq!(s.accounts[alice.as_str()].balance, Amount::from_vinx(100));
-        assert_eq!(s.accounts[bob.as_str()].balance, Amount::from_vinx(300));
+        assert_eq!(s.accounts[&alice].balance, Amount::from_vinx(100));
+        assert_eq!(s.accounts[&bob].balance, Amount::from_vinx(300));
         assert_eq!(s.staking_pool, Amount::ZERO);
     }
 
@@ -1141,8 +1139,8 @@ mod tests {
         s.staking_pool = Amount::from_atoms(3);
         s.block_height = 100;
         s.distribute_staking_rewards();
-        assert_eq!(s.accounts[a.as_str()].balance, Amount::from_atoms(1));
-        assert_eq!(s.accounts[b.as_str()].balance, Amount::from_atoms(1));
+        assert_eq!(s.accounts[&a].balance, Amount::from_atoms(1));
+        assert_eq!(s.accounts[&b].balance, Amount::from_atoms(1));
         assert_eq!(s.staking_pool, Amount::from_atoms(1));
     }
 
@@ -1155,7 +1153,7 @@ mod tests {
         s.staking_pool = Amount::from_vinx(100);
         s.block_height = 100;
         s.distribute_staking_rewards();
-        assert_eq!(s.accounts[idle.as_str()].balance, Amount::from_vinx(5_000));
+        assert_eq!(s.accounts[&idle].balance, Amount::from_vinx(5_000));
     }
 
     #[test]
@@ -1167,7 +1165,7 @@ mod tests {
         let distributed = s.distribute_staking_rewards();
         assert_eq!(distributed, Amount::ZERO);
         assert_eq!(s.staking_pool, Amount::from_vinx(50));
-        assert_eq!(s.accounts[addr.as_str()].balance, Amount::ZERO);
+        assert_eq!(s.accounts[&addr].balance, Amount::ZERO);
     }
 
     // ─── freeze / unfreeze via transaction ──────────────────────────────────
@@ -1183,8 +1181,8 @@ mod tests {
         state.apply_transaction(&tx).unwrap();
 
         assert!(state.is_frozen(&target_addr));
-        assert_eq!(state.accounts[target_addr.as_str()].frozen_since, 0); // block_height=0
-        assert_eq!(state.accounts[admin_addr.as_str()].nonce, 1);
+        assert_eq!(state.accounts[&target_addr].frozen_since, 0); // block_height=0
+        assert_eq!(state.accounts[&admin_addr].nonce, 1);
     }
 
     #[test]
@@ -1221,7 +1219,7 @@ mod tests {
             ))
             .unwrap();
         assert!(!state.is_frozen(&target_addr));
-        assert_eq!(state.accounts[target_addr.as_str()].frozen_since, 0);
+        assert_eq!(state.accounts[&target_addr].frozen_since, 0);
     }
 
     #[test]
@@ -1231,8 +1229,8 @@ mod tests {
         state.credit_for_test(addr.clone(), Amount::from_vinx(100));
 
         // Freeze at block 0
-        state.accounts.get_mut(addr.as_str()).unwrap().frozen = true;
-        state.accounts.get_mut(addr.as_str()).unwrap().frozen_since = 0;
+        state.accounts.get_mut(&addr).unwrap().frozen = true;
+        state.accounts.get_mut(&addr).unwrap().frozen_since = 0;
 
         // Not yet expired at block FREEZE_DURATION_BLOCKS - 1
         state.block_height = FREEZE_DURATION_BLOCKS - 1;
@@ -1243,7 +1241,7 @@ mod tests {
         state.block_height = FREEZE_DURATION_BLOCKS;
         state.check_auto_unfreeze();
         assert!(!state.is_frozen(&addr));
-        assert_eq!(state.accounts[addr.as_str()].frozen_since, 0);
+        assert_eq!(state.accounts[&addr].frozen_since, 0);
     }
 
     #[test]

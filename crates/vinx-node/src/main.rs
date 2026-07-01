@@ -193,11 +193,11 @@ async fn main() {
         }
         None => {
             let state = create_genesis_state(&GenesisConfig {
-                admin_address: admin_addr.clone(),
-                validator_address: validator_addr.clone(),
+                admin_address: admin_addr,
+                validator_address: validator_addr,
                 chain_id,
             });
-            let (chain, _genesis) = Chain::new_with_genesis(validator_addr.clone(), timestamp);
+            let (chain, _genesis) = Chain::new_with_genesis(validator_addr, timestamp);
             (state, chain, false)
         }
     };

@@ -20,7 +20,7 @@ pub fn create_genesis_state(config: &GenesisConfig) -> WorldState {
 
     // 21M VinX to admin — Sandbox allocation, immediately usable
     state.insert_account(Account::new_with_balance(
-        config.admin_address.clone(),
+        config.admin_address,
         Amount::from_atoms(ADMIN_ALLOCATION_ATOMS),
     ));
 
@@ -32,9 +32,9 @@ pub fn create_genesis_state(config: &GenesisConfig) -> WorldState {
     state.circulating_supply = Amount::from_atoms(ADMIN_ALLOCATION_ATOMS);
     state.block_height = 0;
     // Admin address is stored on-chain for governance operations (freeze, upgrades)
-    state.admin_address = Some(config.admin_address.clone());
+    state.admin_address = Some(config.admin_address);
     // Initial validator set — admin can add/remove validators via governance transactions
-    state.validator_set = ValidatorSet::single(config.validator_address.clone());
+    state.validator_set = ValidatorSet::single(config.validator_address);
     state.chain_id = config.chain_id;
 
     state

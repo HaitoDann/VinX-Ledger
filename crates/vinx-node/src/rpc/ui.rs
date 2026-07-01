@@ -355,6 +355,36 @@ function bigIntTo8BE(v) {
   for (let i = 7; i >= 0; i--) { b[i] = Number(v & 0xffn); v >>= 8n; }
   return b;
 }
+function u32To4BE(n) {
+  const b = new Uint8Array(4);
+  b[0] = (n >>> 24) & 0xff; b[1] = (n >>> 16) & 0xff; b[2] = (n >>> 8) & 0xff; b[3] = n & 0xff;
+  return b;
+}
+// Decode a bech32 `vinx1...` address to its raw 20-byte payload — the canonical
+// form the node signs and hashes over. Mirrors vinx-crypto's Address encoding.
+const BECH32_CHARSET = 'qpzry9x8gf2tvdw0s3jn54khce6mua7l';
+function bech32Decode20(addr) {
+  const s = addr.toLowerCase();
+  const pos = s.lastIndexOf('1');
+  if (pos < 1) throw new Error('adresse bech32 invalide');
+  const data = s.slice(pos + 1);
+  const values = [];
+  for (const ch of data) {
+    const v = BECH32_CHARSET.indexOf(ch);
+    if (v === -1) throw new Error('caractère bech32 invalide');
+    values.push(v);
+  }
+  // Drop the 6-symbol checksum, then convert 5-bit groups to 8-bit bytes.
+  const words = values.slice(0, values.length - 6);
+  let acc = 0, bits = 0;
+  const out = [];
+  for (const w of words) {
+    acc = (acc << 5) | w; bits += 5;
+    while (bits >= 8) { bits -= 8; out.push((acc >> bits) & 0xff); }
+  }
+  if (out.length !== 20) throw new Error('charge utile bech32 != 20 octets');
+  return new Uint8Array(out);
+}
 
 const txTag = t => {
   const m = { Transfer:'b', Emission:'g', Stake:'o', Unstake:'o', AdminAction:'p', SlashValidator:'r' };
@@ -543,7 +573,11 @@ function onWalletFile(input) {
       const seed = hexToBytes(json.secret_key_hex);
       if (seed.length !== 32) throw new Error('Clé invalide (32 octets requis)');
       const kp = nacl.sign.keyPair.fromSeed(seed);
-      wallet = { address: json.address, secretKey64: kp.secretKey, publicKey32: kp.publicKey };
+      wallet = { address: json.address, secretKey64: kp.secretKey, publicKey32: kp.publicKey, chainId: 42 };
+      // Learn the node's chain ID so signatures commit to the right network.
+      fetch(`${BASE}/health`).then(r => r.json()).then(h => {
+        if (wallet && typeof h.chain_id === 'number') wallet.chainId = h.chain_id;
+      }).catch(() => {});
       document.getElementById('wallet-err').textContent = '';
       showWallet();
     } catch (err) {
@@ -626,22 +660,29 @@ async function sendTx(txType) {
     wallet.nonce = acc.nonce ?? 0;
   } catch { wallet.nonce = wallet.nonce ?? 0; }
   const nonce = wallet.nonce;
+  const chainId = wallet.chainId ?? 42;
   const discriminants = { Transfer:0x01, Stake:0x02, Unstake:0x03 };
-  const enc = new TextEncoder();
-  const fromB = enc.encode(wallet.address);
-  const toB   = enc.encode(to);
-  const sigBytes = new Uint8Array(1+1+fromB.length+1+toB.length+16+16+8);
+  // Canonical signing bytes — must match vinx-core Transaction::signing_bytes():
+  // disc(1) ‖ from(20) ‖ to(20) ‖ amount(16 BE) ‖ fee(16 BE) ‖ nonce(8 BE)
+  // ‖ chain_id(4 BE) ‖ expiry(1=0x00) ‖ payload(empty) ‖ sponsor(1=0x00)
+  let fromB, toB;
+  try { fromB = bech32Decode20(wallet.address); toB = bech32Decode20(to); }
+  catch (e) { result.innerHTML = `<p class="msg err">Adresse invalide : ${e.message}</p>`; return; }
+  const sigBytes = new Uint8Array(1+20+20+16+16+8+4+1+1);
   let i = 0;
   sigBytes[i++] = discriminants[txType];
-  sigBytes[i++] = fromB.length; sigBytes.set(fromB, i); i += fromB.length;
-  sigBytes[i++] = toB.length;   sigBytes.set(toB, i);   i += toB.length;
+  sigBytes.set(fromB, i); i += 20;
+  sigBytes.set(toB, i);   i += 20;
   sigBytes.set(bigIntTo16BE(amountAtoms), i); i += 16;
   sigBytes.set(bigIntTo16BE(feeAtoms), i);    i += 16;
-  sigBytes.set(bigIntTo8BE(BigInt(nonce)), i);
+  sigBytes.set(bigIntTo8BE(BigInt(nonce)), i); i += 8;
+  sigBytes.set(u32To4BE(chainId), i);          i += 4;
+  sigBytes[i++] = 0x00; // expires_at_height: None
+  sigBytes[i++] = 0x00; // sponsor: None
   const signature = nacl.sign.detached(sigBytes, wallet.secretKey64);
   const pubKeyArr = '['+Array.from(wallet.publicKey32).join(',')+']';
   const sigHex = bytesToHex(signature);
-  const body = `{"tx_type":"${txType}","from":"${wallet.address}","to":"${to}","amount":${amountAtoms},"fee":${feeAtoms},"nonce":${nonce},"payload":[],"pub_key":${pubKeyArr},"signature":"${sigHex}"}`;
+  const body = `{"tx_type":"${txType}","from":"${wallet.address}","to":"${to}","amount":${amountAtoms},"fee":${feeAtoms},"nonce":${nonce},"chain_id":${chainId},"payload":[],"pub_key":${pubKeyArr},"signature":"${sigHex}"}`;
   try {
     const resp = await fetch(BASE+'/tx/submit', { method:'POST', headers:{'Content-Type':'application/json'}, body });
     const json = await resp.json();

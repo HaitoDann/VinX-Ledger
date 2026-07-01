@@ -629,15 +629,12 @@ impl Node {
         {
             let mut cache = self.address_cache.lock().await;
             if let Some(addr) = cache.get(raw) {
-                return Ok(addr.clone());
+                return Ok(*addr);
             }
         }
         let addr = vinx_crypto::Address::from_bech32(raw)
             .map_err(|e| crate::rpc::handlers::ApiError::BadRequest(e.to_string()))?;
-        self.address_cache
-            .lock()
-            .await
-            .put(raw.to_string(), addr.clone());
+        self.address_cache.lock().await.put(raw.to_string(), addr);
         Ok(addr)
     }
 

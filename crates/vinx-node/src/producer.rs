@@ -114,7 +114,7 @@ pub fn produce_block(
         height: next_height,
         prev_hash,
         timestamp,
-        validator: config.validator_address.clone(),
+        validator: config.validator_address,
         tx_count: block_txs.len() as u32,
         state_root,
         base_fee: current_base_fee.atoms() as u64,
@@ -129,7 +129,7 @@ pub fn produce_block(
     // Proposer signs the block header hash (counts as one co-signature)
     let header_hash = block.hash();
     block.signatures.push(BlockSignature {
-        validator: config.validator_address.clone(),
+        validator: config.validator_address,
         pub_key: config.validator_keypair.public_key(),
         signature: config.validator_keypair.sign(&header_hash),
     });
@@ -229,7 +229,7 @@ fn produce_block_inner(
         height: next_height,
         prev_hash,
         timestamp,
-        validator: config.validator_address.clone(),
+        validator: config.validator_address,
         tx_count: block_txs.len() as u32,
         state_root,
         base_fee: current_base_fee.atoms() as u64,
@@ -242,7 +242,7 @@ fn produce_block_inner(
     };
     let header_hash = block.hash();
     block.signatures.push(BlockSignature {
-        validator: config.validator_address.clone(),
+        validator: config.validator_address,
         pub_key: config.validator_keypair.public_key(),
         signature: config.validator_keypair.sign(&header_hash),
     });
@@ -276,7 +276,6 @@ mod tests {
     use crate::config::NodeConfig;
     use crate::mempool::Mempool;
     use vinx_core::amount::{Amount, DEFAULT_FEE_FLOOR_ATOMS};
-    use vinx_core::ValidatorSet;
     use vinx_crypto::{Address, KeyPair};
     use vinx_state::{create_genesis_state, GenesisConfig};
 

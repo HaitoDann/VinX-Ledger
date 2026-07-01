@@ -31,7 +31,7 @@ impl BlockHeader {
         bytes.extend_from_slice(&self.height.to_be_bytes());
         bytes.extend_from_slice(&self.prev_hash);
         bytes.extend_from_slice(&self.timestamp.to_be_bytes());
-        bytes.extend_from_slice(self.validator.as_str().as_bytes());
+        bytes.extend_from_slice(self.validator.as_bytes());
         bytes.extend_from_slice(&self.tx_count.to_be_bytes());
         bytes.extend_from_slice(&self.state_root);
         bytes.extend_from_slice(&self.base_fee.to_be_bytes());
@@ -83,14 +83,14 @@ impl Block {
     /// Counts distinct valid co-signatures from registered validators.
     pub fn valid_signer_count(&self, validator_set: &ValidatorSet) -> usize {
         let header_hash = self.hash();
-        let mut seen: HashSet<String> = HashSet::new();
+        let mut seen: HashSet<Address> = HashSet::new();
         self.signatures
             .iter()
             .filter(|sig| {
                 validator_set.contains(&sig.validator)
                     && Address::from_public_key(&sig.pub_key) == sig.validator
                     && sig.pub_key.verify(&header_hash, &sig.signature).is_ok()
-                    && seen.insert(sig.validator.as_str().to_string())
+                    && seen.insert(sig.validator)
             })
             .count()
     }

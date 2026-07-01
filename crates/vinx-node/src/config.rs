@@ -42,7 +42,7 @@ impl NodeConfig {
     /// Creates a single-validator (dev) config.
     pub fn new(validator_keypair: KeyPair) -> Self {
         let validator_address = Address::from_public_key(&validator_keypair.public_key());
-        let validator_set = ValidatorSet::single(validator_address.clone());
+        let validator_set = ValidatorSet::single(validator_address);
         Self {
             validator_keypair,
             validator_address,

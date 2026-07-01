@@ -13,6 +13,8 @@ pub struct HealthResponse {
     pub status: &'static str,
     pub height: u64,
     pub mempool_pending: usize,
+    /// Chain ID this node validates — clients must sign transactions with it.
+    pub chain_id: u32,
 }
 
 #[derive(Serialize)]

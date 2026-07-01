@@ -138,7 +138,7 @@ mod tests {
         let (mut state, sender_kp, sender_addr) = funded_state();
         let receiver = Address::from_public_key(&KeyPair::generate().public_key());
 
-        state.accounts.get_mut(sender_addr.as_str()).unwrap().frozen = true;
+        state.accounts.get_mut(&sender_addr).unwrap().frozen = true;
 
         let amount = Amount::from_vinx(1);
         let tx = Transaction::new_transfer(&sender_kp, receiver, amount, fee_for(amount), 0);
@@ -173,11 +173,11 @@ mod tests {
         let tx0 =
             Transaction::new_transfer(&sender_kp, receiver.clone(), amount, fee_for(amount), 0);
         state.apply_transaction(&tx0).unwrap();
-        assert_eq!(state.accounts[sender_addr.as_str()].nonce, 1);
+        assert_eq!(state.accounts[&sender_addr].nonce, 1);
 
         let tx1 = Transaction::new_transfer(&sender_kp, receiver, amount, fee_for(amount), 1);
         state.apply_transaction(&tx1).unwrap();
-        assert_eq!(state.accounts[sender_addr.as_str()].nonce, 2);
+        assert_eq!(state.accounts[&sender_addr].nonce, 2);
     }
 
     #[test]
@@ -309,10 +309,10 @@ mod tests {
         let _ = sender_kp;
         assert!(!state.is_frozen(&sender_addr));
 
-        state.accounts.get_mut(sender_addr.as_str()).unwrap().frozen = true;
+        state.accounts.get_mut(&sender_addr).unwrap().frozen = true;
         assert!(state.is_frozen(&sender_addr));
 
-        state.accounts.get_mut(sender_addr.as_str()).unwrap().frozen = false;
+        state.accounts.get_mut(&sender_addr).unwrap().frozen = false;
         assert!(!state.is_frozen(&sender_addr));
     }
 }

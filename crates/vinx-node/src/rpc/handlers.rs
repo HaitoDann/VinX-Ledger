@@ -55,10 +55,12 @@ impl IntoResponse for ApiError {
 pub async fn health(State(node): State<Arc<Node>>) -> ApiResult<HealthResponse> {
     let height = node.chain.read().await.tip_height();
     let pending = node.mempool.read().await.size();
+    let chain_id = node.state.read().await.chain_id;
     Ok(Json(HealthResponse {
         status: "ok",
         height,
         mempool_pending: pending,
+        chain_id,
     }))
 }
 
@@ -803,7 +805,7 @@ pub async fn get_account_proof(
     let leaves: Vec<vinx_crypto::Hash32> = entries
         .iter()
         .map(|a| {
-            let addr = a.address.as_str().as_bytes();
+            let addr = a.address.as_bytes();
             let mut buf = Vec::with_capacity(addr.len() + 48);
             buf.extend_from_slice(addr);
             buf.extend_from_slice(&a.balance.atoms().to_be_bytes());

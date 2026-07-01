@@ -5,6 +5,32 @@ Format : `MAJEUR.MINEUR.CORRECTIF` — les versions `0.x.y` sont des versions de
 
 ---
 
+## [0.23.0] — 2026-07-01
+
+### ⚠️ BREAKING — `Address` en 20 octets bruts (design canonique)
+
+Refonte de la représentation d'adresse : `Address(String)` (bech32) → `Address([u8; 20])` — la charge utile brute (`SHA-256(pubkey)[..20]`), façon Ethereum/Cosmos. Le bech32 (`vinx1...`) devient un simple encodage d'affichage/transport appliqué aux frontières. **Changement cassant du protocole** (signature, hachage, formats disque & wire) — réalisé maintenant, en pré-mainnet, quand le coût de coordination est minimal.
+
+**`vinx-crypto`**
+- `Address` est désormais `Copy`, 20 octets inline, sans allocation heap ; hachage et comparaison sur 20 octets fixes.
+- `as_str()` supprimé ; nouveaux `as_bytes()`, `from_bytes()`, `to_bech32()`. `Display`/`Debug` encodent en bech32 à la demande.
+- serde format-aware : **JSON reste `"vinx1..."`** (API RPC & SDK inchangés), binaire (bincode) = 20 octets ; borsh (P2P) = 20 octets.
+
+**Consensus & encodages (canoniques sur octets bruts)**
+- `Transaction::signing_bytes()` : adresses `from`/`to`/`sponsor` en 20 octets (préfixes de longueur supprimés). Layout figé par un test doré (`test_signing_bytes_golden_vector`).
+- `BlockHeader::hash()` et `hash_account()` (feuille Merkle) hachent les 20 octets.
+- Maps clées par `Address` (`accounts` `BTreeMap<Address>`, `leaf_index`, mempool, `slash_evidence`, table redb `accounts`) — plus aucune allocation de clé string, hachage plus rapide.
+- Ordre des feuilles Merkle = ordre des octets d'adresse (les racines d'état changent — nouveau genesis).
+- Stockage schéma **v5** (adresses 20 octets) — les données antérieures sont rejetées au démarrage.
+
+**Clients**
+- UI web (`rpc/ui.rs`) : signature corrigée — décodage bech32 → 20 octets (`from`/`to`) + `chain_id`/`expiry`/`sponsor` désormais inclus (l'ancien signeur JS était en réalité désynchronisé du Rust depuis v0.14). Vérifié bit-à-bit contre le vecteur doré Rust via Node.
+- `GET /health` expose `chain_id` (le signeur navigateur s'y aligne). Type SDK `HealthResponse` étendu.
+
+**Tests** : vecteur doré `signing_bytes`, vecteur bech32↔JS, compat serde/bincode/borsh (JSON=bech32, binaire=20 o), `Address: Copy`. 229 tests Rust + 23 SDK — 0 échec.
+
+---
+
 ## [0.22.0] — 2026-07-01
 
 ### Allocations & tris — comptes triés, adresses partagées

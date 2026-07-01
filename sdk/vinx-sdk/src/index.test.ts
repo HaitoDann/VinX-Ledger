@@ -27,7 +27,7 @@ describe('VinxClient constructor', () => {
 
 describe('VinxClient.health()', () => {
   it('calls GET /health and returns response', async () => {
-    const payload = { status: 'ok', height: 42, mempool_pending: 3 };
+    const payload = { status: 'ok', height: 42, mempool_pending: 3, chain_id: 42 };
     const spy = mockFetch(payload);
     const client = new VinxClient(BASE);
     const result = await client.health();

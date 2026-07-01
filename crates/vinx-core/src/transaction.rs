@@ -86,15 +86,17 @@ fn default_chain_id() -> u32 {
 
 impl Transaction {
     /// Canonical byte representation for signing. Does NOT include pub_key or signature.
+    /// Canonical byte layout signed by the sender (and sponsor).
+    ///
+    /// Addresses are the raw 20-byte payload (fixed length, so no length prefix).
+    /// Layout: discriminant(1) ‖ from(20) ‖ to(20) ‖ amount(16 BE) ‖ fee(16 BE) ‖
+    /// nonce(8 BE) ‖ chain_id(4 BE) ‖ expiry(0 | 1‖8 BE) ‖ payload ‖
+    /// sponsor(0 | 1‖20). Any client (web UI, SDK) must reproduce this exactly.
     pub fn signing_bytes(&self) -> Vec<u8> {
-        let mut bytes = Vec::with_capacity(256);
+        let mut bytes = Vec::with_capacity(128);
         bytes.push(self.tx_type.discriminant());
-        let from = self.from.as_str().as_bytes();
-        bytes.push(from.len() as u8);
-        bytes.extend_from_slice(from);
-        let to = self.to.as_str().as_bytes();
-        bytes.push(to.len() as u8);
-        bytes.extend_from_slice(to);
+        bytes.extend_from_slice(self.from.as_bytes());
+        bytes.extend_from_slice(self.to.as_bytes());
         bytes.extend_from_slice(&self.amount.atoms().to_be_bytes());
         bytes.extend_from_slice(&self.fee.atoms().to_be_bytes());
         bytes.extend_from_slice(&self.nonce.to_be_bytes());
@@ -112,9 +114,7 @@ impl Transaction {
         // Include sponsor address so the sponsor signature commits to it
         if let Some(ref sponsor) = self.sponsor {
             bytes.push(1u8);
-            let s = sponsor.as_str().as_bytes();
-            bytes.push(s.len() as u8);
-            bytes.extend_from_slice(s);
+            bytes.extend_from_slice(sponsor.as_bytes());
         } else {
             bytes.push(0u8);
         }
@@ -167,7 +167,7 @@ impl Transaction {
     pub fn new_stake(keypair: &KeyPair, amount: Amount, fee: Amount, nonce: u64) -> Self {
         let pk = keypair.public_key();
         let from = Address::from_public_key(&pk);
-        let to = from.clone();
+        let to = from;
         let mut tx = Self {
             tx_type: TransactionType::Stake,
             from,
@@ -192,7 +192,7 @@ impl Transaction {
     pub fn new_unstake(keypair: &KeyPair, amount: Amount, fee: Amount, nonce: u64) -> Self {
         let pk = keypair.public_key();
         let from = Address::from_public_key(&pk);
-        let to = from.clone();
+        let to = from;
         let mut tx = Self {
             tx_type: TransactionType::Unstake,
             from,
@@ -281,7 +281,7 @@ impl Transaction {
         payload.extend_from_slice(&activation_height.to_be_bytes());
         let mut tx = Self {
             tx_type: TransactionType::AnnounceUpgrade,
-            from: from.clone(),
+            from,
             to: from,
             amount: Amount::ZERO,
             fee: Amount::ZERO,
@@ -403,7 +403,7 @@ impl Transaction {
             bincode::serialize(action).expect("GovernanceAction serialization is infallible");
         let mut tx = Self {
             tx_type: TransactionType::AdminAction,
-            from: from.clone(),
+            from,
             to: from,
             amount: Amount::ZERO,
             fee: Amount::ZERO,
@@ -485,6 +485,43 @@ mod tests {
         let (_, tx) = make_transfer();
         assert!(tx.signature.is_some());
         assert!(tx.pub_key.is_some());
+    }
+
+    /// Golden vector locking the canonical `signing_bytes` layout. Any external
+    /// signer (the web UI in rpc/ui.rs, third-party wallets) must reproduce this
+    /// exact preimage; changing it is a consensus-breaking protocol change.
+    #[test]
+    fn test_signing_bytes_golden_vector() {
+        let tx = Transaction {
+            tx_type: TransactionType::Transfer,
+            from: Address::from_bytes([0x11; 20]),
+            to: Address::from_bytes([0x22; 20]),
+            amount: Amount::from_atoms(1_000_000),
+            fee: Amount::from_atoms(500),
+            nonce: 7,
+            chain_id: 42,
+            expires_at_height: None,
+            payload: vec![],
+            pub_key: None,
+            signature: None,
+            sponsor: None,
+            sponsor_pub_key: None,
+            sponsor_signature: None,
+        };
+        // disc(01) ‖ from(0x11×20) ‖ to(0x22×20) ‖ amount(16 BE) ‖ fee(16 BE)
+        //   ‖ nonce(8 BE) ‖ chain_id(4 BE) ‖ expiry(00) ‖ sponsor(00)
+        let expected = concat!(
+            "01",
+            "1111111111111111111111111111111111111111",
+            "2222222222222222222222222222222222222222",
+            "000000000000000000000000000f4240",
+            "000000000000000000000000000001f4",
+            "0000000000000007",
+            "0000002a",
+            "00",
+            "00",
+        );
+        assert_eq!(hex::encode(tx.signing_bytes()), expected);
     }
 
     #[test]
