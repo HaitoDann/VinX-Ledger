@@ -1,5 +1,5 @@
 use serde::{Deserialize, Serialize};
-use std::collections::{HashMap, HashSet};
+use std::collections::{BTreeMap, HashMap, HashSet};
 use vinx_core::{
     amount::{
         Amount, DEFAULT_FEE_FLOOR_ATOMS, FREEZE_DURATION_BLOCKS, MIN_STAKE_ATOMS,
@@ -16,7 +16,10 @@ use vinx_crypto::{sha256, Address, Hash32, IncrementalMerkleTree};
 /// In-memory representation of the full chain state.
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct WorldState {
-    pub(crate) accounts: HashMap<String, Account>,
+    /// Accounts keyed by bech32 address. A `BTreeMap` (not `HashMap`) so iteration
+    /// is already sorted by address — the Merkle leaf order — avoiding an O(n log n)
+    /// sort on every state-root rebuild and every inclusion-proof lookup.
+    pub(crate) accounts: BTreeMap<String, Account>,
     pub circulating_supply: Amount,
     pub block_height: u64,
     pub staking_pool: Amount,
@@ -99,7 +102,7 @@ impl WorldState {
     pub fn new() -> Self {
         let fee_floor = Amount::from_atoms(DEFAULT_FEE_FLOOR_ATOMS);
         Self {
-            accounts: HashMap::new(),
+            accounts: BTreeMap::new(),
             circulating_supply: Amount::ZERO,
             block_height: 0,
             staking_pool: Amount::ZERO,
@@ -141,8 +144,8 @@ impl WorldState {
     /// O(n) full rebuild of the incremental tree — sorts all accounts, hashes each leaf,
     /// rebuilds the `leaf_index` map and all internal tree levels.
     fn full_rebuild(&mut self) {
-        let mut entries: Vec<&Account> = self.accounts.values().collect();
-        entries.sort_by_key(|a| a.address.as_str());
+        // `accounts` is a BTreeMap, so `values()` already yields address-sorted order.
+        let entries: Vec<&Account> = self.accounts.values().collect();
         self.leaf_index.clear();
         let leaves: Vec<Hash32> = entries
             .iter()
@@ -225,10 +228,9 @@ impl WorldState {
     }
 
     /// Returns all accounts sorted by address (for Merkle proof computation).
+    /// `accounts` is a BTreeMap, so `values()` is already in address order.
     pub fn accounts_sorted(&self) -> Vec<&Account> {
-        let mut entries: Vec<&Account> = self.accounts.values().collect();
-        entries.sort_by_key(|a| a.address.as_str());
-        entries
+        self.accounts.values().collect()
     }
 
     pub fn account_balance(&self, address: &Address) -> Amount {
