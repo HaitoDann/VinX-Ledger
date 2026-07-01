@@ -156,11 +156,13 @@ mod tests {
     #[test]
     fn test_compression_roundtrip_large_message() {
         // SyncResponse with many blocks triggers compression
-        let blocks: Vec<Block> = (0..20).map(|i| {
-            let mut b = dummy_block();
-            b.header.height = i;
-            b
-        }).collect();
+        let blocks: Vec<Block> = (0..20)
+            .map(|i| {
+                let mut b = dummy_block();
+                b.header.height = i;
+                b
+            })
+            .collect();
         let msg = P2pMessage::SyncResponse { blocks };
         let encoded = msg.encode();
         assert_eq!(encoded[0], FLAG_ZSTD, "large message should be compressed");
@@ -170,11 +172,20 @@ mod tests {
 
     #[test]
     fn test_small_message_stays_raw() {
-        let msg = P2pMessage::SyncRequest { from_height: 1, limit: 10 };
+        let msg = P2pMessage::SyncRequest {
+            from_height: 1,
+            limit: 10,
+        };
         let encoded = msg.encode();
         assert_eq!(encoded[0], FLAG_RAW, "small message should stay raw");
         let decoded = P2pMessage::decode(&encoded).unwrap();
-        assert!(matches!(decoded, P2pMessage::SyncRequest { from_height: 1, limit: 10 }));
+        assert!(matches!(
+            decoded,
+            P2pMessage::SyncRequest {
+                from_height: 1,
+                limit: 10
+            }
+        ));
     }
 
     #[test]

@@ -38,7 +38,7 @@ impl ValidatorSet {
     /// | 21 |  14    |  67%  |
     pub fn quorum(&self) -> usize {
         let n = self.validators.len();
-        (2 * n + 2) / 3
+        (2 * n).div_ceil(3)
     }
 
     pub fn contains(&self, addr: &Address) -> bool {

@@ -76,10 +76,8 @@ impl Mempool {
             return Err(MempoolError::StaleNonce);
         }
 
-        if self.pending_count >= self.max_size {
-            if !self.try_evict_for(&tx) {
-                return Err(MempoolError::Full);
-            }
+        if self.pending_count >= self.max_size && !self.try_evict_for(&tx) {
+            return Err(MempoolError::Full);
         }
 
         let hash = tx.hash();
@@ -132,11 +130,7 @@ impl Mempool {
             }
             // Flush any pending txs that are now below the confirmed nonce.
             if let Some(queue) = self.queues.get_mut(addr) {
-                let stale: Vec<u64> = queue
-                    .keys()
-                    .copied()
-                    .filter(|&n| n < next_nonce)
-                    .collect();
+                let stale: Vec<u64> = queue.keys().copied().filter(|&n| n < next_nonce).collect();
                 for nonce in stale {
                     if let Some(tx) = queue.remove(&nonce) {
                         self.seen.remove(&tx.hash());
@@ -219,7 +213,7 @@ impl Mempool {
         // Parallel signature verification — each CPU core processes a subset
         let verified: Vec<Transaction> = to_verify
             .into_par_iter()
-            .filter(|tx| Self::verify_sig_static(tx))
+            .filter(Self::verify_sig_static)
             .collect();
 
         let count = verified.len();
@@ -375,7 +369,9 @@ pub enum MempoolError {
     RateLimited,
     #[error("Transaction nonce already consumed by a confirmed block")]
     StaleNonce,
-    #[error("A pending transaction already occupies this nonce; submit with a higher fee to replace it")]
+    #[error(
+        "A pending transaction already occupies this nonce; submit with a higher fee to replace it"
+    )]
     NonceTaken,
 }
 
@@ -500,7 +496,8 @@ mod tests {
         mp.add(make_tx_with_fee(&kp_low, to.clone(), 0, 1)).unwrap();
         assert_eq!(mp.size(), 1);
         // Higher-fee tx should evict the low-fee one
-        mp.add(make_tx_with_fee(&kp_high, to.clone(), 0, 10)).unwrap();
+        mp.add(make_tx_with_fee(&kp_high, to.clone(), 0, 10))
+            .unwrap();
         assert_eq!(mp.size(), 1);
         // The remaining tx should have the high fee
         let drained = mp.drain(10);
@@ -515,7 +512,10 @@ mod tests {
         mp.add(make_tx_with_fee(&kp, to.clone(), 0, 5)).unwrap();
         // Same fee — no eviction, returns Full
         let kp2 = KeyPair::generate();
-        assert_eq!(mp.add(make_tx_with_fee(&kp2, to, 0, 5)), Err(MempoolError::Full));
+        assert_eq!(
+            mp.add(make_tx_with_fee(&kp2, to, 0, 5)),
+            Err(MempoolError::Full)
+        );
         assert_eq!(mp.size(), 1);
     }
 
@@ -601,8 +601,14 @@ mod tests {
         let mut confirmed = std::collections::HashMap::new();
         confirmed.insert(addr, 2u64);
         mp.update_confirmed_nonces(&confirmed);
-        assert_eq!(mp.add(make_tx(&kp, to.clone(), 0)), Err(MempoolError::StaleNonce));
-        assert_eq!(mp.add(make_tx(&kp, to.clone(), 1)), Err(MempoolError::StaleNonce));
+        assert_eq!(
+            mp.add(make_tx(&kp, to.clone(), 0)),
+            Err(MempoolError::StaleNonce)
+        );
+        assert_eq!(
+            mp.add(make_tx(&kp, to.clone(), 1)),
+            Err(MempoolError::StaleNonce)
+        );
         mp.add(make_tx(&kp, to, 2)).unwrap();
         assert_eq!(mp.size(), 1);
     }
@@ -627,7 +633,11 @@ mod tests {
         mp.add(make_tx_with_fee(&kp, to.clone(), 0, 5)).unwrap();
         // Different amount → different hash, but same nonce and same fee → NonceTaken
         let tx2 = vinx_core::Transaction::new_transfer(
-            &kp, to, Amount::from_vinx(2), Amount::from_vinx(5), 0,
+            &kp,
+            to,
+            Amount::from_vinx(2),
+            Amount::from_vinx(5),
+            0,
         );
         assert_eq!(mp.add(tx2), Err(MempoolError::NonceTaken));
         assert_eq!(mp.size(), 1);

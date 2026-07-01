@@ -108,10 +108,15 @@ pub async fn submit_tx(
     match node.mempool.write().await.add(tx) {
         Ok(()) => {
             node.metrics.tx_submitted_ok.fetch_add(1, Ordering::Relaxed);
-            Ok(Json(TxSubmitResponse { accepted: true, tx_hash }))
+            Ok(Json(TxSubmitResponse {
+                accepted: true,
+                tx_hash,
+            }))
         }
         Err(e) => {
-            node.metrics.tx_submitted_err.fetch_add(1, Ordering::Relaxed);
+            node.metrics
+                .tx_submitted_err
+                .fetch_add(1, Ordering::Relaxed);
             Err(ApiError::BadRequest(e.to_string()))
         }
     }
@@ -350,8 +355,7 @@ pub async fn ws_events(ws: WebSocketUpgrade, State(node): State<Arc<Node>>) -> i
 
 async fn handle_ws_client(mut socket: WebSocket, node: Arc<Node>) {
     let mut rx = node.block_events.subscribe();
-    let mut ping_interval =
-        tokio::time::interval(std::time::Duration::from_secs(30));
+    let mut ping_interval = tokio::time::interval(std::time::Duration::from_secs(30));
     ping_interval.tick().await; // skip the immediate first tick
 
     loop {
@@ -369,7 +373,7 @@ async fn handle_ws_client(mut socket: WebSocket, node: Arc<Node>) {
                             "state_root": evt.state_root_hex,
                         });
                         if socket
-                            .send(Message::Text(msg.to_string().into()))
+                            .send(Message::Text(msg.to_string()))
                             .await
                             .is_err()
                         {
@@ -382,7 +386,7 @@ async fn handle_ws_client(mut socket: WebSocket, node: Arc<Node>) {
             }
             _ = ping_interval.tick() => {
                 // Keepalive ping — break if the client is gone
-                if socket.send(Message::Ping(vec![].into())).await.is_err() {
+                if socket.send(Message::Ping(vec![])).await.is_err() {
                     break;
                 }
             }
@@ -568,8 +572,13 @@ pub async fn faucet_request(
             ApiError::BadRequest("Faucet is not enabled on this node".to_string())
         })?;
 
-    let to_addr = node.parse_address(&req.address).await
-        .map_err(|e| match e { ApiError::BadRequest(m) => ApiError::BadRequest(format!("Invalid address: {}", m)), e => e })?;
+    let to_addr = node
+        .parse_address(&req.address)
+        .await
+        .map_err(|e| match e {
+            ApiError::BadRequest(m) => ApiError::BadRequest(format!("Invalid address: {}", m)),
+            e => e,
+        })?;
 
     let faucet_addr = Address::from_public_key(&faucet_kp.public_key());
 
@@ -635,7 +644,9 @@ pub async fn post_snapshot(
     if !check_admin_auth(&headers, node.config.admin_token.as_deref()) {
         return (
             StatusCode::UNAUTHORIZED,
-            Json(ErrorResponse { error: "unauthorized".to_string() }),
+            Json(ErrorResponse {
+                error: "unauthorized".to_string(),
+            }),
         )
             .into_response();
     }
@@ -650,16 +661,26 @@ pub async fn post_snapshot(
             // Full persist: the imported state may hold fewer accounts than the one
             // it replaces, so wipe stale rows and write the whole set to disk now.
             node.persist_full().await;
-            tracing::info!(height, validator_count, "Snapshot imported via POST /snapshot");
+            tracing::info!(
+                height,
+                validator_count,
+                "Snapshot imported via POST /snapshot"
+            );
             (
                 StatusCode::OK,
-                Json(SnapshotImportResponse { imported: true, height, validator_count }),
+                Json(SnapshotImportResponse {
+                    imported: true,
+                    height,
+                    validator_count,
+                }),
             )
                 .into_response()
         }
         Err(e) => (
             StatusCode::BAD_REQUEST,
-            Json(ErrorResponse { error: e.to_string() }),
+            Json(ErrorResponse {
+                error: e.to_string(),
+            }),
         )
             .into_response(),
     }
@@ -674,7 +695,11 @@ pub async fn submit_tx_batch(
     use rayon::prelude::*;
 
     if txs.is_empty() {
-        return Ok(Json(TxBatchResponse { total: 0, accepted: 0, results: vec![] }));
+        return Ok(Json(TxBatchResponse {
+            total: 0,
+            accepted: 0,
+            results: vec![],
+        }));
     }
     if txs.len() > 100 {
         return Err(ApiError::BadRequest(
@@ -688,14 +713,20 @@ pub async fn submit_tx_batch(
         .map(|tx| {
             let hash = hex::encode(tx.hash());
             let result = (|| {
-                let pk = tx.pub_key.as_ref().ok_or_else(|| "Missing public key".to_string())?;
+                let pk = tx
+                    .pub_key
+                    .as_ref()
+                    .ok_or_else(|| "Missing public key".to_string())?;
                 let derived = Address::from_public_key(pk);
                 if derived != tx.from {
                     return Err("Public key does not match sender address".to_string());
                 }
-                let sig =
-                    tx.signature.as_ref().ok_or_else(|| "Missing signature".to_string())?;
-                pk.verify(&tx.signing_bytes(), sig).map_err(|e| e.to_string())
+                let sig = tx
+                    .signature
+                    .as_ref()
+                    .ok_or_else(|| "Missing signature".to_string())?;
+                pk.verify(&tx.signing_bytes(), sig)
+                    .map_err(|e| e.to_string())
             })();
             (hash, result)
         })
@@ -709,17 +740,29 @@ pub async fn submit_tx_batch(
     for (tx, (hash, sig_result)) in txs.into_iter().zip(verifications) {
         match sig_result {
             Err(e) => {
-                node.metrics.tx_submitted_err.fetch_add(1, Ordering::Relaxed);
-                results.push(BatchTxResult { tx_hash: hash, accepted: false, error: Some(e) });
+                node.metrics
+                    .tx_submitted_err
+                    .fetch_add(1, Ordering::Relaxed);
+                results.push(BatchTxResult {
+                    tx_hash: hash,
+                    accepted: false,
+                    error: Some(e),
+                });
             }
             Ok(()) => match mempool.add(tx) {
                 Ok(()) => {
                     node.metrics.tx_submitted_ok.fetch_add(1, Ordering::Relaxed);
                     accepted += 1;
-                    results.push(BatchTxResult { tx_hash: hash, accepted: true, error: None });
+                    results.push(BatchTxResult {
+                        tx_hash: hash,
+                        accepted: true,
+                        error: None,
+                    });
                 }
                 Err(e) => {
-                    node.metrics.tx_submitted_err.fetch_add(1, Ordering::Relaxed);
+                    node.metrics
+                        .tx_submitted_err
+                        .fetch_add(1, Ordering::Relaxed);
                     results.push(BatchTxResult {
                         tx_hash: hash,
                         accepted: false,
@@ -730,7 +773,11 @@ pub async fn submit_tx_batch(
         }
     }
 
-    Ok(Json(TxBatchResponse { total, accepted, results }))
+    Ok(Json(TxBatchResponse {
+        total,
+        accepted,
+        results,
+    }))
 }
 
 // ─── Merkle proof handler ────────────────────────────────────────────────────

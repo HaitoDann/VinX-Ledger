@@ -178,7 +178,7 @@ impl ValidatorSetResponse {
                 let addr_str = a.to_string();
                 let last_seen = liveness.get(&addr_str).copied();
                 let online =
-                    last_seen.map_or(false, |h| next_height.saturating_sub(h) <= slot_window);
+                    last_seen.is_some_and(|h| next_height.saturating_sub(h) <= slot_window);
                 ValidatorInfo {
                     is_next_leader: addr_str == next_leader,
                     suspended: suspended.contains(&addr_str),

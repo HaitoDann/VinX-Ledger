@@ -7,11 +7,10 @@ use amount::parse_amount;
 use client::RpcClient;
 use error::WalletError;
 use keystore::KeyStore;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 use clap::{Parser, Subcommand};
 #[allow(unused_imports)]
-use hex;
 use std::str::FromStr;
 use vinx_core::amount::DEFAULT_FEE_FLOOR_ATOMS;
 use vinx_core::{Amount, GovernanceAction, ProtocolVersion, Transaction};
@@ -289,7 +288,7 @@ async fn run(cmd: Commands) -> Result<(), WalletError> {
 
 // ─── Commands ─────────────────────────────────────────────────────────────────
 
-fn cmd_keygen(output: &PathBuf) -> Result<(), WalletError> {
+fn cmd_keygen(output: &Path) -> Result<(), WalletError> {
     let (ks, _) = KeyStore::generate();
     ks.save(output)?;
     println!("Address : {}", ks.address);
@@ -299,7 +298,7 @@ fn cmd_keygen(output: &PathBuf) -> Result<(), WalletError> {
     Ok(())
 }
 
-fn cmd_address(wallet: &PathBuf) -> Result<(), WalletError> {
+fn cmd_address(wallet: &Path) -> Result<(), WalletError> {
     let ks = KeyStore::load(wallet)?;
     println!("{}", ks.address());
     Ok(())
@@ -319,7 +318,7 @@ async fn cmd_balance(address: &str, node: &str) -> Result<(), WalletError> {
 async fn cmd_transfer(
     to: &str,
     amount_str: &str,
-    wallet: &PathBuf,
+    wallet: &Path,
     node: &str,
 ) -> Result<(), WalletError> {
     let ks = KeyStore::load(wallet)?;
@@ -352,7 +351,7 @@ async fn cmd_transfer(
     Ok(())
 }
 
-async fn cmd_stake(amount_str: &str, wallet: &PathBuf, node: &str) -> Result<(), WalletError> {
+async fn cmd_stake(amount_str: &str, wallet: &Path, node: &str) -> Result<(), WalletError> {
     let ks = KeyStore::load(wallet)?;
     let kp = ks.to_keypair()?;
     let amount = parse_amount(amount_str)?;
@@ -377,7 +376,7 @@ async fn cmd_stake(amount_str: &str, wallet: &PathBuf, node: &str) -> Result<(),
     Ok(())
 }
 
-async fn cmd_unstake(amount_str: &str, wallet: &PathBuf, node: &str) -> Result<(), WalletError> {
+async fn cmd_unstake(amount_str: &str, wallet: &Path, node: &str) -> Result<(), WalletError> {
     let ks = KeyStore::load(wallet)?;
     let kp = ks.to_keypair()?;
     let amount = parse_amount(amount_str)?;
@@ -448,7 +447,7 @@ async fn cmd_tx(hash: &str, node: &str) -> Result<(), WalletError> {
     Ok(())
 }
 
-async fn cmd_freeze(target: &str, wallet: &PathBuf, node: &str) -> Result<(), WalletError> {
+async fn cmd_freeze(target: &str, wallet: &Path, node: &str) -> Result<(), WalletError> {
     let ks = KeyStore::load(wallet)?;
     let kp = ks.to_keypair()?;
     let target_addr = Address::from_bech32(target)?;
@@ -474,7 +473,7 @@ async fn cmd_freeze(target: &str, wallet: &PathBuf, node: &str) -> Result<(), Wa
     Ok(())
 }
 
-async fn cmd_unfreeze(target: &str, wallet: &PathBuf, node: &str) -> Result<(), WalletError> {
+async fn cmd_unfreeze(target: &str, wallet: &Path, node: &str) -> Result<(), WalletError> {
     let ks = KeyStore::load(wallet)?;
     let kp = ks.to_keypair()?;
     let target_addr = Address::from_bech32(target)?;
@@ -503,7 +502,7 @@ async fn cmd_unfreeze(target: &str, wallet: &PathBuf, node: &str) -> Result<(), 
 async fn cmd_announce_upgrade(
     version_str: &str,
     activation_height: u64,
-    wallet: &PathBuf,
+    wallet: &Path,
     node: &str,
 ) -> Result<(), WalletError> {
     let version = ProtocolVersion::from_str(version_str)
@@ -535,7 +534,7 @@ async fn cmd_announce_upgrade(
 
 async fn cmd_add_validator(
     validator_str: &str,
-    wallet: &PathBuf,
+    wallet: &Path,
     node: &str,
 ) -> Result<(), WalletError> {
     let ks = KeyStore::load(wallet)?;
@@ -565,7 +564,7 @@ async fn cmd_add_validator(
 
 async fn cmd_remove_validator(
     validator_str: &str,
-    wallet: &PathBuf,
+    wallet: &Path,
     node: &str,
 ) -> Result<(), WalletError> {
     let ks = KeyStore::load(wallet)?;
@@ -635,8 +634,8 @@ async fn cmd_history(
     }
     println!();
     println!(
-        "{:<8} {:<12} {:<16} {:<20} {}",
-        "Block", "Type", "Amount", "Fee", "Hash"
+        "{:<8} {:<12} {:<16} {:<20} Hash",
+        "Block", "Type", "Amount", "Fee"
     );
     println!("{}", "-".repeat(80));
     for tx in &info.txs {
@@ -662,7 +661,7 @@ async fn cmd_history(
     Ok(())
 }
 
-fn cmd_new_wallet(output: &PathBuf) -> Result<(), WalletError> {
+fn cmd_new_wallet(output: &Path) -> Result<(), WalletError> {
     use bip39::Mnemonic;
     // Generate 16 bytes of OS entropy = 12-word mnemonic
     let entropy = {
@@ -693,7 +692,7 @@ fn cmd_new_wallet(output: &PathBuf) -> Result<(), WalletError> {
     Ok(())
 }
 
-fn cmd_restore_wallet(output: &PathBuf) -> Result<(), WalletError> {
+fn cmd_restore_wallet(output: &Path) -> Result<(), WalletError> {
     use std::io::{self, BufRead};
     print!("Enter your 12-word mnemonic: ");
     let _ = std::io::Write::flush(&mut std::io::stdout());
@@ -724,11 +723,7 @@ fn cmd_restore_wallet(output: &PathBuf) -> Result<(), WalletError> {
     Ok(())
 }
 
-async fn cmd_admin_action(
-    action_json: &str,
-    wallet: &PathBuf,
-    node: &str,
-) -> Result<(), WalletError> {
+async fn cmd_admin_action(action_json: &str, wallet: &Path, node: &str) -> Result<(), WalletError> {
     // Parse the action from JSON
     let action: GovernanceAction = serde_json::from_str(action_json)
         .map_err(|e| WalletError::NodeError(format!("invalid action JSON: {}", e)))?;

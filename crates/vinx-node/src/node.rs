@@ -135,7 +135,10 @@ pub struct Node {
 
 impl Node {
     pub fn new(state: WorldState, chain: Chain, config: NodeConfig) -> Arc<Self> {
-        let storage = config.data_dir.as_ref().map(|p| Arc::new(Storage::new(p.clone())));
+        let storage = config
+            .data_dir
+            .as_ref()
+            .map(|p| Arc::new(Storage::new(p.clone())));
         let initial_vs = state.validator_set.clone();
         let (block_events, _) = broadcast::channel(64);
         Arc::new(Self {
@@ -151,8 +154,12 @@ impl Node {
             last_block_instant: Arc::new(RwLock::new(Instant::now())),
             validator_liveness: Arc::new(RwLock::new(HashMap::new())),
             validator_requests: Arc::new(Mutex::new(Vec::new())),
-            receipts: Arc::new(RwLock::new(LruCache::new(NonZeroUsize::new(100_000).unwrap()))),
-            address_cache: tokio::sync::Mutex::new(LruCache::new(NonZeroUsize::new(1_024).unwrap())),
+            receipts: Arc::new(RwLock::new(LruCache::new(
+                NonZeroUsize::new(100_000).unwrap(),
+            ))),
+            address_cache: tokio::sync::Mutex::new(LruCache::new(
+                NonZeroUsize::new(1_024).unwrap(),
+            )),
             metrics: NodeMetrics::new(),
             suspended_validators: Arc::new(RwLock::new(HashSet::new())),
         })
@@ -160,7 +167,10 @@ impl Node {
 
     /// Creates a node and immediately starts the P2P layer (if configured).
     pub async fn new_with_p2p(state: WorldState, chain: Chain, config: NodeConfig) -> Arc<Self> {
-        let storage = config.data_dir.as_ref().map(|p| Arc::new(Storage::new(p.clone())));
+        let storage = config
+            .data_dir
+            .as_ref()
+            .map(|p| Arc::new(Storage::new(p.clone())));
         let initial_vs = state.validator_set.clone();
         let state_arc = Arc::new(RwLock::new(state));
         let chain_arc = Arc::new(RwLock::new(chain));
@@ -207,8 +217,12 @@ impl Node {
             last_block_instant: Arc::new(RwLock::new(Instant::now())),
             validator_liveness: Arc::new(RwLock::new(HashMap::new())),
             validator_requests: Arc::new(Mutex::new(Vec::new())),
-            receipts: Arc::new(RwLock::new(LruCache::new(NonZeroUsize::new(100_000).unwrap()))),
-            address_cache: tokio::sync::Mutex::new(LruCache::new(NonZeroUsize::new(1_024).unwrap())),
+            receipts: Arc::new(RwLock::new(LruCache::new(
+                NonZeroUsize::new(100_000).unwrap(),
+            ))),
+            address_cache: tokio::sync::Mutex::new(LruCache::new(
+                NonZeroUsize::new(1_024).unwrap(),
+            )),
             metrics,
             suspended_validators: Arc::new(RwLock::new(HashSet::new())),
         })
@@ -280,7 +294,9 @@ impl Node {
         self.metrics
             .tx_in_block
             .fetch_add(block.header.tx_count as u64, Ordering::Relaxed);
-        self.metrics.last_block_secs.store(now_secs, Ordering::Relaxed);
+        self.metrics
+            .last_block_secs
+            .store(now_secs, Ordering::Relaxed);
 
         self.after_block_produced(&block, &state.validator_set)
             .await;
@@ -384,7 +400,11 @@ impl Node {
         // If the scheduled leader is already suspended (liveness-evicted), halve the
         // activation time so backup validators step in sooner.
         let leader_addr = vs.leader_at(height).to_string();
-        let leader_suspended = self.suspended_validators.read().await.contains(&leader_addr);
+        let leader_suspended = self
+            .suspended_validators
+            .read()
+            .await
+            .contains(&leader_addr);
         let activation_secs = if leader_suspended {
             ((distance as u64 + 1) * block_time).max(block_time / 2)
         } else {
@@ -475,7 +495,10 @@ impl Node {
                         }
                         // Auto-compact old tx index every 500 blocks (E)
                         if h > 0 && h % AUTO_COMPACT_INTERVAL == 0 {
-                            self.chain.write().await.compact_old_txs(BLOCK_RETENTION_COUNT);
+                            self.chain
+                                .write()
+                                .await
+                                .compact_old_txs(BLOCK_RETENTION_COUNT);
                             tracing::debug!(height = h, "Auto-compacted chain tx data");
                         }
                         // Update suspended validators based on liveness (F)
@@ -599,7 +622,10 @@ impl Node {
     }
 
     /// Parses and caches a bech32 address string, returning an ApiError on failure.
-    pub async fn parse_address(&self, raw: &str) -> Result<vinx_crypto::Address, crate::rpc::handlers::ApiError> {
+    pub async fn parse_address(
+        &self,
+        raw: &str,
+    ) -> Result<vinx_crypto::Address, crate::rpc::handlers::ApiError> {
         {
             let mut cache = self.address_cache.lock().await;
             if let Some(addr) = cache.get(raw) {
@@ -608,7 +634,10 @@ impl Node {
         }
         let addr = vinx_crypto::Address::from_bech32(raw)
             .map_err(|e| crate::rpc::handlers::ApiError::BadRequest(e.to_string()))?;
-        self.address_cache.lock().await.put(raw.to_string(), addr.clone());
+        self.address_cache
+            .lock()
+            .await
+            .put(raw.to_string(), addr.clone());
         Ok(addr)
     }
 

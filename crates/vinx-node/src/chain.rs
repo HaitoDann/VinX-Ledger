@@ -84,6 +84,7 @@ impl Chain {
     }
 
     /// Exports both tx indexes for external persistence (called by Storage::save).
+    #[allow(clippy::type_complexity)]
     pub fn export_tx_indexes(
         &self,
     ) -> (&HashMap<String, (u64, u32)>, &HashMap<String, Vec<String>>) {
@@ -160,6 +161,11 @@ impl Chain {
     /// Number of blocks (= tip_height + 1).
     pub fn len(&self) -> usize {
         self.blocks.len()
+    }
+
+    /// True when the chain holds no blocks (never the case after genesis).
+    pub fn is_empty(&self) -> bool {
+        self.blocks.is_empty()
     }
 
     /// Adds a co-signature to an already-stored block.
@@ -339,7 +345,10 @@ mod tests {
         chain.prune(3);
         // All headers still accessible
         for h in 0u64..=10 {
-            assert!(chain.get_block(h).is_some(), "block {h} missing after prune");
+            assert!(
+                chain.get_block(h).is_some(),
+                "block {h} missing after prune"
+            );
         }
         assert_eq!(chain.tip_height(), 10);
     }

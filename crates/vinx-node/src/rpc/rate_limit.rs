@@ -39,7 +39,12 @@ struct TokenBucket {
 
 impl TokenBucket {
     fn new(capacity: f64, refill_rate: f64) -> Self {
-        Self { tokens: capacity, last_refill: Instant::now(), capacity, refill_rate }
+        Self {
+            tokens: capacity,
+            last_refill: Instant::now(),
+            capacity,
+            refill_rate,
+        }
     }
 
     /// Refills based on elapsed time then tries to consume one token.
@@ -109,7 +114,10 @@ pub struct RateLimiter {
 
 impl RateLimiter {
     pub fn new(metrics: NodeMetrics) -> Self {
-        Self { buckets: Arc::new(Mutex::new(HashMap::new())), metrics }
+        Self {
+            buckets: Arc::new(Mutex::new(HashMap::new())),
+            metrics,
+        }
     }
 }
 

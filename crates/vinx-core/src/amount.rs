@@ -57,7 +57,20 @@ pub const UPGRADE_NOTICE_MAJOR_BLOCKS: u64 = 90 * 24 * 360; // 90 days
 
 /// Internal token amount stored as an integer in the smallest unit (10^-18 VinX).
 /// All arithmetic uses checked operations to prevent overflow or underflow.
-#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Default, Serialize, Deserialize, BorshSerialize, BorshDeserialize)]
+#[derive(
+    Clone,
+    Copy,
+    Debug,
+    PartialEq,
+    Eq,
+    PartialOrd,
+    Ord,
+    Default,
+    Serialize,
+    Deserialize,
+    BorshSerialize,
+    BorshDeserialize,
+)]
 pub struct Amount(pub(crate) u128);
 
 impl Amount {

@@ -9,7 +9,9 @@ pub const BECH32_HRP: &str = "vinx";
 
 /// A VinX Ledger address in Bech32 format: `vinx1...`
 /// Derived from the first 20 bytes of SHA-256(public_key).
-#[derive(Clone, Debug, PartialEq, Eq, Hash, Serialize, Deserialize, BorshSerialize, BorshDeserialize)]
+#[derive(
+    Clone, Debug, PartialEq, Eq, Hash, Serialize, Deserialize, BorshSerialize, BorshDeserialize,
+)]
 pub struct Address(String);
 
 impl Address {

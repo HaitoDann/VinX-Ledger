@@ -83,12 +83,11 @@ impl Storage {
     }
 
     fn io_err(msg: impl std::fmt::Display) -> io::Error {
-        io::Error::new(io::ErrorKind::Other, msg.to_string())
+        io::Error::other(msg.to_string())
     }
 
     fn compress(data: &[u8]) -> io::Result<Vec<u8>> {
-        zstd::encode_all(data, ZSTD_LEVEL)
-            .map_err(|e| Self::io_err(format!("zstd compress: {e}")))
+        zstd::encode_all(data, ZSTD_LEVEL).map_err(|e| Self::io_err(format!("zstd compress: {e}")))
     }
 
     fn decompress(data: &[u8]) -> io::Result<Vec<u8>> {
@@ -97,8 +96,8 @@ impl Storage {
 
     /// Serializes the chain and its tx indexes (no accounts, no meta).
     fn serialize_chain(chain: &Chain) -> io::Result<(Vec<u8>, Vec<u8>, Vec<u8>)> {
-        let chain_bytes = bincode::serialize(chain)
-            .map_err(|e| Self::io_err(format!("serialize chain: {e}")))?;
+        let chain_bytes =
+            bincode::serialize(chain).map_err(|e| Self::io_err(format!("serialize chain: {e}")))?;
         let (tx_index, account_tx_index) = chain.export_tx_indexes();
         let tx_index_bytes = bincode::serialize(tx_index)
             .map_err(|e| Self::io_err(format!("serialize tx_index: {e}")))?;
@@ -160,30 +159,30 @@ impl Storage {
             "Persisting state (incremental)"
         );
 
-        let tx = self.db.begin_write().map_err(|e| Self::io_err(e))?;
+        let tx = self.db.begin_write().map_err(Self::io_err)?;
         if w.replace_accounts {
             // Drop and recreate the accounts table to clear rows no longer present.
-            tx.delete_table(ACCOUNTS).map_err(|e| Self::io_err(e))?;
+            tx.delete_table(ACCOUNTS).map_err(Self::io_err)?;
         }
         {
-            let mut tbl = tx.open_table(STATE).map_err(|e| Self::io_err(e))?;
+            let mut tbl = tx.open_table(STATE).map_err(Self::io_err)?;
             tbl.insert("world_state_meta", meta_c.as_slice())
-                .map_err(|e| Self::io_err(e))?;
+                .map_err(Self::io_err)?;
             tbl.insert("chain", chain_c.as_slice())
-                .map_err(|e| Self::io_err(e))?;
+                .map_err(Self::io_err)?;
             tbl.insert("tx_index", tx_idx_c.as_slice())
-                .map_err(|e| Self::io_err(e))?;
+                .map_err(Self::io_err)?;
             tbl.insert("account_tx_index", acc_idx_c.as_slice())
-                .map_err(|e| Self::io_err(e))?;
+                .map_err(Self::io_err)?;
         }
         {
-            let mut atbl = tx.open_table(ACCOUNTS).map_err(|e| Self::io_err(e))?;
+            let mut atbl = tx.open_table(ACCOUNTS).map_err(Self::io_err)?;
             for (addr, bytes) in &w.account_rows {
                 atbl.insert(addr.as_str(), bytes.as_slice())
-                    .map_err(|e| Self::io_err(e))?;
+                    .map_err(Self::io_err)?;
             }
         }
-        tx.commit().map_err(|e| Self::io_err(e))?;
+        tx.commit().map_err(Self::io_err)?;
         Ok(())
     }
 
@@ -233,8 +232,7 @@ impl Storage {
 
         // Restore persisted indexes — O(1) vs O(blocks×txs) rebuild
         let indexes_restored = (|| -> Option<()> {
-            let tx_index_bytes =
-                Self::decompress(tbl.get("tx_index").ok()??.value()).ok()?;
+            let tx_index_bytes = Self::decompress(tbl.get("tx_index").ok()??.value()).ok()?;
             let account_tx_index_bytes =
                 Self::decompress(tbl.get("account_tx_index").ok()??.value()).ok()?;
             let tx_index: HashMap<String, (u64, u32)> =
@@ -255,21 +253,20 @@ impl Storage {
 
     /// Serializes pending mempool transactions to raw bytes.
     pub fn serialize_mempool(txs: &[&Transaction]) -> io::Result<Vec<u8>> {
-        bincode::serialize(txs)
-            .map_err(|e| Self::io_err(format!("serialize mempool: {e}")))
+        bincode::serialize(txs).map_err(|e| Self::io_err(format!("serialize mempool: {e}")))
     }
 
     /// Compresses and writes a pre-serialized mempool blob to redb.
     /// Designed to run inside `tokio::task::spawn_blocking`.
     pub fn save_mempool_blob(&self, blob: Vec<u8>) -> io::Result<()> {
         let compressed = Self::compress(&blob)?;
-        let tx = self.db.begin_write().map_err(|e| Self::io_err(e))?;
+        let tx = self.db.begin_write().map_err(Self::io_err)?;
         {
-            let mut tbl = tx.open_table(STATE).map_err(|e| Self::io_err(e))?;
+            let mut tbl = tx.open_table(STATE).map_err(Self::io_err)?;
             tbl.insert("mempool", compressed.as_slice())
-                .map_err(|e| Self::io_err(e))?;
+                .map_err(Self::io_err)?;
         }
-        tx.commit().map_err(|e| Self::io_err(e))?;
+        tx.commit().map_err(Self::io_err)?;
         Ok(())
     }
 

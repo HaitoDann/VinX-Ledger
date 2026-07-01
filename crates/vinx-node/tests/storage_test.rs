@@ -41,7 +41,8 @@ fn test_storage_roundtrip() {
     let (_, admin) = make_addr();
     let (_, validator) = make_addr();
 
-    let mut state = create_genesis_state(&GenesisConfig { chain_id: vinx_core::CHAIN_ID_DEVNET,
+    let mut state = create_genesis_state(&GenesisConfig {
+        chain_id: vinx_core::CHAIN_ID_DEVNET,
         admin_address: admin.clone(),
         validator_address: validator.clone(),
     });
@@ -113,7 +114,8 @@ async fn test_state_persists_across_node_restarts() {
 
     // ── First run: produce 5 blocks ──────────────────────────────────────────
     {
-        let state = create_genesis_state(&GenesisConfig { chain_id: vinx_core::CHAIN_ID_DEVNET,
+        let state = create_genesis_state(&GenesisConfig {
+            chain_id: vinx_core::CHAIN_ID_DEVNET,
             admin_address: admin_addr.clone(),
             validator_address: validator_addr.clone(),
         });

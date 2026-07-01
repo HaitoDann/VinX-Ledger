@@ -267,7 +267,9 @@ impl WorldState {
     /// Drains and returns the set of account addresses modified since the last
     /// drain. Used by incremental persistence to write only changed rows.
     pub fn take_persist_dirty(&mut self) -> Vec<String> {
-        std::mem::take(&mut self.persist_dirty).into_iter().collect()
+        std::mem::take(&mut self.persist_dirty)
+            .into_iter()
+            .collect()
     }
 
     /// Marks every current account for persistence — used before a full save
@@ -800,7 +802,11 @@ impl WorldState {
 
     /// Distributes staking pool every STAKING_DISTRIBUTION_INTERVAL blocks.
     pub fn distribute_staking_rewards(&mut self) -> Amount {
-        if self.block_height == 0 || self.block_height % STAKING_DISTRIBUTION_INTERVAL != 0 {
+        if self.block_height == 0
+            || !self
+                .block_height
+                .is_multiple_of(STAKING_DISTRIBUTION_INTERVAL)
+        {
             return Amount::ZERO;
         }
         if self.staking_pool == Amount::ZERO {

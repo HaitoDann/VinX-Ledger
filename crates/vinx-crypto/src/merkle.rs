@@ -39,7 +39,7 @@ impl IncrementalMerkleTree {
                 break;
             }
             let len = prev.len();
-            let mut next = Vec::with_capacity((len + 1) / 2);
+            let mut next = Vec::with_capacity(len.div_ceil(2));
             for i in (0..len).step_by(2) {
                 let l = prev[i];
                 let r = if i + 1 < len { prev[i + 1] } else { prev[i] };
@@ -52,7 +52,9 @@ impl IncrementalMerkleTree {
     /// O(log n) single-leaf update for an existing leaf.
     /// Propagates the change through all internal levels to the root.
     pub fn update_leaf(&mut self, idx: usize, new_hash: Hash32) {
-        let Some(leaves) = self.levels.first() else { return };
+        let Some(leaves) = self.levels.first() else {
+            return;
+        };
         if idx >= leaves.len() {
             return;
         }
@@ -64,7 +66,11 @@ impl IncrementalMerkleTree {
             let li = parent * 2;
             let ri = li + 1;
             let l = self.levels[lvl][li];
-            let r = if ri < len { self.levels[lvl][ri] } else { self.levels[lvl][li] };
+            let r = if ri < len {
+                self.levels[lvl][ri]
+            } else {
+                self.levels[lvl][li]
+            };
             self.levels[lvl + 1][parent] = hash_pair(l, r);
             node_idx = parent;
         }
@@ -152,10 +158,14 @@ pub fn merkle_proof_for(leaves: &[Hash32], index: usize) -> Option<Vec<MerklePro
         if level.len() % 2 == 1 {
             level.push(*level.last().unwrap());
         }
-        let sibling_idx = if idx % 2 == 0 { idx + 1 } else { idx - 1 };
+        let sibling_idx = if idx.is_multiple_of(2) {
+            idx + 1
+        } else {
+            idx - 1
+        };
         proof.push(MerkleProofStep {
             sibling: level[sibling_idx],
-            sibling_is_right: idx % 2 == 0,
+            sibling_is_right: idx.is_multiple_of(2),
         });
         level = level
             .chunks_exact(2)
@@ -372,7 +382,11 @@ mod tests {
             let h = sha256(&[i as u8, 0xff]);
             leaves[i] = h;
             tree.update_leaf(i, h);
-            assert_eq!(tree.root(), merkle_root(&leaves), "mismatch after update {i}");
+            assert_eq!(
+                tree.root(),
+                merkle_root(&leaves),
+                "mismatch after update {i}"
+            );
         }
     }
 

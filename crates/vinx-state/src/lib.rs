@@ -21,7 +21,8 @@ mod tests {
 
         let validator_kp = KeyPair::generate();
         let validator_addr = Address::from_public_key(&validator_kp.public_key());
-        let state = create_genesis_state(&GenesisConfig { chain_id: vinx_core::CHAIN_ID_DEVNET,
+        let state = create_genesis_state(&GenesisConfig {
+            chain_id: vinx_core::CHAIN_ID_DEVNET,
             admin_address: sender_addr.clone(),
             validator_address: validator_addr,
         });
@@ -193,10 +194,7 @@ mod tests {
         let treasury_cut = Amount::treasury_share(fee);
         assert_eq!(state.validator_fee_pool, validator_cut);
         assert_eq!(state.treasury, treasury_cut);
-        assert_eq!(
-            validator_cut.checked_add(treasury_cut).unwrap(),
-            fee
-        );
+        assert_eq!(validator_cut.checked_add(treasury_cut).unwrap(), fee);
     }
 
     #[test]

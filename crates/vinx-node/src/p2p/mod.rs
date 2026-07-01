@@ -7,7 +7,7 @@ use std::time::Duration;
 use futures::StreamExt;
 use libp2p::{
     gossipsub::{self, IdentTopic, TopicHash},
-    identify, mdns, noise, quic,
+    identify, mdns, noise,
     swarm::{NetworkBehaviour, SwarmEvent},
     tcp, yamux, Multiaddr, PeerId, SwarmBuilder,
 };
@@ -22,6 +22,7 @@ use vinx_core::{Block, BlockSignature, Transaction, ValidatorSet};
 use vinx_crypto::{Address, Hash32};
 use vinx_state::WorldState;
 
+#[allow(clippy::large_enum_variant)]
 pub enum P2pCommand {
     Broadcast(P2pMessage),
     Shutdown,
@@ -207,6 +208,7 @@ pub async fn start(
 
 const BAN_THRESHOLD: i32 = -5;
 
+#[allow(clippy::too_many_arguments)]
 async fn run_event_loop(
     mut swarm: libp2p::Swarm<VinxBehaviour>,
     mut cmd_rx: mpsc::UnboundedReceiver<P2pCommand>,
@@ -245,6 +247,7 @@ async fn run_event_loop(
     }
 }
 
+#[allow(clippy::too_many_arguments)]
 async fn handle_swarm_event(
     event: SwarmEvent<VinxBehaviourEvent>,
     chain: &Arc<RwLock<Chain>>,
@@ -297,7 +300,10 @@ async fn handle_swarm_event(
                 *score -= 1;
                 if *score <= BAN_THRESHOLD {
                     warn!(peer = %propagation_source, score, "Banning peer for invalid messages");
-                    swarm.behaviour_mut().gossipsub.blacklist_peer(&propagation_source);
+                    swarm
+                        .behaviour_mut()
+                        .gossipsub
+                        .blacklist_peer(&propagation_source);
                 }
                 return;
             };
@@ -343,6 +349,7 @@ fn verify_block_signatures_parallel(sigs: &[BlockSignature], block_hash: &Hash32
     })
 }
 
+#[allow(clippy::too_many_arguments)]
 async fn dispatch_message(
     msg: P2pMessage,
     chain: &Arc<RwLock<Chain>>,
@@ -403,7 +410,11 @@ async fn dispatch_message(
 
             // 3. Signature verification — proposer must be present; all sigs verified in parallel.
             let block_hash = block.hash();
-            if !block.signatures.iter().any(|s| s.validator == block.header.validator) {
+            if !block
+                .signatures
+                .iter()
+                .any(|s| s.validator == block.header.validator)
+            {
                 warn!(height, "P2P block missing proposer sig");
                 return;
             }
