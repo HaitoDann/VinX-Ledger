@@ -5,6 +5,28 @@ Format : `MAJEUR.MINEUR.CORRECTIF` — les versions `0.x.y` sont des versions de
 
 ---
 
+## [0.22.0] — 2026-07-01
+
+### Allocations & tris — comptes triés, adresses partagées
+
+**#4 — `accounts` en `BTreeMap` (`vinx-state`)**
+- `WorldState::accounts` passe de `HashMap` à `BTreeMap`. La clé étant l'adresse bech32, `values()` itère déjà dans l'ordre Merkle (tri par adresse).
+- Suppression du `sort_by_key` O(n log n) dans `full_rebuild` (reconstruction du state root) **et** dans `accounts_sorted` (preuves d'inclusion Merkle, chemin RPC).
+- Ordre des feuilles inchangé (`BTreeMap<String>` = tri par `address.as_str()`) → racine Merkle strictement identique.
+
+**#2 — `Address` en `Arc<str>` au lieu de `String` (`vinx-crypto`)**
+- `Address(String)` → `Address(Arc<str>)` : chaque clone (blocs, transactions, signatures, validator set…) devient un **incrément de compteur de références O(1)** au lieu d'une allocation heap. L'adresse traverse tout le pipeline en étant clonée en permanence — c'est le coût d'allocation le plus diffus du système.
+- `as_str()` continue de renvoyer les octets bech32 exacts dont dépendent `signing_bytes()`, l'API JSON et le hachage des feuilles Merkle — **aucun contrat client cassé**.
+- Implémentations `serde`/`borsh` manuelles : les formats sérialisés restent **strictement identiques** à ceux de `String` (JSON `"vinx1..."`, bincode et borsh = longueur + UTF-8). Vérifié par 3 tests dédiés (`test_json_is_the_bech32_string`, `test_bincode_matches_plain_string`, `test_borsh_matches_plain_string`).
+- Note : le passage à une représentation `[u8; 20]` `Copy` (gain maximal) reste un **chantier protocole cassant** distinct — il modifierait `signing_bytes`, le hachage Merkle et le format JSON, exigeant une MAJ coordonnée de l'UI web + du SDK TypeScript et un bump de version protocole.
+
+**Nettoyage**
+- `cargo fmt --all` + `cargo clippy -- -D warnings` sur tout le workspace (dérive de toolchain des stables récentes) : format, closures redondantes, `&PathBuf`→`&Path`, `Chain::is_empty`, `#[allow]` ciblés (type_complexity, large_enum_variant, too_many_arguments).
+
+225 tests — 0 échec.
+
+---
+
 ## [0.21.0] — 2026-07-01
 
 ### Persistance incrémentale & application « trusted » (scalabilité)

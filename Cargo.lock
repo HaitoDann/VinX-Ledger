@@ -3987,11 +3987,13 @@ name = "vinx-crypto"
 version = "0.1.0-alpha.1"
 dependencies = [
  "bech32",
+ "bincode",
  "borsh",
  "ed25519-dalek",
  "hex",
  "rand 0.8.6",
  "serde",
+ "serde_json",
  "sha2",
  "thiserror 1.0.69",
 ]
