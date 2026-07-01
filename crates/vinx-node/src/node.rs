@@ -527,6 +527,31 @@ impl Node {
 
     /// Writes chain, state, and mempool to disk (no-op if no data_dir configured).
     ///
+    /// Full persist: writes every account and wipes any stale rows. Used after a
+    /// snapshot import replaces the live world state (the incremental `persist` path
+    /// only writes changed rows and cannot detect accounts that disappeared).
+    pub async fn persist_full(&self) {
+        let Some(storage) = self.storage.as_ref().map(Arc::clone) else {
+            return;
+        };
+        let state_write = {
+            let mut state = self.state.write().await;
+            let chain = self.chain.read().await;
+            Storage::serialize_full(&mut state, &chain)
+        };
+        match state_write {
+            Err(e) => tracing::warn!(error = %e, "Failed to serialize state for full persist"),
+            Ok(sw) => {
+                let _ = tokio::task::spawn_blocking(move || {
+                    if let Err(e) = storage.write_state(sw) {
+                        tracing::warn!(error = %e, "Failed to persist full state to disk");
+                    }
+                })
+                .await;
+            }
+        }
+    }
+
     /// Serializes to bytes while holding read locks (fast, pure in-memory), releases
     /// the locks, then offloads zstd compression + redb write to a blocking thread.
     /// The JoinHandle is awaited so the persist completes before the caller proceeds,
@@ -536,23 +561,25 @@ impl Node {
             return;
         };
 
-        // Serialize under read locks — fast, no disk I/O here.
-        let (blobs, mempool_blob) = {
-            let state = self.state.read().await;
+        // Serialize under a short write lock — moving the accounts map out for the
+        // meta blob and draining the persist-dirty set both require &mut. Only the
+        // accounts changed since the last flush are serialized here (O(dirty)).
+        let (state_write, mempool_blob) = {
+            let mut state = self.state.write().await;
             let chain = self.chain.read().await;
             let mempool = self.mempool.read().await;
             let txs = mempool.pending_txs();
-            let blobs = Storage::serialize(&state, &chain);
+            let sw = Storage::serialize_incremental(&mut state, &chain);
             let mp_blob = Storage::serialize_mempool(&txs);
-            (blobs, mp_blob)
+            (sw, mp_blob)
         }; // all locks dropped here
 
-        match blobs {
+        match state_write {
             Err(e) => tracing::warn!(error = %e, "Failed to serialize state for persist"),
-            Ok((sb, cb, tib, atib)) => {
+            Ok(sw) => {
                 // Compress + write in a blocking thread. Locks already released.
                 let _ = tokio::task::spawn_blocking(move || {
-                    if let Err(e) = storage.save_serialized(sb, cb, tib, atib) {
+                    if let Err(e) = storage.write_state(sw) {
                         tracing::warn!(error = %e, "Failed to persist state to disk");
                     }
                     match mempool_blob {

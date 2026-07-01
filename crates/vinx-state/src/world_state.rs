@@ -73,6 +73,12 @@ pub struct WorldState {
     /// True when an account was added/removed — requires a full O(n) rebuild.
     #[serde(skip)]
     needs_rebuild: bool,
+    /// Accounts modified since the last persistence flush. Distinct from
+    /// `dirty_addrs` (which is consumed by `compute_state_root`): this set survives
+    /// until `take_persist_dirty` drains it, so incremental persistence can write
+    /// only the accounts that actually changed instead of the whole map.
+    #[serde(skip)]
+    persist_dirty: HashSet<String>,
 }
 
 fn default_fee_floor() -> Amount {
@@ -117,6 +123,7 @@ impl WorldState {
             leaf_index: HashMap::new(),
             dirty_addrs: HashSet::new(),
             needs_rebuild: false,
+            persist_dirty: HashSet::new(),
         }
     }
 
@@ -128,6 +135,7 @@ impl WorldState {
             self.needs_rebuild = true;
         }
         self.dirty_addrs.insert(addr.to_string());
+        self.persist_dirty.insert(addr.to_string());
     }
 
     /// O(n) full rebuild of the incremental tree — sorts all accounts, hashes each leaf,
@@ -241,6 +249,50 @@ impl WorldState {
         self.treasury
     }
 
+    // ---- Incremental persistence support ----------------------------------
+
+    /// Serializes every state field **except** the `accounts` map, which is
+    /// persisted separately per key. The map is temporarily moved out (no clone)
+    /// and restored before returning, so `self` is left unchanged.
+    ///
+    /// The resulting blob deserializes back into a `WorldState` whose `accounts`
+    /// map is empty; the caller repopulates it via [`WorldState::load_account`].
+    pub fn serialize_meta(&mut self) -> Result<Vec<u8>, bincode::Error> {
+        let accounts = std::mem::take(&mut self.accounts);
+        let result = bincode::serialize(&*self);
+        self.accounts = accounts;
+        result
+    }
+
+    /// Drains and returns the set of account addresses modified since the last
+    /// drain. Used by incremental persistence to write only changed rows.
+    pub fn take_persist_dirty(&mut self) -> Vec<String> {
+        std::mem::take(&mut self.persist_dirty).into_iter().collect()
+    }
+
+    /// Marks every current account for persistence — used before a full save
+    /// (genesis bootstrap, snapshot import) so the next flush writes the whole set.
+    pub fn mark_all_persist_dirty(&mut self) {
+        self.persist_dirty = self.accounts.keys().cloned().collect();
+    }
+
+    /// Looks up an account by its raw address string (persistence row source).
+    pub fn account_by_str(&self, addr: &str) -> Option<&Account> {
+        self.accounts.get(addr)
+    }
+
+    /// Iterates over all `(address, account)` pairs — full-snapshot persistence.
+    pub fn accounts_iter(&self) -> impl Iterator<Item = (&String, &Account)> {
+        self.accounts.iter()
+    }
+
+    /// Inserts an account loaded from storage **without** marking it dirty.
+    /// The Merkle tree and indexes are rebuilt lazily on the first state-root call.
+    pub fn load_account(&mut self, account: Account) {
+        self.accounts
+            .insert(account.address.as_str().to_string(), account);
+    }
+
     /// Returns true when the chain must keep advancing even with an empty mempool.
     ///
     /// Two conditions require a periodic heartbeat block:
@@ -278,49 +330,86 @@ impl WorldState {
         acc.balance = acc.balance.saturating_add(amount);
     }
 
+    /// Applies a transaction with full verification: chain-id/TTL replay checks
+    /// **and** Ed25519 signature verification. Use this for transactions from any
+    /// untrusted source (P2P gossip, chain sync, direct replay of a received block).
     pub fn apply_transaction(&mut self, tx: &Transaction) -> Result<(), CoreError> {
         if tx.tx_type != TransactionType::Emission {
-            // Chain-ID replay protection
-            if tx.chain_id != self.chain_id {
+            self.check_replay_and_ttl(tx)?;
+            self.verify_tx_signatures(tx)?;
+        }
+        self.dispatch_tx(tx)
+    }
+
+    /// Applies a transaction **without** re-verifying its Ed25519 signatures.
+    ///
+    /// The caller MUST guarantee the signatures were already verified — e.g. the
+    /// transaction was drained from the mempool's verified `queues`, whose invariant
+    /// is that every entry has a valid signature. Chain-id and TTL checks are still
+    /// enforced because the chain height may have advanced since admission (a tx can
+    /// expire between mempool entry and block inclusion).
+    ///
+    /// NEVER call this on transactions from an untrusted source (P2P, sync) — signature
+    /// verification is the security boundary there. Use `apply_transaction` instead.
+    pub fn apply_transaction_trusted(&mut self, tx: &Transaction) -> Result<(), CoreError> {
+        if tx.tx_type != TransactionType::Emission {
+            self.check_replay_and_ttl(tx)?;
+        }
+        self.dispatch_tx(tx)
+    }
+
+    /// Cheap replay-protection guards: chain-id binding and height-based TTL.
+    fn check_replay_and_ttl(&self, tx: &Transaction) -> Result<(), CoreError> {
+        // Chain-ID replay protection
+        if tx.chain_id != self.chain_id {
+            return Err(CoreError::InvalidTransaction(format!(
+                "chain_id mismatch: tx={} state={}",
+                tx.chain_id, self.chain_id
+            )));
+        }
+        // TTL check
+        if let Some(expires) = tx.expires_at_height {
+            if self.block_height >= expires {
                 return Err(CoreError::InvalidTransaction(format!(
-                    "chain_id mismatch: tx={} state={}",
-                    tx.chain_id, self.chain_id
+                    "transaction expired at height {} (current {})",
+                    expires, self.block_height
                 )));
             }
-            // TTL check
-            if let Some(expires) = tx.expires_at_height {
-                if self.block_height >= expires {
-                    return Err(CoreError::InvalidTransaction(format!(
-                        "transaction expired at height {} (current {})",
-                        expires, self.block_height
-                    )));
-                }
-            }
-            let pk = tx.pub_key.as_ref().ok_or(CoreError::InvalidSignature)?;
-            let derived = Address::from_public_key(pk);
-            if derived != tx.from {
+        }
+        Ok(())
+    }
+
+    /// Verifies the sender's (and optional sponsor's) public-key binding and Ed25519
+    /// signature. This is the expensive part of applying a transaction.
+    fn verify_tx_signatures(&self, tx: &Transaction) -> Result<(), CoreError> {
+        let pk = tx.pub_key.as_ref().ok_or(CoreError::InvalidSignature)?;
+        let derived = Address::from_public_key(pk);
+        if derived != tx.from {
+            return Err(CoreError::PubKeyMismatch);
+        }
+        let sig = tx.signature.as_ref().ok_or(CoreError::InvalidSignature)?;
+        pk.verify(&tx.signing_bytes(), sig)?;
+
+        // Sponsored transaction: validate sponsor's key and signature
+        if let Some(ref sponsor_addr) = tx.sponsor {
+            let spk = tx
+                .sponsor_pub_key
+                .as_ref()
+                .ok_or(CoreError::InvalidSignature)?;
+            if &Address::from_public_key(spk) != sponsor_addr {
                 return Err(CoreError::PubKeyMismatch);
             }
-            let sig = tx.signature.as_ref().ok_or(CoreError::InvalidSignature)?;
-            pk.verify(&tx.signing_bytes(), sig)?;
-
-            // Sponsored transaction: validate sponsor's key and signature
-            if let Some(ref sponsor_addr) = tx.sponsor {
-                let spk = tx
-                    .sponsor_pub_key
-                    .as_ref()
-                    .ok_or(CoreError::InvalidSignature)?;
-                if &Address::from_public_key(spk) != sponsor_addr {
-                    return Err(CoreError::PubKeyMismatch);
-                }
-                let ssig = tx
-                    .sponsor_signature
-                    .as_ref()
-                    .ok_or(CoreError::InvalidSignature)?;
-                spk.verify(&tx.signing_bytes(), ssig)?;
-            }
+            let ssig = tx
+                .sponsor_signature
+                .as_ref()
+                .ok_or(CoreError::InvalidSignature)?;
+            spk.verify(&tx.signing_bytes(), ssig)?;
         }
+        Ok(())
+    }
 
+    /// Dispatches a (pre-verified) transaction to its type-specific handler.
+    fn dispatch_tx(&mut self, tx: &Transaction) -> Result<(), CoreError> {
         match &tx.tx_type {
             TransactionType::Transfer => self.apply_transfer(tx),
             TransactionType::Stake => self.apply_stake(tx),

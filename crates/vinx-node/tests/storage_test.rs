@@ -41,7 +41,7 @@ fn test_storage_roundtrip() {
     let (_, admin) = make_addr();
     let (_, validator) = make_addr();
 
-    let state = create_genesis_state(&GenesisConfig { chain_id: vinx_core::CHAIN_ID_DEVNET,
+    let mut state = create_genesis_state(&GenesisConfig { chain_id: vinx_core::CHAIN_ID_DEVNET,
         admin_address: admin.clone(),
         validator_address: validator.clone(),
     });
@@ -50,7 +50,7 @@ fn test_storage_roundtrip() {
     let storage = Storage::new(tmp.path());
     assert!(!storage.exists());
 
-    storage.save(&state, &chain).unwrap();
+    storage.save(&mut state, &chain).unwrap();
     assert!(storage.exists());
 
     let (loaded_state, loaded_chain) = storage.load().expect("should load");
@@ -61,6 +61,41 @@ fn test_storage_roundtrip() {
     );
     assert_eq!(loaded_chain.tip_height(), chain.tip_height());
     assert_eq!(loaded_chain.tip_hash(), chain.tip_hash());
+}
+
+#[test]
+fn test_incremental_persist_writes_only_dirty_rows() {
+    let tmp = TmpDir::new();
+    let (_, admin) = make_addr();
+    let (_, validator) = make_addr();
+
+    let mut state = create_genesis_state(&GenesisConfig {
+        chain_id: vinx_core::CHAIN_ID_DEVNET,
+        admin_address: admin.clone(),
+        validator_address: validator.clone(),
+    });
+    let (chain, _) = Chain::new_with_genesis(validator.clone(), 0);
+    let storage = Storage::new(tmp.path());
+
+    // Initial full save flushes every account and clears the dirty set.
+    storage.save(&mut state, &chain).unwrap();
+
+    // Touch a single new account, then persist incrementally.
+    let (_, bob) = make_addr();
+    state.credit_for_test(bob.clone(), Amount::from_vinx(500));
+    let write = Storage::serialize_incremental(&mut state, &chain).unwrap();
+    // Only the changed account is written — not the whole account set.
+    assert_eq!(write.account_rows.len(), 1);
+    assert!(!write.replace_accounts);
+    storage.write_state(write).unwrap();
+
+    // Both the untouched genesis account and the new one survive a reload.
+    let (loaded, _) = storage.load().expect("should load");
+    assert_eq!(
+        loaded.account_balance(&admin),
+        Amount::from_vinx(21_000_000)
+    );
+    assert_eq!(loaded.account_balance(&bob), Amount::from_vinx(500));
 }
 
 #[test]

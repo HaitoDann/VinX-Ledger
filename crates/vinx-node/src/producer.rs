@@ -54,12 +54,14 @@ pub fn produce_block(
 
     let mut block_txs: Vec<vinx_core::Transaction> = Vec::new();
 
-    // Pull pending transactions from mempool and apply them
+    // Pull pending transactions from mempool and apply them.
+    // Signatures were already verified at mempool admission (verified `queues`
+    // invariant), so use the trusted apply path — no redundant Ed25519 verify.
     let pending = mempool.drain(config.max_block_txs);
     let mut rejected = 0usize;
     let mut requeue_buf: Vec<vinx_core::Transaction> = Vec::new();
     for tx in pending {
-        match state.apply_transaction(&tx) {
+        match state.apply_transaction_trusted(&tx) {
             Ok(()) => block_txs.push(tx),
             Err(e) => {
                 tracing::debug!(error = %e, "Transaction rejected during block production");
@@ -184,11 +186,12 @@ fn produce_block_inner(
     let current_base_fee = state.base_fee;
 
     let mut block_txs: Vec<vinx_core::Transaction> = Vec::new();
+    // Trusted apply: mempool queues hold only signature-verified transactions.
     let pending = mempool.drain(config.max_block_txs);
     let mut rejected = 0usize;
     let mut requeue_buf: Vec<vinx_core::Transaction> = Vec::new();
     for tx in pending {
-        match state.apply_transaction(&tx) {
+        match state.apply_transaction_trusted(&tx) {
             Ok(()) => block_txs.push(tx),
             Err(e) => {
                 tracing::debug!(error = %e, "Transaction rejected during block production");

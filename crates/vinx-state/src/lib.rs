@@ -52,6 +52,56 @@ mod tests {
     }
 
     #[test]
+    fn test_apply_trusted_skips_signature_but_enforces_state() {
+        let (mut state, sender_kp, _sender_addr) = funded_state();
+        let receiver = Address::from_public_key(&KeyPair::generate().public_key());
+        let amount = Amount::from_vinx(1_000);
+        let mut tx =
+            Transaction::new_transfer(&sender_kp, receiver.clone(), amount, fee_for(amount), 0);
+
+        // Tamper a signed field *after* signing so the Ed25519 signature no longer
+        // verifies, without changing any economic field (TTL is far in the future).
+        tx.expires_at_height = Some(1_000_000);
+
+        // Full verification path rejects the now-invalid signature.
+        let mut full = state.clone();
+        assert!(
+            full.apply_transaction(&tx).is_err(),
+            "full path must reject a tampered signature"
+        );
+
+        // Trusted path skips signature verification and applies the transfer.
+        state.apply_transaction_trusted(&tx).unwrap();
+        assert_eq!(state.account_balance(&receiver), amount);
+
+        // Trusted still enforces nonce — replaying nonce 0 is rejected.
+        assert!(matches!(
+            state.apply_transaction_trusted(&tx),
+            Err(vinx_core::CoreError::InvalidNonce { .. })
+        ));
+    }
+
+    #[test]
+    fn test_apply_trusted_still_enforces_chain_id_and_ttl() {
+        let (mut state, sender_kp, _) = funded_state();
+        let receiver = Address::from_public_key(&KeyPair::generate().public_key());
+        let amount = Amount::from_vinx(1);
+
+        // Wrong chain-id is rejected even on the trusted path (cheap replay guard).
+        let mut wrong_chain =
+            Transaction::new_transfer(&sender_kp, receiver.clone(), amount, fee_for(amount), 0);
+        wrong_chain.chain_id = vinx_core::CHAIN_ID_MAINNET;
+        assert!(state.apply_transaction_trusted(&wrong_chain).is_err());
+
+        // Expired TTL is rejected even on the trusted path.
+        state.block_height = 100;
+        let mut expired =
+            Transaction::new_transfer(&sender_kp, receiver, amount, fee_for(amount), 0);
+        expired.expires_at_height = Some(50);
+        assert!(state.apply_transaction_trusted(&expired).is_err());
+    }
+
+    #[test]
     fn test_transfer_debits_sender_correctly() {
         let (mut state, sender_kp, sender_addr) = funded_state();
         let receiver = Address::from_public_key(&KeyPair::generate().public_key());

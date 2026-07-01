@@ -647,6 +647,9 @@ pub async fn post_snapshot(
             *node.state.write().await = new_state;
             *node.validator_set.write().await = new_vs;
             node.suspended_validators.write().await.clear();
+            // Full persist: the imported state may hold fewer accounts than the one
+            // it replaces, so wipe stale rows and write the whole set to disk now.
+            node.persist_full().await;
             tracing::info!(height, validator_count, "Snapshot imported via POST /snapshot");
             (
                 StatusCode::OK,

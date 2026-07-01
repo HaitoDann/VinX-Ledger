@@ -5,6 +5,32 @@ Format : `MAJEUR.MINEUR.CORRECTIF` — les versions `0.x.y` sont des versions de
 
 ---
 
+## [0.21.0] — 2026-07-01
+
+### Persistance incrémentale & application « trusted » (scalabilité)
+
+**#1 — Persistance des comptes par clé (`vinx-node`, `vinx-state`)**
+- Schéma de stockage **v4** : les comptes ne sont plus sérialisés dans un blob monolithique à chaque bloc. Nouvelle table redb `accounts` — une ligne `adresse → bincode(Account)` par compte.
+- `WorldState` porte désormais un ensemble `persist_dirty: HashSet<String>` (`#[serde(skip)]`), distinct de `dirty_addrs` (consommé par `compute_state_root`) : il survit jusqu'à ce que `take_persist_dirty()` le draine, afin d'écrire **uniquement les comptes réellement modifiés**.
+- `WorldState::serialize_meta()` sérialise tous les champs **sauf** la map des comptes (celle-ci est temporairement déplacée via `mem::take` — aucun clone — puis restaurée).
+- `Storage::serialize_incremental()` → écrit meta + lignes de comptes sales ; `Storage::serialize_full()` (genesis, import snapshot) → écrit tous les comptes et purge les lignes obsolètes (`replace_accounts`).
+- **Gain** : le coût par bloc passe de **O(total comptes)** à **O(comptes modifiés)**. Sur 1 M de comptes dont 200 changent par bloc, on écrit 200 lignes au lieu de re-sérialiser + re-compresser l'état entier toutes les 10 s. Débloque la scalabilité à long terme (les comptes ne sont jamais élagués, contrairement à la chaîne).
+- `POST /snapshot` : import déclenche désormais un `persist_full()` immédiat (purge des comptes obsolètes de l'état remplacé).
+
+**#3 — Application « trusted » sans re-vérification de signature (`vinx-state`, `vinx-node`)**
+- `apply_transaction` refactorisé en trois helpers : `check_replay_and_ttl` (chain-id + TTL, bon marché), `verify_tx_signatures` (Ed25519, coûteux) et `dispatch_tx`.
+- Nouveau `apply_transaction_trusted` : applique une transaction **sans** re-vérifier sa signature Ed25519, en conservant les gardes chain-id/TTL et toutes les vérifications d'état (nonce, solde, gel…).
+- Le producteur de blocs (`produce_block`, `produce_block_inner`) utilise ce chemin pour les transactions **drainées du mempool vérifié** — la signature y a déjà été validée à l'admission. Élimine une double vérification Ed25519 (l'opération la plus chère par tx).
+- Les blocs reçus d'une source **non fiable** (P2P gossip, sync) conservent la vérification complète via `apply_transaction` — la frontière de sécurité est préservée.
+
+**Tests**
+- `test_incremental_persist_writes_only_dirty_rows` : vérifie qu'un seul compte modifié produit une seule ligne écrite et que l'état survit au rechargement.
+- `test_apply_trusted_skips_signature_but_enforces_state` : une signature altérée est rejetée par le chemin complet mais acceptée par le chemin trusted, le nonce restant appliqué.
+- `test_apply_trusted_still_enforces_chain_id_and_ttl` : chain-id erroné et TTL expiré restent rejetés même en mode trusted.
+- 222 tests — 0 échec.
+
+---
+
 ## [0.20.0] — 2026-06-30
 
 ### Quatre optimisations RPC & consensus

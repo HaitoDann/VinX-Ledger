@@ -5,7 +5,7 @@ use std::sync::Arc;
 
 use crate::chain::Chain;
 use redb::{Database, ReadableTable, TableDefinition};
-use vinx_core::Transaction;
+use vinx_core::{Account, Transaction};
 use vinx_state::WorldState;
 use zstd;
 
@@ -13,17 +13,38 @@ use zstd;
 /// in a backwards-incompatible way so nodes refuse to start on stale data.
 /// v2: blobs are zstd-compressed (level 3) before insertion.
 /// v3: tx_index and account_tx_index are persisted (no rebuild_tx_index on boot).
-const STORAGE_VERSION: u64 = 3;
+/// v4: accounts persisted per-key in a dedicated table; only changed rows are
+///     written each block (O(dirty) instead of O(total accounts) per persist).
+const STORAGE_VERSION: u64 = 4;
 
 /// zstd compression level — level 3 is the sweet spot: ~60-70% size reduction,
 /// negligible latency compared to disk I/O.
 const ZSTD_LEVEL: i32 = 3;
 
 const STATE: TableDefinition<&str, &[u8]> = TableDefinition::new("state");
+/// Per-account rows: bech32 address → bincode(Account), stored uncompressed.
+/// Accounts are tiny (~100 B); per-row zstd framing would cost more than it saves.
+const ACCOUNTS: TableDefinition<&str, &[u8]> = TableDefinition::new("accounts");
 const META: TableDefinition<&str, u64> = TableDefinition::new("meta");
 
 pub struct Storage {
     db: Arc<Database>,
+}
+
+/// A batch of pre-serialized state ready to be compressed and written to disk.
+/// Produced under the caller's state lock; compression + I/O happen later
+/// (typically inside `tokio::task::spawn_blocking`).
+pub struct StateWrite {
+    /// Serialized `WorldState` meta — every field except the accounts map.
+    pub meta: Vec<u8>,
+    /// Changed account rows: (address, bincode(Account)). Empty on a no-op flush.
+    pub account_rows: Vec<(String, Vec<u8>)>,
+    /// When true, the accounts table is wiped before writing `account_rows`
+    /// (used by full snapshot import to drop rows no longer present).
+    pub replace_accounts: bool,
+    pub chain: Vec<u8>,
+    pub tx_index: Vec<u8>,
+    pub account_tx_index: Vec<u8>,
 }
 
 impl Storage {
@@ -74,15 +95,8 @@ impl Storage {
         zstd::decode_all(data).map_err(|e| Self::io_err(format!("zstd decompress: {e}")))
     }
 
-    /// Serializes state and chain to raw bytes while the caller holds the read locks.
-    /// Returns (state_bytes, chain_bytes, tx_index_bytes, account_tx_index_bytes).
-    /// Compression and disk I/O happen later in `save_serialized` off the async executor.
-    pub fn serialize(
-        state: &WorldState,
-        chain: &Chain,
-    ) -> io::Result<(Vec<u8>, Vec<u8>, Vec<u8>, Vec<u8>)> {
-        let state_bytes = bincode::serialize(state)
-            .map_err(|e| Self::io_err(format!("serialize state: {e}")))?;
+    /// Serializes the chain and its tx indexes (no accounts, no meta).
+    fn serialize_chain(chain: &Chain) -> io::Result<(Vec<u8>, Vec<u8>, Vec<u8>)> {
         let chain_bytes = bincode::serialize(chain)
             .map_err(|e| Self::io_err(format!("serialize chain: {e}")))?;
         let (tx_index, account_tx_index) = chain.export_tx_indexes();
@@ -90,35 +104,70 @@ impl Storage {
             .map_err(|e| Self::io_err(format!("serialize tx_index: {e}")))?;
         let account_tx_index_bytes = bincode::serialize(account_tx_index)
             .map_err(|e| Self::io_err(format!("serialize account_tx_index: {e}")))?;
-        Ok((state_bytes, chain_bytes, tx_index_bytes, account_tx_index_bytes))
+        Ok((chain_bytes, tx_index_bytes, account_tx_index_bytes))
     }
 
-    /// Compresses and writes pre-serialized blobs to redb in a single ACID transaction.
-    /// Designed to run inside `tokio::task::spawn_blocking` — no async, pure blocking I/O.
-    pub fn save_serialized(
-        &self,
-        state_bytes: Vec<u8>,
-        chain_bytes: Vec<u8>,
-        tx_index_bytes: Vec<u8>,
-        account_tx_index_bytes: Vec<u8>,
-    ) -> io::Result<()> {
-        let state_c = Self::compress(&state_bytes)?;
-        let chain_c = Self::compress(&chain_bytes)?;
-        let tx_idx_c = Self::compress(&tx_index_bytes)?;
-        let acc_idx_c = Self::compress(&account_tx_index_bytes)?;
+    /// Builds an incremental `StateWrite`: the meta blob plus only the accounts
+    /// changed since the last flush. Call while holding the state write lock —
+    /// `serialize_meta` moves the accounts map out and back, and `take_persist_dirty`
+    /// drains the change set. Compression + I/O happen later in `write_state`.
+    pub fn serialize_incremental(state: &mut WorldState, chain: &Chain) -> io::Result<StateWrite> {
+        let meta = state
+            .serialize_meta()
+            .map_err(|e| Self::io_err(format!("serialize meta: {e}")))?;
+        let dirty = state.take_persist_dirty();
+        let mut account_rows = Vec::with_capacity(dirty.len());
+        for addr in dirty {
+            if let Some(acc) = state.account_by_str(&addr) {
+                let bytes = bincode::serialize(acc)
+                    .map_err(|e| Self::io_err(format!("serialize account: {e}")))?;
+                account_rows.push((addr, bytes));
+            }
+        }
+        let (chain, tx_index, account_tx_index) = Self::serialize_chain(chain)?;
+        Ok(StateWrite {
+            meta,
+            account_rows,
+            replace_accounts: false,
+            chain,
+            tx_index,
+            account_tx_index,
+        })
+    }
+
+    /// Builds a full `StateWrite` containing every account, flagged to wipe any
+    /// stale rows first. Used for the initial genesis save and snapshot import.
+    pub fn serialize_full(state: &mut WorldState, chain: &Chain) -> io::Result<StateWrite> {
+        state.mark_all_persist_dirty();
+        let mut w = Self::serialize_incremental(state, chain)?;
+        w.replace_accounts = true;
+        Ok(w)
+    }
+
+    /// Compresses and writes a `StateWrite` in a single ACID transaction.
+    /// Designed to run inside `tokio::task::spawn_blocking` — pure blocking I/O.
+    pub fn write_state(&self, w: StateWrite) -> io::Result<()> {
+        let meta_c = Self::compress(&w.meta)?;
+        let chain_c = Self::compress(&w.chain)?;
+        let tx_idx_c = Self::compress(&w.tx_index)?;
+        let acc_idx_c = Self::compress(&w.account_tx_index)?;
 
         tracing::debug!(
-            state_raw = state_bytes.len(),
-            state_compressed = state_c.len(),
-            chain_raw = chain_bytes.len(),
-            chain_compressed = chain_c.len(),
-            "Persisting compressed state"
+            meta_raw = w.meta.len(),
+            meta_compressed = meta_c.len(),
+            account_rows = w.account_rows.len(),
+            replace = w.replace_accounts,
+            "Persisting state (incremental)"
         );
 
         let tx = self.db.begin_write().map_err(|e| Self::io_err(e))?;
+        if w.replace_accounts {
+            // Drop and recreate the accounts table to clear rows no longer present.
+            tx.delete_table(ACCOUNTS).map_err(|e| Self::io_err(e))?;
+        }
         {
             let mut tbl = tx.open_table(STATE).map_err(|e| Self::io_err(e))?;
-            tbl.insert("world_state", state_c.as_slice())
+            tbl.insert("world_state_meta", meta_c.as_slice())
                 .map_err(|e| Self::io_err(e))?;
             tbl.insert("chain", chain_c.as_slice())
                 .map_err(|e| Self::io_err(e))?;
@@ -127,15 +176,22 @@ impl Storage {
             tbl.insert("account_tx_index", acc_idx_c.as_slice())
                 .map_err(|e| Self::io_err(e))?;
         }
+        {
+            let mut atbl = tx.open_table(ACCOUNTS).map_err(|e| Self::io_err(e))?;
+            for (addr, bytes) in &w.account_rows {
+                atbl.insert(addr.as_str(), bytes.as_slice())
+                    .map_err(|e| Self::io_err(e))?;
+            }
+        }
         tx.commit().map_err(|e| Self::io_err(e))?;
         Ok(())
     }
 
-    /// Persist current state and chain in a single ACID transaction (synchronous path,
-    /// used from blocking contexts such as tests and main.rs initial save).
-    pub fn save(&self, state: &WorldState, chain: &Chain) -> io::Result<()> {
-        let (sb, cb, tib, atib) = Self::serialize(state, chain)?;
-        self.save_serialized(sb, cb, tib, atib)
+    /// Full synchronous save (initial genesis bootstrap, tests, snapshot import).
+    /// Writes every account and clears any stale rows.
+    pub fn save(&self, state: &mut WorldState, chain: &Chain) -> io::Result<()> {
+        let w = Self::serialize_full(state, chain)?;
+        self.write_state(w)
     }
 
     /// Load persisted state and chain.  Returns `None` if no data has been written yet.
@@ -143,15 +199,33 @@ impl Storage {
         let tx = self.db.begin_read().ok()?;
         let tbl = tx.open_table(STATE).ok()?;
 
-        let state_bytes = Self::decompress(tbl.get("world_state").ok()??.value())
-            .map_err(|e| tracing::warn!("Cannot decompress state: {e}"))
+        let meta_bytes = Self::decompress(tbl.get("world_state_meta").ok()??.value())
+            .map_err(|e| tracing::warn!("Cannot decompress state meta: {e}"))
             .ok()?;
-        let chain_bytes = Self::decompress(tbl.get("chain").ok()??.value())
-            .map_err(|e| tracing::warn!("Cannot decompress chain: {e}"))
+        // Deserializes into a WorldState whose accounts map is empty — repopulated below.
+        let mut state: WorldState = bincode::deserialize(&meta_bytes)
+            .map_err(|e| tracing::warn!("Cannot deserialize state meta: {e}"))
             .ok()?;
 
-        let state: WorldState = bincode::deserialize(&state_bytes)
-            .map_err(|e| tracing::warn!("Cannot deserialize state: {e}"))
+        // Repopulate accounts from the per-key ACCOUNTS table.
+        if let Ok(atbl) = tx.open_table(ACCOUNTS) {
+            let mut count = 0usize;
+            if let Ok(iter) = atbl.iter() {
+                for entry in iter.flatten() {
+                    match bincode::deserialize::<Account>(entry.1.value()) {
+                        Ok(acc) => {
+                            state.load_account(acc);
+                            count += 1;
+                        }
+                        Err(e) => tracing::warn!("Cannot deserialize account row: {e}"),
+                    }
+                }
+            }
+            tracing::debug!(accounts = count, "Loaded accounts from per-key store");
+        }
+
+        let chain_bytes = Self::decompress(tbl.get("chain").ok()??.value())
+            .map_err(|e| tracing::warn!("Cannot decompress chain: {e}"))
             .ok()?;
         let mut chain: Chain = bincode::deserialize(&chain_bytes)
             .map_err(|e| tracing::warn!("Cannot deserialize chain: {e}"))
@@ -220,7 +294,7 @@ impl Storage {
         let Ok(tbl) = tx.open_table(STATE) else {
             return false;
         };
-        tbl.get("world_state").ok().flatten().is_some()
+        tbl.get("world_state_meta").ok().flatten().is_some()
     }
 
     /// Returns a clone of the inner `Arc<Database>` handle — used by Node to pass
