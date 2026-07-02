@@ -8,6 +8,8 @@
 
 VinX Ledger est une blockchain L1 conçue exclusivement pour les paiements du quotidien. Pas de smart contracts, pas de spéculation — une seule promesse : envoyer de l'argent vite, pas cher, et sans intermédiaire opaque.
 
+Sa monnaie suit le modèle **La Fonderie** : une supply fixe de 100 milliards, **sans burn**, où le métal *fond* (frais) et se *reforge* (récompenses) à l'infini.
+
 Implémenté intégralement en Rust, sans framework blockchain tiers.
 
 ---
@@ -22,8 +24,8 @@ Implémenté intégralement en Rust, sans framework blockchain tiers.
 | **TPS** | ~4 000 |
 | **Frais** | 0,05% · plancher 0,0001 VINX |
 | **Cryptographie** | Ed25519 · SHA-256 · Bech32 (`vinx1`) |
-| **Supply** | 100 milliards VINX (immuable) |
-| **Phase 1** | 21M VINX Sandbox active · 99,979Md Coffre Maturité verrouillé |
+| **Supply** | 100 milliards VINX (immuable, sans burn) |
+| **Modèle** | La Fonderie — melt/forge, invariant `circulation + Fonderie = 100 Md` |
 
 ---
 
@@ -65,12 +67,14 @@ crates/
 
 ---
 
-## Tokenomics
+## Tokenomics — La Fonderie
 
-- **21 000 000 VINX** — Sandbox Phase 1, distribués aux contributeurs
-- **99 979 000 000 VINX** — Coffre Maturité, verrouillé jusqu'à 3 conditions cumulatives (statut CASP MiCA · audit indépendant · politique de distribution publique)
-- **Frais** : 80% au pool de staking · 20% à la Treasury VinX Labs
-- **Aucun burn** · Aucune inflation · Cap immuable
+- **100 milliards VINX**, supply fixe et **immuable** — forgée une fois à la genèse.
+- **Genèse** : 1 Md (1 %) au fondateur pour amorcer · 99 Md (99 %) dans **La Fonderie**.
+- **Melt** : 100 % des frais fondent dans La Fonderie (ce n'est **pas** un burn).
+- **Forge** : les récompenses de staking sont forgées depuis La Fonderie (une fraction à chaque distribution → la réserve ne se vide jamais).
+- **Invariant** vérifié à chaque bloc : `circulation + Fonderie = 100 000 000 000 VINX`.
+- **Aucun burn** · Aucune inflation · Cap immuable.
 
 > Détails complets : [whitepaper.md](./whitepaper.md)
 
@@ -78,10 +82,10 @@ crates/
 
 ## Roadmap
 
-- **Phase 1** — MVP devnet, Sandbox active *(en cours)*
-- **Phase 2** — Testnet public, multi-validateurs PoA, audit
-- **Phase 3** — Mainnet, déverrouillage Coffre Maturité sous conditions strictes
+- **Actuel** — protocole complet (L1 Rust, PoA Threshold, Fonderie), exploité en local.
+- **Ensuite** — redondance 1 → 3 validateurs, distribution du milliard fondateur, micro-économie réelle.
+- **Plus tard (optionnel)** — réseau public, *token factory* (émission d'autres actifs sur VinX).
 
 ---
 
-*VinX Labs — juin 2026*
+*VinX Labs — juillet 2026*

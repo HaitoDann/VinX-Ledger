@@ -5,13 +5,12 @@
 1. [Démarrage rapide](#1-démarrage-rapide)
 2. [Wallet — commandes de base](#2-wallet--commandes-de-base)
 3. [Staking](#3-staking)
-4. [Admin — gel et dégel de comptes](#4-admin--gel-et-dégel-de-comptes)
-5. [Admin — mise à jour du protocole](#5-admin--mise-à-jour-du-protocole)
-6. [Explorateur via le wallet CLI](#6-explorateur-via-le-wallet-cli)
-7. [Interface web (port 8545)](#7-interface-web-port-8545)
-8. [Configuration avancée du nœud](#8-configuration-avancée-du-nœud)
-9. [Réseau P2P multi-nœuds](#9-réseau-p2p-multi-nœuds)
-10. [Référence des endpoints RPC](#10-référence-des-endpoints-rpc)
+4. [Admin — mise à jour du protocole](#4-admin--mise-à-jour-du-protocole)
+5. [Explorateur via le wallet CLI](#5-explorateur-via-le-wallet-cli)
+6. [Interface web (port 8545)](#6-interface-web-port-8545)
+7. [Configuration avancée du nœud](#7-configuration-avancée-du-nœud)
+8. [Réseau P2P multi-nœuds](#8-réseau-p2p-multi-nœuds)
+9. [Référence des endpoints RPC](#9-référence-des-endpoints-rpc)
 
 ---
 
@@ -61,7 +60,7 @@ cargo run -p vinx-wallet -- address --wallet my-wallet.json
 cargo run -p vinx-wallet -- balance vinx1abc...xyz
 ```
 
-Affiche : solde, montant staké, nonce, statut (actif / gelé).
+Affiche : solde, montant staké, nonce.
 
 ### Envoyer des VINX
 
@@ -84,7 +83,7 @@ cargo run -p vinx-wallet -- status
 
 ## 3. Staking
 
-Les stakers reçoivent 80% des frais collectés, distribués toutes les 100 blocs.
+Les récompenses de staking sont **forgées depuis La Fonderie** (la réserve alimentée par les frais fondus) toutes les 100 blocs, proportionnellement au stake de chacun.
 
 ### Staker des VINX
 
@@ -106,31 +105,7 @@ cargo run -p vinx-wallet -- unstake \
 
 ---
 
-## 4. Admin — gel et dégel de comptes
-
-Seul le wallet admin (créé au genesis dans `devnet/admin.json`) peut geler ou dégeler des comptes.
-
-### Geler un compte
-
-```bash
-cargo run -p vinx-wallet -- freeze \
-  --wallet devnet/admin.json \
-  --target vinx1compte_a_geler...
-```
-
-Un compte gelé ne peut plus émettre de transactions. Le gel est automatiquement levé après **12 mois** (~3 153 600 blocs à 10s/bloc).
-
-### Dégeler un compte manuellement
-
-```bash
-cargo run -p vinx-wallet -- unfreeze \
-  --wallet devnet/admin.json \
-  --target vinx1compte_a_degeler...
-```
-
----
-
-## 5. Admin — mise à jour du protocole
+## 4. Admin — mise à jour du protocole
 
 Les mises à jour de protocole nécessitent un préavis minimum :
 
@@ -159,7 +134,7 @@ cargo run -p vinx-wallet -- protocol
 
 ---
 
-## 6. Explorateur via le wallet CLI
+## 5. Explorateur via le wallet CLI
 
 ### Détails d'un bloc
 
@@ -185,7 +160,7 @@ Affiche le nombre de validateurs, le quorum requis et la liste des adresses.
 
 ---
 
-## 7. Interface web (port 8545)
+## 6. Interface web (port 8545)
 
 Ouvrez **http://localhost:8545** dans votre navigateur.
 
@@ -200,7 +175,7 @@ Ouvrez **http://localhost:8545** dans votre navigateur.
 
 ---
 
-## 8. Configuration avancée du nœud
+## 7. Configuration avancée du nœud
 
 ```bash
 cp config.example.toml config.toml
@@ -232,7 +207,7 @@ cargo run -p vinx-node -- \
 
 ---
 
-## 9. Réseau P2P multi-nœuds
+## 8. Réseau P2P multi-nœuds
 
 ### Nœud 1
 
@@ -259,7 +234,7 @@ Les blocs sont propagés via gossipsub. Chaque validateur co-signe les blocs. Le
 
 ---
 
-## 10. Référence des endpoints RPC
+## 9. Référence des endpoints RPC
 
 | Méthode | Chemin | Description |
 |---|---|---|

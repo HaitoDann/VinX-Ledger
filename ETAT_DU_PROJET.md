@@ -1,7 +1,7 @@
 # VinX Ledger — État du Projet
 
 > Document de référence interne — mis à jour à chaque sprint.
-> Dernière mise à jour : juin 2026 (v2 — corrections gouvernance, supply, melt).
+> Dernière mise à jour : juillet 2026 (v3 — refonte La Fonderie : melt/forge, suppression Coffre/gel/MiCA).
 
 ---
 
@@ -35,7 +35,7 @@ VinX Ledger est une blockchain L1 de paiement écrite intégralement en Rust, sa
 ### Production de blocs
 - [x] Producteur de blocs avec slots temporels (3 s devnet, 10 s mainnet)
 - [x] Frais dynamiques style EIP-1559 (×1 à ×3 selon la charge mémoire)
-- [x] Répartition des frais : 40 % staking pool / 30 % validateur / 30 % melt (pool de redistribution)
+- [x] **Melt intégral** : 100 % des frais fondent dans La Fonderie
 - [x] Vérification des signatures en parallèle (rayon, tous les cœurs CPU)
 - [x] Détection des slots manqués (leader timeout ≥ 3 slots consécutifs)
 
@@ -47,24 +47,23 @@ VinX Ledger est une blockchain L1 de paiement écrite intégralement en Rust, sa
 - [x] Synchronisation de blocs par P2P (`SyncRequest` / `SyncResponse`)
 - [x] Synchronisation au démarrage depuis un pair de confiance (HTTP)
 
-### Économie
-- [x] Supply totale : 100 milliards de VinX (précision : 18 décimales)
-- [x] Allocation admin à la genèse : **21 millions** VinX (sandbox phase 1, opérationnel immédiatement)
-- [x] Coffre Maturité : **~99,979 milliards** VinX — verrouillé jusqu'aux 3 conditions (= 100 Mds - 21 M)
-- [x] Récompenses de staking distribuées toutes les 100 blocs
-- [x] Pool melt : les 30 % de frais reviennent dans ce pool — **ce n'est pas un burn**, les tokens retournent dans le pool de distribution (pas le staking pool) via décision admin
+### Économie — La Fonderie (melt / forge)
+- [x] Supply totale : 100 milliards de VinX, **immuable, sans burn** (précision : 18 décimales)
+- [x] **Genèse** : 1 Md (1 %) forgé au fondateur · 99 Md (99 %) scellés dans **La Fonderie** (`foundry`)
+- [x] **Invariant vérifié à chaque bloc** : `circulating_supply + foundry == 100 Md`
+- [x] **Melt** : 100 % des frais fondent dans La Fonderie (`melt_to_foundry`) — pas un burn
+- [x] **Forge** : récompenses de staking forgées depuis La Fonderie (`FORGE_RATE_BPS = 10`, soit 0,1 % par distribution), toutes les 100 blocs → la réserve ne se vide jamais
 
-### Gouvernance — contrôle exclusif VinX Labs
+### Gouvernance — clé admin unique
 
-La gouvernance est **centralisée** : seul VinX Labs (clé admin) exécute les décisions de protocole on-chain. Il n'y a pas de vote de validateurs, pas de DAO. Les propositions et sondages communautaires se font hors-chaîne (Discord, forum).
+La gouvernance est **centralisée** : une **clé admin unique** (le fondateur), **rotatable à chaud**, exécute les décisions de protocole on-chain. Pas de vote de validateurs, pas de DAO, **pas de gel de compte**.
 
-- [x] 8 actions admin exécutables directement : `AddValidator`, `RemoveValidator`, `UpdateFeeFloor`, `ScheduleUpgrade`, `ReleaseMeltToStaking`, `RotateAdmin`, `MarkCoffreCondition`, `UnlockCoffre`
-- [x] Transaction `AdminAction` (0x0B) : encapsule une `GovernanceAction` dans la payload, requiert la signature de la clé admin, s'exécute immédiatement
+- [x] 5 actions admin exécutables directement : `AddValidator`, `RemoveValidator`, `UpdateFeeFloor`, `ScheduleUpgrade`, `RotateAdmin`
+- [x] Transaction `AdminAction` (0x08) : encapsule une `GovernanceAction` dans la payload, requiert la signature de la clé admin, s'exécute immédiatement
 - [x] Rotation de la clé admin possible via `AdminAction::RotateAdmin` (sans redémarrage du nœud)
-- [x] Unlock Coffre conditionnel : les 3 critères (MiCA CASP, audit externe, politique publique) doivent être marqués par l'admin avant que `UnlockCoffre` soit accepté
 
 ### Sécurité
-- [x] Slashing : preuve d'équivocation → 10 % bounty au rapporteur, 90 % vers melt pool, validateur exclu
+- [x] Slashing : preuve d'équivocation → 10 % bounty au rapporteur, 90 % **fondu dans La Fonderie**, validateur exclu
 - [x] Rate limiting : 100 requêtes/minute par IP (middleware axum)
 - [x] Auth token Bearer sur les routes `/snapshot` et `/admin/compact`
 - [x] Compaction de chaîne (`compact_old_txs`) — supprime les tx anciennes, conserve les headers
@@ -118,30 +117,26 @@ sdk/
 | Élément | Description |
 |---------|-------------|
 | `Amount` | Montant en atomes (10⁻¹⁸ VinX), précision maximale |
-| `Account` | Adresse, solde, staked, nonce, gelé |
+| `Account` | Adresse, solde, staked, nonce, `stake_since` |
 | `Block` / `BlockHeader` | Bloc avec hauteur, hash, validateur, frais de base |
 | `BlockSignature` | Co-signature d'un validateur |
 | `SlashEvidence` | Preuve de double-signature |
-| `Transaction` | 11 types encodés dans un objet unique |
+| `Transaction` | 8 types encodés dans un objet unique |
 | `ValidatorSet` | Ensemble des validateurs autorisés + calcul quorum |
-| `GovernanceAction` | Actions admin exécutables (8 variants) |
-| `CoffreCondition` | `MicaCasp \| ExternalAudit \| PublicPolicy` |
+| `GovernanceAction` | Actions admin exécutables (5 variants) |
 
-**Les 11 types de transactions :**
+**Les 8 types de transactions :**
 
 | Code | Type | Rôle |
 |------|------|------|
 | `0x01` | `Transfer` | Envoi de VinX |
 | `0x02` | `Stake` | Verrouillage en staking |
 | `0x03` | `Unstake` | Déverrouillage du staking |
-| `0x04` | `FreezeAccount` | Gel d'un compte (admin) |
-| `0x05` | `UnfreezeAccount` | Dégel d'un compte (admin) |
-| `0x06` | `AnnounceUpgrade` | Annonce d'une mise à jour protocole (admin) |
-| `0x07` | `Emission` | Émission interne (protocole uniquement) |
-| `0x08` | `AddValidator` | Ajout d'un validateur (admin) |
-| `0x09` | `RemoveValidator` | Suppression d'un validateur (admin) |
-| `0x0A` | `SlashValidator` | Slashing pour équivocation |
-| `0x0B` | `AdminAction` | Action de gouvernance directe (admin, exécution immédiate) |
+| `0x04` | `AnnounceUpgrade` | Annonce d'une mise à jour protocole (admin) |
+| `0x05` | `AddValidator` | Ajout d'un validateur (admin) |
+| `0x06` | `RemoveValidator` | Suppression d'un validateur (admin) |
+| `0x07` | `SlashValidator` | Slashing pour équivocation |
+| `0x08` | `AdminAction` | Action de gouvernance directe (admin, exécution immédiate) |
 
 ### `vinx-state` — WorldState
 
@@ -149,18 +144,12 @@ Le `WorldState` est l'état complet de la chaîne. Il est sérialisé sur disque
 
 | Champ | Type | Description |
 |-------|------|-------------|
-| `accounts` | `HashMap<String, Account>` | Tous les comptes |
-| `circulating_supply` | `Amount` | Supply en circulation |
+| `accounts` | `BTreeMap<Address, Account>` | Tous les comptes (clé = adresse 20 octets, itération triée) |
+| `circulating_supply` | `Amount` | Tokens détenus par les comptes (= `MAX_SUPPLY - foundry`) |
 | `block_height` | `u64` | Hauteur actuelle |
-| `staking_pool` | `Amount` | Réserve de récompenses staking |
-| `melt_pool` | `Amount` | Pool de redistribution (fees 30 % — **pas un burn**, relâchable par l'admin) |
+| `foundry` | `Amount` | **La Fonderie** — réserve melt/forge. `circulation + foundry == 100 Md` |
 | `fee_floor` | `Amount` | Plancher de frais minimum |
 | `base_fee` | `Amount` | Frais dynamiques actuels |
-| `validator_fee_pool` | `Amount` | Récompenses du validateur courant |
-| `coffre_maturity` | `Amount` | **~99,979 milliards** VinX verrouillés (= supply totale - 21 millions admin) |
-| `coffre_mica_casp` | `bool` | Condition 1 : conformité MiCA CASP |
-| `coffre_external_audit` | `bool` | Condition 2 : audit externe réalisé |
-| `coffre_public_policy` | `bool` | Condition 3 : politique publique acceptée |
 | `admin_address` | `Option<Address>` | Clé admin (rotatable via `AdminAction::RotateAdmin`) |
 | `current_version` | `ProtocolVersion` | Version actuelle du protocole |
 | `pending_upgrade` | `Option<ScheduledUpgrade>` | Mise à jour planifiée |
@@ -203,14 +192,11 @@ multiplier = 1.0 + 2.0 × max(0, charge - 0.8) / 0.2
 base_fee = fee_floor × multiplier  (cap à 3×)
 ```
 
-Répartition de chaque fee :
-- **40 %** → `staking_pool` (distribué aux stakers toutes les 100 blocs)
-- **30 %** → `validator_fee_pool` (crédité au validateur en fin de bloc)
-- **30 %** → `melt_pool` (pool de redistribution — **ce n'est pas un burn** ; les tokens restent en réserve et peuvent être réinjectés dans le pool de distribution via `AdminAction::ReleaseMeltToDistribution`)
+**Melt de chaque fee : 100 %** → `foundry` (La Fonderie). Aucun frais direct au validateur, aucune trésorerie séparée. Ce n'est **pas** un burn : le métal est conservé et sera reforgé en récompenses.
 
-### Gouvernance — VinX Labs uniquement
+### Gouvernance — clé admin unique
 
-La gouvernance de VinX est **centralisée** : seul VinX Labs prend les décisions de protocole. Les échanges communautaires se font hors-chaîne.
+La gouvernance de VinX est **centralisée** : une clé admin unique (le fondateur) prend les décisions de protocole. Les échanges communautaires se font hors-chaîne.
 
 On-chain, l'admin soumet une transaction `AdminAction` avec la `GovernanceAction` souhaitée en payload. Elle est vérifiée (signature admin) et exécutée immédiatement dans le même bloc. Pas de vote, pas de délai.
 
@@ -222,23 +208,13 @@ Actions disponibles :
 | `RemoveValidator(addr)` | Retire un validateur du PoA set |
 | `UpdateFeeFloor { atoms }` | Modifie le plancher de frais |
 | `ScheduleUpgrade { version, height }` | Planifie une mise à jour protocole |
-| `ReleaseMeltToDistribution { amount }` | Réinjecte du melt pool vers le pool de distribution |
 | `RotateAdmin(addr)` | Change la clé admin sans redémarrage |
-| `MarkCoffreCondition(condition)` | Valide une des 3 conditions du Coffre |
-| `UnlockCoffre` | Libère les 79 Mds vers le staking pool (si les 3 conditions sont remplies) |
 
-### Répartition et rôle du Melt Pool
+### Le cycle melt / forge
 
-Le melt pool **n'est pas un burn**. Dans VinX, "melter" signifie que les tokens fondent dans un pool de réserve. Ils ne sont pas détruits — ils retournent dans le **pool de distribution**, c'est-à-dire le réservoir de tokens disponibles pour être redistribués dans l'économie (émissions, récompenses, incentives). C'est l'admin qui décide quand et comment les réinjecter via `AdminAction::ReleaseMeltToDistribution`.
+VinX n'a **aucun burn**. « Melter » signifie que les jetons **fondent** dans La Fonderie (`foundry`), la réserve unique — ils ne sont pas détruits. « Forger » signifie que le protocole en **forge** de nouveaux depuis La Fonderie vers les stakers.
 
-### Unlock Coffre Maturité
-
-Les **~99,979 milliards** VinX du Coffre ne peuvent être libérés que si les 3 conditions suivantes sont toutes marquées comme remplies par l'admin :
-1. `MicaCasp` — Obtention du statut CASP sous MiCA (régulation européenne)
-2. `ExternalAudit` — Audit de sécurité externe publié
-3. `PublicPolicy` — Cadre de politique publique accepté
-
-Une fois les 3 conditions marquées, une proposition `UnlockCoffre` peut être soumise et votée. En cas d'exécution, le coffre est transféré vers le staking pool.
+Comme la forge ne prend qu'une **fraction** de La Fonderie (`FORGE_RATE_BPS = 10`) et que les frais la refont fondre en continu, **la réserve ne se vide jamais** : c'est le même métal qui circule à l'infini. L'invariant `circulation + Fonderie = 100 Md` tient à chaque bloc.
 
 ---
 
@@ -254,14 +230,14 @@ Le nœud expose un serveur HTTP sur `0.0.0.0:8545` par défaut.
 | GET | `/chain/sync?from=N&limit=N` | Synchronisation d'une plage de blocs |
 | GET | `/block/:height` | Bloc complet par hauteur |
 | GET | `/tx/:hash` | Transaction par hash hex |
-| GET | `/account/:address` | Solde, nonce, staked, frozen d'un compte |
+| GET | `/account/:address` | Solde, nonce, staked d'un compte |
 | GET | `/account/:address/txs?limit=N&offset=N` | Historique des transactions |
 | GET | `/account/:address/proof` | Preuve Merkle d'inclusion dans l'état |
 | POST | `/tx/submit` | Soumettre une transaction signée |
 | GET | `/mempool/size` | Nombre de transactions en attente |
 | GET | `/validators` | Ensemble des validateurs actifs + quorum |
 | GET | `/protocol/version` | Version courante + upgrade planifiée |
-| GET | `/network/stats` | Statistiques économiques (fees, pools, supply) |
+| GET | `/network/stats` | Statistiques économiques (base_fee, foundry, supply) |
 | GET | `/metrics` | Métriques Prometheus |
 | GET | `/events` | Server-Sent Events — push par bloc |
 | GET | `/ws` | WebSocket — push par bloc |
@@ -313,8 +289,6 @@ cargo run -p vinx-wallet -- <commande> [options]
 
 | Commande | Options clés | Description |
 |----------|-------------|-------------|
-| `freeze` | `--target vinx1...` | Geler un compte |
-| `unfreeze` | `--target vinx1...` | Dégeler un compte |
 | `add-validator` | `--validator vinx1...` | Ajouter un validateur |
 | `remove-validator` | `--validator vinx1...` | Retirer un validateur |
 | `announce-upgrade` | `--version 1.1.0 --activation-height 100000` | Planifier un upgrade |
@@ -330,17 +304,14 @@ Exemple d'actions JSON valides :
 # Ajouter un validateur
 --action '{"AddValidator":"vinx1abc..."}'
 
+# Retirer un validateur
+--action '{"RemoveValidator":"vinx1abc..."}'
+
 # Modifier le plancher de frais (en atomes)
 --action '{"UpdateFeeFloor":{"atoms":100000000000000}}'
 
-# Libérer du melt pool vers le staking
---action '{"ReleaseMeltToStaking":{"amount":"1000000000"}}'
-
-# Marquer la condition MiCA
---action '"MarkCoffreCondition":"MicaCasp"'
-
-# Libérer le Coffre (si les 3 conditions sont remplies)
---action '"UnlockCoffre"'
+# Faire tourner la clé admin
+--action '{"RotateAdmin":"vinx1nouveau..."}'
 ```
 
 > Toutes les commandes de transaction acceptent `--node http://127.0.0.1:8545` (défaut) et `--wallet wallet.json` (défaut).
