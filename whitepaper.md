@@ -1,7 +1,7 @@
 # VinX Ledger — Livre Blanc
 
-**Version :** 2.4
-**Date :** Juin 2026
+**Version :** 3.0
+**Date :** Juillet 2026
 **Éditeur :** VinX Labs
 
 ---
@@ -40,82 +40,68 @@ Les briques P2P (libp2p Rust), consensus PoA Threshold et mises à jour forkless
 
 ---
 
-## 3. Tokenomics & Les Deux Réserves
+## 3. Tokenomics & La Fonderie
 
-La supply totale est fixée à **100 000 000 000 VinX** (100 milliards).
+La supply totale est fixée à **100 000 000 000 VinX** (100 milliards), **immuable et sans burn**. Les jetons ne sont jamais créés ni détruits — ils sont **forgés** au genesis puis **cyclent** perpétuellement entre la circulation et une réserve unique, **La Fonderie**.
 
-Cette supply est techniquement créée au genesis, mais **structurée en deux compartiments on-chain strictement séparés** par des mécanismes cryptographiques.
+> Vocabulaire VinX : on ne *mint* pas des jetons, **on les forge**. On ne *brûle* pas les frais, **on les fond**. C'est le même métal qui circule, fond et se reforge à l'infini.
 
-### 3.1 L'Escrow "Sandbox" — Phase 1
+### 3.1 Le principe melt / forge
 
-**21 000 000 VinX** (0,021% du cap total)
+- **Melt (fondre)** : 100 % des frais de transaction retournent dans **La Fonderie** et quittent la circulation. Ce n'est **pas** un burn — le métal est conservé.
+- **Forge (forger)** : les récompenses de staking sont forgées depuis La Fonderie vers la circulation. Chaque distribution forge une **fraction** de la Fonderie (0,1 %).
+- **Cycle infini** : comme la forge ne prend qu'une fraction et que les frais refont fondre du métal en continu, **La Fonderie ne se vide jamais**.
 
-Seule cette micro-fraction est active au lancement. Elle finance :
+### 3.2 L'invariant fondateur
 
-- Les contributions techniques (code, wallets, outils pour l'écosystème)
-- Les programmes de bug bounty pour éprouver la sécurité
-- Les premiers tests économiques (staking, transactions, échanges P2P)
+À **chaque bloc**, sans exception :
 
-Le chiffre de 21 millions est un clin d'œil assumé aux 21 millions de Bitcoin et Bittensor — symbole de la rareté et de la rigueur dans l'écosystème crypto.
+```
+circulation + Fonderie = 100 000 000 000 VinX   (constant, pour toujours)
+```
 
-### 3.2 Le Coffre "Maturité" — Phases ultérieures
+Rien n'est créé, rien n'est détruit. La valeur ne fait que changer de forme.
 
-**99 979 000 000 VinX** (99,979% du cap)
+### 3.3 Répartition à la genèse
 
-Cette réserve est **cryptographiquement verrouillée et inaccessible** par tout mécanisme courant du protocole. Elle ne peut être déverrouillée qu'avec **trois conditions cumulatives** :
-
-1. **Statut CASP MiCA obtenu** par VinX Labs
-2. **Audit indépendant validé** de la santé économique du réseau et de la robustesse technique
-3. **Politique de distribution publique** publiée au moins 12 mois avant tout déblocage
-
-Le Coffre Maturité n'a aucun calendrier engagé. Il peut rester verrouillé pendant des années ou des décennies si les conditions ne sont pas atteintes.
+- **1 000 000 000 VinX (1 %)** — forgés au **fondateur** pour amorcer la circulation et distribuer aux premiers utilisateurs.
+- **99 000 000 000 VinX (99 %)** — scellés dans **La Fonderie**, forgés progressivement dans l'économie via les récompenses de staking.
 
 ---
 
-## 4. Distribution de la Sandbox
+## 4. Distribution initiale
 
-Les 21M VinX de la Sandbox sont **distribués manuellement par VinX Labs aux contributeurs**, selon un rythme **aligné sur l'activité réelle** du projet.
+Le milliard de VinX en circulation à la genèse est **distribué manuellement par le fondateur**, sans émission programmatique automatique, à son rythme.
 
-**Aucune émission programmatique automatique** : chaque attribution est décidée et publiée. Le rythme reste flexible pour s'adapter à la croissance organique de l'écosystème.
-
-**Transparence** : rapport trimestriel public listant chaque attribution avec sa justification.
-
-**Catégories d'éligibilité** :
-- Contributions techniques (code, bug bounty, outils)
-- Documentation et traduction
-- Support communautaire
-- Outils tiers utiles à l'écosystème (wallets, explorers, intégrations)
+L'usage vise d'abord un **cercle restreint** (proches, premiers contributeurs, testeurs) pour amorcer une **micro-économie réelle** — transactions, staking, échanges P2P — avant tout élargissement.
 
 ---
 
 ## 5. Cycle Économique & Frais
 
-Chaque transaction réseau applique des frais de **0,05%** avec un **plancher minimum de 0,0001 VinX**.
+Chaque transaction réseau applique des frais de **0,05 %** avec un **plancher minimum de 0,0001 VinX**.
 
-### Répartition des frais
+### Melt intégral
 
-- **80% au Pool de Staking** : redistribués aux utilisateurs qui bloquent leurs VinX pour stabiliser l'économie
-- **20% à la Treasury VinX Labs** : couvre les coûts d'infrastructure des validateurs et le développement
+- **100 % des frais fondent dans La Fonderie.** Aucun frais direct au validateur ni à une trésorerie séparée.
+- Les frais fondus alimentent la réserve d'où sont forgées les récompenses de staking.
 
 ```
-[Sandbox 21M] ──► [Contributeurs] ──► [Circulation P2P]
-                                              │
-   ┌──────────────────────────────────────────┘
+[Fondateur 1 Md] ──► [Premiers utilisateurs] ──► [Circulation P2P]
+                                                        │
+   ┌─────────────────────────────────────────────────────┘
    ▼
-[Frais de Transaction 0,05%]
-   ├── 80% ──► [Pool Staking] ──► (Rendement passif holders)
-   └── 20% ──► [Treasury VinX Labs] ──► (Infrastructure et dev)
+[Frais 0,05%] ──(melt)──► [La Fonderie] ──(forge)──► [Récompenses staking] ──► circulation ──► …
 ```
 
-Ce cycle continue **perpétuellement**, garantissant la pérennité économique du protocole.
+Le cycle est **fermé et perpétuel** : c'est le même métal qui circule, fond et se reforge.
 
 ### Staking
 
-- Stake minimum : 1 VinX
-- Warm-up : 7 jours avant de commencer à recevoir des rewards
+- Stake minimum : **1 VinX**
 - Pas de période de lock — déstaking instantané
-- Pas de slashing
-- Distribution des rewards toutes les **100 blocs** (~17 minutes)
+- Pas de slashing sur le stake
+- Récompenses **forgées depuis La Fonderie** toutes les **100 blocs** (~17 minutes), proportionnellement au stake
 
 ---
 
@@ -131,7 +117,7 @@ Liste restreinte de nœuds sélectionnés, opérés par VinX Labs et des partena
 
 **Tolérance aux pannes** : le réseau reste opérationnel tant que 66% des validateurs sont en ligne. Jusqu'à 33% de validateurs hors-ligne ou défaillants sont tolérés sans interruption du service.
 
-**Évolution** : 1 (dev) → 5 (lancement) → 9 (stabilisation) → 21 (maturité). Les validateurs ne sont **pas rémunérés directement** — leur incitation est la légitimité, l'influence et l'utilité stratégique.
+**Évolution** : 1 (local) → 3 (redondance), extensible ensuite. Les validateurs ne perçoivent **aucun frais direct** (les frais fondent à 100 % dans La Fonderie) ; comme tout détenteur, ils peuvent staker pour recevoir des récompenses forgées.
 
 ### 6.2 Full Nodes Communautaires
 
@@ -150,12 +136,11 @@ Une éventuelle rémunération des full nodes pourra être étudiée dans les ph
 
 ## 7. Gouvernance & Évolution
 
-En Phase 1, la gouvernance est assurée par **VinX Labs** via un compte Admin **multi-signature 3/5** (4/5 pour les opérations critiques).
+La gouvernance est assurée par une **clé admin unique** (le fondateur), **rotatable à chaud** via `AdminAction::RotateAdmin` sans redémarrage du nœud. Ses seules prérogatives on-chain : gérer le set de validateurs, ajuster le plancher de frais, et planifier les mises à jour de protocole.
 
-Trois comptes admin spécialisés :
-- **Treasury** : reçoit les 20% des frais
-- **Operations** : finance le développement et l'infrastructure
-- **Admin** : exécute les actions techniques privilégiées (gel judiciaire, upgrades)
+Il n'y a **pas de gel de compte** : la propriété des jetons est inconditionnelle.
+
+> Une répartition du contrôle admin (signature à seuil / multi-parties) pourra être introduite plus tard si le réseau grandit — ce n'est pas un mécanisme figé du protocole.
 
 ### Mises à jour du protocole
 
@@ -171,40 +156,38 @@ Ce mécanisme garantit que tous les opérateurs de nœuds ont le temps de se met
 
 ## 8. Règles Immuables
 
-Les éléments suivants **ne peuvent jamais être modifiés**, par aucun mécanisme :
+Les éléments suivants sont les **piliers de conception** de VinX :
 
 1. **Cap de 100 milliards** de VinX (jamais augmenté)
-2. **Architecture des deux compartiments** (Sandbox 21M + Coffre Maturité 99,979 Md)
-3. **Consensus permissionné** (pas de switch vers PoW anonyme ou PoS ouvert)
-4. **Aucun burn** (jamais)
-5. **Propriété des comptes** (gel possible uniquement sur décision judiciaire, unfreeze automatique à 12 mois)
-6. **Conditions de déverrouillage du Coffre Maturité** (3 conditions cumulatives strictes)
-7. **Répartition des frais 80/20** stakers/Treasury
+2. **Aucun burn** — la supply est conservée pour toujours
+3. **Invariant de la Fonderie** : `circulation + Fonderie = 100 Md` à chaque bloc
+4. **Cycle melt/forge** : les frais fondent dans La Fonderie, les récompenses en sont forgées
+5. **Consensus permissionné** (pas de switch vers PoW anonyme ou PoS ouvert)
+6. **Propriété inconditionnelle des comptes** (aucun gel)
 
-Ces règles sont protégées par des assertions vérifiées à chaque bloc dans la logique runtime du nœud.
+La conservation de la supply repose sur une **arithmétique entièrement *checked*** (aucun overflow/underflow silencieux) et une **finalité déterministe** (pas de réorganisation), et est couverte par des tests de propriété (`proptest`).
 
 ---
 
-## 9. Conformité
+## 9. Positionnement
 
-VinX Ledger cible le marché européen sous le cadre **MiCA**.
+VinX Ledger est un **projet personnel et artisanal** : une monnaie souveraine, construite en solo, sans investisseurs ni pré-vente.
 
-- **Pas de portail commercial en Phase 1** : pas de statut CASP requis
-- **Aucun KYC obligatoire au protocole** : la transparence des transactions on-chain suffit aux exigences AML
-- **Gel sur décision judiciaire uniquement**, via multi-sig Admin, unfreeze automatique à 12 mois
-- **Comptes inactifs intouchables** perpétuellement
+- **Aucun KYC au protocole** — la transparence on-chain est native.
+- **Propriété inconditionnelle** — aucun compte ne peut être gelé.
+- **Pas de portail commercial** ni de statut réglementaire visé à ce stade — VinX avance comme un bijou technique que son créateur affine dans le temps.
 
-Lorsque le Coffre Maturité sera déverrouillé, VinX Labs aura obtenu son statut CASP MiCA.
+Un éventuel cadre de conformité pourra être étudié le jour où un usage public élargi le justifierait ; il n'est pas un prérequis du protocole.
 
 ---
 
 ## 10. Roadmap
 
-Sans calendrier engagé, par phases :
+Sans calendrier engagé, par étapes :
 
-- **Phase 1** : MVP et Sandbox active (21M VinX en circulation progressive)
-- **Phase 2** : Testnet public étendu, multi-validateurs PoA, audit, communauté minimale
-- **Phase 3** : Mainnet et déverrouillage progressif du Coffre Maturité (sous conditions strictes)
+- **Étape actuelle** : le protocole (L1 Rust, consensus PoA Threshold, Fonderie melt/forge) est complet et testé, exploité en local.
+- **Ensuite** : redondance multi-validateurs (1 → 3), distribution du milliard fondateur à un premier cercle, micro-économie réelle.
+- **Plus tard (optionnel)** : réseau public, et de nouvelles briques que la version présente garde ouvertes (ex. *token factory* pour émettre d'autres actifs sur VinX).
 
 VinX Ledger n'a pas de pression d'agenda. Le projet avance à son rythme.
 
@@ -220,20 +203,18 @@ VinX Ledger n'a pas de pression d'agenda. Le projet avance à son rythme.
 | Bloc | 10 secondes |
 | TPS Phase 1 | 4 000 |
 | Consensus | PoA Threshold, seuil 66%, finalité déterministe |
-| Validateurs | 1→5→9→21, sélectionnés VinX Labs, légalement identifiés |
-| Full nodes | Ouverts à tous, sans rémunération en Phase 1 |
-| Supply totale | 100 milliards VinX (immuable) |
-| Sandbox active | 21 millions VinX (Phase 1) |
-| Coffre Maturité | 99,979 milliards VinX (verrouillés, 3 conditions) |
-| Distribution Sandbox | Manuelle, par contribution, rythme adapté |
-| Frais | 0,05% + floor 0,0001 VinX |
-| Répartition frais | 80% stakers / 20% Treasury |
-| Staking | 1 VinX min, warm-up 7j, distribution /100 blocs, pas de slash |
-| Burn | Aucun (jamais) |
-| Gouvernance | Centralisée VinX Labs, multi-sig 3/5 (4/5 critique) |
+| Validateurs | 1 → 3 (redondance), permissionnés |
+| Full nodes | Ouverts à tous |
+| Supply totale | 100 milliards VinX (immuable, no burn) |
+| Adresse | `[u8;20]` (SHA-256(pubkey)[..20]), affichée en bech32 `vinx1…` |
+| Genèse | 1 Md (1 %) au fondateur, 99 Md (99 %) dans La Fonderie |
+| Modèle monétaire | Melt/forge — invariant `circulation + Fonderie = 100 Md` |
+| Frais | 0,05% + floor 0,0001 VinX, **100 % melt** dans La Fonderie |
+| Staking | 1 VinX min, récompenses forgées /100 blocs, pas de slash |
+| Burn | Aucun (jamais) — le métal cycle à l'infini |
+| Gouvernance | Clé admin unique rotatable (fondateur), pas de gel de compte |
 | Upgrades | Versioning on-chain, activation à hauteur planifiée, 7/30/90j |
-| Conformité | MiCA-compatible, pas de CASP en Phase 1 |
 
 ---
 
-*VinX Labs, juin 2026 — Document de référence v2.4*
+*VinX Labs, juillet 2026 — Document de référence v3.0*
