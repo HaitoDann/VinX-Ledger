@@ -50,7 +50,7 @@ describe('VinxClient.height()', () => {
 describe('VinxClient.account()', () => {
   it('calls GET /account/:address', async () => {
     const addr = 'vinx1abc';
-    const payload = { address: addr, balance: '1000', balance_atoms: '1000000000000000000000', nonce: 0, staked: '0', staked_atoms: '0', frozen: false };
+    const payload = { address: addr, balance: '1000', balance_atoms: '1000000000000000000000', nonce: 0, staked: '0', staked_atoms: '0' };
     const spy = mockFetch(payload);
     const client = new VinxClient(BASE);
     const result = await client.account(addr);
@@ -152,7 +152,7 @@ describe('VinxClient.protocolStatus()', () => {
 
 describe('VinxClient.networkStats()', () => {
   it('calls GET /network/stats', async () => {
-    const payload = { base_fee_atoms: '1000000000000000', staking_pool: '0.00', melt_pool: '0.00', circulating_supply: '21000000.00' };
+    const payload = { base_fee_atoms: '1000000000000000', foundry: '99000000000.00', circulating_supply: '1000000000.00' };
     const spy = mockFetch(payload);
     const client = new VinxClient(BASE);
     const result = await client.networkStats();

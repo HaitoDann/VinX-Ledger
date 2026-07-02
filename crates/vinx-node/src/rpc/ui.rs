@@ -161,8 +161,7 @@ const HTML: &str = r####"<!DOCTYPE html>
       <div class="stats" style="grid-template-columns:1fr 1fr">
         <div><div class="stat-v sm" id="e-fee">—</div><div class="stat-l">Base fee (atoms)</div></div>
         <div><div class="stat-v sm" id="e-supply">—</div><div class="stat-l">En circulation</div></div>
-        <div><div class="stat-v sm" id="e-staking">—</div><div class="stat-l">Staking pool</div></div>
-        <div><div class="stat-v sm" id="e-melt">—</div><div class="stat-l">Melt pool</div></div>
+        <div><div class="stat-v sm" id="e-foundry">—</div><div class="stat-l">La Fonderie</div></div>
       </div>
       <div style="margin-top:14px;padding-top:14px;border-top:1px solid var(--border)">
         <div style="font-size:10px;color:var(--muted);text-transform:uppercase;letter-spacing:.5px;margin-bottom:10px">Faucet testnet</div>
@@ -448,8 +447,7 @@ async function refreshEconStats() {
     const s = await (await fetch(BASE + '/network/stats')).json();
     document.getElementById('e-fee').textContent    = Number(BigInt(s.base_fee_atoms)).toLocaleString();
     document.getElementById('e-supply').textContent = fmtAtoms(s.circulating_supply.split(' ')[0] + '000000000000000000').replace('.00 VINX','');
-    document.getElementById('e-staking').textContent = s.staking_pool;
-    document.getElementById('e-melt').textContent    = s.melt_pool;
+    document.getElementById('e-foundry').textContent = s.foundry;
   } catch {}
 }
 
@@ -715,7 +713,6 @@ async function lookupAccount() {
         <div class="ri"><div class="l">Solde</div><div class="v">${a.balance}</div></div>
         <div class="ri"><div class="l">Staké</div><div class="v">${a.staked}</div></div>
         <div class="ri"><div class="l">Nonce</div><div class="v">${a.nonce}</div></div>
-        <div class="ri"><div class="l">Statut</div><div class="v">${a.frozen ? '<span class="tag r">Gelé</span>':'<span class="tag g">Actif</span>'}</div></div>
       </div>`;
     loadAccTxs(addr);
   } catch (e) { out.innerHTML = `<p class="msg err">${e.message}</p>`; }

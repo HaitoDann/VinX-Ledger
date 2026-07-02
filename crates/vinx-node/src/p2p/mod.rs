@@ -438,12 +438,7 @@ async fn dispatch_message(
                 }
                 if ok {
                     sg.block_height = height;
-                    sg.check_auto_unfreeze();
                     sg.check_upgrade_activation();
-                    let reward = sg.flush_validator_fee_pool();
-                    if reward > vinx_core::amount::Amount::ZERO {
-                        sg.credit(&block.header.validator, reward);
-                    }
                     let _r = sg.distribute_staking_rewards();
                     let root = sg.compute_state_root();
                     if root != block.header.state_root {
@@ -600,12 +595,7 @@ async fn dispatch_message(
                     }
                     if ok {
                         sg.block_height = height;
-                        sg.check_auto_unfreeze();
                         sg.check_upgrade_activation();
-                        let r = sg.flush_validator_fee_pool();
-                        if r > vinx_core::amount::Amount::ZERO {
-                            sg.credit(&block.header.validator, r);
-                        }
                         let _rw = sg.distribute_staking_rewards();
                         let root = sg.compute_state_root();
                         if root != block.header.state_root {

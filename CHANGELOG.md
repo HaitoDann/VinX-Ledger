@@ -5,6 +5,37 @@ Format : `MAJEUR.MINEUR.CORRECTIF` — les versions `0.x.y` sont des versions de
 
 ---
 
+## [0.24.0] — 2026-07-02
+
+### ⚠️ BREAKING — Refonte « La Fonderie » : tokenomics melt/forge, simplification
+
+Cristallisation de l'identité de VinX : une monnaie propre au modèle **melt/forge**, débarrassée de tout l'échafaudage stratégique (Coffre Maturité, conditions MiCA, gel judiciaire). *On ne mint pas — on **forge**. On ne brûle pas — on **fond**.* Changement de protocole cassant → **nouvelle genèse** (schéma stockage **v6**).
+
+**Tokenomics « Fonderie » (`vinx-core`, `vinx-state`)**
+- **Supply 100 Md immuable, aucun burn.** Invariant vérifié à chaque bloc : `circulating_supply + foundry == MAX_SUPPLY`. La valeur circule à l'infini, rien n'est créé ni détruit.
+- **La Fonderie** (`foundry`) remplace les 6 anciens réservoirs (`staking_pool`, `melt_pool`, `distribution_pool`, `validator_fee_pool`, `treasury`, `coffre_maturity`).
+- **Melt** : 100 % des frais retournent dans la Fonderie (`melt_to_foundry`) et quittent la circulation.
+- **Forge** : les récompenses de staking sont forgées depuis la Fonderie (`FORGE_RATE_BPS = 10`, soit 0,1 % de la Fonderie par distribution). Comme la forge prend une *fraction* et que les frais la refont fondre, **la Fonderie ne se vide jamais** — le cycle infini.
+- **Genèse** : 1 Md (1 %) forgé au fondateur pour amorcer, 99 Md (99 %) scellés dans la Fonderie.
+
+**Suppressions (simplification)**
+- **Coffre Maturité** + conditions MiCA (`CoffreCondition`, `MarkCoffreCondition`, `UnlockCoffre`) — retirés.
+- **Gel judiciaire** : types de tx `FreezeAccount`/`UnfreezeAccount`, champs `Account.frozen`/`frozen_since`, `check_auto_unfreeze` — retirés.
+- **Split de frais 80/20** validateur/treasury et `ReleaseMeltToDistribution` — retirés (remplacés par le melt 100 %).
+- Discriminants de tx renumérotés `0x01..0x08` (8 types restants) ; `Emission` supprimé.
+
+**Répercussions**
+- `hash_account` (feuille Merkle) et le handler `/account/:address/proof` ne hachent plus `frozen`/`frozen_since`.
+- `GET /network/stats` & `/metrics` exposent `foundry` au lieu des anciens pools ; `AccountResponse` sans `frozen`.
+- Wallet CLI : commandes `freeze`/`unfreeze` retirées. UI web : « La Fonderie » remplace les pools, statut de gel retiré.
+- SDK TypeScript aligné (`NetworkStatsResponse.foundry`, `AccountResponse` sans `frozen`).
+
+**Portes gardées ouvertes** : versioning de protocole (`ProtocolVersion`/`ScheduledUpgrade`), dispatch de tx modulaire, multi-validateur P2P, chain-ids — intacts pour l'évolution future (token factory, etc.).
+
+**Tests** : modèle Fonderie (melt/forge, conservation de supply), invariant `circulation + Fonderie == 100 Md`. 215 tests Rust + 23 SDK — 0 échec. clippy `-D warnings` & fmt verts.
+
+---
+
 ## [0.23.0] — 2026-07-01
 
 ### ⚠️ BREAKING — `Address` en 20 octets bruts (design canonique)

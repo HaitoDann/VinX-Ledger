@@ -460,9 +460,7 @@ pub async fn get_metrics(State(node): State<Arc<Node>>) -> impl IntoResponse {
     let mempool_size = node.mempool.read().await.size();
     let state = node.state.read().await;
     let base_fee = state.base_fee.atoms();
-    let melt_pool = state.melt_pool.atoms();
-    let staking_pool = state.staking_pool.atoms();
-    let distribution_pool = state.distribution_pool.atoms();
+    let foundry = state.foundry_balance().atoms();
     let circulating = state.circulating_supply.atoms();
     let validator_count = state.validator_set.len();
     drop(state);
@@ -477,15 +475,9 @@ pub async fn get_metrics(State(node): State<Arc<Node>>) -> impl IntoResponse {
          # HELP vinx_base_fee Current dynamic fee floor in atoms\n\
          # TYPE vinx_base_fee gauge\n\
          vinx_base_fee {base_fee}\n\
-         # HELP vinx_melt_pool Total melted fees in atoms (redistribution reserve)\n\
-         # TYPE vinx_melt_pool gauge\n\
-         vinx_melt_pool {melt_pool}\n\
-         # HELP vinx_staking_pool Current staking reward pool in atoms\n\
-         # TYPE vinx_staking_pool gauge\n\
-         vinx_staking_pool {staking_pool}\n\
-         # HELP vinx_distribution_pool Distribution pool in atoms\n\
-         # TYPE vinx_distribution_pool gauge\n\
-         vinx_distribution_pool {distribution_pool}\n\
+         # HELP vinx_foundry La Fonderie reserve in atoms (melt/forge reserve)\n\
+         # TYPE vinx_foundry gauge\n\
+         vinx_foundry {foundry}\n\
          # HELP vinx_circulating_supply Total circulating supply in atoms\n\
          # TYPE vinx_circulating_supply gauge\n\
          vinx_circulating_supply {circulating}\n\
@@ -526,14 +518,12 @@ pub async fn get_metrics(State(node): State<Arc<Node>>) -> impl IntoResponse {
     )
 }
 
-/// Returns economic network statistics (base_fee, staking pool, melt pool).
+/// Returns economic network statistics (base_fee, Foundry reserve, circulating supply).
 pub async fn get_network_stats(State(node): State<Arc<Node>>) -> ApiResult<NetworkStatsResponse> {
     let state = node.state.read().await;
     Ok(Json(NetworkStatsResponse {
         base_fee_atoms: state.base_fee.atoms().to_string(),
-        staking_pool: state.staking_pool.to_string(),
-        melt_pool: state.melt_pool.to_string(),
-        distribution_pool: state.distribution_pool.to_string(),
+        foundry: state.foundry_balance().to_string(),
         circulating_supply: state.circulating_supply.to_string(),
     }))
 }
@@ -805,15 +795,14 @@ pub async fn get_account_proof(
     let leaves: Vec<vinx_crypto::Hash32> = entries
         .iter()
         .map(|a| {
+            // Must match vinx_state::hash_account exactly (light-client leaf hash).
             let addr = a.address.as_bytes();
-            let mut buf = Vec::with_capacity(addr.len() + 48);
+            let mut buf = Vec::with_capacity(addr.len() + 40);
             buf.extend_from_slice(addr);
             buf.extend_from_slice(&a.balance.atoms().to_be_bytes());
             buf.extend_from_slice(&a.nonce.to_be_bytes());
             buf.extend_from_slice(&a.staked.atoms().to_be_bytes());
-            buf.push(a.frozen as u8);
             buf.extend_from_slice(&a.stake_since.to_be_bytes());
-            buf.extend_from_slice(&a.frozen_since.to_be_bytes());
             sha256(&buf)
         })
         .collect();

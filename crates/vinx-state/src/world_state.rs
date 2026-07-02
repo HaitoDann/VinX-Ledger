@@ -2,12 +2,12 @@ use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, HashMap, HashSet};
 use vinx_core::{
     amount::{
-        Amount, DEFAULT_FEE_FLOOR_ATOMS, FREEZE_DURATION_BLOCKS, MIN_STAKE_ATOMS,
+        Amount, DEFAULT_FEE_FLOOR_ATOMS, FORGE_RATE_BPS, FORGE_RATE_DENOM, MIN_STAKE_ATOMS,
         STAKING_DISTRIBUTION_INTERVAL,
     },
     block::SlashEvidence,
     chain_id::CHAIN_ID_DEVNET,
-    governance::{CoffreCondition, GovernanceAction},
+    governance::GovernanceAction,
     protocol::{ProtocolVersion, ScheduledUpgrade},
     Account, CoreError, Transaction, TransactionType, ValidatorSet,
 };
@@ -20,38 +20,22 @@ pub struct WorldState {
     /// is already sorted by address — the Merkle leaf order — avoiding an O(n log n)
     /// sort on every state-root rebuild and every inclusion-proof lookup.
     pub(crate) accounts: BTreeMap<Address, Account>,
+    /// Tokens held by accounts (Σ balances + staked). Always equals `MAX_SUPPLY - foundry`:
+    /// the supply is conserved forever (no burn), it only cycles between accounts and the Foundry.
     pub circulating_supply: Amount,
     pub block_height: u64,
-    pub staking_pool: Amount,
-    /// Accumulated melt fees waiting to be redistributed — 30% of every fee goes here.
-    pub melt_pool: Amount,
-    /// Pool des jetons à distribuer — tokens released from melt via ReleaseMeltToDistribution,
-    /// and the Coffre Maturité when unlocked. Not staking rewards.
+    /// La Fonderie — the melt/forge reserve. Transaction fees *melt* into it; staking
+    /// rewards are *forged* out of it. The invariant `circulating_supply + foundry ==
+    /// MAX_SUPPLY` holds at every block: nothing is ever created or destroyed, only recycled.
     #[serde(default)]
-    pub distribution_pool: Amount,
+    pub foundry: Amount,
     /// Static minimum fee floor; dynamic base_fee is always >= this.
     pub fee_floor: Amount,
     /// Dynamic fee floor, updated each block from mempool pressure.
     /// 1x at normal load, up to 3x at 100% mempool capacity.
     #[serde(default = "default_fee_floor")]
     pub base_fee: Amount,
-    /// Pending validator reward for the current block (flushed to proposer at block end).
-    /// 30% of every transaction fee accumulates here.
-    #[serde(default)]
-    pub validator_fee_pool: Amount,
-    /// Protocol treasury: accumulates 20% of every transaction fee.
-    /// Governed by admin — funds protocol development, audits, public policy.
-    #[serde(default)]
-    pub treasury: Amount,
-    /// Coffre Maturité: locked until 3 governance conditions are met.
-    pub coffre_maturity: Amount,
-    #[serde(default)]
-    pub coffre_mica_casp: bool,
-    #[serde(default)]
-    pub coffre_external_audit: bool,
-    #[serde(default)]
-    pub coffre_public_policy: bool,
-    /// Address that may issue admin transactions (freeze, upgrade announcements).
+    /// Address that may issue admin transactions (validator set, upgrades, admin rotation).
     /// None = no admin restrictions (dev/test mode).
     pub admin_address: Option<Address>,
     /// Currently running protocol version.
@@ -105,17 +89,9 @@ impl WorldState {
             accounts: BTreeMap::new(),
             circulating_supply: Amount::ZERO,
             block_height: 0,
-            staking_pool: Amount::ZERO,
-            melt_pool: Amount::ZERO,
-            distribution_pool: Amount::ZERO,
+            foundry: Amount::ZERO,
             fee_floor,
             base_fee: fee_floor,
-            validator_fee_pool: Amount::ZERO,
-            treasury: Amount::ZERO,
-            coffre_maturity: Amount::ZERO,
-            coffre_mica_casp: false,
-            coffre_external_audit: false,
-            coffre_public_policy: false,
             admin_address: None,
             current_version: ProtocolVersion::GENESIS,
             pending_upgrade: None,
@@ -203,11 +179,27 @@ impl WorldState {
         self.base_fee = Amount::from_atoms(new_atoms.max(self.fee_floor.atoms()));
     }
 
-    /// Drains and returns accumulated validator fee rewards for the current block.
-    pub fn flush_validator_fee_pool(&mut self) -> Amount {
-        let reward = self.validator_fee_pool;
-        self.validator_fee_pool = Amount::ZERO;
-        reward
+    /// *Melt*: moves `amount` from circulation into the Foundry (fees, slashing).
+    /// Preserves the invariant `circulating_supply + foundry == MAX_SUPPLY`.
+    fn melt_to_foundry(&mut self, amount: Amount) {
+        self.foundry = self.foundry.saturating_add(amount);
+        self.circulating_supply = self
+            .circulating_supply
+            .checked_sub(amount)
+            .unwrap_or(Amount::ZERO);
+    }
+
+    /// *Forge*: draws up to `amount` out of the Foundry back into circulation
+    /// (staking rewards). Returns the amount actually forged (capped by the reserve).
+    fn forge_from_foundry(&mut self, amount: Amount) -> Amount {
+        let forged = if self.foundry >= amount {
+            amount
+        } else {
+            self.foundry
+        };
+        self.foundry = self.foundry.checked_sub(forged).unwrap_or(Amount::ZERO);
+        self.circulating_supply = self.circulating_supply.saturating_add(forged);
+        forged
     }
 
     /// Credits `amount` to `address`, creating the account if necessary.
@@ -247,8 +239,9 @@ impl WorldState {
             .unwrap_or(Amount::ZERO)
     }
 
-    pub fn treasury_balance(&self) -> Amount {
-        self.treasury
+    /// La Fonderie balance — the melt/forge reserve.
+    pub fn foundry_balance(&self) -> Amount {
+        self.foundry
     }
 
     // ---- Incremental persistence support ----------------------------------
@@ -298,24 +291,11 @@ impl WorldState {
 
     /// Returns true when the chain must keep advancing even with an empty mempool.
     ///
-    /// Two conditions require a periodic heartbeat block:
-    /// - A protocol upgrade is scheduled (activation triggered by reaching a block height).
-    /// - At least one account is frozen (auto-unfreeze triggered by block height elapsed).
-    ///
-    /// When neither condition holds, the node can sleep indefinitely until the next
-    /// transaction arrives — no heartbeat needed, no wasted storage.
+    /// A periodic heartbeat block is only required when a protocol upgrade is
+    /// scheduled (its activation is triggered by reaching a block height). Otherwise
+    /// the node can sleep until the next transaction — no wasted storage.
     pub fn has_pending_time_sensitive_ops(&self) -> bool {
-        if self.pending_upgrade.is_some() {
-            return true;
-        }
-        self.accounts.values().any(|a| a.frozen)
-    }
-
-    pub fn is_frozen(&self, address: &Address) -> bool {
-        self.accounts
-            .get(address)
-            .map(|a| a.frozen)
-            .unwrap_or(false)
+        self.pending_upgrade.is_some()
     }
 
     pub(crate) fn insert_account(&mut self, account: Account) {
@@ -336,10 +316,8 @@ impl WorldState {
     /// **and** Ed25519 signature verification. Use this for transactions from any
     /// untrusted source (P2P gossip, chain sync, direct replay of a received block).
     pub fn apply_transaction(&mut self, tx: &Transaction) -> Result<(), CoreError> {
-        if tx.tx_type != TransactionType::Emission {
-            self.check_replay_and_ttl(tx)?;
-            self.verify_tx_signatures(tx)?;
-        }
+        self.check_replay_and_ttl(tx)?;
+        self.verify_tx_signatures(tx)?;
         self.dispatch_tx(tx)
     }
 
@@ -354,9 +332,7 @@ impl WorldState {
     /// NEVER call this on transactions from an untrusted source (P2P, sync) — signature
     /// verification is the security boundary there. Use `apply_transaction` instead.
     pub fn apply_transaction_trusted(&mut self, tx: &Transaction) -> Result<(), CoreError> {
-        if tx.tx_type != TransactionType::Emission {
-            self.check_replay_and_ttl(tx)?;
-        }
+        self.check_replay_and_ttl(tx)?;
         self.dispatch_tx(tx)
     }
 
@@ -416,16 +392,11 @@ impl WorldState {
             TransactionType::Transfer => self.apply_transfer(tx),
             TransactionType::Stake => self.apply_stake(tx),
             TransactionType::Unstake => self.apply_unstake(tx),
-            TransactionType::FreezeAccount => self.apply_freeze(tx),
-            TransactionType::UnfreezeAccount => self.apply_unfreeze(tx),
             TransactionType::AnnounceUpgrade => self.apply_announce_upgrade(tx),
             TransactionType::AddValidator => self.apply_add_validator(tx),
             TransactionType::RemoveValidator => self.apply_remove_validator(tx),
             TransactionType::SlashValidator => self.apply_slash_validator(tx),
             TransactionType::AdminAction => self.apply_admin_action(tx),
-            TransactionType::Emission => Err(CoreError::InvalidTransaction(
-                "emission disabled in Phase 1".to_string(),
-            )),
         }
     }
 
@@ -464,9 +435,6 @@ impl WorldState {
                 .accounts
                 .get_mut(&tx.from)
                 .ok_or(CoreError::InsufficientBalance)?;
-            if sender.frozen {
-                return Err(CoreError::AccountFrozen);
-            }
             if sender.nonce != tx.nonce {
                 return Err(CoreError::InvalidNonce {
                     expected: sender.nonce,
@@ -486,9 +454,6 @@ impl WorldState {
                 .accounts
                 .get_mut(&fee_payer)
                 .ok_or(CoreError::InsufficientBalance)?;
-            if sponsor_acc.frozen {
-                return Err(CoreError::AccountFrozen);
-            }
             if sponsor_acc.balance < tx.fee {
                 return Err(CoreError::InsufficientBalance);
             }
@@ -504,17 +469,9 @@ impl WorldState {
             .checked_add(tx.amount)
             .ok_or(CoreError::AmountOverflow)?;
 
-        // Fee split: 80% validator / 20% treasury
-        let validator_cut = Amount::validator_share(tx.fee);
-        let treasury_cut = Amount::treasury_share(tx.fee);
-        self.validator_fee_pool = self
-            .validator_fee_pool
-            .checked_add(validator_cut)
-            .ok_or(CoreError::AmountOverflow)?;
-        self.treasury = self
-            .treasury
-            .checked_add(treasury_cut)
-            .ok_or(CoreError::AmountOverflow)?;
+        // Melt: 100% of the fee flows back into the Foundry and leaves circulation.
+        // The supply is conserved — nothing is burned, it will be re-forged as rewards.
+        self.melt_to_foundry(tx.fee);
 
         self.mark_dirty(&tx.from);
         self.mark_dirty(&tx.to);
@@ -535,9 +492,6 @@ impl WorldState {
             .accounts
             .get_mut(&tx.from)
             .ok_or(CoreError::InsufficientBalance)?;
-        if account.frozen {
-            return Err(CoreError::AccountFrozen);
-        }
         if account.nonce != tx.nonce {
             return Err(CoreError::InvalidNonce {
                 expected: account.nonce,
@@ -565,9 +519,6 @@ impl WorldState {
             .accounts
             .get_mut(&tx.from)
             .ok_or(CoreError::InsufficientBalance)?;
-        if account.frozen {
-            return Err(CoreError::AccountFrozen);
-        }
         if account.nonce != tx.nonce {
             return Err(CoreError::InvalidNonce {
                 expected: account.nonce,
@@ -587,65 +538,6 @@ impl WorldState {
         }
         account.nonce += 1;
         self.mark_dirty(&tx.from);
-        Ok(())
-    }
-
-    fn apply_freeze(&mut self, tx: &Transaction) -> Result<(), CoreError> {
-        self.check_admin(tx)?;
-        let sender = self
-            .accounts
-            .get_mut(&tx.from)
-            .ok_or(CoreError::InsufficientBalance)?;
-        if sender.nonce != tx.nonce {
-            return Err(CoreError::InvalidNonce {
-                expected: sender.nonce,
-                got: tx.nonce,
-            });
-        }
-        sender.nonce += 1;
-
-        let target = self
-            .accounts
-            .get_mut(&tx.to)
-            .ok_or(CoreError::InvalidTransaction(
-                "target account does not exist".to_string(),
-            ))?;
-        if target.frozen {
-            return Err(CoreError::InvalidTransaction(
-                "account is already frozen".to_string(),
-            ));
-        }
-        target.frozen = true;
-        target.frozen_since = self.block_height;
-        self.mark_dirty(&tx.from);
-        self.mark_dirty(&tx.to);
-        Ok(())
-    }
-
-    fn apply_unfreeze(&mut self, tx: &Transaction) -> Result<(), CoreError> {
-        self.check_admin(tx)?;
-        let sender = self
-            .accounts
-            .get_mut(&tx.from)
-            .ok_or(CoreError::InsufficientBalance)?;
-        if sender.nonce != tx.nonce {
-            return Err(CoreError::InvalidNonce {
-                expected: sender.nonce,
-                got: tx.nonce,
-            });
-        }
-        sender.nonce += 1;
-
-        let target = self
-            .accounts
-            .get_mut(&tx.to)
-            .ok_or(CoreError::InvalidTransaction(
-                "target account does not exist".to_string(),
-            ))?;
-        target.frozen = false;
-        target.frozen_since = 0;
-        self.mark_dirty(&tx.from);
-        self.mark_dirty(&tx.to);
         Ok(())
     }
 
@@ -754,30 +646,6 @@ impl WorldState {
         Ok(())
     }
 
-    /// Checks for accounts that have been frozen longer than FREEZE_DURATION_BLOCKS
-    /// and automatically unfreezes them. Called by the block producer on every block.
-    pub fn check_auto_unfreeze(&mut self) {
-        let height = self.block_height;
-        let mut unfrozen: Vec<Address> = Vec::new();
-        for account in self.accounts.values_mut() {
-            if account.frozen
-                && height.saturating_sub(account.frozen_since) >= FREEZE_DURATION_BLOCKS
-            {
-                account.frozen = false;
-                account.frozen_since = 0;
-                unfrozen.push(account.address);
-                tracing::info!(
-                    address = %account.address,
-                    height,
-                    "Account automatically unfrozen (12-month limit reached)"
-                );
-            }
-        }
-        for addr in unfrozen {
-            self.mark_dirty(&addr);
-        }
-    }
-
     /// Checks whether a pending upgrade should activate at the current block height
     /// and applies the version change if so.
     pub fn check_upgrade_activation(&mut self) {
@@ -800,7 +668,12 @@ impl WorldState {
         }
     }
 
-    /// Distributes staking pool every STAKING_DISTRIBUTION_INTERVAL blocks.
+    /// Forges staking rewards out of the Foundry every STAKING_DISTRIBUTION_INTERVAL
+    /// blocks and distributes them to stakers proportionally to their stake.
+    ///
+    /// The reward pool is a fraction (`FORGE_RATE_BPS`) of the current Foundry, so it
+    /// shrinks as the Foundry drains and grows again as fees melt back in — the
+    /// Foundry never empties (the "infinite cycle"). Returns the amount forged.
     pub fn distribute_staking_rewards(&mut self) -> Amount {
         if self.block_height == 0
             || !self
@@ -809,7 +682,7 @@ impl WorldState {
         {
             return Amount::ZERO;
         }
-        if self.staking_pool == Amount::ZERO {
+        if self.foundry == Amount::ZERO {
             return Amount::ZERO;
         }
 
@@ -818,7 +691,11 @@ impl WorldState {
             return Amount::ZERO;
         }
 
-        let pool = self.staking_pool.atoms();
+        // Forge a fraction of the Foundry as this epoch's reward pool.
+        let pool = self.foundry.atoms() * FORGE_RATE_BPS / FORGE_RATE_DENOM;
+        if pool == 0 {
+            return Amount::ZERO;
+        }
         let mut distributed = 0u128;
 
         let mut rewarded: Vec<Address> = Vec::new();
@@ -844,12 +721,8 @@ impl WorldState {
             self.mark_dirty(&addr);
         }
 
-        self.staking_pool = self
-            .staking_pool
-            .checked_sub(Amount::from_atoms(distributed))
-            .unwrap_or(Amount::ZERO);
-
-        Amount::from_atoms(distributed)
+        // Move the forged tokens from the Foundry into circulation (accounting).
+        self.forge_from_foundry(Amount::from_atoms(distributed))
     }
 
     /// Merkle root of the account state after sorting accounts by address.
@@ -920,7 +793,7 @@ impl WorldState {
         if slashed > Amount::ZERO {
             // 10% bounty to the reporter
             let bounty = Amount::from_atoms(slashed.atoms() / 10);
-            // Remainder goes to the melt pool (redistribution reserve, not a burn)
+            // Remainder melts back into the Foundry (recycled, never burned).
             let to_melt = slashed.checked_sub(bounty).unwrap_or(Amount::ZERO);
 
             if let Some(acc) = self.accounts.get_mut(target) {
@@ -929,7 +802,7 @@ impl WorldState {
             }
             self.mark_dirty(target);
             self.credit(&tx.from, bounty); // credit() also calls mark_dirty(tx.from)
-            self.melt_pool = self.melt_pool.saturating_add(to_melt);
+            self.melt_to_foundry(to_melt);
         }
 
         self.mark_dirty(&tx.from);
@@ -998,38 +871,9 @@ impl WorldState {
                     tracing::info!(activation_height, "Admin: upgrade scheduled");
                 }
             }
-            GovernanceAction::ReleaseMeltToDistribution { amount } => {
-                if self.melt_pool >= amount {
-                    self.melt_pool = self.melt_pool.checked_sub(amount).unwrap_or(Amount::ZERO);
-                    self.distribution_pool = self.distribution_pool.saturating_add(amount);
-                    tracing::info!(%amount, "Admin: melt released to distribution pool");
-                }
-            }
             GovernanceAction::RotateAdmin(new_admin) => {
                 self.admin_address = Some(new_admin);
                 tracing::info!(%new_admin, "Admin: admin key rotated");
-            }
-            GovernanceAction::MarkCoffreCondition(condition) => {
-                match condition {
-                    CoffreCondition::MicaCasp => self.coffre_mica_casp = true,
-                    CoffreCondition::ExternalAudit => self.coffre_external_audit = true,
-                    CoffreCondition::PublicPolicy => self.coffre_public_policy = true,
-                }
-                tracing::info!(?condition, "Admin: Coffre condition marked");
-            }
-            GovernanceAction::UnlockCoffre => {
-                if self.coffre_mica_casp && self.coffre_external_audit && self.coffre_public_policy
-                {
-                    let amount = self.coffre_maturity;
-                    self.distribution_pool = self.distribution_pool.saturating_add(amount);
-                    self.circulating_supply = self.circulating_supply.saturating_add(amount);
-                    self.coffre_maturity = Amount::ZERO;
-                    tracing::info!(%amount, "Admin: Coffre Maturité unlocked → distribution pool");
-                } else {
-                    return Err(CoreError::InvalidTransaction(
-                        "UnlockCoffre rejected: not all 3 conditions are met".to_string(),
-                    ));
-                }
             }
         }
 
@@ -1051,14 +895,12 @@ impl WorldState {
 
 fn hash_account(account: &Account) -> Hash32 {
     let addr = account.address.as_bytes();
-    let mut buf = Vec::with_capacity(addr.len() + 16 + 8 + 16 + 1 + 8 + 8);
+    let mut buf = Vec::with_capacity(addr.len() + 16 + 8 + 16 + 8);
     buf.extend_from_slice(addr);
     buf.extend_from_slice(&account.balance.atoms().to_be_bytes());
     buf.extend_from_slice(&account.nonce.to_be_bytes());
     buf.extend_from_slice(&account.staked.atoms().to_be_bytes());
-    buf.push(account.frozen as u8);
     buf.extend_from_slice(&account.stake_since.to_be_bytes());
-    buf.extend_from_slice(&account.frozen_since.to_be_bytes());
     sha256(&buf)
 }
 
@@ -1083,173 +925,98 @@ mod tests {
         (state, admin_kp, admin_addr)
     }
 
-    // ─── staking distribution ────────────────────────────────────────────────
+    // ─── Fonderie: melt / forge ──────────────────────────────────────────────
+
+    // At FORGE_RATE_BPS = 10 (0.1%), a Foundry of 1_000_000 VINX forges 1_000 VINX.
+    const FORGE_DIVISOR: u64 = 1_000; // 10_000 / FORGE_RATE_BPS
 
     #[test]
-    fn test_no_stakers_pool_unchanged() {
+    fn test_no_stakers_foundry_unchanged() {
         let mut s = WorldState::new();
-        s.staking_pool = Amount::from_vinx(100);
+        s.foundry = Amount::from_vinx(1_000_000);
         s.block_height = 100;
-        let distributed = s.distribute_staking_rewards();
-        assert_eq!(distributed, Amount::ZERO);
-        assert_eq!(s.staking_pool, Amount::from_vinx(100));
+        let forged = s.distribute_staking_rewards();
+        assert_eq!(forged, Amount::ZERO);
+        assert_eq!(s.foundry, Amount::from_vinx(1_000_000));
     }
 
     #[test]
-    fn test_empty_pool_distributes_nothing() {
+    fn test_empty_foundry_forges_nothing() {
         let mut s = WorldState::new();
         let addr = staker(&mut s, Amount::from_vinx(1_000));
-        s.staking_pool = Amount::ZERO;
+        s.foundry = Amount::ZERO;
         s.block_height = 100;
-        let distributed = s.distribute_staking_rewards();
-        assert_eq!(distributed, Amount::ZERO);
+        assert_eq!(s.distribute_staking_rewards(), Amount::ZERO);
         assert_eq!(s.accounts[&addr].balance, Amount::ZERO);
     }
 
     #[test]
-    fn test_single_staker_receives_full_pool() {
+    fn test_single_staker_receives_forged_fraction() {
         let mut s = WorldState::new();
         let addr = staker(&mut s, Amount::from_vinx(1_000));
-        s.staking_pool = Amount::from_vinx(50);
+        s.foundry = Amount::from_vinx(1_000_000);
         s.block_height = 100;
-        let distributed = s.distribute_staking_rewards();
-        assert_eq!(distributed, Amount::from_vinx(50));
-        assert_eq!(s.staking_pool, Amount::ZERO);
-        assert_eq!(s.accounts[&addr].balance, Amount::from_vinx(50));
+        let forged = s.distribute_staking_rewards();
+        let expected = Amount::from_vinx(1_000_000 / FORGE_DIVISOR); // 1_000 VINX
+        assert_eq!(forged, expected);
+        assert_eq!(s.accounts[&addr].balance, expected);
+        assert_eq!(s.foundry, Amount::from_vinx(1_000_000 - 1_000));
     }
 
     #[test]
-    fn test_two_stakers_proportional() {
+    fn test_two_stakers_forge_proportional() {
         let mut s = WorldState::new();
         let alice = staker(&mut s, Amount::from_vinx(1_000));
         let bob = staker(&mut s, Amount::from_vinx(3_000));
-        s.staking_pool = Amount::from_vinx(400);
+        s.foundry = Amount::from_vinx(400_000); // forges 400 VINX
         s.block_height = 100;
         s.distribute_staking_rewards();
         assert_eq!(s.accounts[&alice].balance, Amount::from_vinx(100));
         assert_eq!(s.accounts[&bob].balance, Amount::from_vinx(300));
-        assert_eq!(s.staking_pool, Amount::ZERO);
     }
 
     #[test]
-    fn test_remainder_stays_in_pool() {
-        let mut s = WorldState::new();
-        let a = staker(&mut s, Amount::from_vinx(1_000));
-        let b = staker(&mut s, Amount::from_vinx(1_000));
-        s.staking_pool = Amount::from_atoms(3);
-        s.block_height = 100;
-        s.distribute_staking_rewards();
-        assert_eq!(s.accounts[&a].balance, Amount::from_atoms(1));
-        assert_eq!(s.accounts[&b].balance, Amount::from_atoms(1));
-        assert_eq!(s.staking_pool, Amount::from_atoms(1));
-    }
-
-    #[test]
-    fn test_non_stakers_receive_nothing() {
-        let mut s = WorldState::new();
-        let _staker_addr = staker(&mut s, Amount::from_vinx(1_000));
-        let idle = Address::from_public_key(&KeyPair::generate().public_key());
-        s.credit_for_test(idle.clone(), Amount::from_vinx(5_000));
-        s.staking_pool = Amount::from_vinx(100);
-        s.block_height = 100;
-        s.distribute_staking_rewards();
-        assert_eq!(s.accounts[&idle].balance, Amount::from_vinx(5_000));
-    }
-
-    #[test]
-    fn test_no_distribution_outside_interval() {
+    fn test_no_forge_outside_interval() {
         let mut s = WorldState::new();
         let addr = staker(&mut s, Amount::from_vinx(1_000));
-        s.staking_pool = Amount::from_vinx(50);
+        s.foundry = Amount::from_vinx(1_000_000);
         s.block_height = 99;
-        let distributed = s.distribute_staking_rewards();
-        assert_eq!(distributed, Amount::ZERO);
-        assert_eq!(s.staking_pool, Amount::from_vinx(50));
+        assert_eq!(s.distribute_staking_rewards(), Amount::ZERO);
         assert_eq!(s.accounts[&addr].balance, Amount::ZERO);
     }
 
-    // ─── freeze / unfreeze via transaction ──────────────────────────────────
-
     #[test]
-    fn test_admin_can_freeze_account() {
-        let (mut state, admin_kp, admin_addr) = admin_state();
-        let target_kp = KeyPair::generate();
-        let target_addr = Address::from_public_key(&target_kp.public_key());
-        state.credit_for_test(target_addr.clone(), Amount::from_vinx(100));
-
-        let tx = Transaction::new_freeze(&admin_kp, target_addr.clone(), 0);
-        state.apply_transaction(&tx).unwrap();
-
-        assert!(state.is_frozen(&target_addr));
-        assert_eq!(state.accounts[&target_addr].frozen_since, 0); // block_height=0
-        assert_eq!(state.accounts[&admin_addr].nonce, 1);
+    fn test_forge_conserves_supply() {
+        let mut s = WorldState::new();
+        let _a = staker(&mut s, Amount::from_vinx(1_000));
+        s.foundry = Amount::from_vinx(1_000_000);
+        s.circulating_supply = Amount::from_vinx(1_000); // the staked tokens
+        let before = s.circulating_supply.atoms() + s.foundry.atoms();
+        s.block_height = 100;
+        let forged = s.distribute_staking_rewards();
+        assert!(forged > Amount::ZERO);
+        assert_eq!(s.circulating_supply.atoms() + s.foundry.atoms(), before);
     }
 
     #[test]
-    fn test_non_admin_cannot_freeze() {
-        let (mut state, _, _) = admin_state();
-        let attacker_kp = KeyPair::generate();
-        let attacker_addr = Address::from_public_key(&attacker_kp.public_key());
-        let target_addr = Address::from_public_key(&KeyPair::generate().public_key());
-        state.credit_for_test(attacker_addr, Amount::from_vinx(100));
-        state.credit_for_test(target_addr.clone(), Amount::from_vinx(100));
-
-        let tx = Transaction::new_freeze(&attacker_kp, target_addr.clone(), 0);
-        assert_eq!(state.apply_transaction(&tx), Err(CoreError::Unauthorized));
-        assert!(!state.is_frozen(&target_addr));
-    }
-
-    #[test]
-    fn test_admin_can_unfreeze_account() {
-        let (mut state, admin_kp, _) = admin_state();
-        let target_kp = KeyPair::generate();
-        let target_addr = Address::from_public_key(&target_kp.public_key());
-        state.credit_for_test(target_addr.clone(), Amount::from_vinx(100));
-
-        state
-            .apply_transaction(&Transaction::new_freeze(&admin_kp, target_addr.clone(), 0))
-            .unwrap();
-        assert!(state.is_frozen(&target_addr));
-
-        state
-            .apply_transaction(&Transaction::new_unfreeze(
-                &admin_kp,
-                target_addr.clone(),
-                1,
-            ))
-            .unwrap();
-        assert!(!state.is_frozen(&target_addr));
-        assert_eq!(state.accounts[&target_addr].frozen_since, 0);
-    }
-
-    #[test]
-    fn test_auto_unfreeze_after_duration() {
-        let (mut state, _, _) = admin_state();
-        let addr = Address::from_public_key(&KeyPair::generate().public_key());
-        state.credit_for_test(addr.clone(), Amount::from_vinx(100));
-
-        // Freeze at block 0
-        state.accounts.get_mut(&addr).unwrap().frozen = true;
-        state.accounts.get_mut(&addr).unwrap().frozen_since = 0;
-
-        // Not yet expired at block FREEZE_DURATION_BLOCKS - 1
-        state.block_height = FREEZE_DURATION_BLOCKS - 1;
-        state.check_auto_unfreeze();
-        assert!(state.is_frozen(&addr));
-
-        // Expires exactly at FREEZE_DURATION_BLOCKS
-        state.block_height = FREEZE_DURATION_BLOCKS;
-        state.check_auto_unfreeze();
-        assert!(!state.is_frozen(&addr));
-        assert_eq!(state.accounts[&addr].frozen_since, 0);
-    }
-
-    #[test]
-    fn test_freeze_nonexistent_account_rejected() {
-        let (mut state, admin_kp, _) = admin_state();
-        let ghost = Address::from_public_key(&KeyPair::generate().public_key());
-        let tx = Transaction::new_freeze(&admin_kp, ghost, 0);
-        assert!(state.apply_transaction(&tx).is_err());
+    fn test_fee_melts_into_foundry() {
+        let mut s = WorldState::new();
+        let sender_kp = KeyPair::generate();
+        let sender = Address::from_public_key(&sender_kp.public_key());
+        s.credit_for_test(sender.clone(), Amount::from_vinx(1_000));
+        s.circulating_supply = Amount::from_vinx(1_000);
+        s.foundry = Amount::from_vinx(99_000);
+        let receiver = Address::from_public_key(&KeyPair::generate().public_key());
+        let amount = Amount::from_vinx(100);
+        let fee = amount.calculate_fee(s.base_fee);
+        let tx = Transaction::new_transfer(&sender_kp, receiver, amount, fee, 0);
+        let foundry_before = s.foundry;
+        s.apply_transaction(&tx).unwrap();
+        assert_eq!(s.foundry, foundry_before.saturating_add(fee));
+        assert_eq!(
+            s.circulating_supply.atoms() + s.foundry.atoms(),
+            Amount::from_vinx(100_000).atoms()
+        );
     }
 
     // ─── protocol upgrades ───────────────────────────────────────────────────

@@ -31,7 +31,6 @@ pub struct AccountResponse {
     pub nonce: u64,
     pub staked: String,
     pub staked_atoms: String,
-    pub frozen: bool,
 }
 
 impl AccountResponse {
@@ -43,7 +42,6 @@ impl AccountResponse {
             nonce: account.nonce,
             staked: account.staked.to_string(),
             staked_atoms: account.staked.atoms().to_string(),
-            frozen: account.frozen,
         }
     }
 }
@@ -284,9 +282,8 @@ pub struct SnapshotResponse {
 #[derive(Serialize)]
 pub struct NetworkStatsResponse {
     pub base_fee_atoms: String,
-    pub staking_pool: String,
-    pub melt_pool: String,
-    pub distribution_pool: String,
+    /// La Fonderie reserve (melt/forge). `circulating_supply + foundry == MAX_SUPPLY`.
+    pub foundry: String,
     pub circulating_supply: String,
 }
 

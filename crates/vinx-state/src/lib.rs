@@ -134,21 +134,6 @@ mod tests {
     }
 
     #[test]
-    fn test_transfer_frozen_account() {
-        let (mut state, sender_kp, sender_addr) = funded_state();
-        let receiver = Address::from_public_key(&KeyPair::generate().public_key());
-
-        state.accounts.get_mut(&sender_addr).unwrap().frozen = true;
-
-        let amount = Amount::from_vinx(1);
-        let tx = Transaction::new_transfer(&sender_kp, receiver, amount, fee_for(amount), 0);
-        assert_eq!(
-            state.apply_transaction(&tx),
-            Err(vinx_core::CoreError::AccountFrozen)
-        );
-    }
-
-    #[test]
     fn test_transfer_invalid_nonce() {
         let (mut state, sender_kp, _) = funded_state();
         let receiver = Address::from_public_key(&KeyPair::generate().public_key());
@@ -181,20 +166,18 @@ mod tests {
     }
 
     #[test]
-    fn test_transfer_fee_split() {
+    fn test_transfer_fee_melts_100_percent() {
         let (mut state, sender_kp, _) = funded_state();
         let receiver = Address::from_public_key(&KeyPair::generate().public_key());
         let amount = Amount::from_vinx(10_000);
         let fee = fee_for(amount);
 
+        let foundry_before = state.foundry_balance();
         let tx = Transaction::new_transfer(&sender_kp, receiver, amount, fee, 0);
         state.apply_transaction(&tx).unwrap();
 
-        let validator_cut = Amount::validator_share(fee);
-        let treasury_cut = Amount::treasury_share(fee);
-        assert_eq!(state.validator_fee_pool, validator_cut);
-        assert_eq!(state.treasury, treasury_cut);
-        assert_eq!(validator_cut.checked_add(treasury_cut).unwrap(), fee);
+        // 100% of the fee melts into the Foundry — nothing to a validator or treasury.
+        assert_eq!(state.foundry_balance(), foundry_before.saturating_add(fee));
     }
 
     #[test]
@@ -299,20 +282,5 @@ mod tests {
                 "stake amount below minimum 1 VINX".to_string()
             ))
         );
-    }
-
-    // ─── freeze / unfreeze ──────────────────────────────────────────────────────
-
-    #[test]
-    fn test_freeze_and_unfreeze() {
-        let (mut state, sender_kp, sender_addr) = funded_state();
-        let _ = sender_kp;
-        assert!(!state.is_frozen(&sender_addr));
-
-        state.accounts.get_mut(&sender_addr).unwrap().frozen = true;
-        assert!(state.is_frozen(&sender_addr));
-
-        state.accounts.get_mut(&sender_addr).unwrap().frozen = false;
-        assert!(!state.is_frozen(&sender_addr));
     }
 }

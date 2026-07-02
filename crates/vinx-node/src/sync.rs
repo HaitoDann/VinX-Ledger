@@ -85,7 +85,6 @@ pub async fn sync_from_peer(
                 }
             }
             state.block_height = block.header.height;
-            state.check_auto_unfreeze();
             state.check_upgrade_activation();
             let _rewards = state.distribute_staking_rewards();
 

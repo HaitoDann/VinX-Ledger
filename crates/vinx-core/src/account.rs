@@ -8,12 +8,8 @@ pub struct Account {
     pub balance: Amount,
     pub nonce: u64,
     pub staked: Amount,
-    pub frozen: bool,
     /// Block height when this account first staked. Reset to 0 on full unstake.
     pub stake_since: u64,
-    /// Block height at which this account was judicially frozen. 0 = never frozen.
-    /// Used for automatic unfreeze after FREEZE_DURATION_BLOCKS.
-    pub frozen_since: u64,
 }
 
 impl Account {
@@ -23,9 +19,7 @@ impl Account {
             balance: Amount::ZERO,
             nonce: 0,
             staked: Amount::ZERO,
-            frozen: false,
             stake_since: 0,
-            frozen_since: 0,
         }
     }
 
@@ -35,9 +29,7 @@ impl Account {
             balance,
             nonce: 0,
             staked: Amount::ZERO,
-            frozen: false,
             stake_since: 0,
-            frozen_since: 0,
         }
     }
 
@@ -61,7 +53,6 @@ mod tests {
         assert_eq!(acc.balance, Amount::ZERO);
         assert_eq!(acc.staked, Amount::ZERO);
         assert_eq!(acc.nonce, 0);
-        assert!(!acc.frozen);
         assert_eq!(acc.stake_since, 0);
     }
 

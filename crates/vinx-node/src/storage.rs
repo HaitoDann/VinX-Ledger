@@ -17,7 +17,9 @@ use zstd;
 ///     written each block (O(dirty) instead of O(total accounts) per persist).
 /// v5: addresses are stored as raw 20 bytes (Address is `[u8; 20]`); the accounts
 ///     table is keyed by those bytes and bincode encodes addresses as 20 bytes.
-const STORAGE_VERSION: u64 = 5;
+/// v6: "Fonderie" tokenomics — Account drops `frozen`/`frozen_since`; WorldState
+///     replaces the pools (staking/melt/distribution/treasury/coffre) with `foundry`.
+const STORAGE_VERSION: u64 = 6;
 
 /// zstd compression level — level 3 is the sweet spot: ~60-70% size reduction,
 /// negligible latency compared to disk I/O.

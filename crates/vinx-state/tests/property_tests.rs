@@ -10,46 +10,18 @@ use vinx_state::WorldState;
 
 // ─── Helper ──────────────────────────────────────────────────────────────────
 
-/// Sum of all account balances + staked amounts + protocol pools.
-fn total_tracked(state: &WorldState) -> u128 {
-    let accounts: u128 = state
+/// Sum of all tokens held by accounts (Σ balances + staked).
+fn total_in_accounts(state: &WorldState) -> u128 {
+    state
         .accounts_sorted()
         .iter()
         .map(|a| a.balance.atoms() + a.staked.atoms())
-        .sum();
-    accounts
-        + state.staking_pool.atoms()
-        + state.melt_pool.atoms()
-        + state.distribution_pool.atoms()
-        + state.validator_fee_pool.atoms()
-        + state.treasury_balance().atoms()
+        .sum()
 }
 
 // ─── Fee arithmetic ───────────────────────────────────────────────────────────
 
 proptest! {
-    /// The two fee shares must always sum to the exact fee (no atoms lost to rounding).
-    #[test]
-    fn fee_split_sums_to_fee(atoms in 1u128..=1_000_000_000 * DECIMAL_FACTOR) {
-        let fee = Amount::from_atoms(atoms);
-        let validator = Amount::validator_share(fee);
-        let treasury  = Amount::treasury_share(fee);
-        prop_assert_eq!(
-            validator.atoms() + treasury.atoms(),
-            fee.atoms(),
-            "fee split lost atoms: validator={} treasury={} fee={}",
-            validator.atoms(), treasury.atoms(), fee.atoms()
-        );
-    }
-
-    /// Each individual share must never exceed the total fee.
-    #[test]
-    fn fee_parts_never_exceed_total(atoms in 1u128..=1_000_000_000 * DECIMAL_FACTOR) {
-        let fee = Amount::from_atoms(atoms);
-        prop_assert!(Amount::validator_share(fee) <= fee);
-        prop_assert!(Amount::treasury_share(fee)  <= fee);
-    }
-
     /// calculate_fee must always return at least the floor.
     #[test]
     fn fee_respects_floor(amount_atoms in DECIMAL_FACTOR..=1_000_000 * DECIMAL_FACTOR) {
@@ -121,9 +93,10 @@ proptest! {
 // ─── WorldState transfer invariants ──────────────────────────────────────────
 
 proptest! {
-    /// After a valid transfer, circulating_supply must not change.
+    /// A transfer melts its fee, so `circulating + foundry` (the total supply) is
+    /// conserved even though circulating_supply alone decreases by the fee.
     #[test]
-    fn transfer_preserves_circulating_supply(
+    fn transfer_conserves_supply(
         amount_vinx  in 1u64..=500u64,
         initial_vinx in 1_000u64..=10_000u64,
     ) {
@@ -143,18 +116,21 @@ proptest! {
         if let Some(total_cost) = amount.checked_add(fee) {
             if total_cost <= initial {
                 let tx = Transaction::new_transfer(&sender_kp, receiver_addr, amount, fee, 0);
-                let supply_before = state.circulating_supply;
+                let total_before = state.circulating_supply.atoms() + state.foundry_balance().atoms();
                 state.apply_transaction(&tx).unwrap();
-                prop_assert_eq!(state.circulating_supply, supply_before,
-                    "circulating_supply changed after transfer");
+                prop_assert_eq!(
+                    state.circulating_supply.atoms() + state.foundry_balance().atoms(),
+                    total_before,
+                    "supply (circulating + foundry) changed after transfer"
+                );
             }
         }
     }
 
-    /// After a valid transfer, the total of all tracked pools + account balances
-    /// must equal circulating_supply (conservation law).
+    /// After a valid transfer, `circulating_supply` must still equal the exact sum
+    /// of tokens held by accounts (the field tracks the accounts precisely).
     #[test]
-    fn transfer_conservation_law(
+    fn circulating_tracks_accounts(
         amount_vinx  in 1u64..=500u64,
         initial_vinx in 1_000u64..=10_000u64,
     ) {
@@ -176,9 +152,9 @@ proptest! {
                 let tx = Transaction::new_transfer(&sender_kp, receiver_addr, amount, fee, 0);
                 state.apply_transaction(&tx).unwrap();
                 prop_assert_eq!(
-                    total_tracked(&state),
+                    total_in_accounts(&state),
                     state.circulating_supply.atoms(),
-                    "conservation law violated after transfer"
+                    "circulating_supply diverged from account balances"
                 );
             }
         }
@@ -206,9 +182,9 @@ proptest! {
         prop_assert_eq!(nonce_after, nonce_before + 1);
     }
 
-    /// The exact fee must flow entirely into the three pools with no leakage.
+    /// The exact fee must melt entirely into the Foundry with no leakage.
     #[test]
-    fn fee_fully_distributed_to_pools(
+    fn fee_fully_melts_to_foundry(
         amount_vinx  in 1u64..=1_000u64,
         initial_vinx in 2_000u64..=20_000u64,
     ) {
@@ -223,21 +199,15 @@ proptest! {
         let amount = Amount::from_vinx(amount_vinx);
         let fee    = amount.calculate_fee(state.base_fee);
 
-        let validator_before = state.validator_fee_pool.atoms();
-        let treasury_before  = state.treasury_balance().atoms();
+        let foundry_before = state.foundry_balance().atoms();
 
         let tx = Transaction::new_transfer(&sender_kp, receiver_addr, amount, fee, 0);
         state.apply_transaction(&tx).unwrap();
 
-        let validator_gained = state.validator_fee_pool.atoms() - validator_before;
-        let treasury_gained  = state.treasury_balance().atoms() - treasury_before;
-
         prop_assert_eq!(
-            validator_gained + treasury_gained,
+            state.foundry_balance().atoms() - foundry_before,
             fee.atoms(),
-            "fee not fully distributed: distributed={} expected={}",
-            validator_gained + treasury_gained,
-            fee.atoms()
+            "fee did not fully melt into the Foundry"
         );
     }
 

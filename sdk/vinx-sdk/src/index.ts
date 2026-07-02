@@ -24,7 +24,6 @@ export interface AccountResponse {
   nonce: number;
   staked: string;
   staked_atoms: string;
-  frozen: boolean;
 }
 
 export interface TxResponse {
@@ -80,9 +79,8 @@ export interface ProtocolStatusResponse {
 
 export interface NetworkStatsResponse {
   base_fee_atoms: string;
-  staking_pool: string;
-  melt_pool: string;
-  distribution_pool: string;
+  /** La Fonderie reserve (melt/forge). circulating_supply + foundry == MAX_SUPPLY. */
+  foundry: string;
   circulating_supply: string;
 }
 

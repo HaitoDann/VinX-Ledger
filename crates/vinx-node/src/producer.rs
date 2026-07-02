@@ -87,23 +87,13 @@ pub fn produce_block(
     // Advance block height before distributing so the interval check sees the new height
     state.block_height = next_height;
 
-    // Auto-unfreeze accounts whose 12-month judicial freeze has expired
-    state.check_auto_unfreeze();
-
     // Activate any pending protocol upgrade whose height has been reached
     state.check_upgrade_activation();
 
-    // Credit block proposer with accumulated validator fee rewards (30% of all block fees)
-    let validator_reward = state.flush_validator_fee_pool();
-    if validator_reward > Amount::ZERO {
-        state.credit(&config.validator_address, validator_reward);
-        tracing::debug!(reward = %validator_reward, "Validator fee reward credited to proposer");
-    }
-
-    // Distribute accumulated staking fees every STAKING_DISTRIBUTION_INTERVAL blocks
+    // Forge staking rewards out of the Foundry every STAKING_DISTRIBUTION_INTERVAL blocks
     let rewards = state.distribute_staking_rewards();
     if rewards > Amount::ZERO {
-        tracing::debug!(rewards = %rewards, height = next_height, "Staking rewards distributed");
+        tracing::debug!(rewards = %rewards, height = next_height, "Staking rewards forged");
     }
 
     // Compute Merkle root over all account states after all mutations
@@ -211,16 +201,11 @@ fn produce_block_inner(
     }
 
     state.block_height = next_height;
-    state.check_auto_unfreeze();
     state.check_upgrade_activation();
 
-    let validator_reward = state.flush_validator_fee_pool();
-    if validator_reward > Amount::ZERO {
-        state.credit(&config.validator_address, validator_reward);
-    }
     let rewards = state.distribute_staking_rewards();
     if rewards > Amount::ZERO {
-        tracing::debug!(rewards = %rewards, "Staking rewards distributed");
+        tracing::debug!(rewards = %rewards, "Staking rewards forged");
     }
 
     let state_root = state.compute_state_root();
@@ -429,7 +414,7 @@ mod tests {
     }
 
     #[test]
-    fn test_validator_earns_fee_reward() {
+    fn test_fee_melts_into_foundry_on_block() {
         let (mut state, mut chain, mut mempool, config) = setup();
 
         let sender_kp = KeyPair::generate();
@@ -442,8 +427,7 @@ mod tests {
             vinx_core::Transaction::new_transfer(&sender_kp, sender_addr.clone(), amount, fee, 0);
         mempool.add(tx).unwrap();
 
-        let validator_addr = config.validator_address.clone();
-        let balance_before = state.account_balance(&validator_addr);
+        let foundry_before = state.foundry_balance();
 
         produce_block(
             &mut state,
@@ -455,12 +439,10 @@ mod tests {
         )
         .unwrap();
 
-        let balance_after = state.account_balance(&validator_addr);
-        let expected_reward = Amount::validator_share(fee);
-        assert!(balance_after > balance_before);
+        // 100% of the fee melts into the Foundry; the validator earns no direct cut.
         assert_eq!(
-            balance_after.checked_sub(balance_before).unwrap(),
-            expected_reward
+            state.foundry_balance().checked_sub(foundry_before).unwrap(),
+            fee
         );
     }
 

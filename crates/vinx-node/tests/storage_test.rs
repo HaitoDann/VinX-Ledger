@@ -58,7 +58,7 @@ fn test_storage_roundtrip() {
     assert_eq!(loaded_state.block_height, state.block_height);
     assert_eq!(
         loaded_state.account_balance(&admin),
-        Amount::from_vinx(21_000_000)
+        Amount::from_vinx(1_000_000_000)
     );
     assert_eq!(loaded_chain.tip_height(), chain.tip_height());
     assert_eq!(loaded_chain.tip_hash(), chain.tip_hash());
@@ -94,7 +94,7 @@ fn test_incremental_persist_writes_only_dirty_rows() {
     let (loaded, _) = storage.load().expect("should load");
     assert_eq!(
         loaded.account_balance(&admin),
-        Amount::from_vinx(21_000_000)
+        Amount::from_vinx(1_000_000_000)
     );
     assert_eq!(loaded.account_balance(&bob), Amount::from_vinx(500));
 }
@@ -141,7 +141,7 @@ async fn test_state_persists_across_node_restarts() {
         assert_eq!(state.block_height, 5);
         assert_eq!(
             state.account_balance(&admin_addr),
-            Amount::from_vinx(21_000_000)
+            Amount::from_vinx(1_000_000_000)
         );
     }
 }

@@ -13,7 +13,7 @@ pub use amount::Amount;
 pub use block::{Block, BlockHeader, BlockSignature, SlashEvidence};
 pub use chain_id::{CHAIN_ID_DEVNET, CHAIN_ID_MAINNET, CHAIN_ID_TESTNET};
 pub use error::CoreError;
-pub use governance::{CoffreCondition, GovernanceAction};
+pub use governance::GovernanceAction;
 pub use protocol::{ProtocolVersion, ScheduledUpgrade};
 pub use transaction::{Transaction, TransactionType};
 pub use validator_set::ValidatorSet;

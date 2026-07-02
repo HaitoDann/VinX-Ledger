@@ -212,7 +212,6 @@ async fn test_account_balance() {
         credited.atoms(),
         "balance_atoms should equal credited amount"
     );
-    assert_eq!(resp["frozen"], false, "account should not be frozen");
     assert_eq!(resp["nonce"], 0, "nonce should be 0 for a fresh account");
 }
 

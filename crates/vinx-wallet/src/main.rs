@@ -101,26 +101,6 @@ enum Commands {
         #[arg(long, default_value = "http://127.0.0.1:8545")]
         node: String,
     },
-    /// Freeze an account (admin only)
-    Freeze {
-        /// Target address to freeze
-        #[arg(long)]
-        target: String,
-        #[arg(short, long, default_value = "wallet.json")]
-        wallet: PathBuf,
-        #[arg(long, default_value = "http://127.0.0.1:8545")]
-        node: String,
-    },
-    /// Unfreeze an account (admin only)
-    Unfreeze {
-        /// Target address to unfreeze
-        #[arg(long)]
-        target: String,
-        #[arg(short, long, default_value = "wallet.json")]
-        wallet: PathBuf,
-        #[arg(long, default_value = "http://127.0.0.1:8545")]
-        node: String,
-    },
     /// Announce a protocol upgrade (admin only)
     AnnounceUpgrade {
         /// New protocol version, e.g. 1.1.0
@@ -241,16 +221,6 @@ async fn run(cmd: Commands) -> Result<(), WalletError> {
         Commands::Block { height, node } => cmd_block(height, &node).await,
         Commands::Status { node } => cmd_status(&node).await,
         Commands::Tx { hash, node } => cmd_tx(&hash, &node).await,
-        Commands::Freeze {
-            target,
-            wallet,
-            node,
-        } => cmd_freeze(&target, &wallet, &node).await,
-        Commands::Unfreeze {
-            target,
-            wallet,
-            node,
-        } => cmd_unfreeze(&target, &wallet, &node).await,
         Commands::AnnounceUpgrade {
             version,
             activation_height,
@@ -444,58 +414,6 @@ async fn cmd_tx(hash: &str, node: &str) -> Result<(), WalletError> {
     println!("Amount    : {}", tx.amount);
     println!("Fee       : {}", tx.fee);
     println!("Nonce     : {}", tx.nonce);
-    Ok(())
-}
-
-async fn cmd_freeze(target: &str, wallet: &Path, node: &str) -> Result<(), WalletError> {
-    let ks = KeyStore::load(wallet)?;
-    let kp = ks.to_keypair()?;
-    let target_addr = Address::from_bech32(target)?;
-
-    let client = RpcClient::new(node);
-    let acc = client.get_account(ks.address()).await?;
-    let nonce = acc.nonce;
-
-    let tx = Transaction::new_freeze(&kp, target_addr, nonce);
-
-    println!("Admin   : {}", ks.address());
-    println!("Target  : {}", target);
-    println!("Action  : freeze");
-    println!("Nonce   : {}", nonce);
-
-    let resp = client.submit_tx(&tx).await?;
-    if resp.accepted {
-        println!("Status  : accepted");
-        println!("Tx hash : {}", resp.tx_hash);
-    } else {
-        println!("Status  : rejected");
-    }
-    Ok(())
-}
-
-async fn cmd_unfreeze(target: &str, wallet: &Path, node: &str) -> Result<(), WalletError> {
-    let ks = KeyStore::load(wallet)?;
-    let kp = ks.to_keypair()?;
-    let target_addr = Address::from_bech32(target)?;
-
-    let client = RpcClient::new(node);
-    let acc = client.get_account(ks.address()).await?;
-    let nonce = acc.nonce;
-
-    let tx = Transaction::new_unfreeze(&kp, target_addr, nonce);
-
-    println!("Admin   : {}", ks.address());
-    println!("Target  : {}", target);
-    println!("Action  : unfreeze");
-    println!("Nonce   : {}", nonce);
-
-    let resp = client.submit_tx(&tx).await?;
-    if resp.accepted {
-        println!("Status  : accepted");
-        println!("Tx hash : {}", resp.tx_hash);
-    } else {
-        println!("Status  : rejected");
-    }
     Ok(())
 }
 

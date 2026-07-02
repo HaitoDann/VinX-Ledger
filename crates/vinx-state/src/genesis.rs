@@ -1,12 +1,13 @@
 use crate::WorldState;
 use vinx_core::{
-    amount::{ADMIN_ALLOCATION_ATOMS, COFFRE_MATURITY_ATOMS},
+    amount::{FOUNDER_ALLOCATION_ATOMS, FOUNDRY_GENESIS_ATOMS},
     Account, Amount, ValidatorSet,
 };
 use vinx_crypto::Address;
 
 pub struct GenesisConfig {
-    /// Receives 21M VinX immediately at block 0 (Sandbox Phase 1).
+    /// Founder account — forged 1% of supply (1 billion VinX) at block 0 to bootstrap
+    /// circulation, and holds the admin key for governance.
     pub admin_address: Address,
     /// Initial PoA validator — the node that proposes block 1 and beyond.
     pub validator_address: Address,
@@ -15,25 +16,27 @@ pub struct GenesisConfig {
 }
 
 /// Builds the initial chain state from the genesis configuration.
+///
+/// The 100 billion VinX are forged once: 1 billion (1%) into the founder's account
+/// to seed circulation, and 99 billion (99%) sealed in the Foundry. From then on the
+/// supply only cycles — fees melt into the Foundry, staking rewards are forged out.
 pub fn create_genesis_state(config: &GenesisConfig) -> WorldState {
     let mut state = WorldState::new();
 
-    // 21M VinX to admin — Sandbox allocation, immediately usable
+    // 1 billion VinX forged to the founder — circulating from block 0.
     state.insert_account(Account::new_with_balance(
         config.admin_address,
-        Amount::from_atoms(ADMIN_ALLOCATION_ATOMS),
+        Amount::from_atoms(FOUNDER_ALLOCATION_ATOMS),
     ));
+    state.circulating_supply = Amount::from_atoms(FOUNDER_ALLOCATION_ATOMS);
 
-    // Coffre Maturité: tracked in WorldState, cryptographically locked
-    // Unlockable only when 3 cumulative conditions are met (MiCA CASP, audit, public policy)
-    state.coffre_maturity = Amount::from_atoms(COFFRE_MATURITY_ATOMS);
+    // 99 billion VinX sealed in the Foundry — forged into circulation over time.
+    state.foundry = Amount::from_atoms(FOUNDRY_GENESIS_ATOMS);
 
-    // Circulating supply at genesis = only the admin Sandbox allocation
-    state.circulating_supply = Amount::from_atoms(ADMIN_ALLOCATION_ATOMS);
     state.block_height = 0;
-    // Admin address is stored on-chain for governance operations (freeze, upgrades)
+    // Admin address is stored on-chain for governance operations (validators, upgrades).
     state.admin_address = Some(config.admin_address);
-    // Initial validator set — admin can add/remove validators via governance transactions
+    // Initial validator set — admin can add/remove validators via governance transactions.
     state.validator_set = ValidatorSet::single(config.validator_address);
     state.chain_id = config.chain_id;
 
@@ -43,7 +46,7 @@ pub fn create_genesis_state(config: &GenesisConfig) -> WorldState {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use vinx_core::amount::{ADMIN_ALLOCATION_ATOMS, COFFRE_MATURITY_ATOMS, MAX_SUPPLY_ATOMS};
+    use vinx_core::amount::{FOUNDER_ALLOCATION_ATOMS, FOUNDRY_GENESIS_ATOMS, MAX_SUPPLY_ATOMS};
     use vinx_core::CHAIN_ID_DEVNET;
     use vinx_crypto::KeyPair;
 
@@ -61,30 +64,36 @@ mod tests {
     }
 
     #[test]
-    fn test_admin_receives_21m_vinx() {
+    fn test_founder_receives_1_billion_vinx() {
         let (state, admin) = genesis();
         assert_eq!(
             state.account_balance(&admin).atoms(),
-            ADMIN_ALLOCATION_ATOMS
+            FOUNDER_ALLOCATION_ATOMS
         );
     }
 
     #[test]
-    fn test_coffre_maturity_is_tracked_in_state() {
+    fn test_foundry_holds_99_billion_at_genesis() {
         let (state, _) = genesis();
-        assert_eq!(state.coffre_maturity.atoms(), COFFRE_MATURITY_ATOMS);
+        assert_eq!(state.foundry.atoms(), FOUNDRY_GENESIS_ATOMS);
     }
 
     #[test]
     fn test_circulating_supply_at_genesis() {
         let (state, _) = genesis();
-        assert_eq!(state.circulating_supply.atoms(), ADMIN_ALLOCATION_ATOMS);
+        assert_eq!(state.circulating_supply.atoms(), FOUNDER_ALLOCATION_ATOMS);
     }
 
     #[test]
-    fn test_admin_plus_coffre_equals_max_supply() {
+    fn test_circulation_plus_foundry_equals_max_supply() {
+        // The founding invariant of the melt/forge cycle.
+        let (state, _) = genesis();
         assert_eq!(
-            ADMIN_ALLOCATION_ATOMS + COFFRE_MATURITY_ATOMS,
+            state.circulating_supply.atoms() + state.foundry.atoms(),
+            MAX_SUPPLY_ATOMS
+        );
+        assert_eq!(
+            FOUNDER_ALLOCATION_ATOMS + FOUNDRY_GENESIS_ATOMS,
             MAX_SUPPLY_ATOMS
         );
     }
@@ -93,13 +102,6 @@ mod tests {
     fn test_genesis_block_height_is_zero() {
         let (state, _) = genesis();
         assert_eq!(state.block_height, 0);
-    }
-
-    #[test]
-    fn test_staking_pool_and_melt_pool_are_zero_at_genesis() {
-        let (state, _) = genesis();
-        assert_eq!(state.staking_pool, Amount::ZERO);
-        assert_eq!(state.melt_pool, Amount::ZERO);
     }
 
     #[test]

@@ -5,12 +5,20 @@ use std::fmt;
 pub const DECIMALS: u32 = 18;
 pub const DECIMAL_FACTOR: u128 = 1_000_000_000_000_000_000; // 10^18
 
-/// Absolute supply cap: 100 billion VinX — immutable by protocol.
+/// Absolute supply cap: 100 billion VinX — immutable by protocol. "The total metal."
+///
+/// VinX has no burn: the supply is conserved forever. At any block,
+/// `circulating_supply + foundry == MAX_SUPPLY_ATOMS`. Value cycles endlessly:
+/// fees *melt* back into the Foundry, and staking rewards are *forged* out of it.
 pub const MAX_SUPPLY_ATOMS: u128 = 100_000_000_000 * DECIMAL_FACTOR;
-/// Genesis allocation to VinX Labs admin account: 21 million VinX (Sandbox Phase 1).
-pub const ADMIN_ALLOCATION_ATOMS: u128 = 21_000_000 * DECIMAL_FACTOR;
-/// Coffre Maturité: ~99.979 billion VinX locked until 3 conditions are met (MiCA CASP, audit, public policy).
-pub const COFFRE_MATURITY_ATOMS: u128 = 99_979_000_000 * DECIMAL_FACTOR;
+
+/// Genesis allocation forged to the founder account: 1 billion VinX (1% of supply),
+/// to bootstrap circulation and seed the first economy.
+pub const FOUNDER_ALLOCATION_ATOMS: u128 = 1_000_000_000 * DECIMAL_FACTOR;
+
+/// Genesis reserve sealed in the Foundry: 99 billion VinX (99% of supply).
+/// Forged into circulation over time as staking rewards; refilled by melted fees.
+pub const FOUNDRY_GENESIS_ATOMS: u128 = 99_000_000_000 * DECIMAL_FACTOR;
 
 /// Transaction fee: 0.05% = 5 / 10_000.
 pub const FEE_NUMERATOR: u128 = 5;
@@ -19,13 +27,15 @@ pub const FEE_DENOMINATOR: u128 = 10_000;
 /// Default fee floor: 0.0001 VinX.
 pub const DEFAULT_FEE_FLOOR_ATOMS: u128 = DECIMAL_FACTOR / 10_000;
 
-/// Fee split: 80% validator / 20% treasury.
-pub const VALIDATOR_FEE_BPS: u128 = 8_000;
-// treasury share = remainder (ensures no rounding loss)
-const FEE_BPS_DENOM: u128 = 10_000;
-
 /// Staking rewards distributed every N blocks (~17 minutes at 10s/block).
 pub const STAKING_DISTRIBUTION_INTERVAL: u64 = 100;
+
+/// Forge rate: fraction of the Foundry forged into staking rewards at each
+/// distribution, in basis points (10 = 0.1%). Because forging takes a *fraction*
+/// of the Foundry and fees continuously melt back in, the Foundry never empties —
+/// the "infinite cycle". Tunable via a protocol upgrade.
+pub const FORGE_RATE_BPS: u128 = 10;
+pub const FORGE_RATE_DENOM: u128 = 10_000;
 
 /// Minimum amount that can be staked: 1 VinX.
 pub const MIN_STAKE_ATOMS: u128 = DECIMAL_FACTOR;
@@ -46,9 +56,6 @@ pub const HEARTBEAT_INTERVAL_SECS: u64 = 3_600;
 /// Batch window after the first transaction arrives before sealing a block.
 /// Allows concurrent submissions to be grouped into a single block.
 pub const BATCH_WINDOW_MS: u64 = 200;
-
-/// Judicial freeze duration before mandatory auto-unfreeze: 365 days at 10 s/block.
-pub const FREEZE_DURATION_BLOCKS: u64 = 365 * 24 * 360; // 3_153_600 blocks ≈ 1 year
 
 /// Announcement lead-time minimums by upgrade type.
 pub const UPGRADE_NOTICE_PATCH_BLOCKS: u64 = 7 * 24 * 360; //  7 days
@@ -111,18 +118,6 @@ impl Amount {
             floor
         }
     }
-
-    /// 80% of a fee amount — goes to the block's active validator.
-    pub fn validator_share(fee: Self) -> Self {
-        Amount(fee.0 * VALIDATOR_FEE_BPS / FEE_BPS_DENOM)
-    }
-
-    /// 20% of a fee amount — goes to the on-chain protocol treasury.
-    /// Computed as remainder to avoid rounding loss.
-    pub fn treasury_share(fee: Self) -> Self {
-        fee.checked_sub(Self::validator_share(fee))
-            .unwrap_or(Self::ZERO)
-    }
 }
 
 impl fmt::Display for Amount {
@@ -151,10 +146,11 @@ mod tests {
     }
 
     #[test]
-    fn test_allocations_sum_to_max_supply() {
-        let admin = Amount::from_atoms(ADMIN_ALLOCATION_ATOMS);
-        let coffre = Amount::from_atoms(COFFRE_MATURITY_ATOMS);
-        let total = admin.checked_add(coffre).unwrap();
+    fn test_genesis_allocations_sum_to_max_supply() {
+        // Founder circulation + Foundry reserve == the full immutable supply.
+        let founder = Amount::from_atoms(FOUNDER_ALLOCATION_ATOMS);
+        let foundry = Amount::from_atoms(FOUNDRY_GENESIS_ATOMS);
+        let total = founder.checked_add(foundry).unwrap();
         assert_eq!(total, Amount::MAX_SUPPLY);
     }
 
@@ -201,16 +197,6 @@ mod tests {
         let floor = Amount::from_atoms(DEFAULT_FEE_FLOOR_ATOMS);
         let fee = amount.calculate_fee(floor);
         assert_eq!(fee, floor);
-    }
-
-    #[test]
-    fn test_fee_split_80_20() {
-        let fee = Amount::from_vinx(100);
-        let validator = Amount::validator_share(fee);
-        let treasury = Amount::treasury_share(fee);
-        assert_eq!(validator, Amount::from_vinx(80));
-        assert_eq!(treasury, Amount::from_vinx(20));
-        assert_eq!(validator.checked_add(treasury).unwrap(), fee);
     }
 
     #[test]

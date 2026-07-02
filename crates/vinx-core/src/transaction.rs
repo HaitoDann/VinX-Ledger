@@ -10,12 +10,8 @@ pub enum TransactionType {
     Transfer,
     Stake,
     Unstake,
-    FreezeAccount,
-    UnfreezeAccount,
     /// Admin-only: schedule a protocol upgrade at a future block height.
     AnnounceUpgrade,
-    /// Protocol-internal: moves tokens from reserve to the public sale pool each block.
-    Emission,
     /// Admin-only: add a new address to the PoA validator set. `to` = new validator.
     AddValidator,
     /// Admin-only: remove an address from the PoA validator set. `to` = validator to remove.
@@ -32,14 +28,11 @@ impl TransactionType {
             TransactionType::Transfer => 0x01,
             TransactionType::Stake => 0x02,
             TransactionType::Unstake => 0x03,
-            TransactionType::FreezeAccount => 0x04,
-            TransactionType::UnfreezeAccount => 0x05,
-            TransactionType::AnnounceUpgrade => 0x06,
-            TransactionType::Emission => 0x07,
-            TransactionType::AddValidator => 0x08,
-            TransactionType::RemoveValidator => 0x09,
-            TransactionType::SlashValidator => 0x0A,
-            TransactionType::AdminAction => 0x0B,
+            TransactionType::AnnounceUpgrade => 0x04,
+            TransactionType::AddValidator => 0x05,
+            TransactionType::RemoveValidator => 0x06,
+            TransactionType::SlashValidator => 0x07,
+            TransactionType::AdminAction => 0x08,
         }
     }
 }
@@ -85,8 +78,8 @@ fn default_chain_id() -> u32 {
 }
 
 impl Transaction {
-    /// Canonical byte representation for signing. Does NOT include pub_key or signature.
-    /// Canonical byte layout signed by the sender (and sponsor).
+    /// Canonical byte layout signed by the sender (and sponsor). Does NOT include
+    /// `pub_key` or `signature`.
     ///
     /// Addresses are the raw 20-byte payload (fixed length, so no length prefix).
     /// Layout: discriminant(1) ‖ from(20) ‖ to(20) ‖ amount(16 BE) ‖ fee(16 BE) ‖
@@ -199,54 +192,6 @@ impl Transaction {
             to,
             amount,
             fee,
-            nonce,
-            chain_id: CHAIN_ID_DEVNET,
-            expires_at_height: None,
-            payload: vec![],
-            pub_key: Some(pk),
-            signature: None,
-            sponsor: None,
-            sponsor_pub_key: None,
-            sponsor_signature: None,
-        };
-        tx.signature = Some(keypair.sign(&tx.signing_bytes()));
-        tx
-    }
-
-    /// Constructs and signs a FreezeAccount transaction (admin only).
-    pub fn new_freeze(keypair: &KeyPair, target: Address, nonce: u64) -> Self {
-        let pk = keypair.public_key();
-        let from = Address::from_public_key(&pk);
-        let mut tx = Self {
-            tx_type: TransactionType::FreezeAccount,
-            from,
-            to: target,
-            amount: Amount::ZERO,
-            fee: Amount::ZERO,
-            nonce,
-            chain_id: CHAIN_ID_DEVNET,
-            expires_at_height: None,
-            payload: vec![],
-            pub_key: Some(pk),
-            signature: None,
-            sponsor: None,
-            sponsor_pub_key: None,
-            sponsor_signature: None,
-        };
-        tx.signature = Some(keypair.sign(&tx.signing_bytes()));
-        tx
-    }
-
-    /// Constructs and signs an UnfreezeAccount transaction (admin only).
-    pub fn new_unfreeze(keypair: &KeyPair, target: Address, nonce: u64) -> Self {
-        let pk = keypair.public_key();
-        let from = Address::from_public_key(&pk);
-        let mut tx = Self {
-            tx_type: TransactionType::UnfreezeAccount,
-            from,
-            to: target,
-            amount: Amount::ZERO,
-            fee: Amount::ZERO,
             nonce,
             chain_id: CHAIN_ID_DEVNET,
             expires_at_height: None,
@@ -421,26 +366,6 @@ impl Transaction {
         tx
     }
 
-    /// Constructs an Emission transaction (no signature — protocol-only).
-    pub fn new_emission(to: Address, amount: Amount, from_reserve: Address) -> Self {
-        Self {
-            tx_type: TransactionType::Emission,
-            from: from_reserve,
-            to,
-            amount,
-            fee: Amount::ZERO,
-            nonce: 0,
-            chain_id: CHAIN_ID_DEVNET,
-            expires_at_height: None,
-            payload: vec![],
-            pub_key: None,
-            signature: None,
-            sponsor: None,
-            sponsor_pub_key: None,
-            sponsor_signature: None,
-        }
-    }
-
     /// Builder: override the chain ID (use CHAIN_ID_MAINNET / TESTNET / DEVNET).
     pub fn with_chain_id(mut self, chain_id: u32) -> Self {
         self.chain_id = chain_id;
@@ -554,16 +479,6 @@ mod tests {
     }
 
     #[test]
-    fn test_emission_has_no_signature() {
-        let pool = Address::from_public_key(&KeyPair::generate().public_key());
-        let reserve = Address::from_public_key(&KeyPair::generate().public_key());
-        let tx = Transaction::new_emission(pool, Amount::from_vinx(3_155), reserve);
-        assert!(tx.signature.is_none());
-        assert!(tx.pub_key.is_none());
-        assert_eq!(tx.tx_type, TransactionType::Emission);
-    }
-
-    #[test]
     fn test_nonce_is_in_signing_bytes() {
         let sender = KeyPair::generate();
         let to = Address::from_public_key(&KeyPair::generate().public_key());
@@ -583,23 +498,5 @@ mod tests {
         let (decoded_ver, decoded_height) = tx.decode_upgrade_payload().unwrap();
         assert_eq!(decoded_ver, version);
         assert_eq!(decoded_height, activation);
-    }
-
-    #[test]
-    fn test_freeze_tx_has_correct_type() {
-        let kp = KeyPair::generate();
-        let target = Address::from_public_key(&KeyPair::generate().public_key());
-        let tx = Transaction::new_freeze(&kp, target, 0);
-        assert_eq!(tx.tx_type, TransactionType::FreezeAccount);
-        assert_eq!(tx.amount, Amount::ZERO);
-        assert_eq!(tx.fee, Amount::ZERO);
-    }
-
-    #[test]
-    fn test_unfreeze_tx_has_correct_type() {
-        let kp = KeyPair::generate();
-        let target = Address::from_public_key(&KeyPair::generate().public_key());
-        let tx = Transaction::new_unfreeze(&kp, target, 1);
-        assert_eq!(tx.tx_type, TransactionType::UnfreezeAccount);
     }
 }
