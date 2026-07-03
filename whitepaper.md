@@ -99,9 +99,10 @@ Le cycle est **fermé et perpétuel** : c'est le même métal qui circule, fond 
 ### Staking
 
 - Stake minimum : **1 VinX**
-- Pas de période de lock — déstaking instantané
+- Pas de période de lock sur le capital — déstaking instantané
 - Pas de slashing sur le stake
-- Récompenses **forgées depuis La Fonderie** toutes les **100 blocs** (~17 minutes), proportionnellement au stake
+- **Warm-up de 100 blocs** : un stake ne devient éligible aux récompenses qu'après avoir traversé une époque complète. Cela ferme l'exploit du *just-in-time staking* (staker juste avant une distribution, encaisser, déstaker juste après). Un top-up décale l'ancienneté (`stake_since`) proportionnellement au capital, de sorte qu'un gros dépôt tardif n'hérite pas de l'ancienneté d'un petit stake ancien.
+- Récompenses **forgées depuis La Fonderie** toutes les **100 blocs** (~17 minutes), proportionnellement au **stake éligible**
 
 ---
 

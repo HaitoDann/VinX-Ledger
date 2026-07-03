@@ -3,7 +3,7 @@ use std::collections::{BTreeMap, HashMap, HashSet};
 use vinx_core::{
     amount::{
         Amount, DEFAULT_FEE_FLOOR_ATOMS, FORGE_RATE_BPS, FORGE_RATE_DENOM, MIN_STAKE_ATOMS,
-        STAKING_DISTRIBUTION_INTERVAL,
+        STAKE_WARMUP_BLOCKS, STAKING_DISTRIBUTION_INTERVAL,
     },
     block::SlashEvidence,
     chain_id::CHAIN_ID_DEVNET,
@@ -502,7 +502,23 @@ impl WorldState {
             return Err(CoreError::InsufficientBalance);
         }
         if account.staked == Amount::ZERO {
+            // First stake: the warm-up clock starts now.
             account.stake_since = self.block_height;
+        } else {
+            // Top-up: advance stake_since to the capital-weighted commitment
+            // time — new = s + (h - s) * add / (old + add) — so a large late
+            // deposit cannot inherit a tiny early stake's seniority.
+            let old = account.staked.atoms();
+            let add = tx.amount.atoms();
+            let s = account.stake_since;
+            let delta = (self.block_height.saturating_sub(s)) as u128;
+            let shift = delta
+                .checked_mul(add)
+                .map(|x| (x / (old + add)) as u64)
+                // Astronomically large operands only: fall back to a full
+                // clock reset (conservative — favors the protocol, not the staker).
+                .unwrap_or(delta as u64);
+            account.stake_since = s.saturating_add(shift);
         }
         account.balance = account.balance.checked_sub(tx.amount).unwrap();
         account.staked = account
@@ -671,6 +687,10 @@ impl WorldState {
     /// Forges staking rewards out of the Foundry every STAKING_DISTRIBUTION_INTERVAL
     /// blocks and distributes them to stakers proportionally to their stake.
     ///
+    /// Only stake that has weathered the warm-up period (`STAKE_WARMUP_BLOCKS`)
+    /// is eligible: this closes the "just-in-time" staking exploit where one
+    /// could stake right before a distribution, collect, and unstake right after.
+    ///
     /// The reward pool is a fraction (`FORGE_RATE_BPS`) of the current Foundry, so it
     /// shrinks as the Foundry drains and grows again as fees melt back in — the
     /// Foundry never empties (the "infinite cycle"). Returns the amount forged.
@@ -686,8 +706,21 @@ impl WorldState {
             return Amount::ZERO;
         }
 
-        let total_staked: u128 = self.accounts.values().map(|a| a.staked.atoms()).sum();
-        if total_staked == 0 {
+        // A stake earns only once it has been held for the full warm-up period.
+        let height = self.block_height;
+        let is_eligible = |a: &Account| {
+            a.staked != Amount::ZERO && height.saturating_sub(a.stake_since) >= STAKE_WARMUP_BLOCKS
+        };
+
+        // Denominator is the *eligible* stake only, so rewards stay proportional
+        // among the accounts that actually earn this epoch.
+        let eligible_staked: u128 = self
+            .accounts
+            .values()
+            .filter(|a| is_eligible(a))
+            .map(|a| a.staked.atoms())
+            .sum();
+        if eligible_staked == 0 {
             return Amount::ZERO;
         }
 
@@ -700,15 +733,15 @@ impl WorldState {
 
         let mut rewarded: Vec<Address> = Vec::new();
         for account in self.accounts.values_mut() {
-            if account.staked == Amount::ZERO {
+            if !is_eligible(account) {
                 continue;
             }
             let reward = pool
                 .checked_mul(account.staked.atoms())
-                .map(|p| p / total_staked)
+                .map(|p| p / eligible_staked)
                 .unwrap_or_else(|| {
                     let p = pool / 1_000_000_000;
-                    let t = (total_staked / 1_000_000_000).max(1);
+                    let t = (eligible_staked / 1_000_000_000).max(1);
                     p.saturating_mul(account.staked.atoms()) / t
                 });
             if reward > 0 {
@@ -983,6 +1016,72 @@ mod tests {
         s.block_height = 99;
         assert_eq!(s.distribute_staking_rewards(), Amount::ZERO);
         assert_eq!(s.accounts[&addr].balance, Amount::ZERO);
+    }
+
+    #[test]
+    fn test_warmup_excludes_just_in_time_staker() {
+        // A stake placed just before the distribution has not warmed up and
+        // earns nothing — the "just-in-time" staking exploit is closed.
+        let mut s = WorldState::new();
+        let addr = staker(&mut s, Amount::from_vinx(1_000));
+        s.accounts.get_mut(&addr).unwrap().stake_since = 99; // age 1 < warm-up
+        s.foundry = Amount::from_vinx(1_000_000);
+        s.block_height = 100;
+        let forged = s.distribute_staking_rewards();
+        assert_eq!(forged, Amount::ZERO);
+        assert_eq!(s.accounts[&addr].balance, Amount::ZERO);
+        assert_eq!(s.foundry, Amount::from_vinx(1_000_000)); // nothing left the Foundry
+    }
+
+    #[test]
+    fn test_warmup_boundary_is_eligible() {
+        // Held for exactly the warm-up period (age == STAKE_WARMUP_BLOCKS): eligible.
+        let mut s = WorldState::new();
+        let addr = staker(&mut s, Amount::from_vinx(1_000)); // stake_since = 0
+        s.foundry = Amount::from_vinx(1_000_000);
+        s.block_height = STAKE_WARMUP_BLOCKS;
+        let forged = s.distribute_staking_rewards();
+        assert!(forged > Amount::ZERO);
+        assert_eq!(s.accounts[&addr].balance, forged);
+    }
+
+    #[test]
+    fn test_only_warmed_up_stake_shares_the_pool() {
+        // A warmed-up staker and a fresh one: only the warmed-up stake counts,
+        // both in the eligibility filter and in the proportional denominator.
+        let mut s = WorldState::new();
+        let old = staker(&mut s, Amount::from_vinx(1_000));
+        let fresh = staker(&mut s, Amount::from_vinx(3_000));
+        s.accounts.get_mut(&old).unwrap().stake_since = 0; // age 100, eligible
+        s.accounts.get_mut(&fresh).unwrap().stake_since = 95; // age 5, excluded
+        s.foundry = Amount::from_vinx(1_000_000); // pool = 1_000 VINX
+        s.block_height = 100;
+        let forged = s.distribute_staking_rewards();
+        assert_eq!(s.accounts[&fresh].balance, Amount::ZERO);
+        // Denominator is eligible stake only → old takes the whole pool.
+        assert_eq!(s.accounts[&old].balance, Amount::from_vinx(1_000));
+        assert_eq!(forged, Amount::from_vinx(1_000));
+    }
+
+    #[test]
+    fn test_topup_advances_stake_since_capital_weighted() {
+        // A tiny early stake topped up by a large late deposit cannot keep the
+        // early seniority: stake_since moves to the capital-weighted time.
+        let mut s = WorldState::new();
+        let kp = KeyPair::generate();
+        let addr = Address::from_public_key(&kp.public_key());
+        s.credit_for_test(addr, Amount::from_vinx(10_000));
+
+        s.block_height = 0;
+        let tx0 = Transaction::new_stake(&kp, Amount::from_vinx(1), Amount::ZERO, 0);
+        s.apply_transaction(&tx0).unwrap();
+        assert_eq!(s.accounts[&addr].stake_since, 0);
+
+        s.block_height = 1_000;
+        let tx1 = Transaction::new_stake(&kp, Amount::from_vinx(999), Amount::ZERO, 1);
+        s.apply_transaction(&tx1).unwrap();
+        // new = 0 + (1000 - 0) * 999 / (1 + 999) = 999.
+        assert_eq!(s.accounts[&addr].stake_since, 999);
     }
 
     #[test]

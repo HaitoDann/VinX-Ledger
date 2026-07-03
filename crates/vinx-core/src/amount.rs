@@ -30,6 +30,14 @@ pub const DEFAULT_FEE_FLOOR_ATOMS: u128 = DECIMAL_FACTOR / 10_000;
 /// Staking rewards distributed every N blocks (~17 minutes at 10s/block).
 pub const STAKING_DISTRIBUTION_INTERVAL: u64 = 100;
 
+/// Warm-up: a stake must be held for at least this many blocks before it earns
+/// any reward. Set to one full distribution epoch so a stake must weather an
+/// entire epoch. This closes the "just-in-time" staking exploit — staking one
+/// block before a distribution, collecting, and unstaking right after now earns
+/// nothing. Combined with capital-weighted `stake_since` on top-ups, a large
+/// late deposit cannot inherit a tiny early stake's seniority either.
+pub const STAKE_WARMUP_BLOCKS: u64 = STAKING_DISTRIBUTION_INTERVAL;
+
 /// Forge rate: fraction of the Foundry forged into staking rewards at each
 /// distribution, in basis points (10 = 0.1%). Because forging takes a *fraction*
 /// of the Foundry and fees continuously melt back in, the Foundry never empties —

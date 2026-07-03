@@ -5,6 +5,20 @@ Format : `MAJEUR.MINEUR.CORRECTIF` — les versions `0.x.y` sont des versions de
 
 ---
 
+## [0.25.0] — 2026-07-03
+
+### Sécurité économique — Warm-up de staking (anti *just-in-time*)
+
+Correction d'un défaut d'équité dans la distribution des récompenses : `distribute_staking_rewards` récompensait **tout** compte staké au bloc de distribution, quelle que soit la durée de détention. Le champ `stake_since` existait mais n'était jamais lu dans le calcul.
+
+- **Warm-up (`STAKE_WARMUP_BLOCKS = 100`, une époque complète)** : un stake ne devient éligible qu'après avoir été détenu au moins une époque. Ferme l'exploit *just-in-time* — staker au bloc 999, encaisser au 1000, déstaker au 1001 ne rapporte désormais **rien**.
+- **Dénominateur = stake éligible uniquement** : les récompenses restent proportionnelles entre les comptes qui gagnent réellement l'époque ; le métal non distribué reste dans la Fonderie (invariant `circulation + Fonderie == 100 Md` préservé).
+- **Ancienneté pondérée par le capital sur top-up** : ajouter au stake décale `stake_since` vers le temps de commitment pondéré (`new = s + (h − s)·add / (old + add)`), pour qu'un gros dépôt tardif n'hérite pas de l'ancienneté d'un petit stake ancien. Calcul en arithmétique *checked* avec repli conservateur (reset complet du compteur en cas d'opérandes astronomiques).
+
+**Tests** : 4 nouveaux (exclusion JIT, borne d'éligibilité, partage du pool entre stakes éligibles, pondération du top-up). Suite complète verte, clippy & fmt propres. Pas de changement de schéma de stockage (`stake_since` déjà persisté en v6).
+
+---
+
 ## [0.24.0] — 2026-07-02
 
 ### ⚠️ BREAKING — Refonte « La Fonderie » : tokenomics melt/forge, simplification

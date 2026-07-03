@@ -53,6 +53,7 @@ VinX Ledger est une blockchain L1 de paiement écrite intégralement en Rust, sa
 - [x] **Invariant vérifié à chaque bloc** : `circulating_supply + foundry == 100 Md`
 - [x] **Melt** : 100 % des frais fondent dans La Fonderie (`melt_to_foundry`) — pas un burn
 - [x] **Forge** : récompenses de staking forgées depuis La Fonderie (`FORGE_RATE_BPS = 10`, soit 0,1 % par distribution), toutes les 100 blocs → la réserve ne se vide jamais
+- [x] **Warm-up de staking** (`STAKE_WARMUP_BLOCKS = 100`) : un stake n'est éligible aux récompenses qu'après une époque complète (anti *just-in-time*) ; l'ancienneté `stake_since` est pondérée par le capital sur les top-ups
 
 ### Gouvernance — clé admin unique
 
