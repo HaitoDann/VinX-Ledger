@@ -784,7 +784,7 @@ impl WorldState {
         }
         sender.nonce += 1;
 
-        // Slash: redirect the validator's stake to the redistribution pool
+        // Slash: melt the validator's stake back into the Foundry (minus a bounty)
         let slashed = self
             .accounts
             .get(target)
