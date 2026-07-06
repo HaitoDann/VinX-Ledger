@@ -525,6 +525,7 @@ pub async fn get_network_stats(State(node): State<Arc<Node>>) -> ApiResult<Netwo
         base_fee_atoms: state.base_fee.atoms().to_string(),
         foundry: state.foundry_balance().to_string(),
         circulating_supply: state.circulating_supply.to_string(),
+        admin_address: state.admin_address.as_ref().map(|a| a.to_string()),
     }))
 }
 

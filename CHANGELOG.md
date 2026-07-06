@@ -5,6 +5,29 @@ Format : `MAJEUR.MINEUR.CORRECTIF` — les versions `0.x.y` sont des versions de
 
 ---
 
+## [0.26.0] — 2026-07-06
+
+### Console d'administration (`/admin`) + corrections critiques
+
+Ajout d'une **console d'admin** servie par le nœud : tableau de bord, gestion des validateurs et planification des mises à jour, le tout **signé dans le navigateur** avec la clé admin (elle ne quitte jamais le poste). Aucun changement de protocole — la page s'appuie sur les endpoints existants.
+
+**Console admin (`vinx-node/rpc/ui.rs`, `mod.rs`)**
+- Nouvelle page `GET /admin`, séparée de l'explorateur public, en **lecture seule** tant qu'une clé correspondant à l'admin on-chain n'est pas chargée.
+- **Tableau de bord** : hauteur, mempool, version de protocole, La Fonderie, circulation, base fee (rafraîchi en direct).
+- **Validateurs** : set actif (leader/online/suspendu), ajout/retrait, et **approbation des demandes en attente** (`/validators/pending`, via token opérateur `Authorization: Bearer`).
+- **Mises à jour** : planification d'upgrade (`AnnounceUpgrade`) avec version + hauteur d'activation.
+- **Maintenance** : compactage du stockage + faucet.
+- Actions à **signature triviale** (Phase 1) : `AddValidator` (0x05), `RemoveValidator` (0x06), `AnnounceUpgrade` (0x04) — le plancher de frais et la rotation admin (payloads bincode) viendront en Phase 2.
+- `GET /network/stats` expose désormais `admin_address` (info publique) pour que la console vérifie la clé chargée. SDK TypeScript aligné.
+- Vecteur de test doré **JS ↔ Rust** (`test_governance_signing_bytes_golden_vector`) verrouillant l'équivalence des `signing_bytes` de gouvernance. Chaîne complète validée en conditions réelles (signature navigateur → `/tx/submit` → bloc → set de validateurs mis à jour).
+
+**Corrections critiques (préexistantes, hors périmètre console)**
+- **Panique au démarrage à froid** (`main.rs`) : le nœud ouvrait deux handles redb sur le même fichier (`DatabaseAlreadyOpen`) — introduit par la refonte de persistance incrémentale. Le mempool est désormais lu puis le premier handle libéré avant la construction du nœud. **Le nœud démarre de nouveau.**
+- **Bannière obsolète** : affichait « Admin : 21 000 000 VINX » (ancienne supply) ; corrigée pour refléter l'allocation réelle du fondateur (1 Md), calculée depuis `FOUNDER_ALLOCATION_ATOMS`.
+- **Explorateur** : table de couleurs des tx nettoyée (`Emission` supprimé, ajout de `AddValidator`/`RemoveValidator`/`AnnounceUpgrade`).
+
+---
+
 ## [0.25.0] — 2026-07-03
 
 ### Sécurité économique — Warm-up de staking (anti *just-in-time*)

@@ -285,6 +285,10 @@ pub struct NetworkStatsResponse {
     /// La Fonderie reserve (melt/forge). `circulating_supply + foundry == MAX_SUPPLY`.
     pub foundry: String,
     pub circulating_supply: String,
+    /// On-chain admin address (bech32), if one is configured. Public info — it
+    /// signs governance transactions visible on-chain. Used by the admin console
+    /// to confirm a loaded key is the current admin before enabling actions.
+    pub admin_address: Option<String>,
 }
 
 #[derive(Serialize)]

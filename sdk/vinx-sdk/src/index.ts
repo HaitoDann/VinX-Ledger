@@ -82,6 +82,8 @@ export interface NetworkStatsResponse {
   /** La Fonderie reserve (melt/forge). circulating_supply + foundry == MAX_SUPPLY. */
   foundry: string;
   circulating_supply: string;
+  /** On-chain admin address (bech32), or null if none is configured. */
+  admin_address: string | null;
 }
 
 export interface MempoolResponse {

@@ -226,6 +226,7 @@ Le nœud expose un serveur HTTP sur `0.0.0.0:8545` par défaut.
 | Méthode | Route | Description |
 |---------|-------|-------------|
 | GET | `/` | Interface web (explorateur de blocs) |
+| GET | `/admin` | Console d'administration (dashboard + gouvernance signée en local) |
 | GET | `/health` | Santé du nœud : hauteur, mempool, statut |
 | GET | `/chain/height` | Hauteur actuelle du tip |
 | GET | `/chain/sync?from=N&limit=N` | Synchronisation d'une plage de blocs |
@@ -238,7 +239,7 @@ Le nœud expose un serveur HTTP sur `0.0.0.0:8545` par défaut.
 | GET | `/mempool/size` | Nombre de transactions en attente |
 | GET | `/validators` | Ensemble des validateurs actifs + quorum |
 | GET | `/protocol/version` | Version courante + upgrade planifiée |
-| GET | `/network/stats` | Statistiques économiques (base_fee, foundry, supply) |
+| GET | `/network/stats` | Statistiques économiques (base_fee, foundry, supply, admin) |
 | GET | `/metrics` | Métriques Prometheus |
 | GET | `/events` | Server-Sent Events — push par bloc |
 | GET | `/ws` | WebSocket — push par bloc |

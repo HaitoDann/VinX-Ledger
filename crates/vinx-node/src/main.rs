@@ -202,6 +202,12 @@ async fn main() {
         }
     };
 
+    // Read the persisted mempool now, then release this Storage handle: the Node
+    // opens the same redb file itself, and redb forbids two open handles to one
+    // database within a process (DatabaseAlreadyOpen).
+    let restored_mempool = storage.load_mempool();
+    drop(storage);
+
     let mut config = NodeConfig::new(validator_kp)
         .with_block_time(block_time)
         .with_rpc_listen(&rpc_listen)
@@ -275,7 +281,7 @@ async fn main() {
     let node = vinx_node::Node::new_with_p2p(state, chain, config).await;
 
     // Restore mempool from last persist — re-validate each tx against current state.
-    if let Some(txs) = storage.load_mempool() {
+    if let Some(txs) = restored_mempool {
         let total = txs.len();
         if total > 0 {
             let mut mp = node.mempool.write().await;
@@ -317,7 +323,10 @@ fn print_banner(
     println!("  {mode}");
     println!("{line}");
     println!("  Admin     : {admin}");
-    println!("               21,000,000.00 VINX");
+    println!(
+        "               {}  (fondateur — le reste scellé dans La Fonderie)",
+        vinx_core::amount::Amount::from_atoms(vinx_core::amount::FOUNDER_ALLOCATION_ATOMS)
+    );
     println!("  Validator : {validator}");
     if let Some(fa) = faucet {
         println!("  Faucet    : {fa}");
