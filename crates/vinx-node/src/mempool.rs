@@ -1,6 +1,7 @@
+use ahash::{AHashMap, AHashSet};
 use bloomfilter::Bloom;
 use rayon::prelude::*;
-use std::collections::{BTreeMap, BinaryHeap, HashMap, HashSet};
+use std::collections::{BTreeMap, BinaryHeap, HashMap};
 use std::sync::Arc;
 use tokio::sync::Notify;
 use vinx_core::{CoreError, Transaction};
@@ -18,19 +19,21 @@ const MAX_PER_ADDRESS: usize = 50;
 /// `flush_staged()` before block production to verify signatures in parallel
 /// on all available CPU cores using rayon.
 pub struct Mempool {
-    /// addr_str → sorted(nonce → tx) — all entries here have valid signatures.
-    queues: HashMap<String, BTreeMap<u64, Transaction>>,
+    /// sender `Address` → sorted(nonce → tx) — all entries here have valid signatures.
+    /// Keyed by the raw 20-byte address (Copy), hashed with ahash — no bech32
+    /// String allocation per insert/lookup on the hot path.
+    queues: AHashMap<Address, BTreeMap<u64, Transaction>>,
     /// Staging queue for unverified incoming transactions (e.g. from P2P batch ingestion).
     unverified: Vec<Transaction>,
     /// All known tx hashes — prevents double-submission.
-    seen: HashSet<Hash32>,
+    seen: AHashSet<Hash32>,
     /// Bloom filter pre-screening duplicate hashes in `stage()` to skip
     /// costly signature verification on already-known P2P-gossiped transactions.
     /// 1% false-positive rate at capacity — correctness guaranteed by `seen`.
     bloom: Bloom<Hash32>,
     /// Minimum acceptable nonce per sender — updated after each block is applied.
     /// Transactions with nonce < min_nonce are rejected immediately in add().
-    min_nonce: HashMap<String, u64>,
+    min_nonce: AHashMap<Address, u64>,
     pending_count: usize,
     max_size: usize,
     /// Signals the block producer that at least one transaction is ready.
@@ -50,11 +53,11 @@ impl Mempool {
         // A false positive only causes a staged tx to be skipped; `seen` ensures correctness.
         let bloom = Bloom::new_for_fp_rate(max_size * 2, 0.01);
         Self {
-            queues: HashMap::new(),
+            queues: AHashMap::new(),
             unverified: Vec::new(),
-            seen: HashSet::new(),
+            seen: AHashSet::new(),
             bloom,
-            min_nonce: HashMap::new(),
+            min_nonce: AHashMap::new(),
             pending_count: 0,
             max_size,
             tx_ready: Arc::new(Notify::new()),
@@ -68,7 +71,7 @@ impl Mempool {
     /// Inserts a pre-verified transaction into the per-account nonce queue.
     /// The caller is responsible for verifying the signature before calling this.
     pub fn add(&mut self, tx: Transaction) -> Result<(), MempoolError> {
-        let addr = tx.from.to_string();
+        let addr = tx.from;
 
         // Reject transactions whose nonce is already consumed by a confirmed block.
         let min = self.min_nonce.get(&addr).copied().unwrap_or(0);
@@ -120,11 +123,11 @@ impl Mempool {
     /// Updates the minimum acceptable nonce per sender after a block is applied,
     /// and immediately removes any pending transactions whose nonce is now stale.
     /// Called by the block producer after each successful block.
-    pub fn update_confirmed_nonces(&mut self, confirmed: &HashMap<String, u64>) {
+    pub fn update_confirmed_nonces(&mut self, confirmed: &HashMap<Address, u64>) {
         let mut removed = 0usize;
         for (addr, &next_nonce) in confirmed {
             // Always advance — never go backwards.
-            let entry = self.min_nonce.entry(addr.clone()).or_insert(0);
+            let entry = self.min_nonce.entry(*addr).or_insert(0);
             if next_nonce > *entry {
                 *entry = next_nonce;
             }
@@ -234,15 +237,10 @@ impl Mempool {
         let mut result = Vec::with_capacity(limit);
 
         // (fee_atoms, addr) — BinaryHeap is a max-heap, so highest fee first.
-        let mut heap: BinaryHeap<(u128, String)> = self
+        let mut heap: BinaryHeap<(u128, Address)> = self
             .queues
             .iter()
-            .filter_map(|(addr, queue)| {
-                queue
-                    .values()
-                    .next()
-                    .map(|tx| (tx.fee.atoms(), addr.clone()))
-            })
+            .filter_map(|(addr, queue)| queue.values().next().map(|tx| (tx.fee.atoms(), *addr)))
             .collect();
 
         while result.len() < limit {
@@ -260,7 +258,7 @@ impl Mempool {
 
             // Push next head from the same account if available
             if let Some(next_tx) = queue.values().next() {
-                heap.push((next_tx.fee.atoms(), addr.clone()));
+                heap.push((next_tx.fee.atoms(), addr));
             }
 
             result.push(tx);
@@ -283,10 +281,7 @@ impl Mempool {
                 break;
             }
             self.seen.insert(hash);
-            self.queues
-                .entry(tx.from.to_string())
-                .or_default()
-                .insert(tx.nonce, tx);
+            self.queues.entry(tx.from).or_default().insert(tx.nonce, tx);
             self.pending_count += 1;
         }
     }
@@ -296,13 +291,13 @@ impl Mempool {
     /// éviction a eu lieu (et le slot est maintenant libre).
     fn try_evict_for(&mut self, incoming: &Transaction) -> bool {
         let mut min_fee = incoming.fee.atoms();
-        let mut victim: Option<(String, u64)> = None;
+        let mut victim: Option<(Address, u64)> = None;
 
         for (addr, queue) in &self.queues {
             for (&nonce, tx) in queue {
                 if tx.fee.atoms() < min_fee {
                     min_fee = tx.fee.atoms();
-                    victim = Some((addr.clone(), nonce));
+                    victim = Some((*addr, nonce));
                 }
             }
         }
@@ -334,7 +329,7 @@ impl Mempool {
     /// Returns `None` if there are no pending transactions (caller should use confirmed nonce).
     pub fn next_nonce_for(&self, addr: &Address) -> Option<u64> {
         self.queues
-            .get(&addr.to_string())
+            .get(addr)
             .and_then(|q| q.keys().last())
             .map(|&n| n + 1)
     }
@@ -597,7 +592,7 @@ mod tests {
         let mut mp = Mempool::new(10);
         let kp = KeyPair::generate();
         let to = dummy_addr();
-        let addr = vinx_crypto::Address::from_public_key(&kp.public_key()).to_string();
+        let addr = vinx_crypto::Address::from_public_key(&kp.public_key());
         let mut confirmed = std::collections::HashMap::new();
         confirmed.insert(addr, 2u64);
         mp.update_confirmed_nonces(&confirmed);
@@ -652,7 +647,7 @@ mod tests {
         mp.add(make_tx(&kp, to.clone(), 1)).unwrap();
         mp.add(make_tx(&kp, to.clone(), 2)).unwrap();
         assert_eq!(mp.size(), 3);
-        let addr = vinx_crypto::Address::from_public_key(&kp.public_key()).to_string();
+        let addr = vinx_crypto::Address::from_public_key(&kp.public_key());
         let mut confirmed = std::collections::HashMap::new();
         confirmed.insert(addr, 2u64);
         mp.update_confirmed_nonces(&confirmed);

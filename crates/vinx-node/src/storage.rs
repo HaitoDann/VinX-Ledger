@@ -1,11 +1,12 @@
-use std::collections::HashMap;
 use std::io;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use crate::chain::Chain;
+use ahash::AHashMap;
 use redb::{Database, ReadableTable, TableDefinition};
 use vinx_core::{Account, Transaction};
+use vinx_crypto::{Address, Hash32};
 use vinx_state::WorldState;
 use zstd;
 
@@ -19,7 +20,10 @@ use zstd;
 ///     table is keyed by those bytes and bincode encodes addresses as 20 bytes.
 /// v6: "Fonderie" tokenomics — Account drops `frozen`/`frozen_since`; WorldState
 ///     replaces the pools (staking/melt/distribution/treasury/coffre) with `foundry`.
-const STORAGE_VERSION: u64 = 6;
+/// v7: tx indexes are keyed by raw bytes (`Hash32`, `Address`) instead of hex/bech32
+///     Strings, and hashed with ahash. The persisted index blobs change layout;
+///     they are derived data, so a fresh start simply rebuilds them from blocks.
+const STORAGE_VERSION: u64 = 7;
 
 /// zstd compression level — level 3 is the sweet spot: ~60-70% size reduction,
 /// negligible latency compared to disk I/O.
@@ -239,9 +243,9 @@ impl Storage {
             let tx_index_bytes = Self::decompress(tbl.get("tx_index").ok()??.value()).ok()?;
             let account_tx_index_bytes =
                 Self::decompress(tbl.get("account_tx_index").ok()??.value()).ok()?;
-            let tx_index: HashMap<String, (u64, u32)> =
+            let tx_index: AHashMap<Hash32, (u64, u32)> =
                 bincode::deserialize(&tx_index_bytes).ok()?;
-            let account_tx_index: HashMap<String, Vec<String>> =
+            let account_tx_index: AHashMap<Address, Vec<Hash32>> =
                 bincode::deserialize(&account_tx_index_bytes).ok()?;
             chain.import_tx_indexes(tx_index, account_tx_index);
             Some(())

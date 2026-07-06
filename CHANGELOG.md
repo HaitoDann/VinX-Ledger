@@ -5,6 +5,26 @@ Format : `MAJEUR.MINEUR.CORRECTIF` — les versions `0.x.y` sont des versions de
 
 ---
 
+## [0.27.0] — 2026-07-06
+
+### Optimisations — clés typées + ahash sur le hot-path
+
+Fin du travail engagé par le refactor `Address = [u8; 20]` : les index et files chauds n'utilisent plus de clés `String` (adresses bech32, hashes hex) mais les **octets bruts**, hachés avec **ahash**. Zéro allocation de chaîne par insertion/lecture sur le chemin critique.
+
+**Clés typées (`chain.rs`, `mempool.rs`)**
+- `Chain::tx_index` : `HashMap<String, …>` → `AHashMap<Hash32, (u64, u32)>` (clé = hash 32 octets, plus d'encodage hex à chaque bloc).
+- `Chain::account_tx_index` : `HashMap<String, Vec<String>>` → `AHashMap<Address, Vec<Hash32>>`.
+- `Chain::slash_evidence` : `AHashMap<Address, AHashMap<u64, AHashSet<Hash32>>>`.
+- `Mempool` : `queues`, `min_nonce`, `confirmed_nonces`, tas de priorité et éviction — tous keyés par `Address` (Copy) au lieu de `String`.
+- `get_tx_by_hash`/`get_account_txs`/`account_tx_count` prennent désormais `&Hash32`/`&Address` ; les handlers RPC décodent l'entrée une fois (hex → `Hash32`, bech32 → `Address`).
+
+**ahash (`ahash` avec feature `serde`)**
+- Toutes les `HashMap`/`HashSet` chaudes du mempool et de la chaîne passent à `AHashMap`/`AHashSet` (SipHash → ahash). Le refactor des clés typées simplifie aussi le code (plus de `.clone()`/`.to_string()`).
+
+**Stockage v7** : les index persistés changent de layout (clés octets, sérialisation bincode). Ce sont des **données dérivées** — un démarrage sur données v6 force une reconstruction depuis les blocs. Round-trip vérifié par test (`test_storage_roundtrip_preserves_typed_tx_index`) et en réel (transfert → `/tx/{hash}` → redémarrage → index rechargé depuis le disque).
+
+---
+
 ## [0.26.0] — 2026-07-06
 
 ### Console d'administration (`/admin`) + corrections critiques

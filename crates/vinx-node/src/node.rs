@@ -255,7 +255,7 @@ impl Node {
         {
             let mut confirmed_nonces = HashMap::new();
             for tx in &block.transactions {
-                confirmed_nonces.insert(tx.from.to_string(), tx.nonce + 1);
+                confirmed_nonces.insert(tx.from, tx.nonce + 1);
             }
             if !confirmed_nonces.is_empty() {
                 mempool.update_confirmed_nonces(&confirmed_nonces);

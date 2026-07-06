@@ -224,8 +224,12 @@ pub async fn get_tx_by_hash(
     State(node): State<Arc<Node>>,
     Path(hash): Path<String>,
 ) -> ApiResult<TxWithBlockResponse> {
+    let hash_bytes: [u8; 32] = hex::decode(&hash)
+        .ok()
+        .and_then(|b| b.try_into().ok())
+        .ok_or_else(|| ApiError::NotFound(format!("Transaction {} not found", hash)))?;
     let chain = node.chain.read().await;
-    match chain.get_tx_by_hash(&hash) {
+    match chain.get_tx_by_hash(&hash_bytes) {
         Some((height, block, tx)) => Ok(Json(TxWithBlockResponse::new(height, &block.hash(), tx))),
         None => Err(ApiError::NotFound(format!(
             "Transaction {} not found",
@@ -256,8 +260,8 @@ pub async fn get_account_txs(
     let limit = params.limit.min(200);
 
     let chain = node.chain.read().await;
-    let tx_hashes = chain.get_account_txs(&addr_str, limit, params.offset);
-    let total = chain.account_tx_count(&addr_str);
+    let tx_hashes = chain.get_account_txs(&address, limit, params.offset);
+    let total = chain.account_tx_count(&address);
 
     let mut txs = Vec::with_capacity(tx_hashes.len());
     for hash in &tx_hashes {

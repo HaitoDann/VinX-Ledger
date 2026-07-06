@@ -65,6 +65,62 @@ fn test_storage_roundtrip() {
 }
 
 #[test]
+fn test_storage_roundtrip_preserves_typed_tx_index() {
+    use vinx_core::{Block, BlockHeader, Transaction};
+
+    let tmp = TmpDir::new();
+    let (admin_kp, admin) = make_addr();
+    let (_, validator) = make_addr();
+    let (_, bob) = make_addr();
+
+    let mut state = create_genesis_state(&GenesisConfig {
+        chain_id: vinx_core::CHAIN_ID_DEVNET,
+        admin_address: admin,
+        validator_address: validator,
+    });
+    let (mut chain, _) = Chain::new_with_genesis(validator, 0);
+
+    // A real signed transfer, indexed into a pushed block.
+    let tx = Transaction::new_transfer(
+        &admin_kp,
+        bob,
+        Amount::from_vinx(10),
+        Amount::from_vinx(1),
+        0,
+    );
+    let tx_hash = tx.hash();
+    let block = Block {
+        header: BlockHeader {
+            height: 1,
+            prev_hash: chain.tip_hash(),
+            timestamp: 1,
+            validator,
+            tx_count: 1,
+            state_root: [0u8; 32],
+            base_fee: 0,
+            receipts_root: [0u8; 32],
+        },
+        transactions: vec![tx],
+        signatures: vec![],
+    };
+    chain.push(block);
+
+    let storage = Storage::new(tmp.path());
+    storage.save(&mut state, &chain).unwrap();
+
+    // Reload and confirm the raw-byte-keyed indexes survive the bincode round-trip
+    // (Hash32 keys for tx_index, Address keys for account_tx_index).
+    let (_, loaded) = storage.load().expect("should load");
+    assert!(
+        loaded.get_tx_by_hash(&tx_hash).is_some(),
+        "tx index lost on reload"
+    );
+    assert_eq!(loaded.account_tx_count(&admin), 1);
+    assert_eq!(loaded.account_tx_count(&bob), 1);
+    assert_eq!(loaded.get_account_txs(&admin, 10, 0), vec![tx_hash]);
+}
+
+#[test]
 fn test_incremental_persist_writes_only_dirty_rows() {
     let tmp = TmpDir::new();
     let (_, admin) = make_addr();

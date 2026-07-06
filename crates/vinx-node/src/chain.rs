@@ -1,4 +1,4 @@
-use std::collections::{HashMap, HashSet};
+use ahash::{AHashMap, AHashSet};
 
 use serde::{Deserialize, Serialize};
 use vinx_core::{block::GENESIS_PREV_HASH, Block, BlockHeader, Transaction};
@@ -8,15 +8,18 @@ use vinx_crypto::{Address, Hash32};
 pub struct Chain {
     /// Stored as (block_hash, block) indexed by height.
     blocks: Vec<(Hash32, Block)>,
-    /// Maps hex-encoded tx hash -> (block_height, tx_position). Not persisted.
+    /// Maps raw tx hash -> (block_height, tx_position). Not persisted via serde
+    /// (rebuilt or imported by Storage). Keyed by the 32-byte hash directly —
+    /// no hex allocation per insert/lookup — hashed with ahash on the hot path.
     #[serde(skip)]
-    tx_index: HashMap<String, (u64, u32)>,
-    /// Maps bech32 address -> ordered list of tx hashes (oldest first). Not persisted.
+    tx_index: AHashMap<Hash32, (u64, u32)>,
+    /// Maps address -> ordered list of tx hashes (oldest first). Not persisted via
+    /// serde. Keyed by the raw 20-byte `Address` (Copy) rather than a bech32 String.
     #[serde(skip)]
-    account_tx_index: HashMap<String, Vec<String>>,
+    account_tx_index: AHashMap<Address, Vec<Hash32>>,
     /// Maps validator addr -> height -> set of block hashes signed (equivocation detection).
     #[serde(skip)]
-    slash_evidence: HashMap<Address, HashMap<u64, HashSet<Hash32>>>,
+    slash_evidence: AHashMap<Address, AHashMap<u64, AHashSet<Hash32>>>,
 }
 
 impl Chain {
@@ -38,9 +41,9 @@ impl Chain {
         let hash = genesis.hash();
         let chain = Self {
             blocks: vec![(hash, genesis.clone())],
-            tx_index: HashMap::new(),
-            account_tx_index: HashMap::new(),
-            slash_evidence: HashMap::new(),
+            tx_index: AHashMap::new(),
+            account_tx_index: AHashMap::new(),
+            slash_evidence: AHashMap::new(),
         };
         (chain, genesis)
     }
@@ -65,17 +68,17 @@ impl Chain {
     pub fn push(&mut self, block: Block) -> Hash32 {
         let height = block.header.height;
         for (idx, tx) in block.transactions.iter().enumerate() {
-            let hash_hex = hex::encode(tx.hash());
-            self.tx_index.insert(hash_hex.clone(), (height, idx as u32));
+            let tx_hash = tx.hash();
+            self.tx_index.insert(tx_hash, (height, idx as u32));
             self.account_tx_index
-                .entry(tx.from.to_string())
+                .entry(tx.from)
                 .or_default()
-                .push(hash_hex.clone());
+                .push(tx_hash);
             if tx.to != tx.from {
                 self.account_tx_index
-                    .entry(tx.to.to_string())
+                    .entry(tx.to)
                     .or_default()
-                    .push(hash_hex);
+                    .push(tx_hash);
             }
         }
         let hash = block.hash();
@@ -87,7 +90,10 @@ impl Chain {
     #[allow(clippy::type_complexity)]
     pub fn export_tx_indexes(
         &self,
-    ) -> (&HashMap<String, (u64, u32)>, &HashMap<String, Vec<String>>) {
+    ) -> (
+        &AHashMap<Hash32, (u64, u32)>,
+        &AHashMap<Address, Vec<Hash32>>,
+    ) {
         (&self.tx_index, &self.account_tx_index)
     }
 
@@ -95,8 +101,8 @@ impl Chain {
     /// Faster than `rebuild_tx_index` — O(1) deserialization vs O(blocks × txs).
     pub fn import_tx_indexes(
         &mut self,
-        tx_index: HashMap<String, (u64, u32)>,
-        account_tx_index: HashMap<String, Vec<String>>,
+        tx_index: AHashMap<Hash32, (u64, u32)>,
+        account_tx_index: AHashMap<Address, Vec<Hash32>>,
     ) {
         self.tx_index = tx_index;
         self.account_tx_index = account_tx_index;
@@ -109,29 +115,29 @@ impl Chain {
         for (_, block) in &self.blocks {
             let height = block.header.height;
             for (idx, tx) in block.transactions.iter().enumerate() {
-                let hash_hex = hex::encode(tx.hash());
-                self.tx_index.insert(hash_hex.clone(), (height, idx as u32));
+                let tx_hash = tx.hash();
+                self.tx_index.insert(tx_hash, (height, idx as u32));
                 self.account_tx_index
-                    .entry(tx.from.to_string())
+                    .entry(tx.from)
                     .or_default()
-                    .push(hash_hex.clone());
+                    .push(tx_hash);
                 if tx.to != tx.from {
                     self.account_tx_index
-                        .entry(tx.to.to_string())
+                        .entry(tx.to)
                         .or_default()
-                        .push(hash_hex);
+                        .push(tx_hash);
                 }
             }
         }
     }
 
     /// Total number of transactions involving this address.
-    pub fn account_tx_count(&self, addr: &str) -> usize {
+    pub fn account_tx_count(&self, addr: &Address) -> usize {
         self.account_tx_index.get(addr).map_or(0, |v| v.len())
     }
 
     /// Returns tx hashes for the given address, newest-first, with pagination.
-    pub fn get_account_txs(&self, addr: &str, limit: usize, offset: usize) -> Vec<String> {
+    pub fn get_account_txs(&self, addr: &Address, limit: usize, offset: usize) -> Vec<Hash32> {
         match self.account_tx_index.get(addr) {
             None => vec![],
             Some(hashes) => {
@@ -144,14 +150,14 @@ impl Chain {
                     .rev()
                     .skip(offset)
                     .take(limit)
-                    .cloned()
+                    .copied()
                     .collect()
             }
         }
     }
 
-    /// Looks up a transaction by its hex-encoded hash.
-    pub fn get_tx_by_hash(&self, hash: &str) -> Option<(u64, &Block, &Transaction)> {
+    /// Looks up a transaction by its raw 32-byte hash.
+    pub fn get_tx_by_hash(&self, hash: &Hash32) -> Option<(u64, &Block, &Transaction)> {
         let &(height, tx_pos) = self.tx_index.get(hash)?;
         let (_, block) = self.blocks.get(height as usize)?;
         let tx = block.transactions.get(tx_pos as usize)?;
@@ -309,9 +315,9 @@ mod tests {
     fn test_equivocation_detection() {
         let mut chain = Chain {
             blocks: vec![],
-            tx_index: HashMap::new(),
-            account_tx_index: HashMap::new(),
-            slash_evidence: HashMap::new(),
+            tx_index: AHashMap::new(),
+            account_tx_index: AHashMap::new(),
+            slash_evidence: AHashMap::new(),
         };
         let addr = Address::from_public_key(&KeyPair::generate().public_key());
         let hash_a = [1u8; 32];
