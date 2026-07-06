@@ -583,7 +583,7 @@ pub async fn faucet_request(
     let mut cooldowns = node.faucet_cooldowns.lock().await;
 
     let cooldown = std::time::Duration::from_secs(node.config.faucet_cooldown_secs);
-    if let Some(&last_at) = cooldowns.get(req.address.as_str()) {
+    if let Some(&last_at) = cooldowns.get(&to_addr) {
         let elapsed = last_at.elapsed();
         if elapsed < cooldown {
             let remaining = (cooldown - elapsed).as_secs();
@@ -621,7 +621,7 @@ pub async fn faucet_request(
         .add(tx)
         .map_err(|e| ApiError::BadRequest(e.to_string()))?;
 
-    cooldowns.insert(req.address.clone(), std::time::Instant::now());
+    cooldowns.insert(to_addr, std::time::Instant::now());
 
     Ok(Json(crate::rpc::types::FaucetResponse {
         accepted: true,
@@ -838,9 +838,13 @@ pub async fn get_tx_receipt(
     Path(hash_hex): Path<String>,
     State(node): State<Arc<Node>>,
 ) -> ApiResult<TxReceiptResponse> {
+    let hash_bytes: [u8; 32] = hex::decode(&hash_hex)
+        .ok()
+        .and_then(|b| b.try_into().ok())
+        .ok_or_else(|| ApiError::NotFound(format!("receipt not found for tx {hash_hex}")))?;
     let mut receipts = node.receipts.write().await;
     let receipt = receipts
-        .get(&hash_hex)
+        .get(&hash_bytes)
         .ok_or_else(|| ApiError::NotFound(format!("receipt not found for tx {hash_hex}")))?;
     Ok(Json(TxReceiptResponse {
         tx_hash: receipt.tx_hash.clone(),

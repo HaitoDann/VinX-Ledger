@@ -5,6 +5,28 @@ Format : `MAJEUR.MINEUR.CORRECTIF` — les versions `0.x.y` sont des versions de
 
 ---
 
+## [0.28.0] — 2026-07-06
+
+### Robustesse — démarrage sans panique + fin des clés typées
+
+**Robustesse (`storage.rs`, `main.rs`)**
+- `Storage::open() -> io::Result<Self>` : l'ouverture du stockage ne **panique** plus. Un échec (dossier illisible, base corrompue) remonte proprement. `Storage::new()` reste un wrapper `expect()` pour les appels internes et les tests.
+- **Mismatch de version = erreur claire et actionnable**, plus un `assert!` avec backtrace : le message pointe la **procédure de migration** (exporter via `GET /snapshot` sur l'ancien binaire → réimporter via `POST /snapshot` sur un dossier vide) au lieu de « delete the data directory ».
+- `main.rs` : ouverture du stockage et création du dossier de données gérées **gracieusement** (message + `exit(1)`), fini les paniques au démarrage.
+
+**Fin des clés typées (`node.rs`, `rpc/types.rs`, `rpc/handlers.rs`)**
+Les dernières maps encore keyées par `String` (adresses bech32, hashes hex) passent aux octets bruts :
+- `validator_liveness` : `HashMap<String,u64>` → `HashMap<Address,u64>`.
+- `faucet_cooldowns` : `HashMap<String,Instant>` → `HashMap<Address,Instant>`.
+- `suspended_validators` : `HashSet<String>` → `HashSet<Address>`.
+- `receipts` : `LruCache<String,…>` → `LruCache<Hash32,…>` (le handler décode l'hex une fois).
+- `ValidatorSetResponse::from_validator_set` compare des `Address` au lieu de refaire des `to_string()` par validateur à chaque bloc.
+- `address_cache` reste keyé par `String` **à dessein** (c'est un cache d'entrée brute → `Address`).
+
+Validé en réel : démarrage à froid, erreur gracieuse sur dossier invalide (exit 1, pas de panique), `/validators` (liveness typée), `/tx/{hash}/receipt` (receipts `Hash32`).
+
+---
+
 ## [0.27.0] — 2026-07-06
 
 ### Optimisations — clés typées + ahash sur le hot-path

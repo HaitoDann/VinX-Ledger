@@ -56,38 +56,51 @@ pub struct StateWrite {
 }
 
 impl Storage {
-    pub fn new(dir: impl Into<PathBuf>) -> Self {
+    /// Opens (or creates) the storage at `dir`, returning an error instead of
+    /// panicking so callers can fail gracefully. A schema-version mismatch is a
+    /// clean, actionable error (not a panic) that points at the migration path.
+    pub fn open(dir: impl Into<PathBuf>) -> io::Result<Self> {
         let dir: PathBuf = dir.into();
-        std::fs::create_dir_all(&dir).expect("create data directory");
+        std::fs::create_dir_all(&dir)
+            .map_err(|e| Self::io_err(format!("create data directory {}: {e}", dir.display())))?;
         let path = dir.join("vinx.redb");
-        let db = Database::create(&path).expect("open redb database");
+        let db = Database::create(&path)
+            .map_err(|e| Self::io_err(format!("open redb database {}: {e}", path.display())))?;
 
         {
-            let tx = db.begin_write().expect("begin write");
+            let tx = db.begin_write().map_err(Self::io_err)?;
             {
-                let mut meta = tx.open_table(META).expect("open meta table");
+                let mut meta = tx.open_table(META).map_err(Self::io_err)?;
                 let existing_version: Option<u64> = meta
                     .get("schema_version")
-                    .expect("read schema version")
+                    .map_err(Self::io_err)?
                     .map(|v| v.value());
                 match existing_version {
                     None => {
                         meta.insert("schema_version", STORAGE_VERSION)
-                            .expect("write schema version");
+                            .map_err(Self::io_err)?;
                     }
-                    Some(existing) => {
-                        assert!(
-                            existing == STORAGE_VERSION,
-                            "storage schema version mismatch: found {existing}, expected {STORAGE_VERSION}. \
-                             Delete the data directory to start fresh."
-                        );
+                    Some(existing) if existing != STORAGE_VERSION => {
+                        return Err(Self::io_err(format!(
+                            "schema version mismatch: on-disk data is v{existing}, this binary expects v{STORAGE_VERSION}. \
+                             The layouts are incompatible. To migrate: run the OLD binary, GET /snapshot to export the state, \
+                             then start this binary on an EMPTY data directory and POST /snapshot to import it. \
+                             Otherwise, delete the data directory to start from a fresh genesis."
+                        )));
                     }
+                    Some(_) => {}
                 }
             }
-            tx.commit().expect("commit schema version");
+            tx.commit().map_err(Self::io_err)?;
         }
 
-        Self { db: Arc::new(db) }
+        Ok(Self { db: Arc::new(db) })
+    }
+
+    /// Convenience wrapper that panics on failure — kept for internal callers and
+    /// tests. Prefer `open()` at startup so the error can be handled gracefully.
+    pub fn new(dir: impl Into<PathBuf>) -> Self {
+        Self::open(dir).expect("open storage")
     }
 
     fn io_err(msg: impl std::fmt::Display) -> io::Error {

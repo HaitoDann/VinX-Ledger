@@ -5,6 +5,7 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
 use std::time::{Instant, SystemTime, UNIX_EPOCH};
 use tokio::sync::{broadcast, Mutex, RwLock};
+use vinx_crypto::{Address, Hash32};
 
 use crate::{
     chain::Chain,
@@ -115,22 +116,24 @@ pub struct Node {
     pub validator_set: Arc<RwLock<ValidatorSet>>,
     /// Broadcast channel for new-block SSE/WebSocket events.
     pub block_events: broadcast::Sender<BlockEvent>,
-    /// Per-address faucet cooldown tracker + serialization lock for faucet requests.
-    pub faucet_cooldowns: Arc<Mutex<HashMap<String, Instant>>>,
+    /// Per-recipient faucet cooldown tracker + serialization lock for faucet requests.
+    /// Keyed by the raw `Address`, not a bech32 String.
+    pub faucet_cooldowns: Arc<Mutex<HashMap<Address, Instant>>>,
     /// Timestamp of the last block produced or received — used for slot-skip logic.
     pub last_block_instant: Arc<RwLock<Instant>>,
-    /// Last block height seen from each validator address (liveness tracking).
-    pub validator_liveness: Arc<RwLock<HashMap<String, u64>>>,
+    /// Last block height seen from each validator `Address` (liveness tracking).
+    pub validator_liveness: Arc<RwLock<HashMap<Address, u64>>>,
     /// Pending validator join requests (in-memory, not persisted).
     pub validator_requests: Arc<Mutex<Vec<ValidatorJoinRequest>>>,
-    /// Transaction receipts indexed by hex-encoded tx hash.
-    pub receipts: Arc<RwLock<LruCache<String, TxReceipt>>>,
-    /// LRU cache for bech32 address decoding — avoids re-parsing on every RPC request.
+    /// Transaction receipts indexed by raw `Hash32` tx hash.
+    pub receipts: Arc<RwLock<LruCache<Hash32, TxReceipt>>>,
+    /// LRU cache for bech32 address decoding — keyed by the raw input String on
+    /// purpose (it caches String → parsed Address, so the String *is* the key).
     pub address_cache: tokio::sync::Mutex<LruCache<String, vinx_crypto::Address>>,
     /// Lock-free real-time counters exposed on GET /metrics.
     pub metrics: NodeMetrics,
     /// Validators temporarily suspended from the round-robin due to liveness eviction.
-    pub suspended_validators: Arc<RwLock<HashSet<String>>>,
+    pub suspended_validators: Arc<RwLock<HashSet<Address>>>,
 }
 
 impl Node {
@@ -266,11 +269,11 @@ impl Node {
             .transactions
             .iter()
             .map(|tx| {
-                let hash = hex::encode(tx.hash());
+                let hash = tx.hash();
                 (
-                    hash.clone(),
+                    hash,
                     TxReceipt {
-                        tx_hash: hash,
+                        tx_hash: hex::encode(hash),
                         block_height: block.header.height,
                         success: true,
                         error: None,
@@ -335,10 +338,10 @@ impl Node {
         *self.validator_set.write().await = new_vs.clone();
 
         // Record liveness for this node
-        self.validator_liveness.write().await.insert(
-            self.config.validator_address.to_string(),
-            block.header.height,
-        );
+        self.validator_liveness
+            .write()
+            .await
+            .insert(self.config.validator_address, block.header.height);
 
         // Reset the slot-timeout clock
         *self.last_block_instant.write().await = Instant::now();
@@ -399,12 +402,8 @@ impl Node {
 
         // If the scheduled leader is already suspended (liveness-evicted), halve the
         // activation time so backup validators step in sooner.
-        let leader_addr = vs.leader_at(height).to_string();
-        let leader_suspended = self
-            .suspended_validators
-            .read()
-            .await
-            .contains(&leader_addr);
+        let leader_addr = vs.leader_at(height);
+        let leader_suspended = self.suspended_validators.read().await.contains(leader_addr);
         let activation_secs = if leader_suspended {
             ((distance as u64 + 1) * block_time).max(block_time / 2)
         } else {
@@ -505,27 +504,25 @@ impl Node {
                         if h >= LIVENESS_EVICTION_BLOCKS {
                             let liveness = self.validator_liveness.read().await;
                             let vs = self.validator_set.read().await;
-                            let my_addr = self.config.validator_address.to_string();
+                            let my_addr = self.config.validator_address;
                             let mut suspended = self.suspended_validators.write().await;
                             for addr in vs.validators() {
-                                let addr_str = addr.to_string();
-                                if addr_str == my_addr {
+                                if *addr == my_addr {
                                     continue; // never suspend ourselves
                                 }
-                                let offline_for = liveness
-                                    .get(&addr_str)
-                                    .map_or(h, |&last| h.saturating_sub(last));
+                                let offline_for =
+                                    liveness.get(addr).map_or(h, |&last| h.saturating_sub(last));
                                 if offline_for >= LIVENESS_EVICTION_BLOCKS {
-                                    if suspended.insert(addr_str.clone()) {
+                                    if suspended.insert(*addr) {
                                         tracing::warn!(
-                                            address = %addr_str,
+                                            address = %addr,
                                             offline_for,
                                             "Validator suspended (liveness eviction)"
                                         );
                                     }
-                                } else if suspended.remove(&addr_str) {
+                                } else if suspended.remove(addr) {
                                     tracing::info!(
-                                        address = %addr_str,
+                                        address = %addr,
                                         "Validator restored (back online)"
                                     );
                                 }

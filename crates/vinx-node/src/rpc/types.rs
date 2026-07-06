@@ -1,8 +1,8 @@
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 
 use serde::{Deserialize, Serialize};
 use vinx_core::{Account, Block, ProtocolVersion, ScheduledUpgrade, Transaction, ValidatorSet};
-use vinx_crypto::Hash32;
+use vinx_crypto::{Address, Hash32};
 
 fn hash_to_hex(h: &Hash32) -> String {
     hex::encode(h)
@@ -166,23 +166,23 @@ impl ValidatorSetResponse {
     pub fn from_validator_set(
         vs: &ValidatorSet,
         next_height: u64,
-        liveness: &HashMap<String, u64>,
+        liveness: &HashMap<Address, u64>,
         slot_window: u64,
-        suspended: &std::collections::HashSet<String>,
+        suspended: &HashSet<Address>,
     ) -> Self {
-        let next_leader = vs.leader_at(next_height).to_string();
+        let next_leader_addr = vs.leader_at(next_height);
+        let next_leader = next_leader_addr.to_string();
         let validators = vs
             .validators()
             .iter()
             .map(|a| {
-                let addr_str = a.to_string();
-                let last_seen = liveness.get(&addr_str).copied();
+                let last_seen = liveness.get(a).copied();
                 let online =
                     last_seen.is_some_and(|h| next_height.saturating_sub(h) <= slot_window);
                 ValidatorInfo {
-                    is_next_leader: addr_str == next_leader,
-                    suspended: suspended.contains(&addr_str),
-                    address: addr_str,
+                    is_next_leader: a == next_leader_addr,
+                    suspended: suspended.contains(a),
+                    address: a.to_string(),
                     last_seen_height: last_seen,
                     online,
                 }

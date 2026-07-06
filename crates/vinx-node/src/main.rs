@@ -164,7 +164,13 @@ async fn main() {
     let max_block_txs = file_cfg.max_block_txs.unwrap_or(1_000);
     let sync_peer_rpc = args.sync_peer.or(file_cfg.sync_peer_rpc);
 
-    std::fs::create_dir_all(&data_dir).expect("create data dir");
+    if let Err(e) = std::fs::create_dir_all(&data_dir) {
+        eprintln!(
+            "\n❌ Impossible de créer le dossier de données ({}): {e}\n",
+            data_dir.display()
+        );
+        std::process::exit(1);
+    }
 
     let validator_key_path = file_cfg
         .validator_key_file
@@ -184,7 +190,16 @@ async fn main() {
         .unwrap()
         .as_secs();
 
-    let storage = Storage::new(&data_dir);
+    let storage = match Storage::open(&data_dir) {
+        Ok(s) => s,
+        Err(e) => {
+            eprintln!(
+                "\n❌ Impossible d'ouvrir le stockage ({}): {e}\n",
+                data_dir.display()
+            );
+            std::process::exit(1);
+        }
+    };
     let (mut state, mut chain, resumed) = match storage.load() {
         Some((s, c)) => {
             let height = s.block_height;
