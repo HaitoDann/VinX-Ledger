@@ -5,6 +5,27 @@ Format : `MAJEUR.MINEUR.CORRECTIF` — les versions `0.x.y` sont des versions de
 
 ---
 
+## [0.30.0] — 2026-07-08
+
+### Cadence de bloc adaptative à la demande (continue)
+
+Généralisation de la cadence : au lieu d'un basculement binaire (block_time plein *ou* dos à dos), **l'écart entre blocs varie en continu avec la pression du mempool**, en une seule courbe couvrant les trois régimes voulus :
+
+- **Repos** (mempool vide) → aucun bloc.
+- **Activité légère** (quelques tx) → écart ≈ `block_time` (~10 s) : les tx s'agrègent en blocs périodiques.
+- **Montée en charge** → l'écart **se resserre proportionnellement** au remplissage (`gap = block_time × (1 − pending / max_block_txs)`).
+- **Saturation** (≥ un bloc plein en attente) → écart **nul**, blocs dos à dos.
+
+**Détails (`node.rs`)**
+- Pacing **avant** le scellage (fonction pure `dynamic_gap`), donc les **reliquats** d'un gros drainage continuent à se vider au lieu d'être bloqués jusqu'au prochain signal.
+- Garde **anti-spin** conservée : un bloc vide malgré un backlog (tx inapplicables) marque `stalled` → attente d'un nouveau signal, jamais de blocs vides en boucle.
+- Garde **anti-bloc-vide** : un réveil sans travail (notify parasite / mempool déjà drainé) ne produit pas de bloc.
+- Suppression du `batch_window` fixe (200 ms) : la courbe de gap l'absorbe.
+
+**Vérifié en réel** : 8 tx, blocs de 5, `block_time` 10 s → bloc #1 (5 tx) immédiat, puis écart **4,1 s** (= `10 × (1 − 3/5)`), bloc #2 (3 tx), puis repos. Régimes saturation (dos à dos) et anti-spin re-testés. 225 tests, clippy & fmt OK.
+
+---
+
 ## [0.29.0] — 2026-07-08
 
 ### Débit — cadence de bloc adaptative + capacités relevées

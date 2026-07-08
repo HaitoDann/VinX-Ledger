@@ -3,7 +3,7 @@ use std::collections::{HashMap, HashSet};
 use std::num::NonZeroUsize;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
-use std::time::{Instant, SystemTime, UNIX_EPOCH};
+use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 use tokio::sync::{broadcast, Mutex, RwLock};
 use vinx_crypto::{Address, Hash32};
 
@@ -442,10 +442,9 @@ impl Node {
     /// Implements **slot skip**: if the scheduled leader is offline, backup validators
     /// step in after 2, 3, … block-times so the chain keeps advancing.
     pub async fn run_block_producer(self: Arc<Self>) {
-        use vinx_core::amount::{BATCH_WINDOW_MS, HEARTBEAT_INTERVAL_SECS};
+        use vinx_core::amount::HEARTBEAT_INTERVAL_SECS;
 
         let block_time = std::time::Duration::from_secs(self.config.block_time_secs);
-        let batch_window = std::time::Duration::from_millis(BATCH_WINDOW_MS);
         let heartbeat = std::time::Duration::from_secs(HEARTBEAT_INTERVAL_SECS);
 
         // Extract the Notify handle once — no lock held while awaiting.
@@ -457,36 +456,46 @@ impl Node {
         let mut stalled = false;
 
         loop {
-            // Only arm the heartbeat timer when something time-sensitive is pending
-            // (a protocol upgrade scheduled at a future height). Otherwise sleep
-            // forever — a transaction signal is the only thing that can wake us up.
+            // Heartbeat only when something time-sensitive is pending (a scheduled
+            // upgrade). Otherwise we wait for a transaction — no empty blocks at rest.
             let needs_heartbeat = self.state.read().await.has_pending_time_sensitive_ops();
 
-            // Adaptive cadence: if a full block's worth of transactions is already
-            // queued *and* we aren't stalled on un-appliable txs, don't wait for a
-            // signal or batch window — seal the next block right away to drain the
-            // backlog (back-to-back full blocks).
-            let backlog_full =
-                !stalled && self.mempool.read().await.size() >= self.config.max_block_txs;
+            // Proceed straight to production when there's pending work and we aren't
+            // stalled — the demand-scaled gap below paces us, and any leftover txs
+            // from a previous block keep draining. Otherwise wait for a signal
+            // (or the heartbeat timer).
+            let have_work = !stalled && self.mempool.read().await.size() > 0;
 
-            let triggered_by_tx = if backlog_full {
-                true
+            let is_heartbeat_block = if have_work {
+                false
             } else if needs_heartbeat {
                 tokio::select! {
-                    _ = tx_ready.notified() => true,
-                    _ = tokio::time::sleep(heartbeat) => false,
+                    _ = tx_ready.notified() => false,
+                    _ = tokio::time::sleep(heartbeat) => true,
                 }
             } else {
                 tx_ready.notified().await;
-                true
+                false
             };
+            // Any fresh wake clears a prior stall — we retry the backlog.
+            stalled = false;
 
-            if triggered_by_tx && !backlog_full {
-                // Brief batch window: let concurrent txs accumulate before sealing.
-                tokio::time::sleep(batch_window).await;
-                tracing::debug!("Block triggered by transaction");
-            } else if !triggered_by_tx {
-                tracing::debug!("Heartbeat block — upgrade or freeze pending");
+            if is_heartbeat_block {
+                tracing::debug!("Heartbeat block — time-sensitive op pending");
+            } else {
+                // Demand-scaled pacing: the gap shrinks as the mempool fills — full
+                // block_time under light load, down to zero (back-to-back) once a
+                // full block is queued.
+                let pending = self.mempool.read().await.size();
+                let gap = dynamic_gap(pending, self.config.max_block_txs, block_time);
+                if !gap.is_zero() {
+                    tokio::time::sleep(gap).await;
+                }
+                // Nothing to seal (spurious wake or already drained) → don't produce
+                // an empty block; loop back to waiting.
+                if self.mempool.read().await.size() == 0 {
+                    continue;
+                }
             }
 
             match self.tick().await {
@@ -544,20 +553,12 @@ impl Node {
                         }
                     }
                     self.persist().await;
-                    // Adaptive cadence: skip the steady block_time pause *only* when
-                    // there is still a full block queued AND this block actually made
-                    // progress (included txs). If a block came out empty despite a
-                    // backlog, the pending txs can't be applied yet — mark stalled and
-                    // pace normally so we never spin on empty blocks.
-                    let still_backlogged =
-                        self.mempool.read().await.size() >= self.config.max_block_txs;
-                    let progressed = block.header.tx_count > 0;
-                    let (should_pace, next_stalled) =
-                        adaptive_cadence(triggered_by_tx, still_backlogged, progressed);
-                    stalled = next_stalled;
-                    if should_pace {
-                        tokio::time::sleep(block_time).await;
-                    }
+                    // A block that came out empty despite a full backlog means the
+                    // pending txs can't be applied yet (fee too low, nonce gap). Mark
+                    // stalled so the next iteration waits for a fresh signal instead of
+                    // spinning on empty blocks; any wake clears it and retries.
+                    let pending = self.mempool.read().await.size();
+                    stalled = pending >= self.config.max_block_txs && block.header.tx_count == 0;
                 }
                 Err(NodeError::Consensus(_)) => {
                     self.try_backup_production().await;
@@ -688,42 +689,57 @@ impl Node {
     }
 }
 
-/// Adaptive block-cadence decision, factored out for testing.
+/// Demand-scaled gap before sealing the next block, factored out for testing.
 ///
-/// After sealing a block, returns `(should_pace, stalled)`:
-/// - `should_pace`: sleep the steady `block_time` before the next round.
-/// - `stalled`: the mempool still holds a backlog but the block came out empty
-///   (txs can't be applied yet) — the producer must then wait for a fresh signal
-///   instead of spinning on empty blocks.
-///
-/// The only case that skips the pace is a genuine *fast drain*: a full block is
-/// still queued AND this block actually included transactions.
-fn adaptive_cadence(
-    triggered_by_tx: bool,
-    still_backlogged: bool,
-    progressed: bool,
-) -> (bool, bool) {
-    let stalled = still_backlogged && !progressed;
-    let fast_drain = still_backlogged && progressed;
-    let should_pace = triggered_by_tx && !fast_drain;
-    (should_pace, stalled)
+/// Full `block_time` when the mempool is nearly empty (light-activity cadence),
+/// shrinking linearly toward zero as `pending` approaches one block's worth
+/// (`max_block_txs`), and exactly zero — back-to-back — once a full block is
+/// already queued (saturation). Combined with block-on-demand (no work → no
+/// block), this yields the three regimes in a single curve:
+/// idle → no block; light traffic → ~`block_time`; rising load → tighter gaps;
+/// saturation → back-to-back.
+fn dynamic_gap(pending: usize, max_block_txs: usize, block_time: Duration) -> Duration {
+    let max = max_block_txs.max(1);
+    if pending >= max {
+        return Duration::ZERO;
+    }
+    let fill = pending as f64 / max as f64; // 0.0 ..= 1.0
+    block_time.mul_f64(1.0 - fill)
 }
 
 #[cfg(test)]
 mod tests {
-    use super::adaptive_cadence;
+    use super::dynamic_gap;
+    use std::time::Duration;
+
+    const BT: Duration = Duration::from_secs(10);
+    const MAX: usize = 10_000;
 
     #[test]
-    fn test_adaptive_cadence_fast_drains_only_with_progress() {
-        // Backlog + progress → fast drain: no pause, not stalled.
-        assert_eq!(adaptive_cadence(true, true, true), (false, false));
-        // Backlog but empty block → pause AND stalled (never spin on empty blocks).
-        assert_eq!(adaptive_cadence(true, true, false), (true, true));
-        // Caught up (no backlog) → pace normally, not stalled.
-        assert_eq!(adaptive_cadence(true, false, true), (true, false));
-        assert_eq!(adaptive_cadence(true, false, false), (true, false));
-        // Heartbeat block (not tx-triggered) → this path never adds a pace.
-        assert_eq!(adaptive_cadence(false, false, false), (false, false));
-        assert_eq!(adaptive_cadence(false, true, false), (false, true));
+    fn test_gap_full_when_nearly_empty() {
+        // Empty / a few txs → ~full block_time (light-activity regime).
+        assert_eq!(dynamic_gap(0, MAX, BT), BT);
+        let g = dynamic_gap(50, MAX, BT);
+        assert!(g > Duration::from_millis(9_900) && g <= BT);
+    }
+
+    #[test]
+    fn test_gap_shrinks_as_mempool_fills() {
+        // Half a block queued → half the gap; nearly a full block → nearly zero.
+        assert_eq!(dynamic_gap(MAX / 2, MAX, BT), BT.mul_f64(0.5));
+        assert_eq!(dynamic_gap(MAX * 9 / 10, MAX, BT), BT.mul_f64(0.1));
+    }
+
+    #[test]
+    fn test_gap_zero_under_full_backlog() {
+        // A full block (or more) queued → back-to-back, no wait.
+        assert_eq!(dynamic_gap(MAX, MAX, BT), Duration::ZERO);
+        assert_eq!(dynamic_gap(MAX * 5, MAX, BT), Duration::ZERO);
+    }
+
+    #[test]
+    fn test_gap_never_divides_by_zero() {
+        // max_block_txs = 0 is clamped to 1 — no panic; empty mempool → full gap.
+        assert_eq!(dynamic_gap(0, 0, BT), BT);
     }
 }
