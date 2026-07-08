@@ -146,7 +146,7 @@ impl Node {
         let (block_events, _) = broadcast::channel(64);
         Arc::new(Self {
             state: Arc::new(RwLock::new(state)),
-            mempool: Arc::new(RwLock::new(Mempool::default())),
+            mempool: Arc::new(RwLock::new(Mempool::new(config.max_mempool_size))),
             chain: Arc::new(RwLock::new(chain)),
             validator_set: Arc::new(RwLock::new(initial_vs)),
             config,
@@ -177,7 +177,7 @@ impl Node {
         let initial_vs = state.validator_set.clone();
         let state_arc = Arc::new(RwLock::new(state));
         let chain_arc = Arc::new(RwLock::new(chain));
-        let mempool_arc = Arc::new(RwLock::new(Mempool::default()));
+        let mempool_arc = Arc::new(RwLock::new(Mempool::new(config.max_mempool_size)));
         let vs_arc = Arc::new(RwLock::new(initial_vs));
         let (block_events, _) = broadcast::channel(64);
 
@@ -451,13 +451,27 @@ impl Node {
         // Extract the Notify handle once — no lock held while awaiting.
         let tx_ready = self.mempool.read().await.tx_ready.clone();
 
+        // True when the last block came out empty despite a backlog — the pending
+        // txs can't be applied yet (fee too low, nonce gap). We then fall back to
+        // waiting for a fresh signal instead of spinning on empty blocks.
+        let mut stalled = false;
+
         loop {
             // Only arm the heartbeat timer when something time-sensitive is pending
             // (a protocol upgrade scheduled at a future height). Otherwise sleep
             // forever — a transaction signal is the only thing that can wake us up.
             let needs_heartbeat = self.state.read().await.has_pending_time_sensitive_ops();
 
-            let triggered_by_tx = if needs_heartbeat {
+            // Adaptive cadence: if a full block's worth of transactions is already
+            // queued *and* we aren't stalled on un-appliable txs, don't wait for a
+            // signal or batch window — seal the next block right away to drain the
+            // backlog (back-to-back full blocks).
+            let backlog_full =
+                !stalled && self.mempool.read().await.size() >= self.config.max_block_txs;
+
+            let triggered_by_tx = if backlog_full {
+                true
+            } else if needs_heartbeat {
                 tokio::select! {
                     _ = tx_ready.notified() => true,
                     _ = tokio::time::sleep(heartbeat) => false,
@@ -467,11 +481,11 @@ impl Node {
                 true
             };
 
-            if triggered_by_tx {
+            if triggered_by_tx && !backlog_full {
                 // Brief batch window: let concurrent txs accumulate before sealing.
                 tokio::time::sleep(batch_window).await;
                 tracing::debug!("Block triggered by transaction");
-            } else {
+            } else if !triggered_by_tx {
                 tracing::debug!("Heartbeat block — upgrade or freeze pending");
             }
 
@@ -530,8 +544,18 @@ impl Node {
                         }
                     }
                     self.persist().await;
-                    // Respect block time before accepting the next production round.
-                    if triggered_by_tx {
+                    // Adaptive cadence: skip the steady block_time pause *only* when
+                    // there is still a full block queued AND this block actually made
+                    // progress (included txs). If a block came out empty despite a
+                    // backlog, the pending txs can't be applied yet — mark stalled and
+                    // pace normally so we never spin on empty blocks.
+                    let still_backlogged =
+                        self.mempool.read().await.size() >= self.config.max_block_txs;
+                    let progressed = block.header.tx_count > 0;
+                    let (should_pace, next_stalled) =
+                        adaptive_cadence(triggered_by_tx, still_backlogged, progressed);
+                    stalled = next_stalled;
+                    if should_pace {
                         tokio::time::sleep(block_time).await;
                     }
                 }
@@ -661,5 +685,45 @@ impl Node {
         )
         .await
         .map_err(|e| NodeError::Rpc(e.to_string()))
+    }
+}
+
+/// Adaptive block-cadence decision, factored out for testing.
+///
+/// After sealing a block, returns `(should_pace, stalled)`:
+/// - `should_pace`: sleep the steady `block_time` before the next round.
+/// - `stalled`: the mempool still holds a backlog but the block came out empty
+///   (txs can't be applied yet) — the producer must then wait for a fresh signal
+///   instead of spinning on empty blocks.
+///
+/// The only case that skips the pace is a genuine *fast drain*: a full block is
+/// still queued AND this block actually included transactions.
+fn adaptive_cadence(
+    triggered_by_tx: bool,
+    still_backlogged: bool,
+    progressed: bool,
+) -> (bool, bool) {
+    let stalled = still_backlogged && !progressed;
+    let fast_drain = still_backlogged && progressed;
+    let should_pace = triggered_by_tx && !fast_drain;
+    (should_pace, stalled)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::adaptive_cadence;
+
+    #[test]
+    fn test_adaptive_cadence_fast_drains_only_with_progress() {
+        // Backlog + progress → fast drain: no pause, not stalled.
+        assert_eq!(adaptive_cadence(true, true, true), (false, false));
+        // Backlog but empty block → pause AND stalled (never spin on empty blocks).
+        assert_eq!(adaptive_cadence(true, true, false), (true, true));
+        // Caught up (no backlog) → pace normally, not stalled.
+        assert_eq!(adaptive_cadence(true, false, true), (true, false));
+        assert_eq!(adaptive_cadence(true, false, false), (true, false));
+        // Heartbeat block (not tx-triggered) → this path never adds a pace.
+        assert_eq!(adaptive_cadence(false, false, false), (false, false));
+        assert_eq!(adaptive_cadence(false, true, false), (false, true));
     }
 }

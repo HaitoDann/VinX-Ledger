@@ -7,7 +7,7 @@ use tokio::sync::Notify;
 use vinx_core::{CoreError, Transaction};
 use vinx_crypto::{Address, Hash32};
 
-const DEFAULT_MAX_SIZE: usize = 10_000;
+const DEFAULT_MAX_SIZE: usize = 100_000;
 /// Maximum pending transactions per sender address.
 const MAX_PER_ADDRESS: usize = 50;
 

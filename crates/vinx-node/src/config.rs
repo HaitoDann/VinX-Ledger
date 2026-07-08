@@ -14,6 +14,9 @@ pub struct NodeConfig {
     pub block_time_secs: u64,
     /// Maximum transactions per block.
     pub max_block_txs: usize,
+    /// Maximum transactions held in the mempool at once (across all senders).
+    /// Should be several blocks' worth so bursts can queue while blocks drain.
+    pub max_mempool_size: usize,
     /// HTTP listen address for the RPC server.
     pub rpc_listen: String,
     /// Directory for persistent chain and state data. `None` = in-memory only.
@@ -48,7 +51,8 @@ impl NodeConfig {
             validator_address,
             validator_set,
             block_time_secs: 10,
-            max_block_txs: 1_000,
+            max_block_txs: 10_000,
+            max_mempool_size: 100_000,
             rpc_listen: "127.0.0.1:8545".to_string(),
             data_dir: None,
             p2p_listen: None,

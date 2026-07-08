@@ -21,8 +21,9 @@ Cohérent avec cette philosophie, VinX est développé sur un **protocole Rust e
 ## 2. Architecture Technique
 
 - **Langage** : Rust, implémentation propriétaire de bout en bout
-- **Vitesse** : Blocs de 10 secondes, finalité déterministe immédiate via le consensus PoA Threshold
-- **Performance** : Cible de 4 000 transactions par seconde (TPS)
+- **Vitesse** : Cadence de bloc **adaptative** — blocs produits *à la demande* (aucun bloc vide au repos), scellés **dos à dos** sous charge pour vider les pics ; finalité déterministe immédiate via le consensus PoA Threshold
+- **Capacité** : jusqu'à **10 000 transactions par bloc** (réglable), mempool de **100 000** transactions
+- **Performance** : plusieurs milliers de TPS en configuration optimisée (dépend du matériel et des réglages ; l'exécution est séquentielle — une exécution parallèle serait requise au-delà)
 - **Précision** : 18 décimales internes, 2 décimales affichées à l'utilisateur
 - **Adresses** : Format Bech32 avec préfixe `vinx1`
 - **Cryptographie** : Ed25519 (signatures), SHA-256 (hachage), Bech32 (adresses)
@@ -201,8 +202,9 @@ VinX Ledger n'a pas de pression d'agenda. Le projet avance à son rythme.
 | Type | L1 indépendante, non-EVM, account-based |
 | Stack | Rust, implémentation propriétaire |
 | Cryptographie | Ed25519, SHA-256, Bech32 (`vinx1`) |
-| Bloc | 10 secondes |
-| TPS Phase 1 | 4 000 |
+| Cadence de bloc | Adaptative — à la demande, dos à dos sous charge |
+| Capacité | 10 000 tx/bloc (réglable) · mempool 100 000 |
+| TPS | Plusieurs milliers (config-dépendant) |
 | Consensus | PoA Threshold, seuil 66%, finalité déterministe |
 | Validateurs | 1 → 3 (redondance), permissionnés |
 | Full nodes | Ouverts à tous |

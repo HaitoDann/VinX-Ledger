@@ -5,6 +5,23 @@ Format : `MAJEUR.MINEUR.CORRECTIF` — les versions `0.x.y` sont des versions de
 
 ---
 
+## [0.29.0] — 2026-07-08
+
+### Débit — cadence de bloc adaptative + capacités relevées
+
+**Cadence adaptative (`node.rs`)**
+- Sous charge, le producteur ne dort plus systématiquement `block_time` entre deux blocs : tant qu'**un bloc plein** est en attente **et** que le dernier bloc a **inclus des transactions**, il scelle le suivant **immédiatement** (blocs dos à dos pour vider les pics). Dès qu'il rattrape le retard, il reprend la cadence normale.
+- **Anti-spin** : si un bloc sort *vide* malgré un backlog (tx inapplicables — frais trop bas, trou de nonce), le producteur se marque `stalled` et **attend un nouveau signal** au lieu de produire des blocs vides en boucle. Logique extraite en fonction pure `adaptive_cadence()` + test de vérité.
+- Mesuré en réel : 40 tx (blocs de 5, `block_time` = 10 s) drainées en **8 blocs en ~44 ms** (dos à dos) au lieu de ~80 s, puis **arrêt propre** (aucun bloc vide).
+
+**Capacités relevées (`config.rs`, `main.rs`, `mempool.rs`)**
+- `max_block_txs` : **1 000 → 10 000** par bloc (réglable via `config.toml`).
+- Taille du mempool : **10 000 → 100 000**, désormais **configurable** (`max_mempool_size`).
+
+**Docs** : whitepaper aligné (cadence adaptative, capacités, TPS réaliste config-dépendant au lieu du « 4000 » incohérent avec « blocs 10 s »).
+
+---
+
 ## [0.28.0] — 2026-07-06
 
 ### Robustesse — démarrage sans panique + fin des clés typées

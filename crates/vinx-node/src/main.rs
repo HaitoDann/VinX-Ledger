@@ -12,6 +12,7 @@ use vinx_state::{create_genesis_state, GenesisConfig};
 struct NodeConfigFile {
     block_time_secs: Option<u64>,
     max_block_txs: Option<usize>,
+    max_mempool_size: Option<usize>,
     rpc_listen: Option<String>,
     data_dir: Option<PathBuf>,
     p2p_listen: Option<String>,
@@ -161,7 +162,8 @@ async fn main() {
     };
     let bootstrap_peers = args.bootstrap_peers;
     let chain_id = args.chain_id;
-    let max_block_txs = file_cfg.max_block_txs.unwrap_or(1_000);
+    let max_block_txs = file_cfg.max_block_txs.unwrap_or(10_000);
+    let max_mempool_size = file_cfg.max_mempool_size.unwrap_or(100_000);
     let sync_peer_rpc = args.sync_peer.or(file_cfg.sync_peer_rpc);
 
     if let Err(e) = std::fs::create_dir_all(&data_dir) {
@@ -245,6 +247,7 @@ async fn main() {
         config = config.with_admin_token(token);
     }
     config.max_block_txs = max_block_txs;
+    config.max_mempool_size = max_mempool_size;
 
     // Optional faucet — only enabled when faucet_key_file is set in config.toml.
     if let Some(ref faucet_path) = file_cfg.faucet_key_file {
