@@ -145,7 +145,7 @@ async fn main() {
     };
 
     // CLI flag > config file > hardcoded default
-    let block_time = args.block_time.or(file_cfg.block_time_secs).unwrap_or(3);
+    let block_time = args.block_time.or(file_cfg.block_time_secs).unwrap_or(5);
     let rpc_listen = args
         .rpc_listen
         .or(file_cfg.rpc_listen)

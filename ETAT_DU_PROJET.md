@@ -405,7 +405,7 @@ Lance 3 nœuds en réseau isolé :
 ### Configuration du nœud (`config.toml`)
 
 ```toml
-block_time_secs = 10          # Écart entre blocs sous activité légère ; se resserre à charge, dos à dos à saturation
+block_time_secs = 5           # Écart entre blocs sous activité légère ; se resserre à charge, dos à dos à saturation
 max_block_txs = 10000         # Transactions max par bloc
 max_mempool_size = 100000     # Transactions max en attente dans le mempool
 rpc_listen = "0.0.0.0:8545"  # Adresse RPC

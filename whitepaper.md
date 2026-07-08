@@ -21,7 +21,7 @@ Cohérent avec cette philosophie, VinX est développé sur un **protocole Rust e
 ## 2. Architecture Technique
 
 - **Langage** : Rust, implémentation propriétaire de bout en bout
-- **Vitesse** : Cadence de bloc **adaptative à la demande** — *repos* → aucun bloc ; *premier paiement* (sortie de repos) → confirmation quasi immédiate (~0,5 s) ; *charge continue / reliquats* → l'écart suit le remplissage du mempool (jusqu'à `block_time`, se resserrant vers 0) ; *saturation* → blocs **dos à dos**. Finalité déterministe immédiate via le consensus PoA Threshold
+- **Vitesse** : Cadence de bloc **adaptative à la demande** — *repos* → aucun bloc ; *activité normale* → jusqu'à ~5 s (block time), les transactions s'agrègent ; *montée en charge* → l'écart se resserre à mesure que le mempool se remplit ; *saturation* → blocs **dos à dos**. Finalité déterministe immédiate via le consensus PoA Threshold
 - **Capacité** : jusqu'à **10 000 transactions par bloc** (réglable), mempool de **100 000** transactions
 - **Performance** : plusieurs milliers de TPS en configuration optimisée (dépend du matériel et des réglages ; l'exécution est séquentielle — une exécution parallèle serait requise au-delà)
 - **Précision** : 18 décimales internes, 2 décimales affichées à l'utilisateur
@@ -202,7 +202,7 @@ VinX Ledger n'a pas de pression d'agenda. Le projet avance à son rythme.
 | Type | L1 indépendante, non-EVM, account-based |
 | Stack | Rust, implémentation propriétaire |
 | Cryptographie | Ed25519, SHA-256, Bech32 (`vinx1`) |
-| Cadence de bloc | Adaptative : repos→0 · 1er paiement→~0,5s · charge→écart suit le remplissage · saturation→dos à dos |
+| Cadence de bloc | Adaptative : repos→0 · normal→~5s · charge→écart suit le remplissage · saturation→dos à dos |
 | Capacité | 10 000 tx/bloc (réglable) · mempool 100 000 |
 | TPS | Plusieurs milliers (config-dépendant) |
 | Consensus | PoA Threshold, seuil 66%, finalité déterministe |

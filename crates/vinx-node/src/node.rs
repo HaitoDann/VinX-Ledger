@@ -446,10 +446,6 @@ impl Node {
 
         let block_time = std::time::Duration::from_secs(self.config.block_time_secs);
         let heartbeat = std::time::Duration::from_secs(HEARTBEAT_INTERVAL_SECS);
-        // Courtesy window for the *first* block after an idle period: seal quickly
-        // for a snappy confirmation instead of waiting the full demand-scaled gap.
-        // A second tx arriving within the window rides along in the same block.
-        let first_block_window = std::time::Duration::from_millis(500);
 
         // Extract the Notify handle once — no lock held while awaiting.
         let tx_ready = self.mempool.read().await.tx_ready.clone();
@@ -487,17 +483,12 @@ impl Node {
             if is_heartbeat_block {
                 tracing::debug!("Heartbeat block — time-sensitive op pending");
             } else {
-                // Pacing before sealing:
-                // - `have_work` (leftover from a previous block, or continuous
-                //   traffic) → demand-scaled gap that shrinks as the mempool fills.
-                // - otherwise this is the *first* block after idle → a short courtesy
-                //   window for snappy confirmation (isolated users don't wait ~10s).
-                let gap = if have_work {
-                    let pending = self.mempool.read().await.size();
-                    dynamic_gap(pending, self.config.max_block_txs, block_time)
-                } else {
-                    first_block_window
-                };
+                // Demand-scaled pacing: the gap shrinks as the mempool fills — up to
+                // block_time under light load, down to zero (back-to-back) once a
+                // full block is queued. Applied uniformly, whether this is the first
+                // block after idle or a leftover being drained.
+                let pending = self.mempool.read().await.size();
+                let gap = dynamic_gap(pending, self.config.max_block_txs, block_time);
                 if !gap.is_zero() {
                     tokio::time::sleep(gap).await;
                 }

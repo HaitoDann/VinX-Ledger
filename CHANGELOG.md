@@ -5,6 +5,19 @@ Format : `MAJEUR.MINEUR.CORRECTIF` — les versions `0.x.y` sont des versions de
 
 ---
 
+## [0.32.0] — 2026-07-08
+
+### Cadence simplifiée : block time 5 s, courbe unique (retrait du « premier bloc rapide »)
+
+Retour à une **courbe de cadence unique** et abaissement du block time.
+
+- **Retrait de la fenêtre de courtoisie de 500 ms** (v0.31.0) : le pacing applique désormais uniformément la formule `dynamic_gap`, que le bloc soit le premier après repos ou un reliquat. Code plus simple, un seul comportement à raisonner.
+- **`block_time` par défaut : 5 s** (au lieu de 3 s en pratique / 10 s selon les docs — désormais aligné partout, `config.rs` et `main.rs`).
+- Le compromis retenu : un paiement isolé attend jusqu'à ~5 s (au lieu de ~0,5 s), mais on **évite le foisonnement de petits blocs** sous trafic léger continu (donc pas de gonflement abusif de la chaîne d'en-têtes). Les avantages des autres régimes sont conservés : agrégation sous activité normale, resserrement progressif à la montée en charge, dos-à-dos à saturation.
+- Vérifié en réel : 1 tx isolée (config par défaut) → bloc scellé en **~5,07 s**.
+
+---
+
 ## [0.31.0] — 2026-07-08
 
 ### « Premier bloc rapide » — latence quasi nulle pour les paiements isolés

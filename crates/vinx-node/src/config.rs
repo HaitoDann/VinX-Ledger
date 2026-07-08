@@ -10,7 +10,9 @@ pub struct NodeConfig {
     pub validator_address: Address,
     /// Authorized validator set used for leader selection and quorum checks.
     pub validator_set: ValidatorSet,
-    /// Target block time in seconds (10 for mainnet, lower for testing).
+    /// Block time in seconds: the gap between blocks under light load. The
+    /// producer shrinks it dynamically as the mempool fills (down to back-to-back
+    /// at saturation), so this is the *upper* bound of the cadence, not a fixed tick.
     pub block_time_secs: u64,
     /// Maximum transactions per block.
     pub max_block_txs: usize,
@@ -50,7 +52,7 @@ impl NodeConfig {
             validator_keypair,
             validator_address,
             validator_set,
-            block_time_secs: 10,
+            block_time_secs: 5,
             max_block_txs: 10_000,
             max_mempool_size: 100_000,
             rpc_listen: "127.0.0.1:8545".to_string(),
