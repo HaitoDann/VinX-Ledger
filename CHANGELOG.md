@@ -5,6 +5,18 @@ Format : `MAJEUR.MINEUR.CORRECTIF` — les versions `0.x.y` sont des versions de
 
 ---
 
+## [0.31.0] — 2026-07-08
+
+### « Premier bloc rapide » — latence quasi nulle pour les paiements isolés
+
+Correction du seul point faible de la cadence à la demande : sous très faible activité, un paiement isolé attendait le gap plein (~`block_time`, 10 s) avant d'être scellé. Désormais, le **premier bloc après une période de repos** est scellé après une **fenêtre de courtoisie de 500 ms** (une 2ᵉ tx arrivant dans l'intervalle embarque avec), au lieu d'appliquer la formule.
+
+- La formule demande-échelle (`dynamic_gap`) ne gouverne plus que les **reliquats** d'un bloc précédent et le **trafic continu** ; la sortie de repos passe par la fenêtre courte.
+- Résultat : latence ~0,5 s pour un utilisateur isolé, tout en gardant l'agrégation sous charge et le dos-à-dos à saturation.
+- Vérifié en réel : 1 tx isolée (config `block_time` = 10 s) → bloc scellé en **~0,6 s** (fenêtre 500 ms + granularité de mesure) au lieu de 10 s.
+
+---
+
 ## [0.30.0] — 2026-07-08
 
 ### Cadence de bloc adaptative à la demande (continue)
