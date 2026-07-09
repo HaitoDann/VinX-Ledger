@@ -1,6 +1,6 @@
 # VinX Ledger — Livre Blanc
 
-**Version :** 3.0
+**Version :** 3.1
 **Date :** Juillet 2026
 **Éditeur :** VinX Labs
 
@@ -220,4 +220,4 @@ VinX Ledger n'a pas de pression d'agenda. Le projet avance à son rythme.
 
 ---
 
-*VinX Labs, juillet 2026 — Document de référence v3.0*
+*VinX Labs, juillet 2026 — Document de référence v3.1*

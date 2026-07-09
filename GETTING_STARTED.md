@@ -44,29 +44,32 @@ vinx-node \
 Le nœud :
 - génère automatiquement une clé validateur dans `./data-node1/`
 - expose le RPC sur `http://127.0.0.1:8545`
-- produit un nouveau bloc toutes les **3 secondes**
+- produit des blocs **à la demande** : aucun bloc au repos, ~`block-time` sous activité légère, et l'écart se resserre jusqu'au dos-à-dos quand le mempool se remplit
 
 La bannière de démarrage affiche l'adresse du validateur et la commande curl de base.
 
 ### 2.2 Vérifier que le nœud tourne
 
 ```bash
-# Santé
-curl http://127.0.0.1:8545/health
+# Santé : statut, hauteur, mempool, chain_id
+curl http://127.0.0.1:8545/health | jq
 
-# Statut de la chaîne
-curl http://127.0.0.1:8545/status | jq
+# Statistiques économiques : base_fee, Fonderie, circulation, admin
+curl http://127.0.0.1:8545/network/stats | jq
 ```
 
-Réponse attendue de `/status` :
+Réponse attendue de `/health` :
+```json
+{ "status": "ok", "height": 12, "mempool_pending": 0, "chain_id": 42 }
+```
+
+Réponse attendue de `/network/stats` (au démarrage : 1 Md forgé au fondateur, 99 Md dans La Fonderie) :
 ```json
 {
-  "height": 12,
-  "state_root": "a3f1...",
-  "validator_count": 1,
-  "mempool_size": 0,
-  "base_fee_atoms": "1000000000000000",
-  "circulating_supply": "21000000000000000000000000"
+  "base_fee_atoms": "100000000000000",
+  "foundry": "99000000000.00 VINX",
+  "circulating_supply": "1000000000.00 VINX",
+  "admin_address": "vinx1..."
 }
 ```
 
@@ -170,7 +173,7 @@ curl http://127.0.0.1:8545/account/$ADDR | jq
 
 ```bash
 # Dernier bloc
-HEIGHT=$(curl -s http://127.0.0.1:8545/status | jq .height)
+HEIGHT=$(curl -s http://127.0.0.1:8545/chain/height | jq .height)
 curl http://127.0.0.1:8545/block/$HEIGHT | jq
 ```
 
@@ -206,12 +209,13 @@ curl http://127.0.0.1:8545/metrics
 ```
 vinx_chain_height 42
 vinx_mempool_size 0
-vinx_base_fee 1000000000000000
-vinx_staking_pool 0
-vinx_melt_pool 420000000000000000
-vinx_distribution_pool 0
-vinx_circulating_supply 21000000000000000000000000
+vinx_base_fee 100000000000000
+vinx_foundry 99000000000000000000000000000
+vinx_circulating_supply 1000000000000000000000000000
 vinx_validator_count 1
+vinx_blocks_produced_total 42
+vinx_tx_submitted_total{status="ok"} 5
+vinx_tx_in_block_total 5
 ```
 
 ---
@@ -222,10 +226,13 @@ Ouvrir dans un navigateur : **http://127.0.0.1:8545/**
 
 Fonctionnalités :
 - Statut réseau en temps réel (SSE)
-- Carte économie : base_fee, supply, pools, faucet intégré
+- Carte économie : base_fee, supply, **La Fonderie**, faucet intégré
 - Graphique des frais des 30 derniers blocs
 - Recherche universelle (adresse / hash de TX / numéro de bloc)
 - Historique de TX paginé par compte
+- Wallet web : signature Ed25519 **locale** (la clé ne quitte jamais le navigateur)
+
+**Console d'admin** : **http://127.0.0.1:8545/admin** — dashboard, gestion des validateurs, upgrades et maintenance, signés localement avec la clé admin (lecture seule sinon).
 
 ---
 
@@ -277,7 +284,7 @@ docker compose up --build -d node1
 
 ## Partie 7 — Tests automatisés
 
-### Suite complète (207 tests)
+### Suite complète (230 tests)
 
 ```bash
 cargo test --workspace
@@ -293,7 +300,7 @@ cargo test -p vinx-node --test integration
 ### Proptest (invariants de conservation)
 
 ```bash
-# 11 invariants : supply, fees, Merkle, nonces
+# Invariants : conservation de supply, fees→Fonderie, Merkle, nonces
 cargo test -p vinx-state --test property_tests
 ```
 
@@ -354,7 +361,8 @@ echo "Bob :"
 vinx-wallet balance $BOB --node $NODE
 
 echo "=== 7. État de la chaîne ==="
-curl -s $NODE/status | jq '{height, mempool_size, base_fee_atoms}'
+curl -s $NODE/health | jq '{height, mempool_pending}'
+curl -s $NODE/network/stats | jq '{base_fee_atoms, foundry, circulating_supply}'
 
 echo "=== OK — test terminé ==="
 kill $NODE_PID
@@ -379,12 +387,14 @@ vinx-wallet unstake   --wallet wallet.json --amount <n> --node ...
 
 # API (exemples curl)
 curl http://localhost:8545/health
-curl http://localhost:8545/status
+curl http://localhost:8545/network/stats
+curl http://localhost:8545/chain/height
 curl http://localhost:8545/block/<N>
 curl http://localhost:8545/tx/<HASH>
 curl http://localhost:8545/account/<ADDR>
+curl http://localhost:8545/account/<ADDR>/txs
 curl http://localhost:8545/account/<ADDR>/proof
-curl http://localhost:8545/mempool
+curl http://localhost:8545/mempool/size
 curl http://localhost:8545/metrics
 curl -X POST http://localhost:8545/faucet/request \
      -H "Content-Type: application/json" \

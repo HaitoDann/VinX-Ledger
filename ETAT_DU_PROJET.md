@@ -1,7 +1,7 @@
 # VinX Ledger — État du Projet
 
 > Document de référence interne — mis à jour à chaque sprint.
-> Dernière mise à jour : juillet 2026 (v3 — refonte La Fonderie : melt/forge, suppression Coffre/gel/MiCA).
+> Dernière mise à jour : juillet 2026 (v4 — warm-up staking, console admin `/admin`, robustesse & migration de schéma sans wipe, clés typées + ahash, capacités relevées, cadence de bloc adaptative à la demande).
 
 ---
 
@@ -26,14 +26,15 @@ VinX Ledger est une blockchain L1 de paiement écrite intégralement en Rust, sa
 ### Protocole de base
 - [x] Cryptographie Ed25519 + SHA-256 + adresses Bech32 (`vinx1...`)
 - [x] Arbre de Merkle avec preuves d'inclusion vérifiables
-- [x] 12 types de transactions (transfer, stake, slash, governance, etc.)
+- [x] 8 types de transactions (transfer, stake, unstake, announce-upgrade, add/remove/slash validator, admin action)
 - [x] État mondial (`WorldState`) avec validation complète
 - [x] État de genèse configurable (admin + validateur initial)
 - [x] Consensus PoA Threshold — quorum `⌈2n/3⌉`, round-robin leader
 - [x] Finalité déterministe et immédiate (pas de réorganisation possible)
 
 ### Production de blocs
-- [x] Producteur de blocs avec slots temporels (3 s devnet, 10 s mainnet)
+- [x] Producteur **à la demande, cadence adaptative** : repos → aucun bloc ; activité légère → ~`block_time` (5 s) ; charge → l'écart se resserre avec le remplissage ; saturation → blocs dos-à-dos. Garde anti-spin (pas de blocs vides en boucle)
+- [x] Capacités : **10 000 tx/bloc**, mempool **100 000** (réglables `max_block_txs` / `max_mempool_size`)
 - [x] Frais dynamiques style EIP-1559 (×1 à ×3 selon la charge mémoire)
 - [x] **Melt intégral** : 100 % des frais fondent dans La Fonderie
 - [x] Vérification des signatures en parallèle (rayon, tous les cœurs CPU)
@@ -70,12 +71,19 @@ La gouvernance est **centralisée** : une **clé admin unique** (le fondateur), 
 - [x] Compaction de chaîne (`compact_old_txs`) — supprime les tx anciennes, conserve les headers
 
 ### API & interfaces
-- [x] 23 endpoints HTTP/REST (voir section 4)
+- [x] Endpoints HTTP/REST (voir section 4)
 - [x] Server-Sent Events `/events` — push en temps réel à chaque bloc
 - [x] WebSocket `/ws` — identique aux SSE, protocole bidirectionnel
-- [x] Métriques Prometheus sur `/metrics`
-- [x] Interface web embarquée sur `/` (explorateur HTML)
+- [x] Métriques Prometheus sur `/metrics` (dont `vinx_foundry`)
+- [x] Interface web embarquée sur `/` (explorateur + wallet, signature locale)
+- [x] **Console d'administration `/admin`** — dashboard, validateurs (ajout/retrait/approbation), upgrades, maintenance ; actions signées localement avec la clé admin, lecture seule sinon
 - [x] Preuves Merkle via `/account/:address/proof`
+
+### Robustesse & performance
+- [x] **Migration de schéma forward** : les anciennes données sont migrées en place à l'ouverture — plus de wipe au changement de version (repli snapshot documenté sinon)
+- [x] Démarrage **sans panique** (ouverture du stockage faillible et gracieuse)
+- [x] Clés typées (`Address`/`Hash32`) + **ahash** sur les index et le mempool (hot-path sans allocation de String)
+- [x] Persistance incrémentale (seuls les comptes modifiés réécrits) + Merkle incrémental
 
 ### Outillage
 - [x] Wallet CLI — 24 commandes (voir section 5)
@@ -423,13 +431,15 @@ sync_peer_rpc = "http://1.2.3.4:8545"  # Sync depuis un pair au démarrage
 
 | Priorité | Fonctionnalité | Détail |
 |----------|---------------|--------|
-| 🔴 Haute | **Faucet testnet** | Service HTTP qui distribue des tokens de test automatiquement |
-| 🔴 Haute | **Light client JS** | Vérification Merkle côté SDK — wallets mobiles sans nœud complet |
-| 🟡 Moyenne | **Tests de propriétés** (`proptest`) | Fuzzing des invariants du WorldState |
-| 🟡 Moyenne | **TLS natif** (rustls) | HTTPS sur le RPC sans dépendance à nginx |
-| 🟡 Moyenne | **Explorateur enrichi** | Pagination, recherche, graphiques fees/hauteur |
-| 🟢 Future | **VM de contrats simples** | Bytecode minimaliste pour apps on-chain |
-| 🟢 Future | **Pont cross-chain** | Interopérabilité avec d'autres réseaux |
+| 🔴 Haute | **Usage réel** | Faire tourner la chaîne, distribuer le 1 Md à un premier cercle, micro-économie |
+| 🟡 Moyenne | **Console admin Phase 2** | Plancher de frais + rotation admin en types de tx dédiés (signature triviale) |
+| 🟡 Moyenne | **Run 3 validateurs** | Valider co-signing / quorum / tolérance de panne en réel (le P2P existe, testé à 1) |
+| 🟡 Moyenne | **Leviers éco** | Taux de forge gouvernable on-chain (E2), forge dynamique (E3) |
+| 🟢 Future | **Token factory** | Émettre d'autres actifs sur VinX (interaction avec la Fonderie mère à concevoir) |
+| 🟢 Future | **Exécution parallèle** | Pertinent seulement à des dizaines de milliers de TPS soutenus — chantier d'architecture, risque de déterminisme |
+| 🟢 Future | **TLS natif** (rustls) | HTTPS sur le RPC sans dépendance à un reverse-proxy |
+
+> **Fait cette itération** : warm-up de staking (anti-JIT), console admin `/admin`, robustesse au démarrage, clés typées + ahash, capacités relevées (10k tx/bloc, mempool 100k), cadence de bloc adaptative à la demande, **migration de schéma sans wipe**.
 
 ---
 

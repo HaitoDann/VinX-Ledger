@@ -85,6 +85,8 @@ cargo run -p vinx-wallet -- status
 
 Les récompenses de staking sont **forgées depuis La Fonderie** (la réserve alimentée par les frais fondus) toutes les 100 blocs, proportionnellement au stake de chacun.
 
+> **Warm-up de 100 blocs** : un stake ne devient éligible aux récompenses qu'après avoir été détenu au moins une époque complète (anti *just-in-time*). Le capital reste libre — le déstaking est instantané —, c'est seulement l'*éligibilité aux récompenses* qui demande cette maturité. Un ajout au stake décale l'ancienneté proportionnellement au capital.
+
 ### Staker des VINX
 
 ```bash
@@ -93,7 +95,7 @@ cargo run -p vinx-wallet -- stake \
   --amount 5000
 ```
 
-Minimum : 1 VINX. Les VINX stakés sont bloqués jusqu'à unstake.
+Minimum : 1 VINX. Pas de lock sur le capital (déstaking instantané) ; seul le warm-up ci-dessus conditionne l'éligibilité aux récompenses.
 
 ### Récupérer des VINX stakés
 
@@ -106,6 +108,8 @@ cargo run -p vinx-wallet -- unstake \
 ---
 
 ## 4. Admin — mise à jour du protocole
+
+> **Console d'admin web** : la page **http://localhost:8545/admin** offre un tableau de bord (hauteur, mempool, Fonderie, version), la gestion des validateurs (ajout/retrait, approbation des demandes), la planification d'upgrades et la maintenance — le tout signé localement avec la clé admin. La page reste en lecture seule tant que la clé de l'admin on-chain n'est pas chargée. Les commandes CLI ci-dessous restent équivalentes pour un usage scripté.
 
 Les mises à jour de protocole nécessitent un préavis minimum :
 
@@ -162,16 +166,20 @@ Affiche le nombre de validateurs, le quorum requis et la liste des adresses.
 
 ## 6. Interface web (port 8545)
 
-Ouvrez **http://localhost:8545** dans votre navigateur.
+Deux pages sont servies par le nœud :
 
-- **Réseau** : hauteur de bloc, statut, mempool — rafraîchi toutes les 3 s
+**`http://localhost:8545/` — Explorateur + wallet**
+- **Réseau** : hauteur de bloc, statut, mempool, La Fonderie — en temps réel (SSE)
 - **Wallet** : chargez votre `.json` — la clé ne quitte jamais le navigateur (Ed25519 local)
 - **Envoyer / Staker** : transfer, stake, unstake depuis l'interface
-- **Compte** : consulter n'importe quelle adresse
-- **Explorateur de blocs** : state root, signatures, finalisation
-- **Transaction** : recherche par hash hexadécimal
-- **Validateurs** : liste en temps réel
-- **Protocole** : version actuelle et upgrade en attente
+- **Compte** : consulter n'importe quelle adresse · **Explorateur de blocs** · recherche par hash
+- **Validateurs** et **Protocole** en temps réel
+
+**`http://localhost:8545/admin` — Console d'administration**
+- Tableau de bord (hauteur, mempool, Fonderie, circulation, version de protocole)
+- Validateurs : ensemble actif, ajout/retrait, approbation des demandes en attente
+- Mises à jour : planification d'upgrade · Maintenance : compactage, faucet
+- Actions signées localement avec la clé admin ; lecture seule tant que la clé admin n'est pas chargée
 
 ---
 
@@ -196,13 +204,15 @@ cargo run -p vinx-node -- \
 
 | Option CLI | Config TOML | Défaut |
 |---|---|---|
-| `--block-time` | `block_time_secs` | 3 |
-| — | `max_block_txs` | 1000 |
+| `--block-time` | `block_time_secs` | 5 (écart sous activité légère ; se resserre à charge) |
+| — | `max_block_txs` | 10000 |
+| — | `max_mempool_size` | 100000 |
 | `--rpc-listen` | `rpc_listen` | `0.0.0.0:8545` |
 | `--p2p-listen` | `p2p_listen` | désactivé |
 | `--data-dir` | `data_dir` | `devnet` |
 | — | `validator_key_file` | `devnet/validator.json` |
 | — | `admin_key_file` | `devnet/admin.json` |
+| — | `admin_token` | aucun (Bearer pour `/validators/pending`, `/admin/compact`) |
 | `--peers` | `peers` | aucun |
 
 ---
@@ -238,12 +248,24 @@ Les blocs sont propagés via gossipsub. Chaque validateur co-signe les blocs. Le
 
 | Méthode | Chemin | Description |
 |---|---|---|
-| GET | `/health` | Statut, hauteur, mempool |
+| GET | `/health` | Statut, hauteur, mempool, chain_id |
 | GET | `/chain/height` | Hauteur de la chaîne |
+| GET | `/chain/sync?from=N&limit=N` | Synchronisation d'une plage de blocs |
 | GET | `/block/:height` | Détails d'un bloc |
 | GET | `/account/:address` | Solde et infos d'un compte |
+| GET | `/account/:address/txs` | Historique des transactions (paginé) |
+| GET | `/account/:address/proof` | Preuve Merkle d'inclusion |
 | POST | `/tx/submit` | Soumettre une transaction |
+| POST | `/tx/batch` | Soumettre un lot (≤ 100) |
 | GET | `/tx/:hash` | Détails d'une transaction |
+| GET | `/tx/:hash/receipt` | Reçu d'exécution d'une transaction |
 | GET | `/mempool/size` | Taille du mempool |
-| GET | `/validators` | Ensemble des validateurs |
-| GET | `/protocol/version` | Version du protocole |
+| GET | `/validators` | Ensemble des validateurs (+ liveness) |
+| GET | `/validators/pending` | Demandes de validateur en attente (token admin) |
+| GET | `/protocol/version` | Version du protocole + upgrade en attente |
+| GET | `/network/stats` | base_fee, Fonderie, circulation, adresse admin |
+| GET | `/metrics` | Métriques Prometheus |
+| GET | `/events` | Server-Sent Events (push par bloc) |
+| GET/POST | `/snapshot` | Export/import de l'état complet (token admin) |
+| POST | `/faucet/request` | Demander des tokens (si faucet activé) |
+| POST | `/admin/compact` | Compacter le stockage (token admin) |
