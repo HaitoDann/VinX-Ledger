@@ -5,6 +5,21 @@ Format : `MAJEUR.MINEUR.CORRECTIF` — les versions `0.x.y` sont des versions de
 
 ---
 
+## [0.33.0] — 2026-07-09
+
+### Migration de données — plus de wipe au changement de schéma
+
+`Storage::open` **migre désormais les anciennes données vers l'avant, en place**, au lieu de refuser de démarrer et d'imposer une suppression du dossier. Le jour où VinX portera de la vraie valeur, une mise à jour ne fera plus perdre la chaîne.
+
+- **Framework de migration forward** (`migrate_forward`) : applique les étapes `v_n → v_{n+1}` en séquence dans la transaction d'ouverture, puis estampille la nouvelle version.
+- **Insight d'architecture exploité** : sur disque, VinX sépare la *source de vérité* (comptes, méta world-state, blocs) des *données dérivées* (les index de tx, reconstructibles depuis la chaîne). Un bump qui n'a touché que les données dérivées (comme **v6 → v7**) se migre en supprimant les index périmés — `load()` les reconstruit depuis la chaîne. Aucune perte.
+- **Gardes claires** : un schéma on-disk **plus récent** que le binaire est refusé proprement (pas de downgrade) ; une transition **sans chemin de migration connu** renvoie une erreur actionnable pointant le repli snapshot (`GET`/`POST /snapshot`), au lieu d'un wipe silencieux.
+- **5 tests** : migration v6→current (index reconstruits + version bumpée), **données réelles préservées** de bout en bout (solde fondateur + chaîne + index reconstruit), version inconnue → erreur guidée, version plus récente refusée, version courante inchangée.
+
+Les futurs bumps qui changent la disposition des comptes/méta/blocs ajouteront une étape de transformation explicite au même endroit (point d'extension documenté).
+
+---
+
 ## [0.32.0] — 2026-07-08
 
 ### Cadence simplifiée : block time 5 s, courbe unique (retrait du « premier bloc rapide »)

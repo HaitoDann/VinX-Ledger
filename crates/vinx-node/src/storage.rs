@@ -10,8 +10,9 @@ use vinx_crypto::{Address, Hash32};
 use vinx_state::WorldState;
 use zstd;
 
-/// Schema version stored in the meta table.  Increment when the storage layout changes
-/// in a backwards-incompatible way so nodes refuse to start on stale data.
+/// Schema version stored in the meta table. Increment when the on-disk layout
+/// changes; older data is migrated forward in place by `Storage::migrate_forward`
+/// (add a step there for the new bump), so nodes upgrade without a data wipe.
 /// v2: blobs are zstd-compressed (level 3) before insertion.
 /// v3: tx_index and account_tx_index are persisted (no rebuild_tx_index on boot).
 /// v4: accounts persisted per-key in a dedicated table; only changed rows are
@@ -57,8 +58,10 @@ pub struct StateWrite {
 
 impl Storage {
     /// Opens (or creates) the storage at `dir`, returning an error instead of
-    /// panicking so callers can fail gracefully. A schema-version mismatch is a
-    /// clean, actionable error (not a panic) that points at the migration path.
+    /// panicking so callers can fail gracefully. Older on-disk schemas are
+    /// **migrated forward in place** (see [`Storage::migrate_forward`]); a newer
+    /// on-disk schema, or one with no known migration path, is a clean, actionable
+    /// error rather than a wipe.
     pub fn open(dir: impl Into<PathBuf>) -> io::Result<Self> {
         let dir: PathBuf = dir.into();
         std::fs::create_dir_all(&dir)
@@ -69,32 +72,82 @@ impl Storage {
 
         {
             let tx = db.begin_write().map_err(Self::io_err)?;
-            {
-                let mut meta = tx.open_table(META).map_err(Self::io_err)?;
-                let existing_version: Option<u64> = meta
-                    .get("schema_version")
-                    .map_err(Self::io_err)?
-                    .map(|v| v.value());
-                match existing_version {
-                    None => {
-                        meta.insert("schema_version", STORAGE_VERSION)
-                            .map_err(Self::io_err)?;
-                    }
-                    Some(existing) if existing != STORAGE_VERSION => {
-                        return Err(Self::io_err(format!(
-                            "schema version mismatch: on-disk data is v{existing}, this binary expects v{STORAGE_VERSION}. \
-                             The layouts are incompatible. To migrate: run the OLD binary, GET /snapshot to export the state, \
-                             then start this binary on an EMPTY data directory and POST /snapshot to import it. \
-                             Otherwise, delete the data directory to start from a fresh genesis."
-                        )));
-                    }
-                    Some(_) => {}
+            // Read the on-disk version (scoped so the table handle is released
+            // before any migration reopens tables in the same transaction).
+            let existing_version: Option<u64> = {
+                let meta = tx.open_table(META).map_err(Self::io_err)?;
+                let guard = meta.get("schema_version").map_err(Self::io_err)?;
+                let version = guard.map(|v| v.value());
+                version
+            };
+            match existing_version {
+                // Fresh database — stamp the current version.
+                None => {
+                    let mut meta = tx.open_table(META).map_err(Self::io_err)?;
+                    meta.insert("schema_version", STORAGE_VERSION)
+                        .map_err(Self::io_err)?;
+                }
+                // Up to date — nothing to do.
+                Some(v) if v == STORAGE_VERSION => {}
+                // Newer on-disk than this binary — refuse (no downgrade).
+                Some(v) if v > STORAGE_VERSION => {
+                    return Err(Self::io_err(format!(
+                        "on-disk schema is v{v}, newer than this binary (v{STORAGE_VERSION}). \
+                         Use a matching or newer VinX build; downgrade is not supported."
+                    )));
+                }
+                // Older — migrate forward step by step, then stamp the new version.
+                Some(v) => {
+                    Self::migrate_forward(&tx, v)?;
+                    let mut meta = tx.open_table(META).map_err(Self::io_err)?;
+                    meta.insert("schema_version", STORAGE_VERSION)
+                        .map_err(Self::io_err)?;
+                    tracing::info!(
+                        from = v,
+                        to = STORAGE_VERSION,
+                        "Storage schema migrated in place — no wipe"
+                    );
                 }
             }
             tx.commit().map_err(Self::io_err)?;
         }
 
         Ok(Self { db: Arc::new(db) })
+    }
+
+    /// Applies forward migrations from on-disk `from` up to [`STORAGE_VERSION`],
+    /// operating on an open write transaction. Each step transforms the data so
+    /// this binary can read it. Returns a clear error if a step is unknown, so the
+    /// operator can fall back to the snapshot export/import path instead of losing data.
+    ///
+    /// VinX's on-disk layout separates the *source of truth* (per-account rows,
+    /// world-state meta, chain blocks) from *derived data* (the tx indexes, which
+    /// are rebuildable from the chain). A version bump that changed only derived
+    /// data therefore migrates by dropping the stale index blobs — `load()` then
+    /// rebuilds them from the chain. Bumps that change the on-disk layout of
+    /// accounts / meta / blocks need an explicit transform step added to the match.
+    fn migrate_forward(tx: &redb::WriteTransaction, from: u64) -> io::Result<()> {
+        let mut v = from;
+        while v < STORAGE_VERSION {
+            match v {
+                // v6 → v7: tx indexes switched to raw-byte keys (Hash32 / Address).
+                // Derived data — drop the stale blobs; load() rebuilds from the chain.
+                6 => {
+                    let mut state = tx.open_table(STATE).map_err(Self::io_err)?;
+                    state.remove("tx_index").map_err(Self::io_err)?;
+                    state.remove("account_tx_index").map_err(Self::io_err)?;
+                }
+                unknown => {
+                    return Err(Self::io_err(format!(
+                        "no automatic migration from schema v{unknown} to v{STORAGE_VERSION}. \
+                         To migrate: run the previous VinX build, GET /snapshot to export the \
+                         state, then POST /snapshot into a fresh data directory on this build."
+                    )));
+                }
+            }
+            v += 1;
+        }
+        Ok(())
     }
 
     /// Convenience wrapper that panics on failure — kept for internal callers and
@@ -333,4 +386,180 @@ impl Clone for Storage {
 /// Removes the redb database file — full data wipe.
 pub fn clear(dir: &Path) {
     let _ = std::fs::remove_file(dir.join("vinx.redb"));
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Temp dir cleaned up on drop.
+    struct Tmp(PathBuf);
+    impl Tmp {
+        fn new() -> Self {
+            let p = std::env::temp_dir().join(format!(
+                "vinx_mig_{}_{}",
+                std::process::id(),
+                std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .unwrap()
+                    .as_nanos()
+            ));
+            std::fs::create_dir_all(&p).unwrap();
+            Tmp(p)
+        }
+    }
+    impl Drop for Tmp {
+        fn drop(&mut self) {
+            let _ = std::fs::remove_dir_all(&self.0);
+        }
+    }
+
+    /// Writes a schema-version marker (and optionally stale index blobs) into a
+    /// fresh redb, then releases it so `Storage::open` can reopen the same file.
+    fn stamp(dir: &Path, version: u64, with_stale_indexes: bool) {
+        let db = Database::create(dir.join("vinx.redb")).unwrap();
+        let tx = db.begin_write().unwrap();
+        {
+            let mut m = tx.open_table(META).unwrap();
+            m.insert("schema_version", version).unwrap();
+        }
+        if with_stale_indexes {
+            let mut s = tx.open_table(STATE).unwrap();
+            s.insert("tx_index", b"stale-v6".as_slice()).unwrap();
+            s.insert("account_tx_index", b"stale-v6".as_slice())
+                .unwrap();
+        }
+        tx.commit().unwrap();
+    }
+
+    /// Overwrites just the version marker on an existing db (leaves all data).
+    fn set_version(dir: &Path, version: u64) {
+        let db = Database::create(dir.join("vinx.redb")).unwrap();
+        let tx = db.begin_write().unwrap();
+        {
+            let mut m = tx.open_table(META).unwrap();
+            m.insert("schema_version", version).unwrap();
+        }
+        tx.commit().unwrap();
+    }
+
+    fn read_version(dir: &Path) -> Option<u64> {
+        let db = Database::create(dir.join("vinx.redb")).unwrap();
+        let tx = db.begin_read().unwrap();
+        let m = tx.open_table(META).unwrap();
+        let v = m.get("schema_version").unwrap().map(|v| v.value());
+        v
+    }
+
+    fn has_state_key(dir: &Path, key: &str) -> bool {
+        let db = Database::create(dir.join("vinx.redb")).unwrap();
+        let tx = db.begin_read().unwrap();
+        let s = tx.open_table(STATE).unwrap();
+        s.get(key).unwrap().is_some()
+    }
+
+    #[test]
+    fn test_migrate_v6_rebuilds_indexes_and_bumps() {
+        let tmp = Tmp::new();
+        stamp(&tmp.0, 6, true);
+        assert!(has_state_key(&tmp.0, "tx_index"));
+
+        // Open → migrates v6 → current in place (drops the stale derived indexes).
+        let storage = Storage::open(&tmp.0).expect("v6 must auto-migrate, not wipe");
+        drop(storage);
+
+        assert_eq!(read_version(&tmp.0), Some(STORAGE_VERSION));
+        assert!(
+            !has_state_key(&tmp.0, "tx_index"),
+            "stale tx_index should be dropped so load() rebuilds it"
+        );
+        assert!(!has_state_key(&tmp.0, "account_tx_index"));
+    }
+
+    #[test]
+    fn test_unknown_old_version_errors_with_guidance() {
+        let tmp = Tmp::new();
+        stamp(&tmp.0, 3, false); // no migration path from v3 → snapshot fallback
+        let err = Storage::open(&tmp.0).err().unwrap();
+        assert!(err.to_string().contains("no automatic migration"));
+    }
+
+    #[test]
+    fn test_newer_on_disk_version_refused() {
+        let tmp = Tmp::new();
+        stamp(&tmp.0, STORAGE_VERSION + 1, false);
+        let err = Storage::open(&tmp.0).err().unwrap();
+        assert!(err.to_string().contains("newer than this binary"));
+    }
+
+    #[test]
+    fn test_current_version_opens_unchanged() {
+        let tmp = Tmp::new();
+        stamp(&tmp.0, STORAGE_VERSION, false);
+        Storage::open(&tmp.0).expect("current version opens cleanly");
+        assert_eq!(read_version(&tmp.0), Some(STORAGE_VERSION));
+    }
+
+    // End-to-end: real data (accounts + chain) survives a v6 → current migration,
+    // and the derived tx index is rebuilt from the chain — no wipe, no data loss.
+    #[test]
+    fn test_migration_preserves_accounts_and_rebuilds_tx_index() {
+        use vinx_core::amount::Amount;
+        use vinx_core::{Block, BlockHeader, Transaction};
+        use vinx_crypto::{Address, KeyPair};
+        use vinx_state::{create_genesis_state, GenesisConfig};
+
+        let tmp = Tmp::new();
+        let kp = KeyPair::generate();
+        let admin = Address::from_public_key(&kp.public_key());
+        let validator = Address::from_public_key(&KeyPair::generate().public_key());
+        let bob = Address::from_public_key(&KeyPair::generate().public_key());
+
+        let mut state = create_genesis_state(&GenesisConfig {
+            chain_id: vinx_core::CHAIN_ID_DEVNET,
+            admin_address: admin,
+            validator_address: validator,
+        });
+        let (mut chain, _) = Chain::new_with_genesis(validator, 0);
+        let tx =
+            Transaction::new_transfer(&kp, bob, Amount::from_vinx(10), Amount::from_vinx(1), 0);
+        let tx_hash = tx.hash();
+        let block = Block {
+            header: BlockHeader {
+                height: 1,
+                prev_hash: chain.tip_hash(),
+                timestamp: 1,
+                validator,
+                tx_count: 1,
+                state_root: [0u8; 32],
+                base_fee: 0,
+                receipts_root: [0u8; 32],
+            },
+            transactions: vec![tx],
+            signatures: vec![],
+        };
+        chain.push(block);
+
+        // Save at the current version, then simulate an older (v6) on-disk marker.
+        {
+            let storage = Storage::open(&tmp.0).unwrap();
+            storage.save(&mut state, &chain).unwrap();
+        }
+        set_version(&tmp.0, 6);
+
+        // Reopen → migrates in place (no wipe); load rebuilds the derived index.
+        let storage = Storage::open(&tmp.0).expect("v6 must migrate, not wipe");
+        let (loaded_state, loaded_chain) = storage.load().expect("data survives migration");
+
+        assert_eq!(
+            loaded_state.account_balance(&admin),
+            Amount::from_vinx(1_000_000_000),
+            "founder balance must survive migration"
+        );
+        assert_eq!(loaded_chain.tip_height(), 1, "chain must survive migration");
+        assert!(
+            loaded_chain.get_tx_by_hash(&tx_hash).is_some(),
+            "tx index must be rebuilt after migration"
+        );
+    }
 }
