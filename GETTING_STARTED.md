@@ -63,15 +63,17 @@ Réponse attendue de `/health` :
 { "status": "ok", "height": 12, "mempool_pending": 0, "chain_id": 42 }
 ```
 
-Réponse attendue de `/network/stats` (au démarrage : 1 Md forgé au fondateur, 99 Md dans La Fonderie) :
+Réponse attendue de `/network/stats` (au démarrage : **aucun pre-mine** — 0 en circulation, 100 Md scellés dans La Fonderie, la réserve d'émission) :
 ```json
 {
   "base_fee_atoms": "100000000000000",
-  "foundry": "99000000000.00 VINX",
-  "circulating_supply": "1000000000.00 VINX",
+  "foundry": "100000000000.00 VINX",
+  "circulating_supply": "0.00 VINX",
   "admin_address": "vinx1..."
 }
 ```
+
+> Les VINX apparaissent en circulation **au fur et à mesure** que les validateurs produisent des blocs (émission par le travail). Après quelques blocs, `circulating_supply` devient positif et `foundry` diminue d'autant — leur somme reste toujours égale à 100 Md.
 
 ### 2.3 Activer le faucet (optionnel pour tests)
 
@@ -96,6 +98,8 @@ vinx-node --config config.toml
 ```
 
 La bannière affiche maintenant l'adresse du faucet et la commande curl pour le recharger.
+
+> **Fair launch — le faucet démarre à zéro.** Comme il n'y a aucun pre-mine, le compte faucet n'a pas de solde initial. Il faut d'abord l'**approvisionner** : laissez le validateur produire quelques blocs (il accumule de l'émission), puis transférez des VINX de son compte vers l'adresse du faucet. Le faucet ne peut distribuer que ce qu'il détient.
 
 ---
 
@@ -210,13 +214,15 @@ curl http://127.0.0.1:8545/metrics
 vinx_chain_height 42
 vinx_mempool_size 0
 vinx_base_fee 100000000000000
-vinx_foundry 99000000000000000000000000000
-vinx_circulating_supply 1000000000000000000000000000
+vinx_foundry <proche de 100 Md, décroît avec l'émission>
+vinx_circulating_supply <part déjà émise aux validateurs, croît avec le temps>
 vinx_validator_count 1
 vinx_blocks_produced_total 42
 vinx_tx_submitted_total{status="ok"} 5
 vinx_tx_in_block_total 5
 ```
+
+> `vinx_foundry` et `vinx_circulating_supply` évoluent avec l'**émission par le travail** (calculée sur le temps réel écoulé) ; leur somme reste toujours égale à 100 Md.
 
 ---
 
@@ -226,7 +232,7 @@ Ouvrir dans un navigateur : **http://127.0.0.1:8545/**
 
 Fonctionnalités :
 - Statut réseau en temps réel (SSE)
-- Carte économie : base_fee, supply, **La Fonderie**, faucet intégré
+- Carte économie : base_fee, supply circulante, **La Fonderie** (réserve d'émission qui décroît), faucet intégré
 - Graphique des frais des 30 derniers blocs
 - Recherche universelle (adresse / hash de TX / numéro de bloc)
 - Historique de TX paginé par compte

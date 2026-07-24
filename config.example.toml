@@ -13,13 +13,21 @@
 # admin_key_file     = "devnet/admin.json"
 
 # ─── Paramètres de bloc ───────────────────────────────────────────────────────
-# Temps entre deux blocs en secondes.
-# Défaut : 3 (devnet) — utilisez 10 pour mainnet.
-# block_time_secs = 3
+# Écart entre deux blocs sous activité légère, en secondes. La cadence est
+# adaptative : aucun bloc au repos, ~block_time_secs sous activité légère,
+# l'écart se resserre à la montée en charge, dos-à-dos à saturation.
+# NB : c'est un écart de production, pas une horloge — la référence de temps du
+# protocole (émission, déliaison de bond, préavis d'upgrade) est le timestamp des blocs.
+# Défaut : 5
+# block_time_secs = 5
 
 # Nombre maximum de transactions par bloc.
-# Défaut : 1000
-# max_block_txs = 1000
+# Défaut : 10000
+# max_block_txs = 10000
+
+# Taille maximale du mempool (transactions en attente).
+# Défaut : 100000
+# max_mempool_size = 100000
 
 # ─── RPC HTTP ─────────────────────────────────────────────────────────────────
 # Adresse d'écoute du serveur RPC + interface web.

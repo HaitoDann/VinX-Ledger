@@ -8,7 +8,7 @@
 
 VinX Ledger est une blockchain L1 conçue exclusivement pour les paiements du quotidien. Pas de smart contracts, pas de spéculation — une seule promesse : envoyer de l'argent vite, pas cher, et sans intermédiaire opaque.
 
-Sa monnaie suit le modèle **La Fonderie** : une supply fixe de 100 milliards, **sans burn**, où le métal *fond* (frais) et se *reforge* (récompenses) à l'infini.
+Sa monnaie suit un modèle de **fair launch** : une supply fixe de 100 milliards, **sans burn** et **sans pre-mine**, où **tous les jetons entrent en circulation par le travail des validateurs** (émission décroissante), puis les frais de transaction prennent le relais.
 
 Implémenté intégralement en Rust, sans framework blockchain tiers.
 
@@ -19,14 +19,15 @@ Implémenté intégralement en Rust, sans framework blockchain tiers.
 | | |
 |---|---|
 | **Consensus** | PoA Threshold — >66% des validateurs co-signent chaque bloc |
-| **Finalité** | Déterministe et immédiate — zéro réorganisation possible |
-| **Cadence** | Adaptative à la demande — repos → 0 bloc · activité normale → ~5s · charge → l'écart se resserre · saturation → blocs dos à dos |
+| **Finalité** | Déterministe — un bloc quorum-signé n'est jamais réorganisé |
+| **Cadence** | Adaptative à la demande — repos → 0 bloc · normal → ~5s · charge → l'écart se resserre · saturation → dos à dos |
+| **Référence de temps** | Timestamp des blocs (temps réel), pas la hauteur de bloc |
 | **Capacité** | 10 000 tx/bloc · mempool 100 000 · plusieurs milliers de TPS (config-dépendant) |
-| **Frais** | 0,05% · plancher 0,0001 VINX · **100 % melt** dans La Fonderie |
+| **Frais** | Forfait 0,0001 VINX × poids × congestion (×1–3) · **100 % au validateur producteur** |
 | **Cryptographie** | Ed25519 · SHA-256 · Bech32 (`vinx1`) |
-| **Supply** | 100 milliards VINX (immuable, sans burn) |
-| **Modèle** | La Fonderie — melt/forge, invariant `circulation + Fonderie = 100 Md` |
-| **Staking** | Récompenses forgées /100 blocs · **warm-up de 100 blocs** (anti *just-in-time*) |
+| **Supply** | 100 milliards VINX (immuable, sans burn, **sans pre-mine**) |
+| **Émission** | Par le travail des validateurs · décroissance exponentielle, **halving tous les 8 ans** → 100 Md · puis fees-only |
+| **Staking** | **Bond de validateur** (min 100k VINX) · déliaison 3 jours · slash équivocation 100 % · **aucun rendement** |
 | **Exploitation** | Console d'admin web (`/admin`) · mises à jour **sans wipe** (migration de schéma) |
 
 ---
@@ -73,24 +74,38 @@ crates/
 
 ---
 
-## Tokenomics — La Fonderie
+## Tokenomics — Fair launch & émission par le travail
 
-- **100 milliards VINX**, supply fixe et **immuable** — forgée une fois à la genèse.
-- **Genèse** : 1 Md (1 %) au fondateur pour amorcer · 99 Md (99 %) dans **La Fonderie**.
-- **Melt** : 100 % des frais fondent dans La Fonderie (ce n'est **pas** un burn).
-- **Forge** : les récompenses de staking sont forgées depuis La Fonderie (une fraction à chaque distribution → la réserve ne se vide jamais).
-- **Staking honnête** : un stake n'est éligible aux récompenses qu'après un **warm-up de 100 blocs**, et l'ancienneté est pondérée par le capital sur les ajouts — ferme l'exploit du *just-in-time staking*.
+- **100 milliards VINX**, supply fixe et **immuable**.
+- **Genèse** : **0 en circulation, 100 Md scellés dans La Fonderie** (la réserve d'émission). **Aucun pre-mine, aucune allocation fondateur** — le fondateur gagne ses VINX comme tout le monde, en faisant tourner des validateurs.
+- **Émission** : les VINX sortent de La Fonderie **uniquement pour rémunérer la production de blocs**. Le débit décroît de façon exponentielle et est **divisé par deux tous les 8 ans** (`débit(t) = R₀ · 2^(−t/8 ans)`, R₀ ≈ 8,66 Md/an) — l'intégrale totale vaut exactement 100 Md.
+- **Temps réel** : l'émission est calculée sur les **timestamps** des blocs, jamais sur la hauteur (la cadence est variable).
+- **Égalité entre validateurs** : l'émission est créditée au producteur du bloc et **n'est pas pondérée par le bond** — en round-robin, chacun gagne ~1/*n*.
+- **Relais automatique** : quand La Fonderie se vide, l'émission s'efface et les **frais de transaction** deviennent la rémunération — bascule en **fees-only**, sans intervention.
+- **Frais** : forfaitaires (indépendants du montant), **100 % au validateur producteur** (plus de *melt*).
 - **Invariant** vérifié à chaque bloc : `circulation + Fonderie = 100 000 000 000 VINX`.
-- **Aucun burn** · Aucune inflation · Cap immuable.
 
 > Détails complets : [whitepaper.md](./whitepaper.md)
 
 ---
 
+## Staking = bond de sécurité (pas un rendement)
+
+En PoA permissionné, la sécurité vient de l'identité des validateurs, pas d'un jeton. Le staking ne sert donc qu'à **une** chose : poser la caution qu'un validateur perd s'il triche.
+
+- **Bond minimum 100 000 VINX** (gouvernable) pour rejoindre le set ; le validateur genesis est dispensé (bootstrap).
+- **Aucun rendement** — le bond sécurise, le travail (émission + frais) rémunère.
+- **Déliaison 3 jours** de temps réel : le retrait est différé pour rester saisissable pendant la fenêtre de preuve.
+- **Slashing** : équivocation prouvée → 100 % du bond (10 % au rapporteur, reste fondu dans La Fonderie) ; downtime → suspension du round-robin, sans slash.
+
+Un détenteur lambda ne stake pas : il garde son VINX pour **l'utiliser comme cash**.
+
+---
+
 ## Roadmap
 
-- **Actuel** — protocole complet (L1 Rust, PoA Threshold, Fonderie), exploité en local.
-- **Ensuite** — redondance 1 → 3 validateurs, distribution du milliard fondateur, micro-économie réelle.
+- **Actuel** — protocole L1 Rust complet (PoA Threshold), exploité en local. La bascule vers le *fair launch* (émission par le travail, bond de validateur, frais au producteur) est le **chantier d'implémentation en cours**.
+- **Ensuite** — redondance 1 → 3 validateurs, amorçage de la micro-économie par l'émission, premiers usages réels.
 - **Plus tard (optionnel)** — réseau public, *token factory* (émission d'autres actifs sur VinX).
 
 ---

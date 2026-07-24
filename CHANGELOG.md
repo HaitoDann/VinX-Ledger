@@ -5,6 +5,25 @@ Format : `MAJEUR.MINEUR.CORRECTIF` — les versions `0.x.y` sont des versions de
 
 ---
 
+## [Design adopté — non livré] — Refonte économique v5 : fair launch
+
+> ⚠️ **Décision de design arrêtée, documentée mais pas encore implémentée dans le code.** Cette entrée enregistre la nouvelle direction économique (whitepaper v4.0) ; elle ne correspond à aucun binaire livré. Le code exécute encore le modèle *melt/forge* de la 0.24.0. La bascule est un chantier **consensus-breaking** (nouvelle genèse). Voir la décomposition dans `ETAT_DU_PROJET.md` §8.
+
+Abandon du cycle *melt/forge* (frais fondus dans une réserve, récompensés à des stakers passifs) au profit d'un **fair launch — émission par le travail des validateurs**.
+
+**Le nouveau modèle**
+- **Aucun pre-mine.** Genèse : 0 en circulation, 100 Md scellés dans La Fonderie. Suppression de `FOUNDER_ALLOCATION_ATOMS`. Le fondateur gagne ses VINX en faisant tourner des validateurs, comme tout le monde.
+- **Émission par le travail.** La Fonderie se vide uniquement pour rémunérer la production de blocs : décroissance exponentielle, **halving tous les 8 ans** (`débit(t) = R₀·2^(−t/8 ans)`, R₀ ≈ 8,66 Md/an, intégrale = 100 Md). Créditée au producteur, **non pondérée par le bond** (égalité round-robin). Calculée sur le **temps réel** (timestamps), pas la hauteur.
+- **Relais automatique.** Fonderie vidée sous un seuil de poussière → **fees-only** pour toujours, sans intervention.
+- **Frais forfaitaires au producteur.** Frais = `0,0001 VINX × poids(type) × congestion(×1–3)`, indépendant du montant (fin du 0,05 % ad valorem). **100 % au validateur producteur**, plus de melt. Actions admin exemptes (poids 0).
+- **Staking = bond de validateur.** Fin du staking retail et des récompenses de staking. Bond min `100 000 VINX` (gouvernable) pour rejoindre le set (genesis dispensé) ; **aucun rendement**. Déliaison **3 jours de temps réel**.
+- **Slashing réparé.** `SlashEvidence` portera les deux `BlockHeader` signés ; vérification réelle des deux signatures Ed25519 (le code actuel n'en vérifie aucune — faille exploitable). Équivocation → 100 % du bond, 10 % au rapporteur, reste fondu.
+- **Le temps = timestamps.** Émission, déliaison et préavis d'upgrade (7/30/90 j) passent en temps réel. Bornes de timestamp ajoutées à la validation de bloc.
+
+**Documentation alignée** : whitepaper v4.0, README, GUIDE, GETTING_STARTED, ETAT_DU_PROJET. **Implémentation du code : à faire.**
+
+---
+
 ## [0.33.0] — 2026-07-09
 
 ### Migration de données — plus de wipe au changement de schéma

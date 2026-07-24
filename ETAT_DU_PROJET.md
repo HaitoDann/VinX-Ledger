@@ -1,7 +1,21 @@
 # VinX Ledger — État du Projet
 
 > Document de référence interne — mis à jour à chaque sprint.
-> Dernière mise à jour : juillet 2026 (v4 — warm-up staking, console admin `/admin`, robustesse & migration de schéma sans wipe, clés typées + ahash, capacités relevées, cadence de bloc adaptative à la demande).
+> Dernière mise à jour : juillet 2026 (**refonte économique v5 adoptée — fair launch / émission par le travail** ; voir whitepaper v4.0).
+
+---
+
+> ## ⚠️ Refonte économique v5 — adoptée, implémentation en cours
+>
+> Le modèle économique de VinX a été **entièrement repensé** (décision arrêtée). Le nouveau modèle, décrit dans le [whitepaper v4.0](./whitepaper.md), remplace le cycle *melt/forge* par un **fair launch** :
+>
+> - **Aucun pre-mine** : à la genèse, 0 en circulation, 100 Md scellés dans La Fonderie.
+> - **Émission par le travail des validateurs** : décroissance exponentielle, **halving tous les 8 ans**, calculée en **temps réel** (timestamps). Créditée au producteur, **non pondérée par le bond**. Relais automatique vers les frais quand La Fonderie se vide.
+> - **Frais forfaitaires** (indépendants du montant), **100 % au validateur producteur** (plus de melt).
+> - **Staking = bond de validateur** (min 100 000 VINX, gouvernable), **déliaison 3 jours** temps réel, **slash équivocation 100 %** avec preuve réellement vérifiée. **Aucun rendement de staking.**
+> - Le **timestamp** devient la référence de temps (émission, déliaison, préavis d'upgrade), pas la hauteur de bloc.
+>
+> **État du code : la bascule n'est pas encore implémentée.** Les sections ci-dessous décrivant l'économie (« La Fonderie melt/forge », frais 0,05 %, récompenses de staking, warm-up) reflètent le **code actuel**, qui sera remplacé. Le chantier d'implémentation est détaillé en [§8](#8-ce-qui-reste-à-faire).
 
 ---
 
@@ -48,13 +62,14 @@ VinX Ledger est une blockchain L1 de paiement écrite intégralement en Rust, sa
 - [x] Synchronisation de blocs par P2P (`SyncRequest` / `SyncResponse`)
 - [x] Synchronisation au démarrage depuis un pair de confiance (HTTP)
 
-### Économie — La Fonderie (melt / forge)
-- [x] Supply totale : 100 milliards de VinX, **immuable, sans burn** (précision : 18 décimales)
-- [x] **Genèse** : 1 Md (1 %) forgé au fondateur · 99 Md (99 %) scellés dans **La Fonderie** (`foundry`)
-- [x] **Invariant vérifié à chaque bloc** : `circulating_supply + foundry == 100 Md`
-- [x] **Melt** : 100 % des frais fondent dans La Fonderie (`melt_to_foundry`) — pas un burn
-- [x] **Forge** : récompenses de staking forgées depuis La Fonderie (`FORGE_RATE_BPS = 10`, soit 0,1 % par distribution), toutes les 100 blocs → la réserve ne se vide jamais
-- [x] **Warm-up de staking** (`STAKE_WARMUP_BLOCKS = 100`) : un stake n'est éligible aux récompenses qu'après une époque complète (anti *just-in-time*) ; l'ancienneté `stake_since` est pondérée par le capital sur les top-ups
+### Économie — ⚠️ modèle actuel (melt / forge), en cours de remplacement par le fair launch (v5)
+> Ce qui suit décrit le **code actuel**. Il sera remplacé par l'émission par le travail (voir bandeau en tête et [§8](#8-ce-qui-reste-à-faire)).
+- [x] Supply totale : 100 milliards de VinX, **immuable, sans burn** (précision : 18 décimales) — *conservé en v5*
+- [x] **Genèse** : 1 Md (1 %) forgé au fondateur · 99 Md (99 %) dans **La Fonderie** — *v5 : plus de pre-mine, 100 % en Fonderie*
+- [x] **Invariant vérifié à chaque bloc** : `circulating_supply + foundry == 100 Md` — *conservé en v5*
+- [x] **Melt** : 100 % des frais fondent dans La Fonderie (`melt_to_foundry`) — *v5 : frais 100 % au validateur, plus de melt*
+- [x] **Forge** : récompenses de staking (`FORGE_RATE_BPS = 10`, toutes les 100 blocs) — *v5 : supprimé, remplacé par l'émission par le travail (halving 8 ans)*
+- [x] **Warm-up de staking** (`STAKE_WARMUP_BLOCKS = 100`) — *v5 : supprimé (plus de récompense de staking)*
 
 ### Gouvernance — clé admin unique
 
@@ -156,7 +171,7 @@ Le `WorldState` est l'état complet de la chaîne. Il est sérialisé sur disque
 | `accounts` | `BTreeMap<Address, Account>` | Tous les comptes (clé = adresse 20 octets, itération triée) |
 | `circulating_supply` | `Amount` | Tokens détenus par les comptes (= `MAX_SUPPLY - foundry`) |
 | `block_height` | `u64` | Hauteur actuelle |
-| `foundry` | `Amount` | **La Fonderie** — réserve melt/forge. `circulation + foundry == 100 Md` |
+| `foundry` | `Amount` | **La Fonderie** — réserve (melt/forge actuel · réserve d'émission en v5). `circulation + foundry == 100 Md` |
 | `fee_floor` | `Amount` | Plancher de frais minimum |
 | `base_fee` | `Amount` | Frais dynamiques actuels |
 | `admin_address` | `Option<Address>` | Clé admin (rotatable via `AdminAction::RotateAdmin`) |
@@ -201,7 +216,9 @@ multiplier = 1.0 + 2.0 × max(0, charge - 0.8) / 0.2
 base_fee = fee_floor × multiplier  (cap à 3×)
 ```
 
-**Melt de chaque fee : 100 %** → `foundry` (La Fonderie). Aucun frais direct au validateur, aucune trésorerie séparée. Ce n'est **pas** un burn : le métal est conservé et sera reforgé en récompenses.
+Le multiplicateur de congestion (×1–3) est **conservé en v5** — il est basé sur la demande, pas sur la valeur.
+
+> **v5 :** deux changements. (1) Le frais devient un **forfait × poids(type)** (indépendant du montant), au lieu de 0,05 % du montant. (2) Le frais va **100 % au validateur producteur**, plus de melt. Le multiplicateur s'applique désormais au `base_fee` **gouvernable** courant (correction : le code actuel repart de la constante `DEFAULT_FEE_FLOOR_ATOMS`).
 
 ### Gouvernance — clé admin unique
 
@@ -219,11 +236,14 @@ Actions disponibles :
 | `ScheduleUpgrade { version, height }` | Planifie une mise à jour protocole |
 | `RotateAdmin(addr)` | Change la clé admin sans redémarrage |
 
-### Le cycle melt / forge
+### Le cycle melt / forge — ⚠️ modèle actuel, remplacé en v5
 
-VinX n'a **aucun burn**. « Melter » signifie que les jetons **fondent** dans La Fonderie (`foundry`), la réserve unique — ils ne sont pas détruits. « Forger » signifie que le protocole en **forge** de nouveaux depuis La Fonderie vers les stakers.
-
-Comme la forge ne prend qu'une **fraction** de La Fonderie (`FORGE_RATE_BPS = 10`) et que les frais la refont fondre en continu, **la réserve ne se vide jamais** : c'est le même métal qui circule à l'infini. L'invariant `circulation + Fonderie = 100 Md` tient à chaque bloc.
+> **Code actuel.** VinX n'a aucun burn : les frais **fondent** dans La Fonderie (`melt_to_foundry`) et des récompenses de staking en sont **forgées** (`FORGE_RATE_BPS = 10`, toutes les 100 blocs). L'invariant `circulation + Fonderie = 100 Md` tient à chaque bloc.
+>
+> **En v5 (fair launch), ce cycle est remplacé** par :
+> - **Émission par le travail** : La Fonderie se vide *uniquement* pour rémunérer la production de blocs, selon une décroissance exponentielle (halving 8 ans, `débit(t) = R₀·2^(−t/8 ans)`, R₀ ≈ 8,66 Md/an), calculée sur les **timestamps**. La Fonderie ne se recharge plus (plus de melt) — elle décroît monotone jusqu'à la poussière, puis c'est **fees-only**.
+> - **Frais 100 % au producteur** : plus de melt, le frais change simplement de main.
+> - L'invariant `circulation + Fonderie = 100 Md` reste vrai, trivialement.
 
 ---
 
@@ -431,15 +451,29 @@ sync_peer_rpc = "http://1.2.3.4:8545"  # Sync depuis un pair au démarrage
 
 | Priorité | Fonctionnalité | Détail |
 |----------|---------------|--------|
-| 🔴 Haute | **Usage réel** | Faire tourner la chaîne, distribuer le 1 Md à un premier cercle, micro-économie |
-| 🟡 Moyenne | **Console admin Phase 2** | Plancher de frais + rotation admin en types de tx dédiés (signature triviale) |
+| 🔴 **Haute** | **Bascule fair launch (v5)** | **Chantier économique majeur — consensus-breaking, nouvelle genèse.** Voir décomposition ci-dessous. |
+| 🔴 Haute | **Usage réel** | Faire tourner la chaîne, amorcer la micro-économie par l'émission, premiers usages |
 | 🟡 Moyenne | **Run 3 validateurs** | Valider co-signing / quorum / tolérance de panne en réel (le P2P existe, testé à 1) |
-| 🟡 Moyenne | **Leviers éco** | Taux de forge gouvernable on-chain (E2), forge dynamique (E3) |
 | 🟢 Future | **Token factory** | Émettre d'autres actifs sur VinX (interaction avec la Fonderie mère à concevoir) |
 | 🟢 Future | **Exécution parallèle** | Pertinent seulement à des dizaines de milliers de TPS soutenus — chantier d'architecture, risque de déterminisme |
 | 🟢 Future | **TLS natif** (rustls) | HTTPS sur le RPC sans dépendance à un reverse-proxy |
 
-> **Fait cette itération** : warm-up de staking (anti-JIT), console admin `/admin`, robustesse au démarrage, clés typées + ahash, capacités relevées (10k tx/bloc, mempool 100k), cadence de bloc adaptative à la demande, **migration de schéma sans wipe**.
+### Décomposition du chantier fair launch (v5)
+
+Ordre recommandé (du plus critique au plus cosmétique) :
+
+1. **Réparer le slashing** (bug de sécurité préexistant) : `SlashEvidence` porte les deux `BlockHeader` signés ; `apply_slash_validator` vérifie réellement les deux signatures Ed25519 (aujourd'hui aucune n'est vérifiée — n'importe qui peut faire slasher un validateur).
+2. **Genèse sans pre-mine** : retirer `FOUNDER_ALLOCATION_ATOMS` ; `foundry = MAX_SUPPLY`, `circulating = 0` ; validateur genesis dispensé de bond.
+3. **Émission par le travail** : champ `last_emission_ts` (persisté) ; `emit(elapsed)` forge l'intégrale de `R₀·2^(−t/8 ans)` sur `[last, timestamp]`, créditée au producteur ; seuil de poussière → fees-only. Supprimer `distribute_staking_rewards`, `FORGE_RATE_*`, `STAKING_DISTRIBUTION_INTERVAL`, `STAKE_WARMUP_BLOCKS`.
+4. **Bornes de timestamp** dans `validate_block` (monotonie + plafond horloge+tolérance) — requis puisque l'émission fait confiance au timestamp.
+5. **Frais forfaitaires au producteur** : `calculate_fee` → forfait × poids ; `apply_transfer` accumule le frais dans un compteur de bloc au lieu de `melt_to_foundry` ; `produce_block` crédite le producteur. Corriger `update_base_fee` (partir du `fee_floor` gouvernable).
+6. **Bond de validateur** : `MIN_VALIDATOR_BOND_ATOMS` (gouvernable) ; `AddValidator` exige le bond (genesis dispensé) ; `apply_unstake` → file de déliaison `Vec<(Amount, u64_timestamp)>` avec `UNBONDING_SECS = 3 j` ; maturation par timestamp ; l'unbond en attente rejoint `has_pending_time_sensitive_ops`.
+7. **Préavis d'upgrade en temps réel** : `UPGRADE_NOTICE_*` en secondes au lieu de blocs.
+8. **Tests + SDK + genesis** : réécrire les tests économiques ; nouvelle genèse (schéma stockage bumpé).
+
+> **Fait cette itération (docs)** : documentation entièrement alignée sur le modèle fair launch v5 (whitepaper v4.0, README, GUIDE, GETTING_STARTED, ce document). **L'implémentation du code reste à faire** (liste ci-dessus).
+>
+> **Itérations précédentes** : warm-up de staking, console admin `/admin`, robustesse au démarrage, clés typées + ahash, capacités relevées (10k tx/bloc, mempool 100k), cadence de bloc adaptative à la demande, migration de schéma sans wipe.
 
 ---
 

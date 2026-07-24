@@ -4,7 +4,7 @@
 
 1. [Démarrage rapide](#1-démarrage-rapide)
 2. [Wallet — commandes de base](#2-wallet--commandes-de-base)
-3. [Staking](#3-staking)
+3. [Staking — bond de validateur](#3-staking--bond-de-validateur)
 4. [Admin — mise à jour du protocole](#4-admin--mise-à-jour-du-protocole)
 5. [Explorateur via le wallet CLI](#5-explorateur-via-le-wallet-cli)
 6. [Interface web (port 8545)](#6-interface-web-port-8545)
@@ -71,7 +71,7 @@ cargo run -p vinx-wallet -- transfer \
   --amount 100.50
 ```
 
-Le fee (0,05% avec plancher 0,0001 VINX) est calculé automatiquement.
+Le fee est un **forfait** (0,0001 VINX × poids × congestion), **indépendant du montant** — envoyer 1 ou 1 000 000 VINX coûte la même chose. Il est calculé automatiquement et va **intégralement au validateur qui produit le bloc**.
 
 ### Statut du nœud
 
@@ -81,29 +81,33 @@ cargo run -p vinx-wallet -- status
 
 ---
 
-## 3. Staking
+## 3. Staking — bond de validateur
 
-Les récompenses de staking sont **forgées depuis La Fonderie** (la réserve alimentée par les frais fondus) toutes les 100 blocs, proportionnellement au stake de chacun.
+> **Le staking n'est pas un placement à rendement.** En PoA permissionné, la sécurité vient de l'identité des validateurs, pas d'un jeton. Le stake sert donc uniquement de **caution** (bond) : la peau dans le jeu qu'un validateur perd s'il triche. Un détenteur lambda ne stake pas — il garde son VINX pour **l'utiliser comme cash**. Il n'y a **aucune récompense de staking** : les validateurs sont rémunérés par leur **travail** (émission + frais), pas par leur bond.
 
-> **Warm-up de 100 blocs** : un stake ne devient éligible aux récompenses qu'après avoir été détenu au moins une époque complète (anti *just-in-time*). Le capital reste libre — le déstaking est instantané —, c'est seulement l'*éligibilité aux récompenses* qui demande cette maturité. Un ajout au stake décale l'ancienneté proportionnellement au capital.
+**En pratique :**
+- **Bond minimum : 100 000 VINX** (gouvernable) pour être éligible au set des validateurs. Le validateur défini à la genèse est dispensé (bootstrap).
+- **Aucun rendement** sur le bond.
+- **Déliaison différée : 3 jours de temps réel.** Le retrait n'est pas instantané — les fonds restent saisissables pendant la fenêtre où une preuve d'équivocation peut émerger.
+- **Slashing** : équivocation prouvée → 100 % du bond (10 % de prime au rapporteur, le reste fondu dans La Fonderie) ; downtime → suspension du round-robin, sans slash économique.
 
-### Staker des VINX
+### Poser un bond (staker)
 
 ```bash
 cargo run -p vinx-wallet -- stake \
   --wallet my-wallet.json \
-  --amount 5000
+  --amount 100000
 ```
 
-Minimum : 1 VINX. Pas de lock sur le capital (déstaking instantané) ; seul le warm-up ci-dessus conditionne l'éligibilité aux récompenses.
-
-### Récupérer des VINX stakés
+### Retirer son bond (unstake — déliaison 3 jours)
 
 ```bash
 cargo run -p vinx-wallet -- unstake \
   --wallet my-wallet.json \
-  --amount 5000
+  --amount 100000
 ```
+
+Les fonds reviennent sur le solde **après la période de déliaison** (3 jours de temps réel), pas immédiatement.
 
 ---
 
@@ -111,13 +115,13 @@ cargo run -p vinx-wallet -- unstake \
 
 > **Console d'admin web** : la page **http://localhost:8545/admin** offre un tableau de bord (hauteur, mempool, Fonderie, version), la gestion des validateurs (ajout/retrait, approbation des demandes), la planification d'upgrades et la maintenance — le tout signé localement avec la clé admin. La page reste en lecture seule tant que la clé de l'admin on-chain n'est pas chargée. Les commandes CLI ci-dessous restent équivalentes pour un usage scripté.
 
-Les mises à jour de protocole nécessitent un préavis minimum :
+Les mises à jour de protocole nécessitent un préavis minimum, compté en **temps réel** (timestamps), pas en nombre de blocs — la cadence étant variable :
 
 | Type | Préavis minimum |
 |---|---|
-| Patch (x.y.**Z**) | 7 jours (~60 480 blocs) |
-| Minor (x.**Y**.0) | 30 jours (~259 200 blocs) |
-| Major (**X**.0.0) | 90 jours (~777 600 blocs) |
+| Patch (x.y.**Z**) | 7 jours réels |
+| Minor (x.**Y**.0) | 30 jours réels |
+| Major (**X**.0.0) | 90 jours réels |
 
 ### Annoncer une mise à jour
 
@@ -128,7 +132,7 @@ cargo run -p vinx-wallet -- announce-upgrade \
   --activation-height 300000
 ```
 
-La mise à jour s'active automatiquement au bloc indiqué.
+La mise à jour s'active automatiquement une fois la hauteur atteinte, à condition que le préavis en temps réel soit respecté.
 
 ### Vérifier l'état du protocole
 
