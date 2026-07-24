@@ -5,17 +5,17 @@
 
 ---
 
-> ## ⚠️ Refonte économique v5 — adoptée, implémentation en cours
+> ## ✅ Refonte économique v5 — fair launch (implémentée)
 >
-> Le modèle économique de VinX a été **entièrement repensé** (décision arrêtée). Le nouveau modèle, décrit dans le [whitepaper v4.0](./whitepaper.md), remplace le cycle *melt/forge* par un **fair launch** :
+> Le modèle économique de VinX a été **entièrement repensé et implémenté** (whitepaper v4.0). Le cycle *melt/forge* est remplacé par un **fair launch** :
 >
 > - **Aucun pre-mine** : à la genèse, 0 en circulation, 100 Md scellés dans La Fonderie.
-> - **Émission par le travail des validateurs** : décroissance exponentielle, **halving tous les 8 ans**, calculée en **temps réel** (timestamps). Créditée au producteur, **non pondérée par le bond**. Relais automatique vers les frais quand La Fonderie se vide.
+> - **Émission par le travail des validateurs** : décroissance par **halving tous les 8 ans** (arithmétique entière déterministe), calculée en **temps réel** (timestamps). Créditée au producteur, **non pondérée par le bond**. Relais automatique vers les frais quand La Fonderie se vide.
 > - **Frais forfaitaires** (indépendants du montant), **100 % au validateur producteur** (plus de melt).
 > - **Staking = bond de validateur** (min 100 000 VINX, gouvernable), **déliaison 3 jours** temps réel, **slash équivocation 100 %** avec preuve réellement vérifiée. **Aucun rendement de staking.**
-> - Le **timestamp** devient la référence de temps (émission, déliaison, préavis d'upgrade), pas la hauteur de bloc.
+> - Le **timestamp** devient la référence de temps.
 >
-> **État du code : la bascule n'est pas encore implémentée.** Les sections ci-dessous décrivant l'économie (« La Fonderie melt/forge », frais 0,05 %, récompenses de staking, warm-up) reflètent le **code actuel**, qui sera remplacé. Le chantier d'implémentation est détaillé en [§8](#8-ce-qui-reste-à-faire).
+> **État du code : implémenté, testé** (`cargo test --workspace` vert, clippy `-D warnings` & fmt propres). Les sections ci-dessous portant la mention *« modèle actuel melt/forge »* décrivent l'**ancien** code désormais remplacé — l'annotation *« → v5 »* indique le comportement en vigueur. **Différé** : préavis d'upgrade en temps réel + cosmétique UI admin / SDK ([§8](#8-ce-qui-reste-à-faire)).
 
 ---
 
@@ -451,16 +451,16 @@ sync_peer_rpc = "http://1.2.3.4:8545"  # Sync depuis un pair au démarrage
 
 | Priorité | Fonctionnalité | Détail |
 |----------|---------------|--------|
-| 🔴 **Haute** | **Bascule fair launch (v5)** | **Chantier économique majeur — consensus-breaking, nouvelle genèse.** Voir décomposition ci-dessous. |
+| ✅ Fait | **Bascule fair launch (v5)** | **Implémentée et testée** (voir décomposition ci-dessous). Reste différé : préavis d'upgrade en temps réel, cosmétique UI admin / SDK. |
 | 🔴 Haute | **Usage réel** | Faire tourner la chaîne, amorcer la micro-économie par l'émission, premiers usages |
 | 🟡 Moyenne | **Run 3 validateurs** | Valider co-signing / quorum / tolérance de panne en réel (le P2P existe, testé à 1) |
 | 🟢 Future | **Token factory** | Émettre d'autres actifs sur VinX (interaction avec la Fonderie mère à concevoir) |
 | 🟢 Future | **Exécution parallèle** | Pertinent seulement à des dizaines de milliers de TPS soutenus — chantier d'architecture, risque de déterminisme |
 | 🟢 Future | **TLS natif** (rustls) | HTTPS sur le RPC sans dépendance à un reverse-proxy |
 
-### Décomposition du chantier fair launch (v5)
+### Décomposition du chantier fair launch (v5) — ✅ étapes 1-6 & 8 faites
 
-Ordre recommandé (du plus critique au plus cosmétique) :
+Les étapes suivantes sont **implémentées et testées** ; l'étape 7 (préavis d'upgrade en temps réel) est **différée** avec la cosmétique UI admin / SDK.
 
 1. **Réparer le slashing** (bug de sécurité préexistant) : `SlashEvidence` porte les deux `BlockHeader` signés ; `apply_slash_validator` vérifie réellement les deux signatures Ed25519 (aujourd'hui aucune n'est vérifiée — n'importe qui peut faire slasher un validateur).
 2. **Genèse sans pre-mine** : retirer `FOUNDER_ALLOCATION_ATOMS` ; `foundry = MAX_SUPPLY`, `circulating = 0` ; validateur genesis dispensé de bond.
@@ -471,7 +471,7 @@ Ordre recommandé (du plus critique au plus cosmétique) :
 7. **Préavis d'upgrade en temps réel** : `UPGRADE_NOTICE_*` en secondes au lieu de blocs.
 8. **Tests + SDK + genesis** : réécrire les tests économiques ; nouvelle genèse (schéma stockage bumpé).
 
-> **Fait cette itération (docs)** : documentation entièrement alignée sur le modèle fair launch v5 (whitepaper v4.0, README, GUIDE, GETTING_STARTED, ce document). **L'implémentation du code reste à faire** (liste ci-dessus).
+> **Fait cette itération** : refonte économique fair launch v5 **implémentée et testée** (genèse sans pre-mine, émission par le travail avec halving 8 ans, frais forfaitaires au producteur, bond de validateur + déliaison temps réel, slashing réparé avec vérification cryptographique), **plus** l'alignement complet de la documentation (whitepaper v4.0, README, GUIDE, GETTING_STARTED, ce document).
 >
 > **Itérations précédentes** : warm-up de staking, console admin `/admin`, robustesse au démarrage, clés typées + ahash, capacités relevées (10k tx/bloc, mempool 100k), cadence de bloc adaptative à la demande, migration de schéma sans wipe.
 

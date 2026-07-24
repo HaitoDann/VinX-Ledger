@@ -5,9 +5,9 @@ Format : `MAJEUR.MINEUR.CORRECTIF` — les versions `0.x.y` sont des versions de
 
 ---
 
-## [Design adopté — non livré] — Refonte économique v5 : fair launch
+## [0.34.0] — ⚠️ BREAKING — Refonte économique v5 : fair launch
 
-> ⚠️ **Décision de design arrêtée, documentée mais pas encore implémentée dans le code.** Cette entrée enregistre la nouvelle direction économique (whitepaper v4.0) ; elle ne correspond à aucun binaire livré. Le code exécute encore le modèle *melt/forge* de la 0.24.0. La bascule est un chantier **consensus-breaking** (nouvelle genèse). Voir la décomposition dans `ETAT_DU_PROJET.md` §8.
+> Changement **consensus-breaking → nouvelle genèse.** Abandon du cycle *melt/forge* (0.24.0) au profit du *fair launch* décrit dans le whitepaper v4.0. Implémenté de bout en bout (`vinx-core`, `vinx-state`, `vinx-node`) ; suite de tests réécrite, clippy `-D warnings` & fmt verts. **Différé** (voir `ETAT_DU_PROJET.md` §8) : préavis d'upgrade en temps réel, cosmétique UI admin / SDK.
 
 Abandon du cycle *melt/forge* (frais fondus dans une réserve, récompensés à des stakers passifs) au profit d'un **fair launch — émission par le travail des validateurs**.
 
@@ -20,7 +20,7 @@ Abandon du cycle *melt/forge* (frais fondus dans une réserve, récompensés à 
 - **Slashing réparé.** `SlashEvidence` portera les deux `BlockHeader` signés ; vérification réelle des deux signatures Ed25519 (le code actuel n'en vérifie aucune — faille exploitable). Équivocation → 100 % du bond, 10 % au rapporteur, reste fondu.
 - **Le temps = timestamps.** Émission, déliaison et préavis d'upgrade (7/30/90 j) passent en temps réel. Bornes de timestamp ajoutées à la validation de bloc.
 
-**Documentation alignée** : whitepaper v4.0, README, GUIDE, GETTING_STARTED, ETAT_DU_PROJET. **Implémentation du code : à faire.**
+**Documentation alignée** : whitepaper v4.0, README, GUIDE, GETTING_STARTED, ETAT_DU_PROJET.
 
 ---
 
