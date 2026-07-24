@@ -21,11 +21,13 @@ mod tests {
 
         let validator_kp = KeyPair::generate();
         let validator_addr = Address::from_public_key(&validator_kp.public_key());
-        let state = create_genesis_state(&GenesisConfig {
+        let mut state = create_genesis_state(&GenesisConfig {
             chain_id: vinx_core::CHAIN_ID_DEVNET,
             admin_address: sender_addr.clone(),
             validator_address: validator_addr,
         });
+        // Fair launch grants nothing at genesis — fund the sender for these unit tests.
+        state.credit_for_test(sender_addr.clone(), Amount::from_vinx(1_000_000_000));
         (state, sender_kp, sender_addr)
     }
 
@@ -166,18 +168,21 @@ mod tests {
     }
 
     #[test]
-    fn test_transfer_fee_melts_100_percent() {
+    fn test_transfer_fee_goes_to_producer() {
         let (mut state, sender_kp, _) = funded_state();
         let receiver = Address::from_public_key(&KeyPair::generate().public_key());
+        let producer = Address::from_public_key(&KeyPair::generate().public_key());
         let amount = Amount::from_vinx(10_000);
         let fee = fee_for(amount);
 
         let foundry_before = state.foundry_balance();
         let tx = Transaction::new_transfer(&sender_kp, receiver, amount, fee, 0);
         state.apply_transaction(&tx).unwrap();
+        state.settle_block(&producer, 1);
 
-        // 100% of the fee melts into the Foundry — nothing to a validator or treasury.
-        assert_eq!(state.foundry_balance(), foundry_before.saturating_add(fee));
+        // 100% of the fee goes to the block producer; the Foundry is untouched.
+        assert_eq!(state.account_balance(&producer), fee);
+        assert_eq!(state.foundry_balance(), foundry_before);
     }
 
     #[test]
@@ -230,7 +235,8 @@ mod tests {
     }
 
     #[test]
-    fn test_unstake_moves_staked_back_to_balance() {
+    fn test_unstake_enters_unbonding_then_returns_after_delay() {
+        use vinx_core::amount::UNBONDING_SECS;
         let (mut state, sender_kp, sender_addr) = funded_state();
         let stake_amount = Amount::from_vinx(500);
 
@@ -244,6 +250,8 @@ mod tests {
             .unwrap();
         let balance_after_stake = state.account_balance(&sender_addr);
 
+        // Unstake at ts = 1000: the bond leaves `staked` but does NOT return yet.
+        state.set_block_context(1_000);
         state
             .apply_transaction(&Transaction::new_unstake(
                 &sender_kp,
@@ -252,12 +260,15 @@ mod tests {
                 1,
             ))
             .unwrap();
+        assert_eq!(state.account_staked(&sender_addr), Amount::ZERO);
+        assert_eq!(state.account_balance(&sender_addr), balance_after_stake); // not yet back
 
+        // After the unbonding delay, settling matures it back to the balance.
+        state.settle_block(&sender_addr, 1_000 + UNBONDING_SECS);
         assert_eq!(
             state.account_balance(&sender_addr),
             balance_after_stake.checked_add(stake_amount).unwrap()
         );
-        assert_eq!(state.account_staked(&sender_addr), Amount::ZERO);
     }
 
     #[test]

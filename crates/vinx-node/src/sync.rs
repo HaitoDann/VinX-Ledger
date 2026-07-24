@@ -78,6 +78,7 @@ pub async fn sync_from_peer(
             }
 
             // Apply all transactions to state
+            state.set_block_context(block.header.timestamp);
             for tx in &block.transactions {
                 if let Err(e) = state.apply_transaction(tx) {
                     tracing::error!(error = %e, height = block.header.height, "Sync tx failed — aborting");
@@ -86,7 +87,7 @@ pub async fn sync_from_peer(
             }
             state.block_height = block.header.height;
             state.check_upgrade_activation();
-            let _rewards = state.distribute_staking_rewards();
+            let _ = state.settle_block(&block.header.validator, block.header.timestamp);
 
             chain.push(block);
             applied += 1;

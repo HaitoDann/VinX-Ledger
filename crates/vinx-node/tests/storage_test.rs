@@ -51,15 +51,14 @@ fn test_storage_roundtrip() {
     let storage = Storage::new(tmp.path());
     assert!(!storage.exists());
 
+    // Fair launch: genesis grants nothing — seed a balance so the roundtrip is meaningful.
+    state.credit_for_test(admin.clone(), Amount::from_vinx(500));
     storage.save(&mut state, &chain).unwrap();
     assert!(storage.exists());
 
     let (loaded_state, loaded_chain) = storage.load().expect("should load");
     assert_eq!(loaded_state.block_height, state.block_height);
-    assert_eq!(
-        loaded_state.account_balance(&admin),
-        Amount::from_vinx(1_000_000_000)
-    );
+    assert_eq!(loaded_state.account_balance(&admin), Amount::from_vinx(500));
     assert_eq!(loaded_chain.tip_height(), chain.tip_height());
     assert_eq!(loaded_chain.tip_hash(), chain.tip_hash());
 }
@@ -134,7 +133,8 @@ fn test_incremental_persist_writes_only_dirty_rows() {
     let (chain, _) = Chain::new_with_genesis(validator.clone(), 0);
     let storage = Storage::new(tmp.path());
 
-    // Initial full save flushes every account and clears the dirty set.
+    // Seed one account, then full-save so it is persisted and the dirty set cleared.
+    state.credit_for_test(admin.clone(), Amount::from_vinx(1_000));
     storage.save(&mut state, &chain).unwrap();
 
     // Touch a single new account, then persist incrementally.
@@ -146,12 +146,9 @@ fn test_incremental_persist_writes_only_dirty_rows() {
     assert!(!write.replace_accounts);
     storage.write_state(write).unwrap();
 
-    // Both the untouched genesis account and the new one survive a reload.
+    // Both the untouched account and the new one survive a reload.
     let (loaded, _) = storage.load().expect("should load");
-    assert_eq!(
-        loaded.account_balance(&admin),
-        Amount::from_vinx(1_000_000_000)
-    );
+    assert_eq!(loaded.account_balance(&admin), Amount::from_vinx(1_000));
     assert_eq!(loaded.account_balance(&bob), Amount::from_vinx(500));
 }
 
@@ -195,9 +192,7 @@ async fn test_state_persists_across_node_restarts() {
         // Height and state should be exactly where we left off
         assert_eq!(chain.tip_height(), 5);
         assert_eq!(state.block_height, 5);
-        assert_eq!(
-            state.account_balance(&admin_addr),
-            Amount::from_vinx(1_000_000_000)
-        );
+        // Fair launch: the admin/founder is granted nothing at genesis.
+        assert_eq!(state.account_balance(&admin_addr), Amount::ZERO);
     }
 }

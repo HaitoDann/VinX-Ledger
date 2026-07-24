@@ -520,6 +520,8 @@ mod tests {
             admin_address: admin,
             validator_address: validator,
         });
+        // Fair launch: genesis grants nothing, so seed a balance to check it survives.
+        state.credit_for_test(admin, Amount::from_vinx(500));
         let (mut chain, _) = Chain::new_with_genesis(validator, 0);
         let tx =
             Transaction::new_transfer(&kp, bob, Amount::from_vinx(10), Amount::from_vinx(1), 0);
@@ -553,8 +555,8 @@ mod tests {
 
         assert_eq!(
             loaded_state.account_balance(&admin),
-            Amount::from_vinx(1_000_000_000),
-            "founder balance must survive migration"
+            Amount::from_vinx(500),
+            "account balance must survive migration"
         );
         assert_eq!(loaded_chain.tip_height(), 1, "chain must survive migration");
         assert!(

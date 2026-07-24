@@ -93,8 +93,9 @@ proptest! {
 // ─── WorldState transfer invariants ──────────────────────────────────────────
 
 proptest! {
-    /// A transfer melts its fee, so `circulating + foundry` (the total supply) is
-    /// conserved even though circulating_supply alone decreases by the fee.
+    /// A transfer never touches the total supply: `circulating + foundry` is
+    /// conserved. The fee stays in circulation (it moves sender → producer), so it
+    /// does not leave `circulating_supply` either.
     #[test]
     fn transfer_conserves_supply(
         amount_vinx  in 1u64..=500u64,
@@ -151,6 +152,10 @@ proptest! {
             if total_cost <= initial {
                 let tx = Transaction::new_transfer(&sender_kp, receiver_addr, amount, fee, 0);
                 state.apply_transaction(&tx).unwrap();
+                // The fee is collected into the block pool; settling credits it to the
+                // producer, so accounts and circulating_supply line up again.
+                let producer = Address::from_public_key(&KeyPair::generate().public_key());
+                state.settle_block(&producer, 1);
                 prop_assert_eq!(
                     total_in_accounts(&state),
                     state.circulating_supply.atoms(),
@@ -182,9 +187,10 @@ proptest! {
         prop_assert_eq!(nonce_after, nonce_before + 1);
     }
 
-    /// The exact fee must melt entirely into the Foundry with no leakage.
+    /// The full fee goes to the block producer — not the Foundry. After settling,
+    /// the producer holds exactly the fee and the Foundry is untouched.
     #[test]
-    fn fee_fully_melts_to_foundry(
+    fn fee_goes_to_producer(
         amount_vinx  in 1u64..=1_000u64,
         initial_vinx in 2_000u64..=20_000u64,
     ) {
@@ -192,6 +198,7 @@ proptest! {
         let sender_addr = Address::from_public_key(&sender_kp.public_key());
         let receiver_kp = KeyPair::generate();
         let receiver_addr = Address::from_public_key(&receiver_kp.public_key());
+        let producer = Address::from_public_key(&KeyPair::generate().public_key());
 
         let mut state = WorldState::new();
         state.credit_for_test(sender_addr.clone(), Amount::from_vinx(initial_vinx));
@@ -203,11 +210,17 @@ proptest! {
 
         let tx = Transaction::new_transfer(&sender_kp, receiver_addr, amount, fee, 0);
         state.apply_transaction(&tx).unwrap();
+        state.settle_block(&producer, 1);
 
         prop_assert_eq!(
-            state.foundry_balance().atoms() - foundry_before,
+            state.account_balance(&producer).atoms(),
             fee.atoms(),
-            "fee did not fully melt into the Foundry"
+            "fee not credited in full to the producer"
+        );
+        prop_assert_eq!(
+            state.foundry_balance().atoms(),
+            foundry_before,
+            "Foundry changed — the fee must not melt"
         );
     }
 

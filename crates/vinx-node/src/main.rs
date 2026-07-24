@@ -341,10 +341,7 @@ fn print_banner(
     println!("  {mode}");
     println!("{line}");
     println!("  Admin     : {admin}");
-    println!(
-        "               {}  (fondateur — le reste scellé dans La Fonderie)",
-        vinx_core::amount::Amount::from_atoms(vinx_core::amount::FOUNDER_ALLOCATION_ATOMS)
-    );
+    println!("               (fair launch — aucun pre-mine ; 100 Md scellés dans La Fonderie)");
     println!("  Validator : {validator}");
     if let Some(fa) = faucet {
         println!("  Faucet    : {fa}");

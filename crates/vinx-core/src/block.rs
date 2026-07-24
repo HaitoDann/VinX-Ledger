@@ -52,11 +52,17 @@ pub struct BlockSignature {
     pub signature: VinxSignature,
 }
 
-/// Evidence of validator equivocation: two valid signatures by the same validator
-/// on different block hashes at the same height. Used in SlashValidator transactions.
+/// Evidence of validator equivocation: two *different* block headers at the **same
+/// height**, each carrying a valid Ed25519 signature from the same validator.
+///
+/// The full headers are included (not just their hashes) so any verifier can
+/// recompute `header_a.hash()` / `header_b.hash()`, confirm the heights match and the
+/// hashes differ, and check both signatures. This is what makes a slash *provable* —
+/// forging evidence would require forging the target's signature over a real header.
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct SlashEvidence {
-    pub height: u64,
+    pub header_a: BlockHeader,
+    pub header_b: BlockHeader,
     pub sig_a: BlockSignature,
     pub sig_b: BlockSignature,
 }

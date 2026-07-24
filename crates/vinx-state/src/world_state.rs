@@ -2,8 +2,8 @@ use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, HashMap, HashSet};
 use vinx_core::{
     amount::{
-        Amount, DEFAULT_FEE_FLOOR_ATOMS, FORGE_RATE_BPS, FORGE_RATE_DENOM, MIN_STAKE_ATOMS,
-        STAKE_WARMUP_BLOCKS, STAKING_DISTRIBUTION_INTERVAL,
+        cumulative_emission_atoms, Amount, BPS_DENOM, DEFAULT_FEE_FLOOR_ATOMS, MIN_STAKE_ATOMS,
+        MIN_VALIDATOR_BOND_ATOMS, SLASH_BOUNTY_BPS, SLASH_EQUIVOCATION_BPS, UNBONDING_SECS,
     },
     block::SlashEvidence,
     chain_id::CHAIN_ID_DEVNET,
@@ -24,11 +24,38 @@ pub struct WorldState {
     /// the supply is conserved forever (no burn), it only cycles between accounts and the Foundry.
     pub circulating_supply: Amount,
     pub block_height: u64,
-    /// La Fonderie — the melt/forge reserve. Transaction fees *melt* into it; staking
-    /// rewards are *forged* out of it. The invariant `circulating_supply + foundry ==
-    /// MAX_SUPPLY` holds at every block: nothing is ever created or destroyed, only recycled.
+    /// La Fonderie — the emission reserve. At genesis it holds the entire supply; it
+    /// drains *only* to reward block production (work emission) and grows only when a
+    /// slashed bond melts back in. The invariant `circulating_supply + foundry ==
+    /// MAX_SUPPLY` holds at every block: nothing is created or destroyed, only moved.
     #[serde(default)]
     pub foundry: Amount,
+    /// Timestamp (unix seconds) of the first block — the emission epoch. Established
+    /// lazily on the first block; `emission_started` guards initialization (so a
+    /// genesis timestamp of 0 does not collide with an "unset" sentinel).
+    #[serde(default)]
+    pub emission_epoch_ts: u64,
+    /// Whether the emission epoch has been established yet.
+    #[serde(default)]
+    emission_started: bool,
+    /// Cumulative atoms already emitted as work rewards. Tracks the emission curve so
+    /// each block forges exactly `curve(now) - emitted` and never double-emits.
+    #[serde(default)]
+    pub emitted_atoms: u128,
+    /// Bonds in their unbonding delay: `(address, amount, unlock_ts)`. The amount left
+    /// `staked` at unstake time and returns to the balance once `unlock_ts` is reached.
+    /// It stays slashable until then. Part of circulation the whole time.
+    #[serde(default)]
+    pub pending_unbonds: Vec<PendingUnbond>,
+    /// Timestamp of the block currently being applied — set before draining txs so
+    /// `apply_unstake` can compute a real-time unlock. Not persisted.
+    #[serde(skip)]
+    current_block_ts: u64,
+    /// Fees collected from the transactions of the block currently being applied.
+    /// Credited in full to the block producer by `settle_block`. Not persisted
+    /// (transient within a single block).
+    #[serde(skip)]
+    block_fees: Amount,
     /// Static minimum fee floor; dynamic base_fee is always >= this.
     pub fee_floor: Amount,
     /// Dynamic fee floor, updated each block from mempool pressure.
@@ -68,6 +95,15 @@ pub struct WorldState {
     persist_dirty: HashSet<Address>,
 }
 
+/// A bond amount in its unbonding delay, waiting to return to `address`'s balance
+/// at `unlock_ts` (unix seconds). Slashable until it matures.
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct PendingUnbond {
+    pub address: Address,
+    pub amount: Amount,
+    pub unlock_ts: u64,
+}
+
 fn default_fee_floor() -> Amount {
     Amount::from_atoms(DEFAULT_FEE_FLOOR_ATOMS)
 }
@@ -90,6 +126,12 @@ impl WorldState {
             circulating_supply: Amount::ZERO,
             block_height: 0,
             foundry: Amount::ZERO,
+            emission_epoch_ts: 0,
+            emission_started: false,
+            emitted_atoms: 0,
+            pending_unbonds: Vec::new(),
+            current_block_ts: 0,
+            block_fees: Amount::ZERO,
             fee_floor,
             base_fee: fee_floor,
             admin_address: None,
@@ -175,8 +217,11 @@ impl WorldState {
         } else {
             10_000
         };
-        let new_atoms = DEFAULT_FEE_FLOOR_ATOMS * multiplier_bps / 10_000;
-        self.base_fee = Amount::from_atoms(new_atoms.max(self.fee_floor.atoms()));
+        // Apply the congestion multiplier to the *governable* fee floor (not the
+        // compile-time constant), so raising the floor also raises surge pricing.
+        let floor = self.fee_floor.atoms();
+        let new_atoms = floor * multiplier_bps / 10_000;
+        self.base_fee = Amount::from_atoms(new_atoms.max(floor));
     }
 
     /// *Melt*: moves `amount` from circulation into the Foundry (fees, slashing).
@@ -199,6 +244,79 @@ impl WorldState {
         };
         self.foundry = self.foundry.checked_sub(forged).unwrap_or(Amount::ZERO);
         self.circulating_supply = self.circulating_supply.saturating_add(forged);
+        forged
+    }
+
+    /// Records the timestamp of the block currently being applied. Must be called
+    /// before draining/applying that block's transactions so `apply_unstake` can
+    /// compute a real-time unlock. Idempotent per block.
+    pub fn set_block_context(&mut self, block_ts: u64) {
+        self.current_block_ts = block_ts;
+    }
+
+    /// Settles block-level rewards to the producer and matures due unbonds. Call once
+    /// per block, after applying all transactions and before `compute_state_root`, in
+    /// every path that builds/replays a block (producer, P2P apply, sync). Returns
+    /// `(fees, emission)` for logging.
+    ///
+    /// Fees stay in circulation (they move sender → producer). Emission is forged from
+    /// the Foundry into circulation. Both are computed deterministically from the block
+    /// (its transactions, its `producer`, its `block_ts`), so validators re-applying
+    /// the block reach the identical state.
+    pub fn settle_block(&mut self, producer: &Address, block_ts: u64) -> (Amount, Amount) {
+        // 1. Collected transaction fees → producer (circulation-neutral).
+        let fees = std::mem::replace(&mut self.block_fees, Amount::ZERO);
+        if fees > Amount::ZERO {
+            self.credit(producer, fees);
+        }
+        // 2. Mature any unbonds whose delay has elapsed (real time).
+        self.mature_unbonds(block_ts);
+        // 3. Work emission forged from the Foundry → producer.
+        let emission = self.emit_work_reward(producer, block_ts);
+        (fees, emission)
+    }
+
+    /// Returns matured bonds to their owners' balances. Circulation-neutral: the funds
+    /// were already counted as circulating throughout the unbonding delay.
+    fn mature_unbonds(&mut self, block_ts: u64) {
+        if self.pending_unbonds.is_empty() {
+            return;
+        }
+        let mut matured: Vec<(Address, Amount)> = Vec::new();
+        self.pending_unbonds.retain(|u| {
+            if u.unlock_ts <= block_ts {
+                matured.push((u.address, u.amount));
+                false
+            } else {
+                true
+            }
+        });
+        for (addr, amount) in matured {
+            self.credit(&addr, amount);
+        }
+    }
+
+    /// Forges this block's work-emission reward out of the Foundry and credits it to
+    /// the producer. Emission follows the discrete halving curve, integrated over real
+    /// time since the emission epoch — so a quiet network doesn't stall or accelerate
+    /// it. The first block establishes the epoch and emits nothing.
+    fn emit_work_reward(&mut self, producer: &Address, block_ts: u64) -> Amount {
+        if !self.emission_started {
+            self.emission_started = true;
+            self.emission_epoch_ts = block_ts;
+            return Amount::ZERO;
+        }
+        let elapsed = block_ts.saturating_sub(self.emission_epoch_ts);
+        let target = cumulative_emission_atoms(elapsed);
+        let to_emit = target.saturating_sub(self.emitted_atoms);
+        if to_emit == 0 {
+            return Amount::ZERO;
+        }
+        let forged = self.forge_from_foundry(Amount::from_atoms(to_emit));
+        if forged > Amount::ZERO {
+            self.credit(producer, forged);
+            self.emitted_atoms = self.emitted_atoms.saturating_add(forged.atoms());
+        }
         forged
     }
 
@@ -295,12 +413,9 @@ impl WorldState {
     /// scheduled (its activation is triggered by reaching a block height). Otherwise
     /// the node can sleep until the next transaction — no wasted storage.
     pub fn has_pending_time_sensitive_ops(&self) -> bool {
-        self.pending_upgrade.is_some()
-    }
-
-    pub(crate) fn insert_account(&mut self, account: Account) {
-        self.mark_dirty(&account.address);
-        self.accounts.insert(account.address, account);
+        // A scheduled upgrade (height-triggered) or a pending unbond (time-triggered)
+        // both need the chain to keep advancing so their trigger can be reached.
+        self.pending_upgrade.is_some() || !self.pending_unbonds.is_empty()
     }
 
     pub fn credit_for_test(&mut self, address: Address, amount: Amount) {
@@ -469,9 +584,10 @@ impl WorldState {
             .checked_add(tx.amount)
             .ok_or(CoreError::AmountOverflow)?;
 
-        // Melt: 100% of the fee flows back into the Foundry and leaves circulation.
-        // The supply is conserved — nothing is burned, it will be re-forged as rewards.
-        self.melt_to_foundry(tx.fee);
+        // The fee stays in circulation: it is collected into the block's fee pool and
+        // credited in full to the producer by `settle_block`. No melt — it just changes
+        // hands, so `circulating_supply` is unchanged (sender −fee, producer +fee).
+        self.block_fees = self.block_fees.saturating_add(tx.fee);
 
         self.mark_dirty(&tx.from);
         self.mark_dirty(&tx.to);
@@ -501,25 +617,8 @@ impl WorldState {
         if account.balance < tx.amount {
             return Err(CoreError::InsufficientBalance);
         }
-        if account.staked == Amount::ZERO {
-            // First stake: the warm-up clock starts now.
-            account.stake_since = self.block_height;
-        } else {
-            // Top-up: advance stake_since to the capital-weighted commitment
-            // time — new = s + (h - s) * add / (old + add) — so a large late
-            // deposit cannot inherit a tiny early stake's seniority.
-            let old = account.staked.atoms();
-            let add = tx.amount.atoms();
-            let s = account.stake_since;
-            let delta = (self.block_height.saturating_sub(s)) as u128;
-            let shift = delta
-                .checked_mul(add)
-                .map(|x| (x / (old + add)) as u64)
-                // Astronomically large operands only: fall back to a full
-                // clock reset (conservative — favors the protocol, not the staker).
-                .unwrap_or(delta as u64);
-            account.stake_since = s.saturating_add(shift);
-        }
+        // Bond posting: move balance → staked. No yield, no warm-up — the bond is
+        // pure security collateral. Circulation-neutral (balance −a, staked +a).
         account.balance = account.balance.checked_sub(tx.amount).unwrap();
         account.staked = account
             .staked
@@ -531,6 +630,10 @@ impl WorldState {
     }
 
     fn apply_unstake(&mut self, tx: &Transaction) -> Result<(), CoreError> {
+        let bond_floor = Amount::from_atoms(MIN_VALIDATOR_BOND_ATOMS);
+        let is_active_validator = self.validator_set.contains(&tx.from);
+        let unlock_ts = self.current_block_ts.saturating_add(UNBONDING_SECS);
+
         let account = self
             .accounts
             .get_mut(&tx.from)
@@ -544,15 +647,24 @@ impl WorldState {
         if account.staked < tx.amount {
             return Err(CoreError::InsufficientBalance);
         }
-        account.staked = account.staked.checked_sub(tx.amount).unwrap();
-        account.balance = account
-            .balance
-            .checked_add(tx.amount)
-            .ok_or(CoreError::AmountOverflow)?;
-        if account.staked == Amount::ZERO {
-            account.stake_since = 0;
+        let remaining = account.staked.checked_sub(tx.amount).unwrap();
+        // A properly bonded, active validator may not drop below the minimum bond
+        // while in the set — it must be removed from the validator set first.
+        // (A grandfathered genesis validator holding less than the bond is exempt.)
+        if is_active_validator && account.staked >= bond_floor && remaining < bond_floor {
+            return Err(CoreError::InvalidTransaction(
+                "active validator cannot unstake below the minimum bond".to_string(),
+            ));
         }
+        account.staked = remaining;
         account.nonce += 1;
+        // The withdrawn amount does NOT return to the balance now: it enters the
+        // unbonding delay and stays slashable until `unlock_ts`. Circulation-neutral.
+        self.pending_unbonds.push(PendingUnbond {
+            address: tx.from,
+            amount: tx.amount,
+            unlock_ts,
+        });
         self.mark_dirty(&tx.from);
         Ok(())
     }
@@ -614,6 +726,14 @@ impl WorldState {
         if self.validator_set.contains(&tx.to) {
             return Err(CoreError::InvalidTransaction(
                 "address is already a validator".to_string(),
+            ));
+        }
+        // Skin in the game: a new validator must have posted the minimum bond.
+        // (The genesis validator enters via create_genesis_state, not this path,
+        // so it is grandfathered and exempt.)
+        if self.account_staked(&tx.to).atoms() < MIN_VALIDATOR_BOND_ATOMS {
+            return Err(CoreError::InvalidTransaction(
+                "candidate validator has not posted the minimum bond".to_string(),
             ));
         }
         let sender = self
@@ -684,79 +804,9 @@ impl WorldState {
         }
     }
 
-    /// Forges staking rewards out of the Foundry every STAKING_DISTRIBUTION_INTERVAL
-    /// blocks and distributes them to stakers proportionally to their stake.
-    ///
-    /// Only stake that has weathered the warm-up period (`STAKE_WARMUP_BLOCKS`)
-    /// is eligible: this closes the "just-in-time" staking exploit where one
-    /// could stake right before a distribution, collect, and unstake right after.
-    ///
-    /// The reward pool is a fraction (`FORGE_RATE_BPS`) of the current Foundry, so it
-    /// shrinks as the Foundry drains and grows again as fees melt back in — the
-    /// Foundry never empties (the "infinite cycle"). Returns the amount forged.
-    pub fn distribute_staking_rewards(&mut self) -> Amount {
-        if self.block_height == 0
-            || !self
-                .block_height
-                .is_multiple_of(STAKING_DISTRIBUTION_INTERVAL)
-        {
-            return Amount::ZERO;
-        }
-        if self.foundry == Amount::ZERO {
-            return Amount::ZERO;
-        }
-
-        // A stake earns only once it has been held for the full warm-up period.
-        let height = self.block_height;
-        let is_eligible = |a: &Account| {
-            a.staked != Amount::ZERO && height.saturating_sub(a.stake_since) >= STAKE_WARMUP_BLOCKS
-        };
-
-        // Denominator is the *eligible* stake only, so rewards stay proportional
-        // among the accounts that actually earn this epoch.
-        let eligible_staked: u128 = self
-            .accounts
-            .values()
-            .filter(|a| is_eligible(a))
-            .map(|a| a.staked.atoms())
-            .sum();
-        if eligible_staked == 0 {
-            return Amount::ZERO;
-        }
-
-        // Forge a fraction of the Foundry as this epoch's reward pool.
-        let pool = self.foundry.atoms() * FORGE_RATE_BPS / FORGE_RATE_DENOM;
-        if pool == 0 {
-            return Amount::ZERO;
-        }
-        let mut distributed = 0u128;
-
-        let mut rewarded: Vec<Address> = Vec::new();
-        for account in self.accounts.values_mut() {
-            if !is_eligible(account) {
-                continue;
-            }
-            let reward = pool
-                .checked_mul(account.staked.atoms())
-                .map(|p| p / eligible_staked)
-                .unwrap_or_else(|| {
-                    let p = pool / 1_000_000_000;
-                    let t = (eligible_staked / 1_000_000_000).max(1);
-                    p.saturating_mul(account.staked.atoms()) / t
-                });
-            if reward > 0 {
-                account.balance = account.balance.saturating_add(Amount::from_atoms(reward));
-                distributed = distributed.saturating_add(reward);
-                rewarded.push(account.address);
-            }
-        }
-        for addr in rewarded {
-            self.mark_dirty(&addr);
-        }
-
-        // Move the forged tokens from the Foundry into circulation (accounting).
-        self.forge_from_foundry(Amount::from_atoms(distributed))
-    }
+    // Staking rewards no longer exist: validators are paid for *work* (block
+    // production) via `emit_work_reward` + collected fees, not for holding a stake.
+    // See `settle_block`.
 
     /// Merkle root of the account state after sorting accounts by address.
     ///
@@ -774,28 +824,50 @@ impl WorldState {
 
         let target = &tx.to;
 
-        // Both signatures must be from the same validator (the target)
+        // 1. Same height, different blocks — the definition of equivocation.
+        if evidence.header_a.height != evidence.header_b.height {
+            return Err(CoreError::InvalidTransaction(
+                "evidence headers are at different heights".to_string(),
+            ));
+        }
+        let hash_a = evidence.header_a.hash();
+        let hash_b = evidence.header_b.hash();
+        if hash_a == hash_b {
+            return Err(CoreError::InvalidTransaction(
+                "evidence headers are identical — not equivocation".to_string(),
+            ));
+        }
+
+        // 2. Both signatures must name the target validator, with matching pubkeys.
         if evidence.sig_a.validator != *target || evidence.sig_b.validator != *target {
             return Err(CoreError::InvalidTransaction(
                 "evidence validator mismatch".to_string(),
             ));
         }
-
-        if Address::from_public_key(&evidence.sig_a.pub_key) != *target {
+        if Address::from_public_key(&evidence.sig_a.pub_key) != *target
+            || Address::from_public_key(&evidence.sig_b.pub_key) != *target
+        {
             return Err(CoreError::InvalidTransaction(
-                "sig_a pubkey/address mismatch".to_string(),
-            ));
-        }
-        if Address::from_public_key(&evidence.sig_b.pub_key) != *target {
-            return Err(CoreError::InvalidTransaction(
-                "sig_b pubkey/address mismatch".to_string(),
+                "evidence pubkey/address mismatch".to_string(),
             ));
         }
 
-        // Signatures must be different (they signed different things)
-        if evidence.sig_a.signature == evidence.sig_b.signature {
+        // 3. THE crucial check: both signatures must be cryptographically valid over
+        //    their respective block-header hashes. Only the target could have produced
+        //    both — this is what makes a slash provable and forgery impossible.
+        if evidence
+            .sig_a
+            .pub_key
+            .verify(&hash_a, &evidence.sig_a.signature)
+            .is_err()
+            || evidence
+                .sig_b
+                .pub_key
+                .verify(&hash_b, &evidence.sig_b.signature)
+                .is_err()
+        {
             return Err(CoreError::InvalidTransaction(
-                "signatures are identical — not equivocation".to_string(),
+                "invalid equivocation signature".to_string(),
             ));
         }
 
@@ -817,35 +889,49 @@ impl WorldState {
         }
         sender.nonce += 1;
 
-        // Slash: melt the validator's stake back into the Foundry (minus a bounty)
-        let slashed = self
+        // Slashable = current bond + any amounts still in the unbonding delay (the
+        // whole reason for the delay is that exiting funds stay slashable).
+        let staked = self
             .accounts
             .get(target)
             .map(|a| a.staked)
             .unwrap_or(Amount::ZERO);
-        if slashed > Amount::ZERO {
-            // 10% bounty to the reporter
-            let bounty = Amount::from_atoms(slashed.atoms() / 10);
-            // Remainder melts back into the Foundry (recycled, never burned).
-            let to_melt = slashed.checked_sub(bounty).unwrap_or(Amount::ZERO);
+        let unbonding: u128 = self
+            .pending_unbonds
+            .iter()
+            .filter(|u| &u.address == target)
+            .map(|u| u.amount.atoms())
+            .sum();
+        let slashable = staked.atoms().saturating_add(unbonding);
 
+        if slashable > 0 {
             if let Some(acc) = self.accounts.get_mut(target) {
                 acc.staked = Amount::ZERO;
-                acc.stake_since = 0;
             }
+            self.pending_unbonds.retain(|u| &u.address != target);
+
+            // slashed = slashable × equivocation rate (100%); any remainder returns.
+            let slashed = slashable * SLASH_EQUIVOCATION_BPS / BPS_DENOM;
+            let returned = slashable.saturating_sub(slashed);
+            let bounty = slashed * SLASH_BOUNTY_BPS / BPS_DENOM;
+            let to_melt = slashed.saturating_sub(bounty);
+
             self.mark_dirty(target);
-            self.credit(&tx.from, bounty); // credit() also calls mark_dirty(tx.from)
-            self.melt_to_foundry(to_melt);
+            if returned > 0 {
+                self.credit(target, Amount::from_atoms(returned));
+            }
+            self.credit(&tx.from, Amount::from_atoms(bounty)); // reporter bounty
+            self.melt_to_foundry(Amount::from_atoms(to_melt)); // rest → Foundry
         }
 
         self.mark_dirty(&tx.from);
 
-        // Remove from validator set (can't produce blocks anymore)
+        // Remove from validator set (can't produce blocks anymore).
         if self.validator_set.len() > 1 {
             self.validator_set.remove(target);
-            tracing::warn!(validator = %target, slashed = %slashed, "Validator slashed for equivocation");
+            tracing::warn!(validator = %target, slashed = slashable, "Validator slashed for equivocation");
         } else {
-            tracing::warn!(validator = %target, "Slash skipped — last validator");
+            tracing::warn!(validator = %target, "Slash accounting applied — last validator kept in set");
         }
 
         Ok(())
@@ -873,6 +959,11 @@ impl WorldState {
 
         match action {
             GovernanceAction::AddValidator(addr) => {
+                if self.account_staked(&addr).atoms() < MIN_VALIDATOR_BOND_ATOMS {
+                    return Err(CoreError::InvalidTransaction(
+                        "candidate validator has not posted the minimum bond".to_string(),
+                    ));
+                }
                 if !self.validator_set.contains(&addr) {
                     self.validator_set.add(addr);
                     tracing::info!(%addr, "Admin: validator added");
@@ -922,18 +1013,16 @@ impl WorldState {
             .or_insert_with(|| vinx_core::Account::new(*address));
         acc.balance = Amount::ZERO;
         acc.staked = staked;
-        acc.stake_since = 0;
     }
 }
 
 fn hash_account(account: &Account) -> Hash32 {
     let addr = account.address.as_bytes();
-    let mut buf = Vec::with_capacity(addr.len() + 16 + 8 + 16 + 8);
+    let mut buf = Vec::with_capacity(addr.len() + 16 + 8 + 16);
     buf.extend_from_slice(addr);
     buf.extend_from_slice(&account.balance.atoms().to_be_bytes());
     buf.extend_from_slice(&account.nonce.to_be_bytes());
     buf.extend_from_slice(&account.staked.atoms().to_be_bytes());
-    buf.extend_from_slice(&account.stake_since.to_be_bytes());
     sha256(&buf)
 }
 
@@ -943,10 +1032,10 @@ mod tests {
     use vinx_core::{protocol::ProtocolVersion, Transaction};
     use vinx_crypto::{Address, KeyPair};
 
-    fn staker(state: &mut WorldState, stake: Amount) -> Address {
-        let addr = Address::from_public_key(&KeyPair::generate().public_key());
-        state.set_staked_for_test(&addr, stake);
-        addr
+    fn kp_addr() -> (KeyPair, Address) {
+        let kp = KeyPair::generate();
+        let addr = Address::from_public_key(&kp.public_key());
+        (kp, addr)
     }
 
     fn admin_state() -> (WorldState, KeyPair, Address) {
@@ -958,164 +1047,230 @@ mod tests {
         (state, admin_kp, admin_addr)
     }
 
-    // ─── Fonderie: melt / forge ──────────────────────────────────────────────
-
-    // At FORGE_RATE_BPS = 10 (0.1%), a Foundry of 1_000_000 VINX forges 1_000 VINX.
-    const FORGE_DIVISOR: u64 = 1_000; // 10_000 / FORGE_RATE_BPS
+    // ─── Fair launch: emission, fees, bond, unbonding, slashing ──────────────
+    use vinx_core::amount::{cumulative_emission_atoms, HALVING_PERIOD_SECS, MAX_SUPPLY_ATOMS};
+    use vinx_core::block::GENESIS_PREV_HASH;
+    use vinx_core::{BlockHeader, BlockSignature, SlashEvidence};
 
     #[test]
-    fn test_no_stakers_foundry_unchanged() {
+    fn test_first_block_sets_emission_epoch_and_emits_nothing() {
         let mut s = WorldState::new();
-        s.foundry = Amount::from_vinx(1_000_000);
-        s.block_height = 100;
-        let forged = s.distribute_staking_rewards();
-        assert_eq!(forged, Amount::ZERO);
-        assert_eq!(s.foundry, Amount::from_vinx(1_000_000));
+        s.foundry = Amount::from_atoms(MAX_SUPPLY_ATOMS);
+        let (_, producer) = kp_addr();
+        let (fees, emission) = s.settle_block(&producer, 1_000);
+        assert_eq!(fees, Amount::ZERO);
+        assert_eq!(emission, Amount::ZERO);
+        assert_eq!(s.emission_epoch_ts, 1_000);
+        assert_eq!(s.foundry.atoms(), MAX_SUPPLY_ATOMS);
     }
 
     #[test]
-    fn test_empty_foundry_forges_nothing() {
+    fn test_emission_rewards_producer_and_conserves_supply() {
         let mut s = WorldState::new();
-        let addr = staker(&mut s, Amount::from_vinx(1_000));
-        s.foundry = Amount::ZERO;
-        s.block_height = 100;
-        assert_eq!(s.distribute_staking_rewards(), Amount::ZERO);
-        assert_eq!(s.accounts[&addr].balance, Amount::ZERO);
+        s.foundry = Amount::from_atoms(MAX_SUPPLY_ATOMS);
+        let (_, producer) = kp_addr();
+        s.settle_block(&producer, 0); // establish epoch at t=0
+                                      // One full era later: half the supply is emitted to the producer.
+        let (_, emission) = s.settle_block(&producer, HALVING_PERIOD_SECS);
+        let expected = cumulative_emission_atoms(HALVING_PERIOD_SECS);
+        assert_eq!(emission.atoms(), expected);
+        assert_eq!(s.accounts[&producer].balance.atoms(), expected);
+        assert_eq!(s.foundry.atoms(), MAX_SUPPLY_ATOMS - expected);
+        assert_eq!(
+            s.circulating_supply.atoms() + s.foundry.atoms(),
+            MAX_SUPPLY_ATOMS
+        );
     }
 
     #[test]
-    fn test_single_staker_receives_forged_fraction() {
+    fn test_emission_is_not_weighted_by_bond() {
+        // A producer with zero stake still earns the full block emission.
         let mut s = WorldState::new();
-        let addr = staker(&mut s, Amount::from_vinx(1_000));
-        s.foundry = Amount::from_vinx(1_000_000);
-        s.block_height = 100;
-        let forged = s.distribute_staking_rewards();
-        let expected = Amount::from_vinx(1_000_000 / FORGE_DIVISOR); // 1_000 VINX
-        assert_eq!(forged, expected);
-        assert_eq!(s.accounts[&addr].balance, expected);
-        assert_eq!(s.foundry, Amount::from_vinx(1_000_000 - 1_000));
+        s.foundry = Amount::from_atoms(MAX_SUPPLY_ATOMS);
+        let (_, producer) = kp_addr();
+        s.settle_block(&producer, 0);
+        let (_, emission) = s.settle_block(&producer, HALVING_PERIOD_SECS / 8); // ~1 year
+        assert!(emission > Amount::ZERO);
+        assert_eq!(s.accounts[&producer].balance, emission);
     }
 
     #[test]
-    fn test_two_stakers_forge_proportional() {
+    fn test_fee_goes_to_producer_not_foundry() {
         let mut s = WorldState::new();
-        let alice = staker(&mut s, Amount::from_vinx(1_000));
-        let bob = staker(&mut s, Amount::from_vinx(3_000));
-        s.foundry = Amount::from_vinx(400_000); // forges 400 VINX
-        s.block_height = 100;
-        s.distribute_staking_rewards();
-        assert_eq!(s.accounts[&alice].balance, Amount::from_vinx(100));
-        assert_eq!(s.accounts[&bob].balance, Amount::from_vinx(300));
-    }
-
-    #[test]
-    fn test_no_forge_outside_interval() {
-        let mut s = WorldState::new();
-        let addr = staker(&mut s, Amount::from_vinx(1_000));
-        s.foundry = Amount::from_vinx(1_000_000);
-        s.block_height = 99;
-        assert_eq!(s.distribute_staking_rewards(), Amount::ZERO);
-        assert_eq!(s.accounts[&addr].balance, Amount::ZERO);
-    }
-
-    #[test]
-    fn test_warmup_excludes_just_in_time_staker() {
-        // A stake placed just before the distribution has not warmed up and
-        // earns nothing — the "just-in-time" staking exploit is closed.
-        let mut s = WorldState::new();
-        let addr = staker(&mut s, Amount::from_vinx(1_000));
-        s.accounts.get_mut(&addr).unwrap().stake_since = 99; // age 1 < warm-up
-        s.foundry = Amount::from_vinx(1_000_000);
-        s.block_height = 100;
-        let forged = s.distribute_staking_rewards();
-        assert_eq!(forged, Amount::ZERO);
-        assert_eq!(s.accounts[&addr].balance, Amount::ZERO);
-        assert_eq!(s.foundry, Amount::from_vinx(1_000_000)); // nothing left the Foundry
-    }
-
-    #[test]
-    fn test_warmup_boundary_is_eligible() {
-        // Held for exactly the warm-up period (age == STAKE_WARMUP_BLOCKS): eligible.
-        let mut s = WorldState::new();
-        let addr = staker(&mut s, Amount::from_vinx(1_000)); // stake_since = 0
-        s.foundry = Amount::from_vinx(1_000_000);
-        s.block_height = STAKE_WARMUP_BLOCKS;
-        let forged = s.distribute_staking_rewards();
-        assert!(forged > Amount::ZERO);
-        assert_eq!(s.accounts[&addr].balance, forged);
-    }
-
-    #[test]
-    fn test_only_warmed_up_stake_shares_the_pool() {
-        // A warmed-up staker and a fresh one: only the warmed-up stake counts,
-        // both in the eligibility filter and in the proportional denominator.
-        let mut s = WorldState::new();
-        let old = staker(&mut s, Amount::from_vinx(1_000));
-        let fresh = staker(&mut s, Amount::from_vinx(3_000));
-        s.accounts.get_mut(&old).unwrap().stake_since = 0; // age 100, eligible
-        s.accounts.get_mut(&fresh).unwrap().stake_since = 95; // age 5, excluded
-        s.foundry = Amount::from_vinx(1_000_000); // pool = 1_000 VINX
-        s.block_height = 100;
-        let forged = s.distribute_staking_rewards();
-        assert_eq!(s.accounts[&fresh].balance, Amount::ZERO);
-        // Denominator is eligible stake only → old takes the whole pool.
-        assert_eq!(s.accounts[&old].balance, Amount::from_vinx(1_000));
-        assert_eq!(forged, Amount::from_vinx(1_000));
-    }
-
-    #[test]
-    fn test_topup_advances_stake_since_capital_weighted() {
-        // A tiny early stake topped up by a large late deposit cannot keep the
-        // early seniority: stake_since moves to the capital-weighted time.
-        let mut s = WorldState::new();
-        let kp = KeyPair::generate();
-        let addr = Address::from_public_key(&kp.public_key());
-        s.credit_for_test(addr, Amount::from_vinx(10_000));
-
-        s.block_height = 0;
-        let tx0 = Transaction::new_stake(&kp, Amount::from_vinx(1), Amount::ZERO, 0);
-        s.apply_transaction(&tx0).unwrap();
-        assert_eq!(s.accounts[&addr].stake_since, 0);
-
-        s.block_height = 1_000;
-        let tx1 = Transaction::new_stake(&kp, Amount::from_vinx(999), Amount::ZERO, 1);
-        s.apply_transaction(&tx1).unwrap();
-        // new = 0 + (1000 - 0) * 999 / (1 + 999) = 999.
-        assert_eq!(s.accounts[&addr].stake_since, 999);
-    }
-
-    #[test]
-    fn test_forge_conserves_supply() {
-        let mut s = WorldState::new();
-        let _a = staker(&mut s, Amount::from_vinx(1_000));
-        s.foundry = Amount::from_vinx(1_000_000);
-        s.circulating_supply = Amount::from_vinx(1_000); // the staked tokens
-        let before = s.circulating_supply.atoms() + s.foundry.atoms();
-        s.block_height = 100;
-        let forged = s.distribute_staking_rewards();
-        assert!(forged > Amount::ZERO);
-        assert_eq!(s.circulating_supply.atoms() + s.foundry.atoms(), before);
-    }
-
-    #[test]
-    fn test_fee_melts_into_foundry() {
-        let mut s = WorldState::new();
-        let sender_kp = KeyPair::generate();
-        let sender = Address::from_public_key(&sender_kp.public_key());
-        s.credit_for_test(sender.clone(), Amount::from_vinx(1_000));
+        let (sender_kp, sender) = kp_addr();
+        let (_, receiver) = kp_addr();
+        let (_, producer) = kp_addr();
+        s.credit_for_test(sender, Amount::from_vinx(1_000));
         s.circulating_supply = Amount::from_vinx(1_000);
-        s.foundry = Amount::from_vinx(99_000);
-        let receiver = Address::from_public_key(&KeyPair::generate().public_key());
         let amount = Amount::from_vinx(100);
         let fee = amount.calculate_fee(s.base_fee);
         let tx = Transaction::new_transfer(&sender_kp, receiver, amount, fee, 0);
         let foundry_before = s.foundry;
         s.apply_transaction(&tx).unwrap();
-        assert_eq!(s.foundry, foundry_before.saturating_add(fee));
-        assert_eq!(
-            s.circulating_supply.atoms() + s.foundry.atoms(),
-            Amount::from_vinx(100_000).atoms()
-        );
+        // Fee is collected, not melted — the Foundry does not change.
+        assert_eq!(s.foundry, foundry_before);
+        // Settling credits the producer with the fee (epoch established, no emission).
+        s.settle_block(&producer, 100);
+        assert_eq!(s.accounts[&producer].balance, fee);
+        // The fee just changed hands: circulation is unchanged.
+        assert_eq!(s.circulating_supply, Amount::from_vinx(1_000));
+    }
+
+    #[test]
+    fn test_add_validator_requires_bond() {
+        let (mut state, admin_kp, _) = admin_state();
+        let (_, candidate) = kp_addr();
+        // No bond → rejected.
+        let tx = Transaction::new_add_validator(&admin_kp, candidate, 0);
+        assert!(state.apply_transaction(&tx).is_err());
+        // Post the minimum bond, then admission succeeds.
+        state.set_staked_for_test(&candidate, Amount::from_atoms(MIN_VALIDATOR_BOND_ATOMS));
+        let tx = Transaction::new_add_validator(&admin_kp, candidate, 0);
+        state.apply_transaction(&tx).unwrap();
+        assert!(state.validator_set.contains(&candidate));
+    }
+
+    #[test]
+    fn test_unstake_enters_unbonding_then_matures() {
+        let mut s = WorldState::new();
+        let (kp, addr) = kp_addr();
+        s.credit_for_test(addr, Amount::from_vinx(1_000));
+        s.apply_transaction(&Transaction::new_stake(
+            &kp,
+            Amount::from_vinx(500),
+            Amount::ZERO,
+            0,
+        ))
+        .unwrap();
+        assert_eq!(s.accounts[&addr].staked, Amount::from_vinx(500));
+
+        // Unstake at ts = 1000 → enters the unbonding delay, NOT credited yet.
+        s.set_block_context(1_000);
+        s.apply_transaction(&Transaction::new_unstake(
+            &kp,
+            Amount::from_vinx(500),
+            Amount::ZERO,
+            1,
+        ))
+        .unwrap();
+        assert_eq!(s.accounts[&addr].staked, Amount::ZERO);
+        assert_eq!(s.accounts[&addr].balance, Amount::from_vinx(500)); // still not back
+        assert_eq!(s.pending_unbonds.len(), 1);
+
+        // Just before unlock: nothing matures.
+        s.settle_block(&addr, 1_000 + UNBONDING_SECS - 1);
+        assert_eq!(s.pending_unbonds.len(), 1);
+        // At unlock: the bond returns to the balance.
+        s.settle_block(&addr, 1_000 + UNBONDING_SECS);
+        assert!(s.pending_unbonds.is_empty());
+        assert_eq!(s.accounts[&addr].balance, Amount::from_vinx(1_000));
+    }
+
+    #[test]
+    fn test_active_validator_cannot_unstake_below_bond() {
+        let mut s = WorldState::new();
+        let (kp, addr) = kp_addr();
+        let bond = MIN_VALIDATOR_BOND_ATOMS;
+        s.credit_for_test(addr, Amount::from_atoms(bond * 2));
+        s.apply_transaction(&Transaction::new_stake(
+            &kp,
+            Amount::from_atoms(bond),
+            Amount::ZERO,
+            0,
+        ))
+        .unwrap();
+        s.validator_set = ValidatorSet::single(addr);
+        s.set_block_context(1_000);
+        // Unstaking any of the bond would drop below the minimum → rejected.
+        let bad = Transaction::new_unstake(&kp, Amount::from_atoms(bond / 2), Amount::ZERO, 1);
+        assert!(s.apply_transaction(&bad).is_err());
+    }
+
+    // Builds a signed header at `height` with a distinguishing `state_root`.
+    fn signed_header(
+        kp: &KeyPair,
+        validator: Address,
+        height: u64,
+        tag: u8,
+    ) -> (BlockHeader, BlockSignature) {
+        let header = BlockHeader {
+            height,
+            prev_hash: GENESIS_PREV_HASH,
+            timestamp: 0,
+            validator,
+            tx_count: 0,
+            state_root: [tag; 32],
+            base_fee: 0,
+            receipts_root: [0u8; 32],
+        };
+        let sig = BlockSignature {
+            validator,
+            pub_key: kp.public_key(),
+            signature: kp.sign(&header.hash()),
+        };
+        (header, sig)
+    }
+
+    #[test]
+    fn test_slash_rejects_forged_evidence() {
+        // An attacker who does not hold the victim's key cannot fabricate evidence:
+        // the signatures won't verify against the victim's public key.
+        let (reporter_kp, reporter) = kp_addr();
+        let (victim_kp, victim) = kp_addr();
+        let attacker_kp = KeyPair::generate();
+        let mut s = WorldState::new();
+        s.credit_for_test(reporter, Amount::from_vinx(10));
+        s.set_staked_for_test(&victim, Amount::from_vinx(1_000));
+        s.validator_set = ValidatorSet::new(vec![victim, reporter]);
+
+        let (header_a, _) = signed_header(&victim_kp, victim, 5, 0xAA);
+        let (header_b, _) = signed_header(&victim_kp, victim, 5, 0xBB);
+        // Forged: claim the victim's pubkey but sign with the attacker's key.
+        let forge = |h: &BlockHeader| BlockSignature {
+            validator: victim,
+            pub_key: victim_kp.public_key(),
+            signature: attacker_kp.sign(&h.hash()),
+        };
+        let evidence = SlashEvidence {
+            header_a: header_a.clone(),
+            header_b: header_b.clone(),
+            sig_a: forge(&header_a),
+            sig_b: forge(&header_b),
+        };
+        let tx = Transaction::new_slash_validator(&reporter_kp, victim, &evidence, 0);
+        assert!(s.apply_transaction(&tx).is_err());
+        // Victim keeps its bond and its seat.
+        assert_eq!(s.accounts[&victim].staked, Amount::from_vinx(1_000));
+        assert!(s.validator_set.contains(&victim));
+    }
+
+    #[test]
+    fn test_slash_valid_equivocation_burns_bond() {
+        let (reporter_kp, reporter) = kp_addr();
+        let (victim_kp, victim) = kp_addr();
+        let mut s = WorldState::new();
+        s.credit_for_test(reporter, Amount::from_vinx(10));
+        s.set_staked_for_test(&victim, Amount::from_vinx(1_000));
+        s.validator_set = ValidatorSet::new(vec![victim, reporter]);
+
+        // Two genuinely-signed, different headers at the same height = equivocation.
+        let (header_a, sig_a) = signed_header(&victim_kp, victim, 5, 0xAA);
+        let (header_b, sig_b) = signed_header(&victim_kp, victim, 5, 0xBB);
+        let evidence = SlashEvidence {
+            header_a,
+            header_b,
+            sig_a,
+            sig_b,
+        };
+        let tx = Transaction::new_slash_validator(&reporter_kp, victim, &evidence, 0);
+        s.apply_transaction(&tx).unwrap();
+
+        // 100% of the bond slashed: victim loses everything and its seat.
+        assert_eq!(s.accounts[&victim].staked, Amount::ZERO);
+        assert!(!s.validator_set.contains(&victim));
+        // 10% bounty to the reporter (100 VINX), 90% (900 VINX) melted to the Foundry.
+        assert_eq!(s.accounts[&reporter].balance, Amount::from_vinx(110));
+        assert_eq!(s.foundry, Amount::from_vinx(900));
     }
 
     // ─── protocol upgrades ───────────────────────────────────────────────────

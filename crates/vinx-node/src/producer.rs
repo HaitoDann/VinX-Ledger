@@ -8,8 +8,8 @@ use vinx_core::{amount::Amount, Block, BlockHeader, BlockSignature, Transaction,
 use vinx_crypto::sha256;
 use vinx_state::WorldState;
 
-/// Produces the next block: applies mempool transactions, distributes staking rewards,
-/// commits to the chain, and updates the world state.
+/// Produces the next block: applies mempool transactions, rewards the producer
+/// (collected fees + work emission), commits to the chain, and updates the world state.
 ///
 /// The producing node must be the expected round-robin leader for `next_height`.
 /// The block is signed by the proposer (counts as one co-signature toward quorum).
@@ -31,6 +31,16 @@ pub fn produce_block(
             "not the leader for block {next_height}: expected {expected_leader}"
         )));
     }
+
+    // Enforce timestamp monotonicity (block timestamps are the protocol clock: they
+    // drive emission and unbonding), then record it as the block context so unstakes
+    // in this block compute a real-time unlock.
+    let prev_ts = chain
+        .get_block(chain.tip_height())
+        .map(|b| b.header.timestamp)
+        .unwrap_or(0);
+    let timestamp = timestamp.max(prev_ts.saturating_add(1));
+    state.set_block_context(timestamp);
 
     // Flush staged (unverified) transactions via parallel sig verification pipeline
     let admitted = mempool.flush_staged();
@@ -84,16 +94,17 @@ pub fn produce_block(
         tracing::warn!(rejected, "Transactions dropped from block");
     }
 
-    // Advance block height before distributing so the interval check sees the new height
+    // Advance block height before settling so height-based timers see the new height
     state.block_height = next_height;
 
     // Activate any pending protocol upgrade whose height has been reached
     state.check_upgrade_activation();
 
-    // Forge staking rewards out of the Foundry every STAKING_DISTRIBUTION_INTERVAL blocks
-    let rewards = state.distribute_staking_rewards();
-    if rewards > Amount::ZERO {
-        tracing::debug!(rewards = %rewards, height = next_height, "Staking rewards forged");
+    // Reward the producer for its work: collected fees + work emission forged from the
+    // Foundry. Also matures any unbonds due at this block's timestamp.
+    let (fees, emission) = state.settle_block(&config.validator_address, timestamp);
+    if fees > Amount::ZERO || emission > Amount::ZERO {
+        tracing::debug!(fees = %fees, emission = %emission, height = next_height, "Producer rewarded");
     }
 
     // Compute Merkle root over all account states after all mutations
@@ -167,6 +178,13 @@ fn produce_block_inner(
     let next_height = chain.tip_height() + 1;
     let prev_hash = chain.tip_hash();
 
+    let prev_ts = chain
+        .get_block(chain.tip_height())
+        .map(|b| b.header.timestamp)
+        .unwrap_or(0);
+    let timestamp = timestamp.max(prev_ts.saturating_add(1));
+    state.set_block_context(timestamp);
+
     let admitted = mempool.flush_staged();
     if admitted > 0 {
         tracing::debug!(admitted, "Staged transactions verified and admitted");
@@ -203,9 +221,9 @@ fn produce_block_inner(
     state.block_height = next_height;
     state.check_upgrade_activation();
 
-    let rewards = state.distribute_staking_rewards();
-    if rewards > Amount::ZERO {
-        tracing::debug!(rewards = %rewards, "Staking rewards forged");
+    let (fees, emission) = state.settle_block(&config.validator_address, timestamp);
+    if fees > Amount::ZERO || emission > Amount::ZERO {
+        tracing::debug!(fees = %fees, emission = %emission, "Producer rewarded (backup)");
     }
 
     let state_root = state.compute_state_root();
@@ -414,7 +432,7 @@ mod tests {
     }
 
     #[test]
-    fn test_fee_melts_into_foundry_on_block() {
+    fn test_fee_goes_to_producer_on_block() {
         let (mut state, mut chain, mut mempool, config) = setup();
 
         let sender_kp = KeyPair::generate();
@@ -428,6 +446,8 @@ mod tests {
         mempool.add(tx).unwrap();
 
         let foundry_before = state.foundry_balance();
+        let producer = config.validator_address;
+        let producer_before = state.account_balance(&producer);
 
         produce_block(
             &mut state,
@@ -439,11 +459,16 @@ mod tests {
         )
         .unwrap();
 
-        // 100% of the fee melts into the Foundry; the validator earns no direct cut.
+        // 100% of the fee goes to the block producer. The Foundry is untouched by fees;
+        // the first block only establishes the emission epoch (forging nothing yet).
         assert_eq!(
-            state.foundry_balance().checked_sub(foundry_before).unwrap(),
+            state
+                .account_balance(&producer)
+                .checked_sub(producer_before)
+                .unwrap(),
             fee
         );
+        assert_eq!(state.foundry_balance(), foundry_before);
     }
 
     #[test]

@@ -427,6 +427,7 @@ async fn dispatch_message(
             let applied = {
                 let mut sg = state.write().await;
                 let snapshot = sg.clone();
+                sg.set_block_context(block.header.timestamp);
                 let mut ok = true;
                 for tx in &block.transactions {
                     if let Err(e) = sg.apply_transaction(tx) {
@@ -439,7 +440,7 @@ async fn dispatch_message(
                 if ok {
                     sg.block_height = height;
                     sg.check_upgrade_activation();
-                    let _r = sg.distribute_staking_rewards();
+                    let _ = sg.settle_block(&block.header.validator, block.header.timestamp);
                     let root = sg.compute_state_root();
                     if root != block.header.state_root {
                         warn!(height, "P2P block state_root mismatch, rolling back");
@@ -584,6 +585,7 @@ async fn dispatch_message(
                 let ok = {
                     let mut sg = state.write().await;
                     let snapshot = sg.clone();
+                    sg.set_block_context(block.header.timestamp);
                     let mut ok = true;
                     for tx in &block.transactions {
                         if let Err(e) = sg.apply_transaction(tx) {
@@ -596,7 +598,7 @@ async fn dispatch_message(
                     if ok {
                         sg.block_height = height;
                         sg.check_upgrade_activation();
-                        let _rw = sg.distribute_staking_rewards();
+                        let _ = sg.settle_block(&block.header.validator, block.header.timestamp);
                         let root = sg.compute_state_root();
                         if root != block.header.state_root {
                             warn!(height, "SyncResponse state_root mismatch");

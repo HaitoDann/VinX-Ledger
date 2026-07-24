@@ -5,48 +5,65 @@ use std::fmt;
 pub const DECIMALS: u32 = 18;
 pub const DECIMAL_FACTOR: u128 = 1_000_000_000_000_000_000; // 10^18
 
-/// Absolute supply cap: 100 billion VinX — immutable by protocol. "The total metal."
+/// Absolute supply cap: 100 billion VinX — immutable by protocol.
 ///
-/// VinX has no burn: the supply is conserved forever. At any block,
-/// `circulating_supply + foundry == MAX_SUPPLY_ATOMS`. Value cycles endlessly:
-/// fees *melt* back into the Foundry, and staking rewards are *forged* out of it.
+/// VinX has no burn and no pre-mine: the supply is conserved forever. At any block,
+/// `circulating_supply + foundry == MAX_SUPPLY_ATOMS`. It all starts in the Foundry and
+/// enters circulation only through work emission (block production).
 pub const MAX_SUPPLY_ATOMS: u128 = 100_000_000_000 * DECIMAL_FACTOR;
 
-/// Genesis allocation forged to the founder account: 1 billion VinX (1% of supply),
-/// to bootstrap circulation and seed the first economy.
-pub const FOUNDER_ALLOCATION_ATOMS: u128 = 1_000_000_000 * DECIMAL_FACTOR;
+/// Genesis reserve sealed in the Foundry: the **entire** supply (100 billion VinX).
+///
+/// VinX is a **fair launch**: there is no pre-mine and no founder allocation. At
+/// genesis, circulation is zero and 100% of the supply sits in the Foundry — the
+/// emission reserve. Tokens enter circulation *only* by rewarding the work of block
+/// producers (see [`cumulative_emission_atoms`]).
+pub const FOUNDRY_GENESIS_ATOMS: u128 = MAX_SUPPLY_ATOMS;
 
-/// Genesis reserve sealed in the Foundry: 99 billion VinX (99% of supply).
-/// Forged into circulation over time as staking rewards; refilled by melted fees.
-pub const FOUNDRY_GENESIS_ATOMS: u128 = 99_000_000_000 * DECIMAL_FACTOR;
-
-/// Transaction fee: 0.05% = 5 / 10_000.
-pub const FEE_NUMERATOR: u128 = 5;
-pub const FEE_DENOMINATOR: u128 = 10_000;
-
-/// Default fee floor: 0.0001 VinX.
+/// Flat base transaction fee: 0.0001 VinX. Charged as an absolute forfait (times the
+/// tx-type weight and the congestion multiplier), **independent of the amount moved** —
+/// processing a transaction costs the same whether it carries 1 or 1,000,000 VinX.
+/// Governable via `UpdateFeeFloor`. 100% of every fee goes to the block producer.
 pub const DEFAULT_FEE_FLOOR_ATOMS: u128 = DECIMAL_FACTOR / 10_000;
 
-/// Staking rewards distributed every N blocks (~17 minutes at 10s/block).
-pub const STAKING_DISTRIBUTION_INTERVAL: u64 = 100;
-
-/// Warm-up: a stake must be held for at least this many blocks before it earns
-/// any reward. Set to one full distribution epoch so a stake must weather an
-/// entire epoch. This closes the "just-in-time" staking exploit — staking one
-/// block before a distribution, collecting, and unstaking right after now earns
-/// nothing. Combined with capital-weighted `stake_since` on top-ups, a large
-/// late deposit cannot inherit a tiny early stake's seniority either.
-pub const STAKE_WARMUP_BLOCKS: u64 = STAKING_DISTRIBUTION_INTERVAL;
-
-/// Forge rate: fraction of the Foundry forged into staking rewards at each
-/// distribution, in basis points (10 = 0.1%). Because forging takes a *fraction*
-/// of the Foundry and fees continuously melt back in, the Foundry never empties —
-/// the "infinite cycle". Tunable via a protocol upgrade.
-pub const FORGE_RATE_BPS: u128 = 10;
-pub const FORGE_RATE_DENOM: u128 = 10_000;
-
-/// Minimum amount that can be staked: 1 VinX.
+/// Minimum amount that can be staked in a single transaction: 1 VinX.
 pub const MIN_STAKE_ATOMS: u128 = DECIMAL_FACTOR;
+
+// ─── Emission by work — fair launch ────────────────────────────────────────────
+
+/// Halving period: the emission rate is divided by two every 8 real-time years.
+/// Measured in **seconds** (block timestamps), not block height, because the block
+/// cadence is demand-adaptive and height is not a clock. 8 × 365.25 × 24 × 3600.
+pub const HALVING_PERIOD_SECS: u64 = 252_460_800;
+
+/// Total to emit over the first halving era (8 years): half of the supply.
+/// Each subsequent era emits half the previous one, so the sum over all eras is
+/// exactly `MAX_SUPPLY_ATOMS` — the whole supply is emitted, ever more slowly.
+pub const ERA0_EMISSION_ATOMS: u128 = MAX_SUPPLY_ATOMS / 2;
+
+// ─── Validator bond & slashing ─────────────────────────────────────────────────
+
+/// Minimum bond required to be admitted to the validator set (100,000 VinX).
+/// The genesis validator is grandfathered (it bootstraps with no balance). The bond
+/// is a security deposit — skin in the game slashed on equivocation — it earns no
+/// yield. Governable via governance.
+pub const MIN_VALIDATOR_BOND_ATOMS: u128 = 100_000 * DECIMAL_FACTOR;
+
+/// Unbonding delay: withdrawn bond returns to the balance only after this much
+/// **real time** (3 days), measured on block timestamps. During this window the
+/// funds remain slashable, so a validator cannot equivocate then exit before the
+/// evidence lands.
+pub const UNBONDING_SECS: u64 = 3 * 24 * 3_600;
+
+/// Basis-point denominator (10_000 = 100%).
+pub const BPS_DENOM: u128 = 10_000;
+
+/// Fraction of the bond destroyed on a proven equivocation (100%).
+pub const SLASH_EQUIVOCATION_BPS: u128 = 10_000;
+
+/// Fraction of the slashed amount paid to the reporter as a bounty (10%).
+/// The remainder melts back into the Foundry.
+pub const SLASH_BOUNTY_BPS: u128 = 1_000;
 
 /// Number of recent blocks to retain with full data (header + transactions + signatures).
 /// Older blocks are compacted: transactions and signatures are dropped, only the header
@@ -116,16 +133,40 @@ impl Amount {
         Amount(self.0.saturating_add(other.0))
     }
 
-    /// Computes the protocol fee for a transfer of this amount.
-    /// Returns the higher of 0.05% of the amount or the floor.
-    pub fn calculate_fee(self, floor: Self) -> Self {
-        let pct = Amount(self.0 * FEE_NUMERATOR / FEE_DENOMINATOR);
-        if pct >= floor {
-            pct
-        } else {
-            floor
+    /// Protocol fee for a standard transaction: a **flat forfait**, independent of
+    /// the amount moved. `base_fee` already folds in the congestion multiplier
+    /// (see `WorldState::update_base_fee`); the tx-type weight for a transfer is 1.
+    /// The receiver of `self` (the amount) is ignored on purpose — a payment rail
+    /// prices by resource consumed, not by value transported.
+    pub fn calculate_fee(self, base_fee: Self) -> Self {
+        base_fee
+    }
+}
+
+/// Cumulative VinX (in atoms) that should have been emitted `elapsed_secs` after the
+/// emission epoch (the first block's timestamp).
+///
+/// Emission follows a discrete **halving** schedule: era `e` lasts
+/// [`HALVING_PERIOD_SECS`] and emits `ERA0_EMISSION_ATOMS >> e` linearly across the
+/// era; each era emits half the previous one, so the sum over all eras converges to
+/// [`MAX_SUPPLY_ATOMS`]. The computation is **pure integer arithmetic** — fully
+/// deterministic across platforms (no floating point), which consensus requires.
+pub fn cumulative_emission_atoms(elapsed_secs: u64) -> u128 {
+    let h = HALVING_PERIOD_SECS as u128;
+    let full_eras = elapsed_secs / HALVING_PERIOD_SECS;
+    let rem = (elapsed_secs % HALVING_PERIOD_SECS) as u128;
+    let mut total: u128 = 0;
+    let mut era_amount = ERA0_EMISSION_ATOMS;
+    for _ in 0..full_eras {
+        total = total.saturating_add(era_amount);
+        era_amount /= 2;
+        if era_amount == 0 {
+            return total; // schedule exhausted (dust) — nothing more to emit, ever
         }
     }
+    // Linear share of the current (partial) era. No overflow: era_amount ≤ 5e28,
+    // rem < h ≈ 2.5e8, product ≤ 1.25e37 < u128::MAX.
+    total.saturating_add(era_amount * rem / h)
 }
 
 impl fmt::Display for Amount {
@@ -154,12 +195,52 @@ mod tests {
     }
 
     #[test]
-    fn test_genesis_allocations_sum_to_max_supply() {
-        // Founder circulation + Foundry reserve == the full immutable supply.
-        let founder = Amount::from_atoms(FOUNDER_ALLOCATION_ATOMS);
-        let foundry = Amount::from_atoms(FOUNDRY_GENESIS_ATOMS);
-        let total = founder.checked_add(foundry).unwrap();
-        assert_eq!(total, Amount::MAX_SUPPLY);
+    fn test_genesis_foundry_holds_entire_supply() {
+        // Fair launch: no pre-mine — the whole supply starts in the Foundry.
+        assert_eq!(FOUNDRY_GENESIS_ATOMS, MAX_SUPPLY_ATOMS);
+    }
+
+    #[test]
+    fn test_emission_epoch_start_is_zero() {
+        assert_eq!(cumulative_emission_atoms(0), 0);
+    }
+
+    #[test]
+    fn test_emission_first_era_is_half_supply() {
+        // After one full 8-year era, exactly half the supply has been emitted.
+        assert_eq!(
+            cumulative_emission_atoms(HALVING_PERIOD_SECS),
+            ERA0_EMISSION_ATOMS
+        );
+        assert_eq!(
+            cumulative_emission_atoms(HALVING_PERIOD_SECS),
+            MAX_SUPPLY_ATOMS / 2
+        );
+    }
+
+    #[test]
+    fn test_emission_halves_each_era() {
+        // Era 0 → 50 Md, era 1 → +25 Md (75 Md total), era 2 → +12.5 Md (87.5 Md).
+        let one = cumulative_emission_atoms(HALVING_PERIOD_SECS);
+        let two = cumulative_emission_atoms(2 * HALVING_PERIOD_SECS);
+        let three = cumulative_emission_atoms(3 * HALVING_PERIOD_SECS);
+        assert_eq!(two - one, ERA0_EMISSION_ATOMS / 2);
+        assert_eq!(three - two, ERA0_EMISSION_ATOMS / 4);
+    }
+
+    #[test]
+    fn test_emission_monotonic_and_bounded() {
+        let mut prev = 0u128;
+        for years in 0..=120 {
+            let t = years * (HALVING_PERIOD_SECS / 8); // one-year steps
+            let e = cumulative_emission_atoms(t);
+            assert!(e >= prev, "emission must be non-decreasing");
+            assert!(
+                e <= MAX_SUPPLY_ATOMS,
+                "emission never exceeds the supply cap"
+            );
+            prev = e;
+        }
     }
 
     #[test]
@@ -190,21 +271,16 @@ mod tests {
     }
 
     #[test]
-    fn test_fee_uses_percentage_for_large_amount() {
-        // 0.05% of 1000 VinX = 0.5 VinX
-        let amount = Amount::from_vinx(1_000);
-        let floor = Amount::from_atoms(DEFAULT_FEE_FLOOR_ATOMS); // 0.0001 VinX
-        let fee = amount.calculate_fee(floor);
-        assert_eq!(fee, Amount::from_atoms(DECIMAL_FACTOR / 2)); // 0.5 VinX
-    }
-
-    #[test]
-    fn test_fee_uses_floor_for_small_amount() {
-        // 0.05% of 0.001 VinX = 0.0000005 VinX < floor of 0.0001 VinX
-        let amount = Amount::from_atoms(DECIMAL_FACTOR / 1_000);
-        let floor = Amount::from_atoms(DEFAULT_FEE_FLOOR_ATOMS);
-        let fee = amount.calculate_fee(floor);
-        assert_eq!(fee, floor);
+    fn test_fee_is_flat_regardless_of_amount() {
+        // The flat forfait is independent of the amount moved: sending 0.001 VinX
+        // or 1000 VinX costs exactly the base fee.
+        let base = Amount::from_atoms(DEFAULT_FEE_FLOOR_ATOMS); // 0.0001 VinX
+        assert_eq!(Amount::from_vinx(1_000).calculate_fee(base), base);
+        assert_eq!(
+            Amount::from_atoms(DECIMAL_FACTOR / 1_000).calculate_fee(base),
+            base
+        );
+        assert_eq!(Amount::ZERO.calculate_fee(base), base);
     }
 
     #[test]

@@ -1,15 +1,15 @@
 use crate::WorldState;
-use vinx_core::{
-    amount::{FOUNDER_ALLOCATION_ATOMS, FOUNDRY_GENESIS_ATOMS},
-    Account, Amount, ValidatorSet,
-};
+use vinx_core::{amount::FOUNDRY_GENESIS_ATOMS, Amount, ValidatorSet};
 use vinx_crypto::Address;
 
 pub struct GenesisConfig {
-    /// Founder account — forged 1% of supply (1 billion VinX) at block 0 to bootstrap
-    /// circulation, and holds the admin key for governance.
+    /// Admin account — holds the governance key. It receives **no** genesis allocation
+    /// (fair launch: no pre-mine); it may hold a zero balance and still govern, since
+    /// governance transactions are fee-exempt.
     pub admin_address: Address,
-    /// Initial PoA validator — the node that proposes block 1 and beyond.
+    /// Initial PoA validator — proposes block 1 and beyond. Grandfathered past the
+    /// bond requirement (it bootstraps with no balance and earns its first VinX by
+    /// producing blocks).
     pub validator_address: Address,
     /// Chain ID for replay protection (CHAIN_ID_MAINNET / TESTNET / DEVNET).
     pub chain_id: u32,
@@ -17,21 +17,16 @@ pub struct GenesisConfig {
 
 /// Builds the initial chain state from the genesis configuration.
 ///
-/// The 100 billion VinX are forged once: 1 billion (1%) into the founder's account
-/// to seed circulation, and 99 billion (99%) sealed in the Foundry. From then on the
-/// supply only cycles — fees melt into the Foundry, staking rewards are forged out.
+/// **Fair launch — no pre-mine.** All 100 billion VinX sit in the Foundry at genesis
+/// and circulation starts at zero. Tokens enter circulation only by rewarding the work
+/// of block producers (work emission), and once the Foundry is drained, transaction
+/// fees become the validators' only reward.
 pub fn create_genesis_state(config: &GenesisConfig) -> WorldState {
     let mut state = WorldState::new();
 
-    // 1 billion VinX forged to the founder — circulating from block 0.
-    state.insert_account(Account::new_with_balance(
-        config.admin_address,
-        Amount::from_atoms(FOUNDER_ALLOCATION_ATOMS),
-    ));
-    state.circulating_supply = Amount::from_atoms(FOUNDER_ALLOCATION_ATOMS);
-
-    // 99 billion VinX sealed in the Foundry — forged into circulation over time.
+    // The entire supply is sealed in the Foundry; nothing circulates yet.
     state.foundry = Amount::from_atoms(FOUNDRY_GENESIS_ATOMS);
+    state.circulating_supply = Amount::ZERO;
 
     state.block_height = 0;
     // Admin address is stored on-chain for governance operations (validators, upgrades).
@@ -46,7 +41,7 @@ pub fn create_genesis_state(config: &GenesisConfig) -> WorldState {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use vinx_core::amount::{FOUNDER_ALLOCATION_ATOMS, FOUNDRY_GENESIS_ATOMS, MAX_SUPPLY_ATOMS};
+    use vinx_core::amount::MAX_SUPPLY_ATOMS;
     use vinx_core::CHAIN_ID_DEVNET;
     use vinx_crypto::KeyPair;
 
@@ -64,36 +59,30 @@ mod tests {
     }
 
     #[test]
-    fn test_founder_receives_1_billion_vinx() {
+    fn test_no_premine_admin_balance_is_zero() {
+        // Fair launch: the admin/founder receives nothing at genesis.
         let (state, admin) = genesis();
-        assert_eq!(
-            state.account_balance(&admin).atoms(),
-            FOUNDER_ALLOCATION_ATOMS
-        );
+        assert_eq!(state.account_balance(&admin), Amount::ZERO);
     }
 
     #[test]
-    fn test_foundry_holds_99_billion_at_genesis() {
+    fn test_foundry_holds_entire_supply_at_genesis() {
         let (state, _) = genesis();
-        assert_eq!(state.foundry.atoms(), FOUNDRY_GENESIS_ATOMS);
+        assert_eq!(state.foundry.atoms(), MAX_SUPPLY_ATOMS);
     }
 
     #[test]
-    fn test_circulating_supply_at_genesis() {
+    fn test_circulating_supply_is_zero_at_genesis() {
         let (state, _) = genesis();
-        assert_eq!(state.circulating_supply.atoms(), FOUNDER_ALLOCATION_ATOMS);
+        assert_eq!(state.circulating_supply, Amount::ZERO);
     }
 
     #[test]
     fn test_circulation_plus_foundry_equals_max_supply() {
-        // The founding invariant of the melt/forge cycle.
+        // The founding invariant: 0 circulating + 100 Md Foundry == the whole supply.
         let (state, _) = genesis();
         assert_eq!(
             state.circulating_supply.atoms() + state.foundry.atoms(),
-            MAX_SUPPLY_ATOMS
-        );
-        assert_eq!(
-            FOUNDER_ALLOCATION_ATOMS + FOUNDRY_GENESIS_ATOMS,
             MAX_SUPPLY_ATOMS
         );
     }

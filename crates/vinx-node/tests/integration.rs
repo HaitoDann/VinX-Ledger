@@ -608,12 +608,21 @@ async fn test_admin_action_adds_validator() {
     let admin_addr = Address::from_public_key(&admin_kp.public_key());
     let new_val_addr = Address::from_public_key(&new_val_kp.public_key());
 
-    // Override admin address in state and credit the admin account
+    let bond = vinx_core::amount::MIN_VALIDATOR_BOND_ATOMS;
+
+    // Override admin address, credit the admin, and fund the candidate so it can bond.
     {
         let mut s = node.state.write().await;
         s.admin_address = Some(admin_addr.clone());
         s.credit_for_test(admin_addr.clone(), Amount::from_vinx(1_000));
+        s.credit_for_test(new_val_addr.clone(), Amount::from_atoms(bond));
     }
+
+    // The candidate posts the minimum validator bond (required for admission).
+    let stake_tx =
+        vinx_core::Transaction::new_stake(&new_val_kp, Amount::from_atoms(bond), Amount::ZERO, 0);
+    node.mempool.write().await.add(stake_tx).unwrap();
+    node.tick().await.expect("tick bond");
 
     // Build AdminAction tx to add new_val_addr as validator
     let action = vinx_core::GovernanceAction::AddValidator(new_val_addr.clone());

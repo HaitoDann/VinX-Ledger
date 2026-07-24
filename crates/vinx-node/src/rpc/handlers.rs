@@ -802,12 +802,11 @@ pub async fn get_account_proof(
         .map(|a| {
             // Must match vinx_state::hash_account exactly (light-client leaf hash).
             let addr = a.address.as_bytes();
-            let mut buf = Vec::with_capacity(addr.len() + 40);
+            let mut buf = Vec::with_capacity(addr.len() + 32);
             buf.extend_from_slice(addr);
             buf.extend_from_slice(&a.balance.atoms().to_be_bytes());
             buf.extend_from_slice(&a.nonce.to_be_bytes());
             buf.extend_from_slice(&a.staked.atoms().to_be_bytes());
-            buf.extend_from_slice(&a.stake_since.to_be_bytes());
             sha256(&buf)
         })
         .collect();

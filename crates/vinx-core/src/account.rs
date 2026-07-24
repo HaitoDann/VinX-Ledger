@@ -7,9 +7,11 @@ pub struct Account {
     pub address: Address,
     pub balance: Amount,
     pub nonce: u64,
+    /// Bond posted to secure a validator seat. Earns no yield — it is skin in the
+    /// game, slashable on equivocation. Withdrawing it goes through the unbonding
+    /// delay (see `WorldState::pending_unbonds`), so it is not credited back here
+    /// immediately on unstake.
     pub staked: Amount,
-    /// Block height when this account first staked. Reset to 0 on full unstake.
-    pub stake_since: u64,
 }
 
 impl Account {
@@ -19,7 +21,6 @@ impl Account {
             balance: Amount::ZERO,
             nonce: 0,
             staked: Amount::ZERO,
-            stake_since: 0,
         }
     }
 
@@ -29,7 +30,6 @@ impl Account {
             balance,
             nonce: 0,
             staked: Amount::ZERO,
-            stake_since: 0,
         }
     }
 
@@ -53,7 +53,6 @@ mod tests {
         assert_eq!(acc.balance, Amount::ZERO);
         assert_eq!(acc.staked, Amount::ZERO);
         assert_eq!(acc.nonce, 0);
-        assert_eq!(acc.stake_since, 0);
     }
 
     #[test]
