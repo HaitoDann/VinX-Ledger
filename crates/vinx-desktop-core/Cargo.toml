@@ -1,0 +1,14 @@
+[package]
+name = "vinx-desktop-core"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+description = "Wallet/keystore/tx-building logic shared by the VinX desktop app (Tauri-agnostic)."
+
+[dependencies]
+vinx-crypto = { path = "../vinx-crypto" }
+vinx-core = { path = "../vinx-core" }
+serde = { workspace = true }
+serde_json = { workspace = true }
+hex = { workspace = true }
+thiserror = { workspace = true }

@@ -1,0 +1,150 @@
+<!doctype html>
+<html lang="fr">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>VinX Wallet</title>
+    <link rel="stylesheet" href="styles.css" />
+  </head>
+  <body>
+    <header class="topbar">
+      <div class="brand"><span class="logo">V</span> VinX Wallet</div>
+      <div class="node">
+        <input id="node-url" type="text" value="http://127.0.0.1:8545" spellcheck="false" />
+        <button id="btn-connect" class="ghost">Connecter</button>
+        <span id="node-pill" class="pill off">hors ligne</span>
+      </div>
+    </header>
+
+    <nav class="tabs">
+      <button class="tab active" data-tab="wallet">Portefeuille</button>
+      <button class="tab" data-tab="admin">Admin</button>
+    </nav>
+
+    <main>
+      <!-- ─── WALLET ─────────────────────────────────────────────── -->
+      <section id="tab-wallet" class="tabpane active">
+        <div class="grid">
+          <div class="card">
+            <h2>Mon portefeuille</h2>
+            <div id="wallet-none">
+              <p class="muted">Ouvrez un fichier <code>.json</code> existant ou créez-en un nouveau. La clé privée reste sur cette machine et ne quitte jamais l'application.</p>
+              <label>Chemin du fichier wallet</label>
+              <input id="wallet-path" type="text" spellcheck="false" placeholder="/chemin/vers/vinx-wallet.json" />
+              <div class="row">
+                <button id="btn-open">Ouvrir</button>
+                <button id="btn-create" class="ghost">Créer un nouveau</button>
+              </div>
+            </div>
+            <div id="wallet-open" class="hidden">
+              <label>Adresse</label>
+              <div class="addr-row">
+                <code id="my-address" class="addr"></code>
+                <button id="btn-copy" class="ghost small">Copier</button>
+              </div>
+              <div class="balances">
+                <div><span class="muted">Solde</span><strong id="my-balance">—</strong></div>
+                <div><span class="muted">Staké (bond)</span><strong id="my-staked">—</strong></div>
+                <div><span class="muted">Nonce</span><strong id="my-nonce">—</strong></div>
+              </div>
+              <div class="row">
+                <button id="btn-refresh" class="ghost small">Rafraîchir</button>
+                <button id="btn-lock" class="ghost small">Verrouiller</button>
+              </div>
+            </div>
+          </div>
+
+          <div class="card">
+            <h2>Envoyer des VINX</h2>
+            <label>Destinataire (vinx1…)</label>
+            <input id="send-to" type="text" spellcheck="false" placeholder="vinx1…" />
+            <label>Montant (VINX)</label>
+            <input id="send-amount" type="text" inputmode="decimal" placeholder="0.00" />
+            <button id="btn-send">Envoyer</button>
+            <p class="hint">Frais forfaitaires, prélevés automatiquement au taux courant du réseau.</p>
+          </div>
+
+          <div class="card">
+            <h2>Staking (bond de validateur)</h2>
+            <p class="muted">Le stake est une caution de validateur — aucun rendement. Le retrait passe par une déliaison de 3 jours.</p>
+            <label>Montant (VINX)</label>
+            <input id="stake-amount" type="text" inputmode="decimal" placeholder="0.00" />
+            <div class="row">
+              <button id="btn-stake">Staker</button>
+              <button id="btn-unstake" class="ghost">Déstaker</button>
+            </div>
+          </div>
+
+          <div class="card">
+            <h2>Réseau</h2>
+            <div class="kv">
+              <div><span>Hauteur</span><b id="net-height">—</b></div>
+              <div><span>Mempool</span><b id="net-mempool">—</b></div>
+              <div><span>Frais de base</span><b id="net-fee">—</b></div>
+              <div><span>Circulation</span><b id="net-circ">—</b></div>
+              <div><span>La Fonderie</span><b id="net-foundry">—</b></div>
+              <div><span>Chain ID</span><b id="net-chain">—</b></div>
+            </div>
+          </div>
+        </div>
+
+        <div class="card">
+          <h2>Historique</h2>
+          <table id="history">
+            <thead><tr><th>Bloc</th><th>Type</th><th>De</th><th>Vers</th><th>Montant</th><th>Frais</th></tr></thead>
+            <tbody><tr><td colspan="6" class="muted">Ouvrez un wallet et rafraîchissez.</td></tr></tbody>
+          </table>
+        </div>
+      </section>
+
+      <!-- ─── ADMIN ──────────────────────────────────────────────── -->
+      <section id="tab-admin" class="tabpane">
+        <div class="card warn">
+          <strong>Console d'administration.</strong> Les actions ci-dessous doivent être signées par la <em>clé admin on-chain</em>. Ouvrez le wallet admin dans l'onglet Portefeuille. <span id="admin-check" class="muted"></span>
+        </div>
+        <div class="grid">
+          <div class="card">
+            <h2>Validateurs</h2>
+            <div class="kv small">
+              <div><span>Actifs</span><b id="v-count">—</b></div>
+              <div><span>Quorum</span><b id="v-quorum">—</b></div>
+            </div>
+            <ul id="v-list" class="vlist"></ul>
+            <button id="btn-refresh-admin" class="ghost small">Rafraîchir</button>
+          </div>
+
+          <div class="card">
+            <h2>Gérer les validateurs</h2>
+            <label>Adresse du validateur (vinx1…)</label>
+            <input id="adm-validator" type="text" spellcheck="false" placeholder="vinx1…" />
+            <div class="row">
+              <button id="btn-add-val">Ajouter</button>
+              <button id="btn-rm-val" class="ghost">Retirer</button>
+            </div>
+            <p class="hint">Un nouveau validateur doit avoir posé le bond minimum avant d'être ajouté.</p>
+          </div>
+
+          <div class="card">
+            <h2>Planifier une mise à jour</h2>
+            <label>Version (x.y.z)</label>
+            <input id="adm-version" type="text" spellcheck="false" placeholder="1.1.0" />
+            <label>Hauteur d'activation</label>
+            <input id="adm-height" type="number" min="1" placeholder="300000" />
+            <button id="btn-announce">Annoncer</button>
+          </div>
+
+          <div class="card">
+            <h2>Protocole</h2>
+            <div class="kv small">
+              <div><span>Version</span><b id="p-version">—</b></div>
+              <div><span>Upgrade planifié</span><b id="p-pending">—</b></div>
+            </div>
+          </div>
+        </div>
+      </section>
+    </main>
+
+    <div id="toast" class="toast hidden"></div>
+    <script src="app.js"></script>
+  </body>
+</html>

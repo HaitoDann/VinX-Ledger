@@ -4013,6 +4013,18 @@ dependencies = [
 ]
 
 [[package]]
+name = "vinx-desktop-core"
+version = "0.1.0-alpha.1"
+dependencies = [
+ "hex",
+ "serde",
+ "serde_json",
+ "thiserror 1.0.69",
+ "vinx-core",
+ "vinx-crypto",
+]
+
+[[package]]
 name = "vinx-node"
 version = "0.1.0-alpha.1"
 dependencies = [

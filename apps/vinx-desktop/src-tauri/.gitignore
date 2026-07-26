@@ -1,0 +1,4 @@
+# Build artifacts
+/target
+# Tauri v2 generated schemas/bindings
+/gen

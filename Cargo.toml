@@ -5,7 +5,11 @@ members = [
     "crates/vinx-state",
     "crates/vinx-node",
     "crates/vinx-wallet",
+    "crates/vinx-desktop-core",
 ]
+# The Tauri desktop shell is its own workspace: it pulls heavy GUI/system
+# dependencies (webkit, etc.) that must not affect the node's build or CI.
+exclude = ["apps/vinx-desktop/src-tauri"]
 resolver = "2"
 
 [workspace.package]
