@@ -115,13 +115,13 @@ Les fonds reviennent sur le solde **après la période de déliaison** (3 jours 
 
 > **Console d'admin web** : la page **http://localhost:8545/admin** offre un tableau de bord (hauteur, mempool, Fonderie, version), la gestion des validateurs (ajout/retrait, approbation des demandes), la planification d'upgrades et la maintenance — le tout signé localement avec la clé admin. La page reste en lecture seule tant que la clé de l'admin on-chain n'est pas chargée. Les commandes CLI ci-dessous restent équivalentes pour un usage scripté.
 
-Les mises à jour de protocole nécessitent un préavis minimum, compté en **temps réel** (timestamps), pas en nombre de blocs — la cadence étant variable :
+Les mises à jour de protocole nécessitent un préavis minimum. La **cible** est un délai en temps réel ; l'implémentation actuelle l'applique encore en hauteur de bloc (migration vers les timestamps planifiée, cf. `ETAT_DU_PROJET.md` §8) :
 
-| Type | Préavis minimum |
+| Type | Préavis minimum (cible) |
 |---|---|
-| Patch (x.y.**Z**) | 7 jours réels |
-| Minor (x.**Y**.0) | 30 jours réels |
-| Major (**X**.0.0) | 90 jours réels |
+| Patch (x.y.**Z**) | 7 jours |
+| Minor (x.**Y**.0) | 30 jours |
+| Major (**X**.0.0) | 90 jours |
 
 ### Annoncer une mise à jour
 

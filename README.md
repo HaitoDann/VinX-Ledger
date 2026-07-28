@@ -55,6 +55,8 @@ Le nœud expose sur **http://localhost:8545** :
 - **`/`** — explorateur + wallet web (signature locale, la clé ne quitte jamais le navigateur)
 - **`/admin`** — console d'administration (dashboard, validateurs, upgrades), en lecture seule tant que la clé admin n'est pas chargée
 
+Une **application desktop native** (Tauri) est aussi disponible dans [`apps/vinx-desktop`](./apps/vinx-desktop) : même wallet + console admin, signature 100 % locale.
+
 L'état est sauvegardé automatiquement sur disque (`devnet/`), et **migré vers l'avant** à chaque montée de version — plus jamais besoin d'effacer le dossier.
 
 > Guide complet : [GUIDE.md](./GUIDE.md)
@@ -65,11 +67,18 @@ L'état est sauvegardé automatiquement sur disque (`devnet/`), et **migré vers
 
 ```
 crates/
-├── vinx-crypto/   Ed25519, adresses Bech32, SHA-256
-├── vinx-core/     Amount, Account, Transaction, Block
-├── vinx-state/    WorldState, genesis, apply_transaction
-├── vinx-node/     Nœud, mempool, RPC HTTP, producteur de blocs, persistance
-└── vinx-wallet/   CLI wallet
+├── vinx-crypto/        Ed25519, adresses Bech32, SHA-256, Merkle
+├── vinx-core/          Amount, Account, Transaction, Block
+├── vinx-state/         WorldState, genesis, apply_transaction, émission
+├── vinx-node/          Nœud, mempool, RPC HTTP, producteur de blocs, persistance
+├── vinx-wallet/        CLI wallet
+└── vinx-desktop-core/  Logique wallet partagée (keystore, signature) — Tauri-agnostique
+apps/
+└── vinx-desktop/       Application desktop Tauri (wallet + console admin, signature locale)
+sdk/
+└── vinx-sdk/           SDK TypeScript
+docs/
+└── adr/                Décisions d'architecture (ADR)
 ```
 
 ---
@@ -104,9 +113,9 @@ Un détenteur lambda ne stake pas : il garde son VINX pour **l'utiliser comme ca
 
 ## Roadmap
 
-- **Actuel** — protocole L1 Rust complet (PoA Threshold), exploité en local. La bascule vers le *fair launch* (émission par le travail, bond de validateur, frais au producteur) est le **chantier d'implémentation en cours**.
-- **Ensuite** — redondance 1 → 3 validateurs, amorçage de la micro-économie par l'émission, premiers usages réels.
-- **Plus tard (optionnel)** — réseau public, *token factory* (émission d'autres actifs sur VinX).
+- **Fait** — protocole L1 Rust complet (PoA Threshold) et modèle *fair launch* (émission par le travail, bond de validateur avec slashing prouvable, frais au producteur) **implémentés et testés**. Exploité en local.
+- **Ensuite** — redondance 1 → 3 validateurs, finalité au quorum, amorçage de la micro-économie par l'émission, premiers usages réels.
+- **Plus tard (optionnel)** — réseau public, et **surcouches / modules hors-nœud** (token factory, etc.) reliés par **ancrage bondé**, sans jamais salir le cœur — voir [ADR 0001](./docs/adr/0001-l1-monnaie-pure-modules-ancrage-bonde.md).
 
 ---
 

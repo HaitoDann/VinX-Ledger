@@ -186,9 +186,9 @@ Les full nodes sont **la couche de redondance** du réseau. Si VinX Labs dispara
 
 La cadence de VinX étant **adaptative à la demande**, la hauteur de bloc **n'est pas une horloge** : le même nombre de blocs peut représenter quelques minutes en saturation ou un temps indéfini au repos. Toute garantie qui doit s'exprimer en temps réel s'appuie donc sur le **`timestamp` des en-têtes de blocs** :
 
-- **L'émission** décroît selon le temps réel écoulé (§3.2).
-- **La déliaison de bond** mûrit après 3 jours réels (§5).
-- **Les préavis d'upgrade** se comptent en jours réels (§8).
+- **L'émission** décroît selon le temps réel écoulé (§3.2). *(implémenté)*
+- **La déliaison de bond** mûrit après 3 jours réels (§5). *(implémenté)*
+- **Les préavis d'upgrade** visent des jours réels (§8) — *actuellement encore comptés en hauteur de bloc ; migration vers les timestamps planifiée.*
 
 Pour empêcher un producteur malhonnête de gonfler le temps, chaque bloc est validé contre des **bornes de timestamp** : monotonie non-décroissante (`≥` celui du bloc précédent) et plafond (`≤` horloge locale + petite tolérance).
 
@@ -204,13 +204,13 @@ Il n'y a **pas de gel de compte** : la propriété des jetons est inconditionnel
 
 ### Mises à jour du protocole
 
-Les mises à jour sont déployées via un **versioning on-chain avec activation planifiée en temps réel** :
+Les mises à jour sont déployées via un **versioning on-chain avec activation planifiée** :
 
 - **Patch** (correctif) : 7 jours d'annonce avant activation
 - **Minor** (nouvelle fonctionnalité) : 30 jours d'annonce
 - **Major** (changement structurel) : 90 jours d'annonce
 
-Ces préavis se comptent en **jours réels** (timestamps), garantissant que tous les opérateurs ont le temps de se mettre à jour quelle que soit la cadence de la chaîne, et évitant tout hard fork involontaire.
+Ces préavis **visent des jours réels** afin que tous les opérateurs aient le temps de se mettre à jour et d'éviter tout hard fork involontaire. *Note d'implémentation : ils sont aujourd'hui encore appliqués en hauteur de bloc ; leur passage aux timestamps — comme l'émission et la déliaison — est planifié (cf. `ETAT_DU_PROJET.md` §8).*
 
 ---
 
@@ -226,8 +226,9 @@ Les éléments suivants sont les **piliers de conception** de VinX :
 6. **Le bond sécurise, le travail rémunère** — le stake ne produit aucun rendement
 7. **Consensus permissionné** (pas de switch vers PoW anonyme ou PoS ouvert)
 8. **Propriété inconditionnelle des comptes** (aucun gel)
+9. **La L1 n'exécute jamais de logique applicative** — les fonctionnalités complexes vivent dans des surcouches **hors-nœud**, reliées à VinX par ancrage bondé (un hash + un bond + des transferts VINX). Voir [ADR 0001](docs/adr/0001-l1-monnaie-pure-modules-ancrage-bonde.md).
 
-La conservation de la supply repose sur une **arithmétique entièrement *checked*** (aucun overflow/underflow silencieux) et une **finalité déterministe** (pas de réorganisation), couvertes par des tests de propriété (`proptest`).
+La conservation de la supply repose sur une **arithmétique entièrement *checked*** (aucun overflow/underflow silencieux) et une **finalité au quorum** (un bloc co-signé par le quorum n'est pas réorganisé), couvertes par des tests de propriété (`proptest`).
 
 ---
 
@@ -248,9 +249,9 @@ Un éventuel cadre de conformité pourra être étudié le jour où un usage pub
 
 Sans calendrier engagé, par étapes :
 
-- **Étape actuelle** : le protocole (L1 Rust, consensus PoA Threshold) est complet et testé, exploité en local. La bascule vers le modèle *fair launch* décrit ici (émission par le travail, bond de validateur, frais au producteur) est le **chantier d'implémentation en cours**.
-- **Ensuite** : redondance multi-validateurs (1 → 3), amorçage de la micro-économie par l'émission, premiers usages réels.
-- **Plus tard (optionnel)** : réseau public, et de nouvelles briques que la version présente garde ouvertes (ex. *token factory* pour émettre d'autres actifs sur VinX).
+- **Fait** : le protocole (L1 Rust, consensus PoA Threshold) et le modèle *fair launch* décrit ici (émission par le travail, bond de validateur avec slashing prouvable, frais au producteur) sont **implémentés et testés**, exploités en local.
+- **Ensuite** : redondance multi-validateurs (1 → 3), finalité au quorum, amorçage de la micro-économie par l'émission, premiers usages réels.
+- **Plus tard (optionnel)** : réseau public, et **surcouches / modules hors-nœud** reliés par ancrage bondé (ex. *token factory*) — architecture gravée dans [ADR 0001](docs/adr/0001-l1-monnaie-pure-modules-ancrage-bonde.md), la version présente en garde les portes ouvertes (bond, Merkle, payload générique).
 
 VinX Ledger n'a pas de pression d'agenda. Le projet avance à son rythme.
 
