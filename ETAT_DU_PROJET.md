@@ -454,7 +454,7 @@ sync_peer_rpc = "http://1.2.3.4:8545"  # Sync depuis un pair au démarrage
 | ✅ Fait | **Bascule fair launch (v5)** | **Implémentée et testée** (voir décomposition ci-dessous). Reste différé : préavis d'upgrade en temps réel, cosmétique UI admin / SDK. |
 | 🔴 Haute | **Usage réel** | Faire tourner la chaîne, amorcer la micro-économie par l'émission, premiers usages |
 | 🟡 Moyenne | **Run 3 validateurs** | Valider co-signing / quorum / tolérance de panne en réel (le P2P existe, testé à 1) |
-| 🟢 Future | **Token factory** | Émettre d'autres actifs sur VinX (interaction avec la Fonderie mère à concevoir) |
+| 🟢 Future | **Surcouches / modules** | Monnaie pure + modules hors-nœud par **ancrage bondé** (token factory, traçabilité…). Design gravé dans [ADR 0001](./docs/adr/0001-l1-monnaie-pure-modules-ancrage-bonde.md). Socle déjà présent : bond/slashing, Merkle, payload générique. |
 | 🟢 Future | **Exécution parallèle** | Pertinent seulement à des dizaines de milliers de TPS soutenus — chantier d'architecture, risque de déterminisme |
 | 🟢 Future | **TLS natif** (rustls) | HTTPS sur le RPC sans dépendance à un reverse-proxy |
 
