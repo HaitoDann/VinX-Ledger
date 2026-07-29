@@ -82,6 +82,15 @@ pub const HEARTBEAT_INTERVAL_SECS: u64 = 3_600;
 /// Allows concurrent submissions to be grouped into a single block.
 pub const BATCH_WINDOW_MS: u64 = 200;
 
+/// Maximum a block timestamp may lead the receiving node's clock before the block is
+/// rejected (ADR 0005). Accommodates honest clock skew while capping the emission-time
+/// manipulation a producer could attempt with a bogus (future) clock.
+pub const MAX_CLOCK_DRIFT_SECS: u64 = 120;
+
+/// Window (number of recent blocks) for the Median Time Past (ADR 0005): a single
+/// producer cannot make the network's time reference jump because it is a median.
+pub const MEDIAN_TIME_BLOCKS: usize = 11;
+
 /// Announcement lead-time minimums by upgrade type.
 pub const UPGRADE_NOTICE_PATCH_BLOCKS: u64 = 7 * 24 * 360; //  7 days
 pub const UPGRADE_NOTICE_MINOR_BLOCKS: u64 = 30 * 24 * 360; // 30 days

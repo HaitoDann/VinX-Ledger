@@ -91,6 +91,33 @@ impl Chain {
             .unwrap_or(GENESIS_PREV_HASH)
     }
 
+    /// Timestamp (unix seconds) of the tip block. Used for the monotonicity bound on
+    /// incoming block timestamps (ADR 0005).
+    pub fn tip_timestamp(&self) -> u64 {
+        self.blocks
+            .last()
+            .map(|(_, b)| b.header.timestamp)
+            .unwrap_or(0)
+    }
+
+    /// Median Time Past: median of the last `MEDIAN_TIME_BLOCKS` block timestamps
+    /// (ADR 0005). A single producer cannot make this reference jump — it is a median,
+    /// so it resists timestamp manipulation. Intended reference for time-sensitive
+    /// comparisons (emission, unbonding) once wired onto it.
+    pub fn median_time_past(&self) -> u64 {
+        let n = self.blocks.len();
+        let start = n.saturating_sub(vinx_core::amount::MEDIAN_TIME_BLOCKS);
+        let mut ts: Vec<u64> = self.blocks[start..]
+            .iter()
+            .map(|(_, b)| b.header.timestamp)
+            .collect();
+        if ts.is_empty() {
+            return 0;
+        }
+        ts.sort_unstable();
+        ts[ts.len() / 2]
+    }
+
     pub fn get_block(&self, height: u64) -> Option<&Block> {
         self.blocks.get(height as usize).map(|(_, b)| b)
     }
@@ -404,6 +431,19 @@ mod tests {
         assert_eq!(chain.finalized_height(), 1);
         assert!(chain.is_final(1));
         assert!(!chain.is_final(2));
+    }
+
+    #[test]
+    fn test_median_time_past_is_the_median() {
+        let kp = KeyPair::generate();
+        let v = Address::from_public_key(&kp.public_key());
+        let (mut chain, _) = Chain::new_with_genesis(v, 0); // genesis ts = 0
+        for h in 1..=5 {
+            let b = signed_block(h, chain.tip_hash(), v, &[&kp]); // ts = h
+            chain.push(b);
+        }
+        // timestamps {0,1,2,3,4,5} → median (index 3) = 3
+        assert_eq!(chain.median_time_past(), 3);
     }
 
     #[test]

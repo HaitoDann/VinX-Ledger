@@ -2,7 +2,7 @@ pub mod messages;
 
 use std::collections::HashMap;
 use std::sync::Arc;
-use std::time::Duration;
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use futures::StreamExt;
 use libp2p::{
@@ -496,6 +496,27 @@ async fn dispatch_message(
                     warn!(height, "P2P block wrong prev_hash");
                     return;
                 }
+                // ADR 0005: timestamp bounds. Reject non-monotonic or far-future
+                // timestamps so a producer can't inflate emission / shorten unbonding
+                // via a bogus clock. The state_root does not catch this (both sides use
+                // the same block timestamp), so it must be checked explicitly.
+                let now = SystemTime::now()
+                    .duration_since(UNIX_EPOCH)
+                    .map(|d| d.as_secs())
+                    .unwrap_or(0);
+                if block.header.timestamp <= chain_guard.tip_timestamp() {
+                    warn!(height, "P2P block timestamp not monotonic — rejecting");
+                    return;
+                }
+                if block.header.timestamp
+                    > now.saturating_add(vinx_core::amount::MAX_CLOCK_DRIFT_SECS)
+                {
+                    warn!(
+                        height,
+                        "P2P block timestamp too far in the future — rejecting"
+                    );
+                    return;
+                }
             }
 
             // 2. Proposer authority
@@ -676,6 +697,11 @@ async fn dispatch_message(
                 }
                 if block.header.prev_hash != chain.read().await.tip_hash() {
                     warn!(height, "SyncResponse block wrong prev_hash");
+                    break;
+                }
+                // ADR 0005: timestamps must be monotonic even for historical blocks.
+                if block.header.timestamp <= chain.read().await.tip_timestamp() {
+                    warn!(height, "SyncResponse block timestamp not monotonic");
                     break;
                 }
                 // Verify all bundled co-signatures in parallel before applying state.
