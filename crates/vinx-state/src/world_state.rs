@@ -710,18 +710,20 @@ impl WorldState {
             ));
         }
 
-        let (new_version, activation_height) = tx
+        let (new_version, activation_ts) = tx
             .decode_upgrade_payload()
             .ok_or_else(|| CoreError::UpgradeViolation("malformed upgrade payload".to_string()))?;
 
+        // ADR 0006: the notice window is measured in real seconds against block
+        // timestamps, not block heights (height is not a clock under adaptive cadence).
         let upgrade_type = self.current_version.upgrade_type(&new_version);
-        let min_notice = upgrade_type.min_notice_blocks();
-        let announcement_height = self.block_height;
+        let min_notice = upgrade_type.min_notice_secs();
+        let announcement_ts = self.current_block_ts;
 
-        if activation_height < announcement_height.saturating_add(min_notice) {
+        if activation_ts < announcement_ts.saturating_add(min_notice) {
             return Err(CoreError::UpgradeViolation(format!(
-                "{:?} upgrade requires {} blocks notice (announcement at {}, requested activation at {})",
-                upgrade_type, min_notice, announcement_height, activation_height
+                "{:?} upgrade requires {} s notice (announced at ts {}, requested activation at ts {})",
+                upgrade_type, min_notice, announcement_ts, activation_ts
             )));
         }
 
@@ -740,13 +742,13 @@ impl WorldState {
 
         self.pending_upgrade = Some(ScheduledUpgrade {
             version: new_version,
-            activation_height,
-            announced_at: announcement_height,
+            activation_ts,
+            announced_at: announcement_ts,
         });
 
         tracing::info!(
             version = %self.pending_upgrade.as_ref().unwrap().version,
-            activation_height,
+            activation_ts,
             "Protocol upgrade scheduled"
         );
 
@@ -758,13 +760,13 @@ impl WorldState {
     // governance path — `apply_admin_action` → `GovernanceAction::AddValidator` /
     // `RemoveValidator` — which carries the same (now strict) validation.
 
-    /// Checks whether a pending upgrade should activate at the current block height
-    /// and applies the version change if so.
+    /// Checks whether a pending upgrade should activate at the current block time
+    /// (ADR 0006) and applies the version change if so.
     pub fn check_upgrade_activation(&mut self) {
         let should_activate = self
             .pending_upgrade
             .as_ref()
-            .map(|u| self.block_height >= u.activation_height)
+            .map(|u| self.current_block_ts >= u.activation_ts)
             .unwrap_or(false);
 
         if should_activate {
@@ -774,7 +776,7 @@ impl WorldState {
             tracing::info!(
                 from = %old,
                 to = %upgrade.version,
-                height = self.block_height,
+                ts = self.current_block_ts,
                 "Protocol upgrade activated"
             );
         }
@@ -980,15 +982,17 @@ impl WorldState {
             }
             GovernanceAction::ScheduleUpgrade {
                 version,
-                activation_height,
+                activation_ts,
             } => {
+                // ADR 0006: activation is a wall-clock timestamp, announced at the
+                // current block time.
                 if self.pending_upgrade.is_none() {
                     self.pending_upgrade = Some(vinx_core::ScheduledUpgrade {
                         version: version.clone(),
-                        activation_height,
-                        announced_at: self.block_height,
+                        activation_ts,
+                        announced_at: self.current_block_ts,
                     });
-                    tracing::info!(activation_height, "Admin: upgrade scheduled");
+                    tracing::info!(activation_ts, "Admin: upgrade scheduled");
                 }
             }
             GovernanceAction::RotateAdmin(new_admin) => {
@@ -1329,8 +1333,8 @@ mod tests {
     #[test]
     fn test_admin_can_schedule_patch_upgrade() {
         let (mut state, admin_kp, _) = admin_state();
-        let notice = vinx_core::amount::UPGRADE_NOTICE_PATCH_BLOCKS;
-        let activation = state.block_height + notice + 100;
+        let notice = vinx_core::amount::UPGRADE_NOTICE_PATCH_SECS;
+        let activation = state.current_block_ts + notice + 100;
 
         let tx = Transaction::new_announce_upgrade(
             &admin_kp,
@@ -1342,7 +1346,7 @@ mod tests {
 
         let upgrade = state.pending_upgrade.as_ref().unwrap();
         assert_eq!(upgrade.version, ProtocolVersion::new(1, 0, 1));
-        assert_eq!(upgrade.activation_height, activation);
+        assert_eq!(upgrade.activation_ts, activation);
     }
 
     #[test]
@@ -1357,9 +1361,9 @@ mod tests {
     }
 
     #[test]
-    fn test_upgrade_activates_at_correct_height() {
+    fn test_upgrade_activates_at_correct_time() {
         let (mut state, admin_kp, _) = admin_state();
-        let notice = vinx_core::amount::UPGRADE_NOTICE_PATCH_BLOCKS;
+        let notice = vinx_core::amount::UPGRADE_NOTICE_PATCH_SECS;
         let activation = notice + 1;
 
         state
@@ -1371,14 +1375,14 @@ mod tests {
             ))
             .unwrap();
 
-        // Not yet activated
-        state.block_height = activation - 1;
+        // Not yet activated (block time still before activation_ts)
+        state.set_block_context(activation - 1);
         state.check_upgrade_activation();
         assert_eq!(state.current_version, ProtocolVersion::GENESIS);
         assert!(state.pending_upgrade.is_some());
 
-        // Activates exactly at activation_height
-        state.block_height = activation;
+        // Activates exactly at activation_ts
+        state.set_block_context(activation);
         state.check_upgrade_activation();
         assert_eq!(state.current_version, ProtocolVersion::new(1, 0, 1));
         assert!(state.pending_upgrade.is_none());
@@ -1391,7 +1395,7 @@ mod tests {
         let attacker_addr = Address::from_public_key(&attacker.public_key());
         state.credit_for_test(attacker_addr, Amount::from_vinx(100));
 
-        let notice = vinx_core::amount::UPGRADE_NOTICE_MAJOR_BLOCKS;
+        let notice = vinx_core::amount::UPGRADE_NOTICE_MAJOR_SECS;
         let tx = Transaction::new_announce_upgrade(
             &attacker,
             ProtocolVersion::new(2, 0, 0),

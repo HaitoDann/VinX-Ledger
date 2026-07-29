@@ -260,17 +260,17 @@ pub fn build_remove_validator(
 pub fn build_announce_upgrade(
     kp: &KeyPair,
     version: ProtocolVersion,
-    activation_height: u64,
+    activation_ts: u64,
     nonce: u64,
     chain_id: u32,
 ) -> Transaction {
     let from = Address::from_public_key(&kp.public_key());
-    // Payload: major(2) || minor(2) || patch(2) || activation_height(8) = 14 bytes.
+    // Payload: major(2) || minor(2) || patch(2) || activation_ts(8) = 14 bytes (ADR 0006).
     let mut payload = Vec::with_capacity(14);
     payload.extend_from_slice(&version.major.to_be_bytes());
     payload.extend_from_slice(&version.minor.to_be_bytes());
     payload.extend_from_slice(&version.patch.to_be_bytes());
-    payload.extend_from_slice(&activation_height.to_be_bytes());
+    payload.extend_from_slice(&activation_ts.to_be_bytes());
     build_signed(
         kp,
         TransactionType::AnnounceUpgrade,

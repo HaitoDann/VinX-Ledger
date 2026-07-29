@@ -92,7 +92,7 @@ pub struct ProtocolStatusInfo {
 #[derive(Deserialize)]
 pub struct PendingUpgradeInfo {
     pub version: String,
-    pub activation_height: u64,
+    pub activation_ts: u64,
     pub announced_at: u64,
 }
 

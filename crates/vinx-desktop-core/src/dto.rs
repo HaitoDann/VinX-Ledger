@@ -49,7 +49,8 @@ pub struct Validators {
 #[derive(Debug, Serialize, Deserialize)]
 pub struct PendingUpgrade {
     pub version: String,
-    pub activation_height: u64,
+    /// Unix timestamp (seconds) at which the upgrade activates (ADR 0006).
+    pub activation_ts: u64,
     pub announced_at: u64,
 }
 

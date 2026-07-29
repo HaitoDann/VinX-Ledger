@@ -276,13 +276,13 @@ async fn admin_announce_upgrade(
     state: State<'_, AppState>,
     node: String,
     version: String,
-    activation_height: u64,
+    activation_ts: u64,
 ) -> Result<String, String> {
     let kp = state.keypair()?;
     let ver: ProtocolVersion = version.parse().map_err(|e: String| e)?;
     let cid = chain_id(&state.http, &node).await?;
     let nonce = next_nonce(&state.http, &node, &own_address(&kp)).await?;
-    let tx = core::build_announce_upgrade(&kp, ver, activation_height, nonce, cid);
+    let tx = core::build_announce_upgrade(&kp, ver, activation_ts, nonce, cid);
     submit_tx(&state.http, &node, &tx).await
 }
 

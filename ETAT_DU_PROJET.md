@@ -321,7 +321,7 @@ cargo run -p vinx-wallet -- <commande> [options]
 |----------|-------------|-------------|
 | `add-validator` | `--validator vinx1...` | Ajouter un validateur |
 | `remove-validator` | `--validator vinx1...` | Retirer un validateur |
-| `announce-upgrade` | `--version 1.1.0 --activation-height 100000` | Planifier un upgrade |
+| `announce-upgrade` | `--version 1.1.0 --activation-ts 1793000000` | Planifier un upgrade (timestamp Unix, ADR 0006) |
 
 **Admin — actions de gouvernance (requiert la clé admin) :**
 

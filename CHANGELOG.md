@@ -5,6 +5,27 @@ Format : `MAJEUR.MINEUR.CORRECTIF` — les versions `0.x.y` sont des versions de
 
 ---
 
+## [0.35.0] — ⚠️ BREAKING (consensus) — Gouvernance unifiée + préavis d'upgrade en temps réel
+
+> Lot **consensus-breaking → nouvelle genèse.** Clôt les deux derniers ADR « Cohérence & Robustesse » lourds (0006, 0007). Implémenté de bout en bout (`vinx-core`, `vinx-state`, `vinx-node`, wallet CLI, desktop-core, app desktop, console admin JS, SDK). Tests réécrits, clippy `-D warnings` & fmt verts.
+
+### ADR 0007 — Unification des chemins de gouvernance
+- **Retrait des types de tx dédiés** `AddValidator` (0x05) et `RemoveValidator` (0x06). Les changements du set de validateurs passent **uniquement** par `AdminAction` (0x08) portant un `bincode(GovernanceAction)`.
+- **Sémantique stricte unique** au point de validation : bond requis, **doublon refusé** (au lieu d'un ignore silencieux), retrait du **dernier validateur refusé**.
+- **Nonce consommé seulement en cas de succès** : une action de gouvernance rejetée ne brûle plus le nonce (fidèle aux anciens handlers dédiés).
+- Clients alignés : wallet CLI (`add-validator`/`remove-validator` route via `AdminAction`), desktop-core (`build_add/remove_validator`), console admin JS (reconstruit `bincode(GovernanceAction)` côté navigateur). Golden vector mis à jour.
+
+### ADR 0006 — Préavis d'upgrade en temps réel
+- **Activation d'upgrade : hauteur de bloc → timestamp Unix** (secondes). Cohérent avec émission et déliaison ; la hauteur n'est pas une horloge sous cadence adaptative. Ferme le **dernier écart doc↔code**.
+- Constantes `UPGRADE_NOTICE_{PATCH,MINOR,MAJOR}_SECS` (7/30/90 j) remplacent les `*_BLOCKS` ; `ScheduledUpgrade.activation_ts`, `UpgradeType::min_notice_secs()`.
+- Annonce et activation mesurées contre `current_block_ts`. **Payload 14 o inchangé** (octets identiques, sémantique = timestamp) → golden vector `signing_bytes` intact.
+- Clients alignés : wallet `--activation-ts`, desktop-core + dto, app desktop, console admin JS (saisie/affichage en date), SDK (`activation_ts`).
+
+### Divers
+- **ADR 0026 (Proposé)** rédigé : dépôt existentiel (anti-bloat de l'état) — motivé par la simulation de stockage (l'état est le seul terme non borné).
+
+---
+
 ## [0.34.0] — ⚠️ BREAKING — Refonte économique v5 : fair launch
 
 > Changement **consensus-breaking → nouvelle genèse.** Abandon du cycle *melt/forge* (0.24.0) au profit du *fair launch* décrit dans le whitepaper v4.0. Implémenté de bout en bout (`vinx-core`, `vinx-state`, `vinx-node`) ; suite de tests réécrite, clippy `-D warnings` & fmt verts. **Différé** (voir `ETAT_DU_PROJET.md` §8) : préavis d'upgrade en temps réel, cosmétique UI admin / SDK.

@@ -129,10 +129,12 @@ Les mises à jour de protocole nécessitent un préavis minimum. La **cible** es
 cargo run -p vinx-wallet -- announce-upgrade \
   --wallet devnet/admin.json \
   --version 1.1.0 \
-  --activation-height 300000
+  --activation-ts 1793000000
 ```
 
-La mise à jour s'active automatiquement une fois la hauteur atteinte, à condition que le préavis en temps réel soit respecté.
+`--activation-ts` est un **timestamp Unix en secondes** (ADR 0006). La mise à jour s'active
+automatiquement dès que l'horloge des blocs atteint ce timestamp, à condition que le préavis
+minimal en temps réel soit respecté (patch ≥ 7 j, minor ≥ 30 j, major ≥ 90 j).
 
 ### Vérifier l'état du protocole
 

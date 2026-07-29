@@ -74,7 +74,8 @@ export interface ProtocolStatusResponse {
   current_version: string;
   pending_upgrade: {
     version: string;
-    activation_height: number;
+    /** Unix timestamp (seconds) at which the upgrade activates (ADR 0006). */
+    activation_ts: number;
     announced_at: number;
   } | null;
 }

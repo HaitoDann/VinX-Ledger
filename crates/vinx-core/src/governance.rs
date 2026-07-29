@@ -13,7 +13,8 @@ pub enum GovernanceAction {
     },
     ScheduleUpgrade {
         version: ProtocolVersion,
-        activation_height: u64,
+        /// Unix timestamp (seconds) at which the upgrade activates (ADR 0006).
+        activation_ts: u64,
     },
     /// Rotate the admin key to a new address.
     RotateAdmin(Address),
@@ -37,7 +38,7 @@ mod tests {
             GovernanceAction::UpdateFeeFloor { atoms: 123_456 },
             GovernanceAction::ScheduleUpgrade {
                 version: ProtocolVersion::new(1, 2, 3),
-                activation_height: 999,
+                activation_ts: 999,
             },
             GovernanceAction::RotateAdmin(addr),
         ];

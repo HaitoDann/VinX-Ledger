@@ -97,10 +97,12 @@ pub const MAX_CLOCK_DRIFT_SECS: u64 = 120;
 /// producer cannot make the network's time reference jump because it is a median.
 pub const MEDIAN_TIME_BLOCKS: usize = 11;
 
-/// Announcement lead-time minimums by upgrade type.
-pub const UPGRADE_NOTICE_PATCH_BLOCKS: u64 = 7 * 24 * 360; //  7 days
-pub const UPGRADE_NOTICE_MINOR_BLOCKS: u64 = 30 * 24 * 360; // 30 days
-pub const UPGRADE_NOTICE_MAJOR_BLOCKS: u64 = 90 * 24 * 360; // 90 days
+/// Announcement lead-time minimums by upgrade type, in **real seconds** (ADR 0006).
+/// Block height is not a clock (adaptive cadence), so the upgrade notice window is
+/// measured against block timestamps — consistent with emission and unbonding.
+pub const UPGRADE_NOTICE_PATCH_SECS: u64 = 7 * 24 * 3600; //  7 days
+pub const UPGRADE_NOTICE_MINOR_SECS: u64 = 30 * 24 * 3600; // 30 days
+pub const UPGRADE_NOTICE_MAJOR_SECS: u64 = 90 * 24 * 3600; // 90 days
 
 /// Internal token amount stored as an integer in the smallest unit (10^-18 VinX).
 /// All arithmetic uses checked operations to prevent overflow or underflow.

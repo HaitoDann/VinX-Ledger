@@ -106,9 +106,9 @@ enum Commands {
         /// New protocol version, e.g. 1.1.0
         #[arg(long)]
         version: String,
-        /// Block height at which the upgrade activates
+        /// Unix timestamp (seconds) at which the upgrade activates (ADR 0006)
         #[arg(long)]
-        activation_height: u64,
+        activation_ts: u64,
         #[arg(short, long, default_value = "wallet.json")]
         wallet: PathBuf,
         #[arg(long, default_value = "http://127.0.0.1:8545")]
@@ -223,10 +223,10 @@ async fn run(cmd: Commands) -> Result<(), WalletError> {
         Commands::Tx { hash, node } => cmd_tx(&hash, &node).await,
         Commands::AnnounceUpgrade {
             version,
-            activation_height,
+            activation_ts,
             wallet,
             node,
-        } => cmd_announce_upgrade(&version, activation_height, &wallet, &node).await,
+        } => cmd_announce_upgrade(&version, activation_ts, &wallet, &node).await,
         Commands::AddValidator {
             validator,
             wallet,
@@ -419,7 +419,7 @@ async fn cmd_tx(hash: &str, node: &str) -> Result<(), WalletError> {
 
 async fn cmd_announce_upgrade(
     version_str: &str,
-    activation_height: u64,
+    activation_ts: u64,
     wallet: &Path,
     node: &str,
 ) -> Result<(), WalletError> {
@@ -433,11 +433,11 @@ async fn cmd_announce_upgrade(
     let acc = client.get_account(ks.address()).await?;
     let nonce = acc.nonce;
 
-    let tx = Transaction::new_announce_upgrade(&kp, version.clone(), activation_height, nonce);
+    let tx = Transaction::new_announce_upgrade(&kp, version.clone(), activation_ts, nonce);
 
     println!("Admin             : {}", ks.address());
     println!("New version       : {}", version);
-    println!("Activation height : {}", activation_height);
+    println!("Activation (unix) : {}", activation_ts);
     println!("Nonce             : {}", nonce);
 
     let resp = client.submit_tx(&tx).await?;
@@ -537,8 +537,8 @@ async fn cmd_protocol(node: &str) -> Result<(), WalletError> {
     match ps.pending_upgrade {
         None => println!("Upgrade  : none scheduled"),
         Some(u) => {
-            println!("Upgrade  : {} at block {}", u.version, u.activation_height);
-            println!("Announced: block {}", u.announced_at);
+            println!("Upgrade  : {} at unix ts {}", u.version, u.activation_ts);
+            println!("Announced: unix ts {}", u.announced_at);
         }
     }
     Ok(())

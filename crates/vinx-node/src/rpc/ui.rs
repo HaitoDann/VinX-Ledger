@@ -865,7 +865,7 @@ async function refreshProtocol() {
   try {
     const p = await (await fetch(BASE+'/protocol/version')).json();
     const upg = p.pending_upgrade
-      ? `<div class="ri"><div class="l">Upgrade prévu</div><div class="v"><span class="tag o">${p.pending_upgrade.version}</span> au bloc ${p.pending_upgrade.activation_height.toLocaleString()}</div></div>`
+      ? `<div class="ri"><div class="l">Upgrade prévu</div><div class="v"><span class="tag o">${p.pending_upgrade.version}</span> le ${new Date(p.pending_upgrade.activation_ts*1000).toLocaleString()}</div></div>`
       : `<div class="ri"><div class="l">Upgrade prévu</div><div class="v"><span class="tag g">aucun</span></div></div>`;
     out.innerHTML = `
       <div class="rg">
@@ -1158,12 +1158,13 @@ function govValidatorPayload(variant,addr){
   return b;
 }
 
-function upgradePayload(major,minor,patch,height){
+// ADR 0006: payload = major(2) || minor(2) || patch(2) || activation_ts(8, unix seconds).
+function upgradePayload(major,minor,patch,activationTs){
   const b=new Uint8Array(14);
   b[0]=(major>>8)&0xff;b[1]=major&0xff;
   b[2]=(minor>>8)&0xff;b[3]=minor&0xff;
   b[4]=(patch>>8)&0xff;b[5]=patch&0xff;
-  b.set(bigIntTo8BE(BigInt(height)),6);
+  b.set(bigIntTo8BE(BigInt(activationTs)),6);
   return b;
 }
 
@@ -1186,8 +1187,9 @@ async function scheduleUpgrade(){
   const M=parseInt(document.getElementById('u-major').value||'0',10);
   const m=parseInt(document.getElementById('u-minor').value||'0',10);
   const p=parseInt(document.getElementById('u-patch').value||'0',10);
+  // ADR 0006: activation is a Unix timestamp (seconds), not a block height.
   const h=document.getElementById('u-height').value.trim();
-  if(!h||BigInt(h)<=0n)return errMsg('u-msg',new Error('Hauteur d\'activation requise.'));
+  if(!h||BigInt(h)<=0n)return errMsg('u-msg',new Error('Timestamp d\'activation (unix, secondes) requis.'));
   try{const tx=await submitGov('AnnounceUpgrade',0x04,wallet.address,upgradePayload(M,m,p,h));okMsg('u-msg',tx);setTimeout(refreshAll,600);}
   catch(e){errMsg('u-msg',e);}
 }
@@ -1225,8 +1227,8 @@ async function refreshDash(){
     set('d-foundry',s.foundry);set('d-circ',s.circulating_supply);
     set('d-fee',fmtAtoms(s.base_fee_atoms));
     const up=document.getElementById('u-current');
-    up.textContent='Version courante : '+p.current_version+(p.pending_upgrade?' · upgrade planifiée v'+p.pending_upgrade.version+' au bloc '+p.pending_upgrade.activation_height:' · aucune upgrade en attente');
-    document.getElementById('d-upgrade').textContent=p.pending_upgrade?('⏳ Upgrade v'+p.pending_upgrade.version+' activée au bloc '+p.pending_upgrade.activation_height):'Aucune mise à jour en attente.';
+    up.textContent='Version courante : '+p.current_version+(p.pending_upgrade?' · upgrade planifiée v'+p.pending_upgrade.version+' le '+new Date(p.pending_upgrade.activation_ts*1000).toLocaleString():' · aucune upgrade en attente');
+    document.getElementById('d-upgrade').textContent=p.pending_upgrade?('⏳ Upgrade v'+p.pending_upgrade.version+' activée le '+new Date(p.pending_upgrade.activation_ts*1000).toLocaleString()):'Aucune mise à jour en attente.';
   }catch(e){/* silencieux */}
 }
 async function loadValidators(){

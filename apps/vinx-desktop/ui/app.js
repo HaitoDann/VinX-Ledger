@@ -215,7 +215,7 @@ async function refreshAdmin() {
       .join("");
     $("p-version").textContent = p.current_version;
     $("p-pending").textContent = p.pending_upgrade
-      ? `${p.pending_upgrade.version} @ #${p.pending_upgrade.activation_height}`
+      ? `${p.pending_upgrade.version} @ ${new Date(p.pending_upgrade.activation_ts * 1000).toISOString()}`
       : "aucun";
   } catch (e) {
     toast("Admin : " + e, "err");
@@ -232,7 +232,7 @@ $("btn-announce").onclick = () =>
     invoke("admin_announce_upgrade", {
       node: nodeUrl(),
       version: $("adm-version").value.trim(),
-      activationHeight: parseInt($("adm-height").value, 10) || 0,
+      activationTs: parseInt($("adm-height").value, 10) || 0,
     }),
     "Annonce d'upgrade"
   ).then(refreshAdmin);

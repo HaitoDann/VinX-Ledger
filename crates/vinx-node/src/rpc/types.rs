@@ -238,7 +238,8 @@ pub struct ProtocolStatusResponse {
 #[derive(Serialize)]
 pub struct PendingUpgradeResponse {
     pub version: String,
-    pub activation_height: u64,
+    /// Unix timestamp (seconds) at which the upgrade activates (ADR 0006).
+    pub activation_ts: u64,
     pub announced_at: u64,
 }
 
@@ -248,7 +249,7 @@ impl ProtocolStatusResponse {
             current_version: version.to_string(),
             pending_upgrade: upgrade.map(|u| PendingUpgradeResponse {
                 version: u.version.to_string(),
-                activation_height: u.activation_height,
+                activation_ts: u.activation_ts,
                 announced_at: u.announced_at,
             }),
         }

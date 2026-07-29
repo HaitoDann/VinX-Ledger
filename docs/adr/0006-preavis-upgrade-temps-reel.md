@@ -1,6 +1,6 @@
 # ADR 0006 — Préavis d'upgrade en temps réel
 
-- **Statut :** Proposé
+- **Statut :** Accepté (implémenté — consensus-breaking)
 - **Catégorie :** Cohérence · **Priorité :** 🟠 moyenne
 - **Date :** Juillet 2026
 - **Lié :** ADR 0005 (temps réseau), whitepaper §7-§8.

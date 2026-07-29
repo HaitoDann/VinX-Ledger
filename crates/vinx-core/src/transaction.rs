@@ -52,7 +52,8 @@ pub struct Transaction {
     #[serde(default)]
     pub expires_at_height: Option<u64>,
     /// Extra typed data for specialized transactions (empty for standard ops).
-    /// AnnounceUpgrade: 14 bytes = major(2) || minor(2) || patch(2) || activation_height(8)
+    /// AnnounceUpgrade: 14 bytes = major(2) || minor(2) || patch(2) || activation_ts(8)
+    /// where activation_ts is a Unix timestamp in seconds (ADR 0006).
     pub payload: Vec<u8>,
     /// Sender's public key — used to verify `from` ownership.
     pub pub_key: Option<PublicKey>,
@@ -208,22 +209,23 @@ impl Transaction {
 
     /// Constructs and signs an AnnounceUpgrade transaction (admin only).
     ///
-    /// The `activation_height` must be far enough in the future based on the upgrade type
-    /// (patch ≥ 7 days, minor ≥ 30 days, major ≥ 90 days). Validation is enforced by WorldState.
+    /// `activation_ts` is a Unix timestamp (seconds) that must be far enough in the future
+    /// based on the upgrade type (patch ≥ 7 days, minor ≥ 30 days, major ≥ 90 days), measured
+    /// against block timestamps (ADR 0006). Validation is enforced by WorldState.
     pub fn new_announce_upgrade(
         keypair: &KeyPair,
         version: ProtocolVersion,
-        activation_height: u64,
+        activation_ts: u64,
         nonce: u64,
     ) -> Self {
         let pk = keypair.public_key();
         let from = Address::from_public_key(&pk);
-        // Payload: major(2) || minor(2) || patch(2) || activation_height(8) = 14 bytes
+        // Payload: major(2) || minor(2) || patch(2) || activation_ts(8) = 14 bytes
         let mut payload = Vec::with_capacity(14);
         payload.extend_from_slice(&version.major.to_be_bytes());
         payload.extend_from_slice(&version.minor.to_be_bytes());
         payload.extend_from_slice(&version.patch.to_be_bytes());
-        payload.extend_from_slice(&activation_height.to_be_bytes());
+        payload.extend_from_slice(&activation_ts.to_be_bytes());
         let mut tx = Self {
             tx_type: TransactionType::AnnounceUpgrade,
             from,
@@ -244,8 +246,8 @@ impl Transaction {
         tx
     }
 
-    /// Decodes version + activation_height from the payload of an AnnounceUpgrade transaction.
-    /// Returns None if the payload is malformed.
+    /// Decodes version + activation timestamp (Unix seconds) from the payload of an
+    /// AnnounceUpgrade transaction. Returns None if the payload is malformed.
     pub fn decode_upgrade_payload(&self) -> Option<(ProtocolVersion, u64)> {
         if self.payload.len() != 14 {
             return None;
@@ -253,8 +255,8 @@ impl Transaction {
         let major = u16::from_be_bytes([self.payload[0], self.payload[1]]);
         let minor = u16::from_be_bytes([self.payload[2], self.payload[3]]);
         let patch = u16::from_be_bytes([self.payload[4], self.payload[5]]);
-        let activation_height = u64::from_be_bytes(self.payload[6..14].try_into().ok()?);
-        Some((ProtocolVersion::new(major, minor, patch), activation_height))
+        let activation_ts = u64::from_be_bytes(self.payload[6..14].try_into().ok()?);
+        Some((ProtocolVersion::new(major, minor, patch), activation_ts))
     }
 
     /// Constructs a SlashValidator tx with equivocation evidence.
@@ -455,7 +457,7 @@ mod tests {
         let gov = crate::governance::GovernanceAction::AddValidator(to);
         assert_eq!(add.payload, bincode::serialize(&gov).unwrap());
 
-        // AnnounceUpgrade: to = self, payload = major(1) minor(2) patch(3) height(1000).
+        // AnnounceUpgrade: to = self, payload = major(1) minor(2) patch(3) activation_ts(1000).
         let mut pl = Vec::with_capacity(14);
         pl.extend_from_slice(&1u16.to_be_bytes());
         pl.extend_from_slice(&2u16.to_be_bytes());

@@ -66,13 +66,14 @@ impl std::str::FromStr for ProtocolVersion {
     }
 }
 
-/// An upgrade scheduled to activate at a specific block height.
+/// An upgrade scheduled to activate at a specific wall-clock time (ADR 0006).
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct ScheduledUpgrade {
     pub version: ProtocolVersion,
-    /// Block height at which the upgrade activates.
-    pub activation_height: u64,
-    /// Block height at which the upgrade was announced (for notice-window validation).
+    /// Unix timestamp (seconds) at which the upgrade activates.
+    pub activation_ts: u64,
+    /// Unix timestamp (seconds) at which the upgrade was announced (for
+    /// notice-window validation).
     pub announced_at: u64,
 }
 
@@ -85,15 +86,15 @@ pub enum UpgradeType {
 }
 
 impl UpgradeType {
-    /// Minimum blocks between announcement and activation.
-    pub fn min_notice_blocks(self) -> u64 {
+    /// Minimum real seconds between announcement and activation (ADR 0006).
+    pub fn min_notice_secs(self) -> u64 {
         use crate::amount::{
-            UPGRADE_NOTICE_MAJOR_BLOCKS, UPGRADE_NOTICE_MINOR_BLOCKS, UPGRADE_NOTICE_PATCH_BLOCKS,
+            UPGRADE_NOTICE_MAJOR_SECS, UPGRADE_NOTICE_MINOR_SECS, UPGRADE_NOTICE_PATCH_SECS,
         };
         match self {
-            UpgradeType::Patch => UPGRADE_NOTICE_PATCH_BLOCKS,
-            UpgradeType::Minor => UPGRADE_NOTICE_MINOR_BLOCKS,
-            UpgradeType::Major => UPGRADE_NOTICE_MAJOR_BLOCKS,
+            UpgradeType::Patch => UPGRADE_NOTICE_PATCH_SECS,
+            UpgradeType::Minor => UPGRADE_NOTICE_MINOR_SECS,
+            UpgradeType::Major => UPGRADE_NOTICE_MAJOR_SECS,
         }
     }
 }
@@ -141,9 +142,9 @@ mod tests {
     }
 
     #[test]
-    fn test_min_notice_blocks() {
-        assert_eq!(UpgradeType::Patch.min_notice_blocks(), 7 * 24 * 360);
-        assert_eq!(UpgradeType::Minor.min_notice_blocks(), 30 * 24 * 360);
-        assert_eq!(UpgradeType::Major.min_notice_blocks(), 90 * 24 * 360);
+    fn test_min_notice_secs() {
+        assert_eq!(UpgradeType::Patch.min_notice_secs(), 7 * 24 * 3600);
+        assert_eq!(UpgradeType::Minor.min_notice_secs(), 30 * 24 * 3600);
+        assert_eq!(UpgradeType::Major.min_notice_secs(), 90 * 24 * 3600);
     }
 }

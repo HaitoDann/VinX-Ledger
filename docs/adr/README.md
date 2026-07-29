@@ -16,11 +16,12 @@ Ce dossier trace les décisions d'architecture. Chaque ADR a un **statut** :
 Catalogue priorisé des ADR à écrire/décider. **Priorités :** 🔴 haute · 🟠 moyenne · 🟢 future.
 Rien ci-dessous n'est décidé — ce sont des propositions à instruire une par une.
 
-> **Lot « Cohérence & Robustesse » rédigé** (statut Proposé — documents dédiés) :
+> **Lot « Cohérence & Robustesse » — ✅ tout implémenté** (documents dédiés) :
 > [0005](./0005-temps-reseau-robuste.md) · [0006](./0006-preavis-upgrade-temps-reel.md) ·
 > [0007](./0007-unification-gouvernance.md) · [0008](./0008-chain-id-defaut-sur.md) ·
 > [0009](./0009-frais-stake-unstake.md) · [0020](./0020-serialisation-canonique.md) ·
 > [0021](./0021-immutabilite-emission.md).
+> **Anti-bloat de l'état :** [0026](./0026-depot-existentiel.md) (Proposé).
 
 ### Consensus & finalité
 
@@ -111,8 +112,8 @@ Rien ci-dessous n'est décidé — ce sont des propositions à instruire une par
 
 ### Robustesse & exploitation
 
-- **0006 — Préavis d'upgrade en temps réel** 🟠
-  *Direction :* migrer les préavis 7/30/90 j de la hauteur de bloc vers les **timestamps** (aligner sur émission + déliaison). Ferme l'écart doc↔code actuel.
+- **0006 — [Préavis d'upgrade en temps réel](./0006-preavis-upgrade-temps-reel.md)** 🟠 **— ✅ implémenté** (consensus-breaking)
+  *Fait :* l'activation d'upgrade passe de la **hauteur de bloc** au **timestamp** (unix secondes). Constantes `UPGRADE_NOTICE_*_SECS` (7/30/90 j), `ScheduledUpgrade.activation_ts`, `min_notice_secs()`, annonce/activation mesurées contre `current_block_ts`. Payload 14 o inchangé (octets identiques, sémantique = timestamp). Wallet CLI (`--activation-ts`), desktop-core+dto, app desktop, console admin JS et SDK alignés. Ferme le dernier écart doc↔code.
 
 - **0018 — Observabilité & SLO** 🟢
   *Direction :* formaliser métriques (déjà Prometheus/Grafana), alertes, objectifs de service, à mesure que le réseau grandit.
