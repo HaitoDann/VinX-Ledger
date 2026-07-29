@@ -227,6 +227,7 @@ Les éléments suivants sont les **piliers de conception** de VinX :
 7. **Consensus permissionné** (pas de switch vers PoW anonyme ou PoS ouvert)
 8. **Propriété inconditionnelle des comptes** (aucun gel)
 9. **La L1 n'exécute jamais de logique applicative** — les fonctionnalités complexes vivent dans des surcouches **hors-nœud**, reliées à VinX par ancrage bondé (un hash + un bond + des transferts VINX). Voir [ADR 0001](docs/adr/0001-l1-monnaie-pure-modules-ancrage-bonde.md).
+10. **Courbe d'émission immuable** — le total (100 Md), la période de halving (8 ans) et la forme de la courbe ne sont gouvernables par **personne** (ni admin, ni action de gouvernance). Nul ne décide de la création monétaire. Voir [ADR 0021](docs/adr/0021-immutabilite-emission.md).
 
 La conservation de la supply repose sur une **arithmétique entièrement *checked*** (aucun overflow/underflow silencieux) et une **finalité au quorum** (un bloc co-signé par le quorum n'est pas réorganisé), couvertes par des tests de propriété (`proptest`).
 

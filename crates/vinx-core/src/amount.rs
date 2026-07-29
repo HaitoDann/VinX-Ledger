@@ -229,6 +229,34 @@ mod tests {
     }
 
     #[test]
+    fn test_emission_schedule_is_constitutional() {
+        // ADR 0021: these constants ARE VinX's monetary policy and are immutable —
+        // not governable by anyone. Changing any of them is a deliberate, breaking act,
+        // and this test is the tripwire that forces it to be conscious.
+        assert_eq!(
+            HALVING_PERIOD_SECS, 252_460_800,
+            "halving period is 8 years — immutable"
+        );
+        assert_eq!(
+            ERA0_EMISSION_ATOMS,
+            MAX_SUPPLY_ATOMS / 2,
+            "era 0 emits half the supply"
+        );
+        assert_eq!(
+            MAX_SUPPLY_ATOMS,
+            100_000_000_000 * DECIMAL_FACTOR,
+            "100 Md cap — immutable"
+        );
+        // The schedule asymptotically emits the entire supply (minus integer dust).
+        let far_future = cumulative_emission_atoms(u64::MAX / 2);
+        assert!(far_future <= MAX_SUPPLY_ATOMS);
+        assert!(
+            far_future > MAX_SUPPLY_ATOMS - MAX_SUPPLY_ATOMS / 1_000_000,
+            "emission converges to the full supply"
+        );
+    }
+
+    #[test]
     fn test_emission_monotonic_and_bounded() {
         let mut prev = 0u128;
         for years in 0..=120 {
