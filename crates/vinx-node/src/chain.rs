@@ -8,6 +8,10 @@ use vinx_crypto::{Address, Hash32};
 pub struct Chain {
     /// Stored as (block_hash, block) indexed by height.
     blocks: Vec<(Hash32, Block)>,
+    /// Highest height whose block has reached quorum co-signatures (ADR 0002).
+    /// Everything at or below is **final** — never reorganized. Genesis (0) is final.
+    #[serde(default)]
+    finalized_height: u64,
     /// Maps raw tx hash -> (block_height, tx_position). Not persisted via serde
     /// (rebuilt or imported by Storage). Keyed by the 32-byte hash directly —
     /// no hex allocation per insert/lookup — hashed with ahash on the hot path.
@@ -41,11 +45,38 @@ impl Chain {
         let hash = genesis.hash();
         let chain = Self {
             blocks: vec![(hash, genesis.clone())],
+            finalized_height: 0,
             tx_index: AHashMap::new(),
             account_tx_index: AHashMap::new(),
             slash_evidence: AHashMap::new(),
         };
         (chain, genesis)
+    }
+
+    /// Highest final (quorum-signed) height. Everything at or below is irreversible.
+    pub fn finalized_height(&self) -> u64 {
+        self.finalized_height
+    }
+
+    /// True when `height` is final (quorum-signed and never reorganizable).
+    pub fn is_final(&self, height: u64) -> bool {
+        height <= self.finalized_height
+    }
+
+    /// Advances `finalized_height` over the contiguous prefix of quorum-signed blocks
+    /// above the current mark (ADR 0002). Called after producing a block and after a
+    /// co-signature lands. Finality is prefix-closed: it stops at the first block that
+    /// has not yet reached quorum. Returns the new finalized height.
+    pub fn advance_finality(&mut self, validator_set: &vinx_core::ValidatorSet) -> u64 {
+        let tip = self.tip_height();
+        while self.finalized_height < tip {
+            let next = self.finalized_height + 1;
+            match self.get_block(next) {
+                Some(b) if b.is_finalized(validator_set) => self.finalized_height = next,
+                _ => break,
+            }
+        }
+        self.finalized_height
     }
 
     /// Height of the latest block (0 = only genesis exists).
@@ -315,6 +346,7 @@ mod tests {
     fn test_equivocation_detection() {
         let mut chain = Chain {
             blocks: vec![],
+            finalized_height: 0,
             tx_index: AHashMap::new(),
             account_tx_index: AHashMap::new(),
             slash_evidence: AHashMap::new(),
@@ -326,6 +358,67 @@ mod tests {
         assert!(!chain.record_signature(&addr, 5, hash_a)); // first sig — ok
         assert!(!chain.record_signature(&addr, 5, hash_a)); // same hash — ok (idempotent)
         assert!(chain.record_signature(&addr, 5, hash_b)); // different hash — EQUIVOCATION
+    }
+
+    // Builds a block at `height` signed by each of `signers` (quorum evidence).
+    fn signed_block(height: u64, prev: Hash32, proposer: Address, signers: &[&KeyPair]) -> Block {
+        let header = BlockHeader {
+            height,
+            prev_hash: prev,
+            timestamp: height,
+            validator: proposer,
+            tx_count: 0,
+            state_root: [0u8; 32],
+            base_fee: 0,
+            receipts_root: [0u8; 32],
+        };
+        let hash = header.hash();
+        let signatures = signers
+            .iter()
+            .map(|kp| vinx_core::BlockSignature {
+                validator: Address::from_public_key(&kp.public_key()),
+                pub_key: kp.public_key(),
+                signature: kp.sign(&hash),
+            })
+            .collect();
+        Block {
+            header,
+            transactions: vec![],
+            signatures,
+        }
+    }
+
+    #[test]
+    fn test_finality_advances_with_quorum() {
+        // Single validator: its own signature already meets quorum → block 1 final.
+        let kp = KeyPair::generate();
+        let v = Address::from_public_key(&kp.public_key());
+        let vs = vinx_core::ValidatorSet::single(v);
+        let (mut chain, _) = Chain::new_with_genesis(v, 0);
+        assert_eq!(chain.finalized_height(), 0);
+
+        let b1 = signed_block(1, chain.tip_hash(), v, &[&kp]);
+        chain.push(b1);
+        assert_eq!(chain.finalized_height(), 0); // not advanced until we ask
+        chain.advance_finality(&vs);
+        assert_eq!(chain.finalized_height(), 1);
+        assert!(chain.is_final(1));
+        assert!(!chain.is_final(2));
+    }
+
+    #[test]
+    fn test_finality_stops_below_quorum() {
+        // Two validators (quorum 2): a block with only the proposer's sig is NOT final.
+        let kp = KeyPair::generate();
+        let v = Address::from_public_key(&kp.public_key());
+        let other = Address::from_public_key(&KeyPair::generate().public_key());
+        let vs = vinx_core::ValidatorSet::new(vec![v, other]);
+        let (mut chain, _) = Chain::new_with_genesis(v, 0);
+
+        let b1 = signed_block(1, chain.tip_hash(), v, &[&kp]); // 1 of 2 sigs
+        chain.push(b1);
+        chain.advance_finality(&vs);
+        assert_eq!(chain.finalized_height(), 0); // below quorum → not final
     }
 
     #[test]

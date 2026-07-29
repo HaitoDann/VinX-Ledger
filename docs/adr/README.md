@@ -18,10 +18,10 @@ Rien ci-dessous n'est décidé — ce sont des propositions à instruire une par
 
 ### Consensus & finalité
 
-- **0002 — Finalité au quorum** 🔴
-  *Problème :* aujourd'hui le producteur commite le bloc avec sa **seule** signature ; le quorum n'est vérifié qu'*a posteriori*. La « finalité déterministe immédiate » annoncée n'est donc pas garantie à n≥2.
-  *Direction :* deux phases explicites — `propose → collecte quorum de co-signatures → commit`. Séparer un pointeur `finalized_height` du `tip`. Interdire toute réorg sous la hauteur finalisée.
-  *Compromis :* latence de finalité = 1 aller-retour de co-signatures (au lieu d'un commit optimiste).
+- **0002 — Finalité au quorum** 🔴 **— ✅ tranche 1 implémentée**
+  *Problème :* le producteur commite le bloc avec sa **seule** signature ; le quorum n'est vérifié qu'*a posteriori*.
+  *Fait :* pointeur `finalized_height` explicite et **prefix-closed** (avance sur le préfixe contigu de blocs quorum-signés), mis à jour à la production et à chaque co-signature, exposé sur `/health`, avec `is_final(height)`. À n=1 la finalité est immédiate ; à n≥2 elle suit les co-signatures.
+  *Reste (nécessite le banc 3-validateurs) :* refuser de bâtir au-delà d'une profondeur non finalisée, view-change formel, latence de finalité = 1 aller-retour.
 
 - **0005 — Temps réseau robuste** 🟠
   *Problème :* l'émission et la déliaison font confiance au `timestamp` du bloc, posé par un seul producteur. Bornes actuelles : monotonie + horloge locale à la production seulement.
@@ -30,10 +30,9 @@ Rien ci-dessous n'est décidé — ce sont des propositions à instruire une par
 
 ### Sécurité
 
-- **0003 — Slashing automatique de l'équivocation** 🔴
-  *Problème :* la détection d'équivocation existe (`record_signature`) mais **rien ne construit ni ne diffuse** la transaction `SlashValidator`. La sanction repose sur une action manuelle.
-  *Direction :* sur double-signature détectée → assembler l'`SlashEvidence` (les deux en-têtes signés), construire et gossiper une tx `SlashValidator` automatiquement.
-  *Compromis :* gestion des faux-positifs (partitions réseau) — la preuve cryptographique les élimine, mais à cadrer.
+- **0003 — Slashing automatique de l'équivocation** 🔴 **— ✅ implémenté**
+  *Fait :* sur réception d'un second bloc différent du même proposeur à une hauteur déjà scellée (double-proposition), on assemble l'`SlashEvidence` à deux en-têtes et on construit/soumet/gossipe automatiquement une tx `SlashValidator` (rapporteur = validateur local). Preuve cryptographiquement vérifiée → pas de faux positifs.
+  *Reste :* détection via co-signatures conflictuelles (nécessite de conserver les deux en-têtes signés).
 
 - **0012 — Gestion des clés validateur** 🟢
   *Problème :* la clé validateur est « chaude » dans le process du nœud (elle signe blocs + co-signatures + dérive la clé P2P).
@@ -48,9 +47,8 @@ Rien ci-dessous n'est décidé — ce sont des propositions à instruire une par
 
 ### Tokenomics & frais
 
-- **0004 — Invariant exécutable** 🔴 *(quasi une tâche)*
-  *Problème :* `circulation + Fonderie = 100 Md` est promis « à chaque bloc » mais n'est **jamais vérifié à l'exécution** (seulement en tests).
-  *Direction :* `debug_assert!` (voire rejet de bloc) après `settle_block`. Ferme le risque de régression silencieuse le plus insidieux.
+- **0004 — Invariant exécutable** 🔴 **— ✅ implémenté**
+  *Fait :* `supply_invariant_holds()` (`circulation + Fonderie == MAX`) appliqué comme **garde dure** sur tous les chemins de bloc (producer → refus de sceller ; P2P/sync → rollback), car le state_root ne couvre pas la Fonderie. Ajout de `credit_from_foundry_for_test` pour les setups de test.
 
 - **0009 — Frais des transactions stake/unstake** 🟠
   *Problème :* le whitepaper donne un poids `1` à stake/unstake, mais le code les **exempte** (fee ZERO). Incohérence + petit vecteur de spam.

@@ -12,6 +12,8 @@ fn hash_to_hex(h: &Hash32) -> String {
 pub struct HealthResponse {
     pub status: &'static str,
     pub height: u64,
+    /// Highest final (quorum-signed) height — irreversible (ADR 0002).
+    pub finalized_height: u64,
     pub mempool_pending: usize,
     /// Chain ID this node validates — clients must sign transactions with it.
     pub chain_id: u32,

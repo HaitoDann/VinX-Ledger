@@ -53,12 +53,16 @@ impl IntoResponse for ApiError {
 // ─── Handlers ───────────────────────────────────────────────────────────────
 
 pub async fn health(State(node): State<Arc<Node>>) -> ApiResult<HealthResponse> {
-    let height = node.chain.read().await.tip_height();
+    let (height, finalized_height) = {
+        let chain = node.chain.read().await;
+        (chain.tip_height(), chain.finalized_height())
+    };
     let pending = node.mempool.read().await.size();
     let chain_id = node.state.read().await.chain_id;
     Ok(Json(HealthResponse {
         status: "ok",
         height,
+        finalized_height,
         mempool_pending: pending,
         chain_id,
     }))

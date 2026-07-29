@@ -590,6 +590,7 @@ async fn dispatch_message(
                 c.record_signature(local_addr, height, block_hash);
                 let finalized = c.add_co_signature(height, sig, &vs);
                 if finalized {
+                    c.advance_finality(&vs); // ADR 0002
                     info!(height, "Block finalized after co-signing");
                 }
             }
@@ -633,6 +634,7 @@ async fn dispatch_message(
             }
             let finalized = c.add_co_signature(height, signature, &vs);
             if finalized {
+                c.advance_finality(&vs); // ADR 0002
                 info!(height, "Block finalized via co-signatures");
             }
         }

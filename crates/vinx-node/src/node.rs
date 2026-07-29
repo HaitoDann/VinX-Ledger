@@ -254,6 +254,11 @@ impl Node {
             timestamp,
         )?;
 
+        // ADR 0002: advance the finalized pointer. On a single-validator chain the
+        // proposer's own signature already meets quorum, so the block is final at once;
+        // with more validators it becomes final once quorum co-signs (via P2P).
+        chain.advance_finality(&state.validator_set);
+
         // Flush mempool entries whose nonce is now consumed by this block.
         {
             let mut confirmed_nonces = HashMap::new();

@@ -8,6 +8,8 @@
 export interface HealthResponse {
   status: string;
   height: number;
+  /** Highest final (quorum-signed) height — irreversible (ADR 0002). */
+  finalized_height: number;
   mempool_pending: number;
   /** Chain ID this node validates — sign transactions with it. */
   chain_id: number;
