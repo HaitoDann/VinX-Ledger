@@ -245,6 +245,45 @@ mod tests {
     }
 
     #[test]
+    fn test_slash_evidence_encoding_is_canonical() {
+        // ADR 0020: SlashEvidence enters the SlashValidator transaction payload —
+        // consensus-critical. Pin that its bincode encoding is deterministic and
+        // canonical (decode then re-encode is byte-identical).
+        let kp = KeyPair::generate();
+        let v = Address::from_public_key(&kp.public_key());
+        let mk = |tag: u8| {
+            let h = BlockHeader {
+                height: 5,
+                prev_hash: GENESIS_PREV_HASH,
+                timestamp: 7,
+                validator: v,
+                tx_count: 0,
+                state_root: [tag; 32],
+                base_fee: 0,
+                receipts_root: [0u8; 32],
+            };
+            let sig = BlockSignature {
+                validator: v,
+                pub_key: kp.public_key(),
+                signature: kp.sign(&h.hash()),
+            };
+            (h, sig)
+        };
+        let (header_a, sig_a) = mk(0xAA);
+        let (header_b, sig_b) = mk(0xBB);
+        let ev = SlashEvidence {
+            header_a,
+            header_b,
+            sig_a,
+            sig_b,
+        };
+        let bytes = bincode::serialize(&ev).unwrap();
+        assert_eq!(bytes, bincode::serialize(&ev).unwrap());
+        let decoded: SlashEvidence = bincode::deserialize(&bytes).unwrap();
+        assert_eq!(bincode::serialize(&decoded).unwrap(), bytes);
+    }
+
+    #[test]
     fn test_non_validator_signature_ignored() {
         let kp = KeyPair::generate();
         let addr = Address::from_public_key(&kp.public_key());

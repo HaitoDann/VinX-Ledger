@@ -76,7 +76,7 @@ Rien ci-dessous n'est décidé — ce sont des propositions à instruire une par
 - **0015 — Exécution parallèle** 🟢
   *Direction :* exécution parallèle des tx sans conflit d'accès — pertinent seulement à des dizaines de milliers de TPS soutenus. Risque de déterminisme à cadrer.
 
-- **0020 — Sérialisation canonique consensus-critique** 🟠
+- **0020 — Sérialisation canonique consensus-critique** 🟠 **— ✅ tranche 1** (tests-tripwire de déterminisme + round-trip canonique pour `GovernanceAction` et `SlashEvidence` ; audit complet + vecteurs dorés hex = suite)
   *Direction :* garantir l'encodage canonique (borsh/bincode) des structures qui entrent dans un hash signé, pour empêcher toute malléabilité inter-implémentations.
 
 ### Réseau P2P
