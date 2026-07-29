@@ -4016,6 +4016,7 @@ dependencies = [
 name = "vinx-desktop-core"
 version = "0.1.0-alpha.1"
 dependencies = [
+ "bincode",
  "hex",
  "serde",
  "serde_json",

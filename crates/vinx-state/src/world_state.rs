@@ -529,8 +529,6 @@ impl WorldState {
             TransactionType::Stake => self.apply_stake(tx),
             TransactionType::Unstake => self.apply_unstake(tx),
             TransactionType::AnnounceUpgrade => self.apply_announce_upgrade(tx),
-            TransactionType::AddValidator => self.apply_add_validator(tx),
-            TransactionType::RemoveValidator => self.apply_remove_validator(tx),
             TransactionType::SlashValidator => self.apply_slash_validator(tx),
             TransactionType::AdminAction => self.apply_admin_action(tx),
         }
@@ -755,66 +753,10 @@ impl WorldState {
         Ok(())
     }
 
-    fn apply_add_validator(&mut self, tx: &Transaction) -> Result<(), CoreError> {
-        self.check_admin(tx)?;
-        if self.validator_set.contains(&tx.to) {
-            return Err(CoreError::InvalidTransaction(
-                "address is already a validator".to_string(),
-            ));
-        }
-        // Skin in the game: a new validator must have posted the minimum bond.
-        // (The genesis validator enters via create_genesis_state, not this path,
-        // so it is grandfathered and exempt.)
-        if self.account_staked(&tx.to).atoms() < MIN_VALIDATOR_BOND_ATOMS {
-            return Err(CoreError::InvalidTransaction(
-                "candidate validator has not posted the minimum bond".to_string(),
-            ));
-        }
-        let sender = self
-            .accounts
-            .get_mut(&tx.from)
-            .ok_or(CoreError::InsufficientBalance)?;
-        if sender.nonce != tx.nonce {
-            return Err(CoreError::InvalidNonce {
-                expected: sender.nonce,
-                got: tx.nonce,
-            });
-        }
-        sender.nonce += 1;
-        self.validator_set.add(tx.to);
-        self.mark_dirty(&tx.from);
-        tracing::info!(validator = %tx.to, "Validator added to set");
-        Ok(())
-    }
-
-    fn apply_remove_validator(&mut self, tx: &Transaction) -> Result<(), CoreError> {
-        self.check_admin(tx)?;
-        if self.validator_set.len() <= 1 {
-            return Err(CoreError::InvalidTransaction(
-                "cannot remove the last validator".to_string(),
-            ));
-        }
-        if !self.validator_set.contains(&tx.to) {
-            return Err(CoreError::InvalidTransaction(
-                "address is not a validator".to_string(),
-            ));
-        }
-        let sender = self
-            .accounts
-            .get_mut(&tx.from)
-            .ok_or(CoreError::InsufficientBalance)?;
-        if sender.nonce != tx.nonce {
-            return Err(CoreError::InvalidNonce {
-                expected: sender.nonce,
-                got: tx.nonce,
-            });
-        }
-        sender.nonce += 1;
-        self.validator_set.remove(&tx.to);
-        self.mark_dirty(&tx.from);
-        tracing::info!(validator = %tx.to, "Validator removed from set");
-        Ok(())
-    }
+    // ADR 0007: `apply_add_validator` / `apply_remove_validator` (dedicated tx types
+    // 0x05 / 0x06) were removed. Validator-set changes now go through the single
+    // governance path — `apply_admin_action` → `GovernanceAction::AddValidator` /
+    // `RemoveValidator` — which carries the same (now strict) validation.
 
     /// Checks whether a pending upgrade should activate at the current block height
     /// and applies the version change if so.
@@ -979,35 +921,55 @@ impl WorldState {
             CoreError::InvalidTransaction("malformed governance action payload".to_string())
         })?;
 
-        let sender = self
+        // ADR 0007: check the nonce but do NOT consume it yet — a governance action
+        // that fails validation (e.g. duplicate validator, missing bond) must leave the
+        // nonce untouched, matching the old dedicated handlers. The nonce is only bumped
+        // once the action has been applied successfully.
+        let cur_nonce = self
             .accounts
-            .get_mut(&tx.from)
-            .ok_or(CoreError::InsufficientBalance)?;
-        if sender.nonce != tx.nonce {
+            .get(&tx.from)
+            .ok_or(CoreError::InsufficientBalance)?
+            .nonce;
+        if cur_nonce != tx.nonce {
             return Err(CoreError::InvalidNonce {
-                expected: sender.nonce,
+                expected: cur_nonce,
                 got: tx.nonce,
             });
         }
-        sender.nonce += 1;
 
         match action {
             GovernanceAction::AddValidator(addr) => {
+                // ADR 0007: single, strict validation path (was previously duplicated in
+                // the dedicated 0x05 handler). Reject a duplicate rather than ignoring it.
+                if self.validator_set.contains(&addr) {
+                    return Err(CoreError::InvalidTransaction(
+                        "address is already a validator".to_string(),
+                    ));
+                }
+                // Skin in the game: a new validator must have posted the minimum bond.
+                // (The genesis validator enters via create_genesis_state, so it is
+                // grandfathered and exempt.)
                 if self.account_staked(&addr).atoms() < MIN_VALIDATOR_BOND_ATOMS {
                     return Err(CoreError::InvalidTransaction(
                         "candidate validator has not posted the minimum bond".to_string(),
                     ));
                 }
-                if !self.validator_set.contains(&addr) {
-                    self.validator_set.add(addr);
-                    tracing::info!(%addr, "Admin: validator added");
-                }
+                self.validator_set.add(addr);
+                tracing::info!(%addr, "Admin: validator added");
             }
             GovernanceAction::RemoveValidator(addr) => {
-                if self.validator_set.len() > 1 && self.validator_set.contains(&addr) {
-                    self.validator_set.remove(&addr);
-                    tracing::info!(%addr, "Admin: validator removed");
+                if self.validator_set.len() <= 1 {
+                    return Err(CoreError::InvalidTransaction(
+                        "cannot remove the last validator".to_string(),
+                    ));
                 }
+                if !self.validator_set.contains(&addr) {
+                    return Err(CoreError::InvalidTransaction(
+                        "address is not a validator".to_string(),
+                    ));
+                }
+                self.validator_set.remove(&addr);
+                tracing::info!(%addr, "Admin: validator removed");
             }
             GovernanceAction::UpdateFeeFloor { atoms } => {
                 self.fee_floor = Amount::from_atoms(atoms as u128);
@@ -1035,6 +997,11 @@ impl WorldState {
             }
         }
 
+        // Success: consume the nonce.
+        self.accounts
+            .get_mut(&tx.from)
+            .expect("sender existence checked above")
+            .nonce += 1;
         self.mark_dirty(&tx.from);
         Ok(())
     }
@@ -1162,16 +1129,25 @@ mod tests {
 
     #[test]
     fn test_add_validator_requires_bond() {
+        // ADR 0007: validator admission goes through the unified AdminAction path.
+        use vinx_core::GovernanceAction;
         let (mut state, admin_kp, _) = admin_state();
         let (_, candidate) = kp_addr();
+        let add = |nonce| {
+            Transaction::new_admin_action(
+                &admin_kp,
+                &GovernanceAction::AddValidator(candidate),
+                nonce,
+            )
+        };
         // No bond → rejected.
-        let tx = Transaction::new_add_validator(&admin_kp, candidate, 0);
-        assert!(state.apply_transaction(&tx).is_err());
+        assert!(state.apply_transaction(&add(0)).is_err());
         // Post the minimum bond, then admission succeeds.
         state.set_staked_for_test(&candidate, Amount::from_atoms(MIN_VALIDATOR_BOND_ATOMS));
-        let tx = Transaction::new_add_validator(&admin_kp, candidate, 0);
-        state.apply_transaction(&tx).unwrap();
+        state.apply_transaction(&add(0)).unwrap();
         assert!(state.validator_set.contains(&candidate));
+        // Adding the same validator again is now a hard error (strict semantics).
+        assert!(state.apply_transaction(&add(1)).is_err());
     }
 
     #[test]

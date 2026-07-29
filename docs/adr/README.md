@@ -90,9 +90,9 @@ Rien ci-dessous n'est décidé — ce sont des propositions à instruire une par
 
 ### Gouvernance
 
-- **0007 — Unification des chemins de gouvernance** 🟠
-  *Problème :* `AddValidator`/`RemoveValidator` existent en **type de tx** (0x05/0x06) **et** en `GovernanceAction` (via `AdminAction`), avec des sémantiques légèrement différentes.
-  *Direction :* un seul chemin (probablement `AdminAction`), retirer les doublons.
+- **0007 — [Unification des chemins de gouvernance](./0007-unification-gouvernance.md)** 🟠 **— ✅ implémenté** (consensus-breaking)
+  *Problème :* `AddValidator`/`RemoveValidator` existaient en **type de tx** (0x05/0x06) **et** en `GovernanceAction` (via `AdminAction`), avec des sémantiques divergentes (erreur vs ignore silencieux sur doublon).
+  *Fait :* discriminants 0x05/0x06 **retirés** ; un seul chemin `AdminAction` (0x08) avec **sémantique stricte** unique (bond requis, refus du doublon, refus du dernier validateur) et **nonce consommé seulement en cas de succès**. Wallet CLI, desktop-core et console admin JS reconstruisent `bincode(GovernanceAction)` ; golden vector mis à jour.
 
 - **0008 — chain_id par défaut sûr** 🟠 **— ✅ implémenté**
   *Problème :* tous les constructeurs et le `serde(default)` retombent sur `DEVNET` — piège anti-replay pour une tx désérialisée sans chain_id.

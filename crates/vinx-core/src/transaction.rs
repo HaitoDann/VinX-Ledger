@@ -12,10 +12,6 @@ pub enum TransactionType {
     Unstake,
     /// Admin-only: schedule a protocol upgrade at a future block height.
     AnnounceUpgrade,
-    /// Admin-only: add a new address to the PoA validator set. `to` = new validator.
-    AddValidator,
-    /// Admin-only: remove an address from the PoA validator set. `to` = validator to remove.
-    RemoveValidator,
     /// Slash a validator who double-signed. `to` = validator, `payload` = bincode(SlashEvidence).
     SlashValidator,
     /// Admin-only governance action executed immediately. `payload` = bincode(GovernanceAction).
@@ -29,8 +25,9 @@ impl TransactionType {
             TransactionType::Stake => 0x02,
             TransactionType::Unstake => 0x03,
             TransactionType::AnnounceUpgrade => 0x04,
-            TransactionType::AddValidator => 0x05,
-            TransactionType::RemoveValidator => 0x06,
+            // 0x05 / 0x06 (dedicated AddValidator / RemoveValidator) were retired in
+            // ADR 0007 — validator-set changes now go through AdminAction (0x08) only.
+            // The discriminants of the surviving types are kept stable.
             TransactionType::SlashValidator => 0x07,
             TransactionType::AdminAction => 0x08,
         }
@@ -260,54 +257,6 @@ impl Transaction {
         Some((ProtocolVersion::new(major, minor, patch), activation_height))
     }
 
-    /// Constructs and signs an AddValidator transaction (admin only).
-    pub fn new_add_validator(keypair: &KeyPair, validator: Address, nonce: u64) -> Self {
-        let pk = keypair.public_key();
-        let from = Address::from_public_key(&pk);
-        let mut tx = Self {
-            tx_type: TransactionType::AddValidator,
-            from,
-            to: validator,
-            amount: Amount::ZERO,
-            fee: Amount::ZERO,
-            nonce,
-            chain_id: CHAIN_ID_DEVNET,
-            expires_at_height: None,
-            payload: vec![],
-            pub_key: Some(pk),
-            signature: None,
-            sponsor: None,
-            sponsor_pub_key: None,
-            sponsor_signature: None,
-        };
-        tx.signature = Some(keypair.sign(&tx.signing_bytes()));
-        tx
-    }
-
-    /// Constructs and signs a RemoveValidator transaction (admin only).
-    pub fn new_remove_validator(keypair: &KeyPair, validator: Address, nonce: u64) -> Self {
-        let pk = keypair.public_key();
-        let from = Address::from_public_key(&pk);
-        let mut tx = Self {
-            tx_type: TransactionType::RemoveValidator,
-            from,
-            to: validator,
-            amount: Amount::ZERO,
-            fee: Amount::ZERO,
-            nonce,
-            chain_id: CHAIN_ID_DEVNET,
-            expires_at_height: None,
-            payload: vec![],
-            pub_key: Some(pk),
-            signature: None,
-            sponsor: None,
-            sponsor_pub_key: None,
-            sponsor_signature: None,
-        };
-        tx.signature = Some(keypair.sign(&tx.signing_bytes()));
-        tx
-    }
-
     /// Constructs a SlashValidator tx with equivocation evidence.
     pub fn new_slash_validator(
         keypair: &KeyPair,
@@ -478,19 +427,33 @@ mod tests {
             sponsor_signature: None,
         };
 
-        let add = mk(TransactionType::AddValidator, to, vec![]);
-        assert_eq!(
-            hex::encode(add.signing_bytes()),
-            "050102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f202122232425262728\
-             000000000000000000000000000000000000000000000000000000000000000000000000000000070000002a0000"
+        // ADR 0007: validator-set changes go through AdminAction (0x08) carrying a
+        // bincode(GovernanceAction). The admin console (rpc/ui.rs) reproduces the same
+        // bincode: enum tag u32 LE (AddValidator = 0) ‖ address(20 raw bytes).
+        // Here `to = from` (self), amount/fee = 0.
+        let mut add_payload = Vec::with_capacity(24);
+        add_payload.extend_from_slice(&0u32.to_le_bytes()); // GovernanceAction::AddValidator
+        add_payload.extend_from_slice(to.as_bytes());
+        let add = mk(TransactionType::AdminAction, from, add_payload);
+        let expected_add = concat!(
+            "08",                                       // AdminAction discriminant
+            "0102030405060708090a0b0c0d0e0f1011121314", // from  = 01..14
+            "0102030405060708090a0b0c0d0e0f1011121314", // to    = self (from)
+            "00000000000000000000000000000000",         // amount 0
+            "00000000000000000000000000000000",         // fee 0
+            "0000000000000007",                         // nonce 7
+            "0000002a",                                 // chain_id 42
+            "00",                                       // expiry None
+            "00000000", // GovernanceAction::AddValidator (u32 LE = 0)
+            "15161718191a1b1c1d1e1f202122232425262728", // validator address = 15..28
+            "00",       // sponsor None
         );
+        assert_eq!(hex::encode(add.signing_bytes()), expected_add);
 
-        let remove = mk(TransactionType::RemoveValidator, to, vec![]);
-        assert_eq!(
-            hex::encode(remove.signing_bytes()),
-            "060102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f202122232425262728\
-             000000000000000000000000000000000000000000000000000000000000000000000000000000070000002a0000"
-        );
+        // Cross-check that the hand-built payload equals bincode(GovernanceAction) —
+        // this is exactly what the in-browser admin console must reproduce.
+        let gov = crate::governance::GovernanceAction::AddValidator(to);
+        assert_eq!(add.payload, bincode::serialize(&gov).unwrap());
 
         // AnnounceUpgrade: to = self, payload = major(1) minor(2) patch(3) height(1000).
         let mut pl = Vec::with_capacity(14);

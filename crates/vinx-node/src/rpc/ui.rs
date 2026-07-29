@@ -1147,6 +1147,17 @@ async function submitGov(txName, disc, toAddr, payloadBytes){
   return json;
 }
 
+// ADR 0007: validator-set changes go through AdminAction (0x08). The payload is
+// bincode(GovernanceAction): a little-endian u32 variant tag (AddValidator=0,
+// RemoveValidator=1) followed by the 20-byte address. `to` is the admin (self).
+function govValidatorPayload(variant,addr){
+  const a=bech32Decode20(addr);
+  const b=new Uint8Array(24);
+  b[0]=variant&0xff;b[1]=(variant>>8)&0xff;b[2]=(variant>>16)&0xff;b[3]=(variant>>24)&0xff;
+  b.set(a,4);
+  return b;
+}
+
 function upgradePayload(major,minor,patch,height){
   const b=new Uint8Array(14);
   b[0]=(major>>8)&0xff;b[1]=major&0xff;
@@ -1163,12 +1174,12 @@ function errMsg(id,e){document.getElementById(id).innerHTML='<p class="msg err">
 async function addValidator(){
   const addr=document.getElementById('add-val').value.trim();
   if(!addr.startsWith('vinx1'))return errMsg('v-msg',new Error('Adresse invalide.'));
-  try{const tx=await submitGov('AddValidator',0x05,addr,null);okMsg('v-msg',tx);document.getElementById('add-val').value='';setTimeout(refreshAll,600);}
+  try{const tx=await submitGov('AdminAction',0x08,wallet.address,govValidatorPayload(0,addr));okMsg('v-msg',tx);document.getElementById('add-val').value='';setTimeout(refreshAll,600);}
   catch(e){errMsg('v-msg',e);}
 }
 async function removeValidator(addr){
   if(!confirm('Retirer le validateur '+shortA(addr)+' ?'))return;
-  try{const tx=await submitGov('RemoveValidator',0x06,addr,null);okMsg('v-msg',tx);setTimeout(refreshAll,600);}
+  try{const tx=await submitGov('AdminAction',0x08,wallet.address,govValidatorPayload(1,addr));okMsg('v-msg',tx);setTimeout(refreshAll,600);}
   catch(e){errMsg('v-msg',e);}
 }
 async function scheduleUpgrade(){
@@ -1246,7 +1257,7 @@ async function loadPending(){
   }catch(e){box.innerHTML='<p class="msg err">'+e.message+'</p>';}
 }
 async function approve(addr){
-  try{const tx=await submitGov('AddValidator',0x05,addr,null);okMsg('v-msg',tx);setTimeout(refreshAll,600);}
+  try{const tx=await submitGov('AdminAction',0x08,wallet.address,govValidatorPayload(0,addr));okMsg('v-msg',tx);setTimeout(refreshAll,600);}
   catch(e){errMsg('v-msg',e);}
 }
 

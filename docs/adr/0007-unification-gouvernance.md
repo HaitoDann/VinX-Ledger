@@ -1,6 +1,6 @@
 # ADR 0007 — Unification des chemins de gouvernance
 
-- **Statut :** Proposé
+- **Statut :** Accepté (implémenté — consensus-breaking)
 - **Catégorie :** Cohérence · **Priorité :** 🟠 moyenne
 - **Date :** Juillet 2026
 

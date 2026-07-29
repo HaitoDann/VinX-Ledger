@@ -463,7 +463,10 @@ async fn cmd_add_validator(
     let acc = client.get_account(ks.address()).await?;
     let nonce = acc.nonce;
 
-    let tx = Transaction::new_add_validator(&kp, validator_addr, nonce);
+    // ADR 0007: goes through the unified governance path (AdminAction), not a
+    // dedicated tx type.
+    let tx =
+        Transaction::new_admin_action(&kp, &GovernanceAction::AddValidator(validator_addr), nonce);
 
     println!("Admin     : {}", ks.address());
     println!("Validator : {}", validator_str);
@@ -493,7 +496,12 @@ async fn cmd_remove_validator(
     let acc = client.get_account(ks.address()).await?;
     let nonce = acc.nonce;
 
-    let tx = Transaction::new_remove_validator(&kp, validator_addr, nonce);
+    // ADR 0007: unified governance path (AdminAction).
+    let tx = Transaction::new_admin_action(
+        &kp,
+        &GovernanceAction::RemoveValidator(validator_addr),
+        nonce,
+    );
 
     println!("Admin     : {}", ks.address());
     println!("Validator : {}", validator_str);

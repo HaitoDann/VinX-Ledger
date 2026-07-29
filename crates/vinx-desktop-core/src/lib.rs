@@ -9,7 +9,7 @@ use serde::{Deserialize, Serialize};
 use std::path::Path;
 use vinx_core::amount::{Amount, DECIMAL_FACTOR};
 use vinx_core::protocol::ProtocolVersion;
-use vinx_core::{Transaction, TransactionType};
+use vinx_core::{GovernanceAction, Transaction, TransactionType};
 use vinx_crypto::{Address, KeyPair};
 
 pub mod dto;
@@ -204,6 +204,29 @@ pub fn build_unstake(
     )
 }
 
+/// ADR 0007: validator-set changes go through the single governance path
+/// (AdminAction carrying a bincode(GovernanceAction)), not a dedicated tx type.
+/// `to` is the admin itself, matching `Transaction::new_admin_action`.
+fn build_admin_action(
+    kp: &KeyPair,
+    action: &GovernanceAction,
+    nonce: u64,
+    chain_id: u32,
+) -> Transaction {
+    let from = Address::from_public_key(&kp.public_key());
+    let payload = bincode::serialize(action).expect("GovernanceAction serialization is infallible");
+    build_signed(
+        kp,
+        TransactionType::AdminAction,
+        from,
+        Amount::ZERO,
+        Amount::ZERO,
+        nonce,
+        chain_id,
+        payload,
+    )
+}
+
 pub fn build_add_validator(
     kp: &KeyPair,
     validator: &str,
@@ -211,15 +234,11 @@ pub fn build_add_validator(
     chain_id: u32,
 ) -> Result<Transaction, CoreError> {
     let to = parse_address(validator)?;
-    Ok(build_signed(
+    Ok(build_admin_action(
         kp,
-        TransactionType::AddValidator,
-        to,
-        Amount::ZERO,
-        Amount::ZERO,
+        &GovernanceAction::AddValidator(to),
         nonce,
         chain_id,
-        vec![],
     ))
 }
 
@@ -230,15 +249,11 @@ pub fn build_remove_validator(
     chain_id: u32,
 ) -> Result<Transaction, CoreError> {
     let to = parse_address(validator)?;
-    Ok(build_signed(
+    Ok(build_admin_action(
         kp,
-        TransactionType::RemoveValidator,
-        to,
-        Amount::ZERO,
-        Amount::ZERO,
+        &GovernanceAction::RemoveValidator(to),
         nonce,
         chain_id,
-        vec![],
     ))
 }
 
@@ -317,8 +332,14 @@ mod tests {
         let (_, kp) = Keystore::generate();
         let (v, _) = Keystore::generate();
         let add = build_add_validator(&kp, &v.address, 3, 42).unwrap();
-        assert_eq!(add.tx_type, TransactionType::AddValidator);
+        // ADR 0007: routed through the unified governance path.
+        assert_eq!(add.tx_type, TransactionType::AdminAction);
         assert_eq!(add.fee, Amount::ZERO);
+        let decoded: GovernanceAction = bincode::deserialize(&add.payload).unwrap();
+        assert_eq!(
+            decoded,
+            GovernanceAction::AddValidator(parse_address(&v.address).unwrap())
+        );
         let up = build_announce_upgrade(&kp, ProtocolVersion::new(1, 1, 0), 100_000, 0, 42);
         assert_eq!(up.decode_upgrade_payload().unwrap().1, 100_000);
     }
