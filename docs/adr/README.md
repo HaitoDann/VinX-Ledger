@@ -16,6 +16,12 @@ Ce dossier trace les décisions d'architecture. Chaque ADR a un **statut** :
 Catalogue priorisé des ADR à écrire/décider. **Priorités :** 🔴 haute · 🟠 moyenne · 🟢 future.
 Rien ci-dessous n'est décidé — ce sont des propositions à instruire une par une.
 
+> **Lot « Cohérence & Robustesse » rédigé** (statut Proposé — documents dédiés) :
+> [0005](./0005-temps-reseau-robuste.md) · [0006](./0006-preavis-upgrade-temps-reel.md) ·
+> [0007](./0007-unification-gouvernance.md) · [0008](./0008-chain-id-defaut-sur.md) ·
+> [0009](./0009-frais-stake-unstake.md) · [0020](./0020-serialisation-canonique.md) ·
+> [0021](./0021-immutabilite-emission.md).
+
 ### Consensus & finalité
 
 - **0002 — Finalité au quorum** 🔴 **— ✅ tranche 1 implémentée**
