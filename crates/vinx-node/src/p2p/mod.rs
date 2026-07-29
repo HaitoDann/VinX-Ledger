@@ -18,9 +18,59 @@ use crate::{chain::Chain, config::NodeConfig, mempool::Mempool, node::NodeMetric
 use messages::P2pMessage;
 use rayon::prelude::*;
 use std::sync::atomic::Ordering;
-use vinx_core::{Block, BlockSignature, Transaction, ValidatorSet};
+use vinx_core::{Block, BlockSignature, SlashEvidence, Transaction, ValidatorSet};
 use vinx_crypto::{Address, Hash32};
 use vinx_state::WorldState;
+
+/// Returns the proposer's own co-signature on `block` (the one whose validator is the
+/// block's proposer), if present. Used to assemble equivocation evidence.
+fn proposer_signature(block: &Block) -> Option<&BlockSignature> {
+    block
+        .signatures
+        .iter()
+        .find(|s| s.validator == block.header.validator)
+}
+
+/// Auto-reports a proven equivocation (ADR 0003): builds a `SlashValidator` transaction
+/// carrying the two-header evidence, submits it to the local mempool, and gossips it so
+/// any validator can include it. Only registered validators report (the reporter must
+/// have an on-chain account to be `from` and collect the bounty).
+#[allow(clippy::too_many_arguments)]
+async fn report_equivocation(
+    target: Address,
+    evidence: SlashEvidence,
+    mempool: &Arc<RwLock<Mempool>>,
+    state: &Arc<RwLock<WorldState>>,
+    vs: &ValidatorSet,
+    local_kp: &vinx_crypto::KeyPair,
+    local_addr: &Address,
+    swarm: &mut libp2p::Swarm<VinxBehaviour>,
+) {
+    if !vs.contains(local_addr) {
+        debug!(%target, "Equivocation observed but this node is not a validator — not reporting");
+        return;
+    }
+    // Bind the slash transaction to the node's real chain id and nonce.
+    let (chain_id, nonce) = {
+        let s = state.read().await;
+        (
+            s.chain_id,
+            s.get_account(local_addr).map(|a| a.nonce).unwrap_or(0),
+        )
+    };
+    let mut tx = Transaction::new_slash_validator(local_kp, target, &evidence, nonce);
+    tx.chain_id = chain_id;
+    tx.sign(local_kp); // re-sign so the signature commits to the real chain id
+
+    if mempool.write().await.add(tx.clone()).is_ok() {
+        let out = P2pMessage::NewTransaction(tx);
+        let topic = IdentTopic::new(out.topic());
+        let _ = swarm.behaviour_mut().gossipsub.publish(topic, out.encode());
+        warn!(%target, "EQUIVOCATION — slash transaction submitted and gossiped");
+    } else {
+        debug!(%target, "Equivocation slash tx not admitted (already pending?)");
+    }
+}
 
 #[allow(clippy::large_enum_variant)]
 pub enum P2pCommand {
@@ -372,6 +422,52 @@ async fn dispatch_message(
             let height = block.header.height;
             let vs = validator_set.read().await.clone();
 
+            // 0. Equivocation detection (ADR 0003): a *different* block by the same
+            //    proposer at a height we already hold — with a valid proposer signature
+            //    on each — is a provable double-proposal. Assemble the evidence while we
+            //    still hold both headers, then auto-report a SlashValidator transaction.
+            let equivocation: Option<SlashEvidence> = {
+                let chain_guard = chain.read().await;
+                if height <= chain_guard.tip_height() {
+                    chain_guard.get_block(height).and_then(|ours| {
+                        let hb = block.hash();
+                        let ha = ours.hash();
+                        if ours.header.validator != block.header.validator || ha == hb {
+                            return None;
+                        }
+                        let sig_a = proposer_signature(ours)?.clone();
+                        let sig_b = proposer_signature(&block)?.clone();
+                        // Both proposer signatures must be cryptographically valid over
+                        // their respective headers, else it's just a bogus block.
+                        let valid = Address::from_public_key(&sig_b.pub_key)
+                            == block.header.validator
+                            && sig_b.pub_key.verify(&hb, &sig_b.signature).is_ok()
+                            && sig_a.pub_key.verify(&ha, &sig_a.signature).is_ok();
+                        valid.then(|| SlashEvidence {
+                            header_a: ours.header.clone(),
+                            header_b: block.header.clone(),
+                            sig_a,
+                            sig_b,
+                        })
+                    })
+                } else {
+                    None
+                }
+            };
+            if let Some(evidence) = equivocation {
+                report_equivocation(
+                    block.header.validator,
+                    evidence,
+                    mempool,
+                    state,
+                    &vs,
+                    local_kp,
+                    local_addr,
+                    swarm,
+                )
+                .await;
+            }
+
             // 1. Height and prev_hash linkage
             {
                 let chain_guard = chain.read().await;
@@ -630,5 +726,70 @@ async fn dispatch_message(
                 }
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use vinx_core::block::GENESIS_PREV_HASH;
+    use vinx_core::BlockHeader;
+    use vinx_crypto::KeyPair;
+
+    fn signed_block(kp: &KeyPair, validator: Address, height: u64, tag: u8) -> Block {
+        let header = BlockHeader {
+            height,
+            prev_hash: GENESIS_PREV_HASH,
+            timestamp: 0,
+            validator,
+            tx_count: 0,
+            state_root: [tag; 32],
+            base_fee: 0,
+            receipts_root: [0u8; 32],
+        };
+        let sig = BlockSignature {
+            validator,
+            pub_key: kp.public_key(),
+            signature: kp.sign(&header.hash()),
+        };
+        Block {
+            header,
+            transactions: vec![],
+            signatures: vec![sig],
+        }
+    }
+
+    #[test]
+    fn test_proposer_signature_found() {
+        let kp = KeyPair::generate();
+        let v = Address::from_public_key(&kp.public_key());
+        let b = signed_block(&kp, v, 5, 0xAA);
+        assert_eq!(proposer_signature(&b).unwrap().validator, v);
+    }
+
+    #[test]
+    fn test_equivocation_evidence_is_well_formed() {
+        // Two different blocks at the same height, both signed by the same proposer,
+        // assemble into evidence whose signatures verify over their own header hashes.
+        let kp = KeyPair::generate();
+        let v = Address::from_public_key(&kp.public_key());
+        let a = signed_block(&kp, v, 5, 0xAA);
+        let b = signed_block(&kp, v, 5, 0xBB);
+        assert_eq!(a.header.height, b.header.height);
+        assert_ne!(a.hash(), b.hash());
+
+        let sig_a = proposer_signature(&a).unwrap().clone();
+        let sig_b = proposer_signature(&b).unwrap().clone();
+        assert!(sig_a.pub_key.verify(&a.hash(), &sig_a.signature).is_ok());
+        assert!(sig_b.pub_key.verify(&b.hash(), &sig_b.signature).is_ok());
+
+        let evidence = SlashEvidence {
+            header_a: a.header.clone(),
+            header_b: b.header.clone(),
+            sig_a,
+            sig_b,
+        };
+        assert_eq!(evidence.header_a.height, evidence.header_b.height);
+        assert_ne!(evidence.header_a.hash(), evidence.header_b.hash());
     }
 }
