@@ -29,7 +29,7 @@ Rien ci-dessous n'est décidé — ce sont des propositions à instruire une par
   *Fait :* pointeur `finalized_height` explicite et **prefix-closed** (avance sur le préfixe contigu de blocs quorum-signés), mis à jour à la production et à chaque co-signature, exposé sur `/health`, avec `is_final(height)`. À n=1 la finalité est immédiate ; à n≥2 elle suit les co-signatures.
   *Reste (nécessite le banc 3-validateurs) :* refuser de bâtir au-delà d'une profondeur non finalisée, view-change formel, latence de finalité = 1 aller-retour.
 
-- **0005 — Temps réseau robuste** 🟠
+- **0005 — Temps réseau robuste** 🟠 **— ✅ implémenté** (bornes de timestamp à la réception + helper Median Time Past ; câblage émission↔MTP à finir au banc n≥2)
   *Problème :* l'émission et la déliaison font confiance au `timestamp` du bloc, posé par un seul producteur. Bornes actuelles : monotonie + horloge locale à la production seulement.
   *Direction :* timestamp = médiane des horloges des validateurs (façon Bitcoin "median time past"), bornes strictes à la **réception** P2P (plafond futur, monotonie).
   *Compromis :* nécessite d'échanger/valider des horloges — pertinent surtout à n≥2.
@@ -56,11 +56,11 @@ Rien ci-dessous n'est décidé — ce sont des propositions à instruire une par
 - **0004 — Invariant exécutable** 🔴 **— ✅ implémenté**
   *Fait :* `supply_invariant_holds()` (`circulation + Fonderie == MAX`) appliqué comme **garde dure** sur tous les chemins de bloc (producer → refus de sceller ; P2P/sync → rollback), car le state_root ne couvre pas la Fonderie. Ajout de `credit_from_foundry_for_test` pour les setups de test.
 
-- **0009 — Frais des transactions stake/unstake** 🟠
+- **0009 — Frais des transactions stake/unstake** 🟠 **— ✅ implémenté** (option retenue : exemption assumée + **plafond de déliaisons par compte** contre le spam — plus robuste qu'un micro-frais ; whitepaper réconcilié)
   *Problème :* le whitepaper donne un poids `1` à stake/unstake, mais le code les **exempte** (fee ZERO). Incohérence + petit vecteur de spam.
   *Direction :* décider — soit facturer le forfait (aligne le whitepaper), soit assumer l'exemption et corriger le whitepaper. Traiter l'anti-spam.
 
-- **0021 — Immutabilité de la courbe d'émission** 🟠
+- **0021 — Immutabilité de la courbe d'émission** 🟠 **— ✅ implémenté** (règle immuable §9 + test constitutionnel épinglant halving/total/cap)
   *Problème :* le halving (8 ans) et le total sont des constantes ; leur statut (gouvernable ou gravé) n'est pas décidé.
   *Direction :* graver l'émission comme **immuable** (argument de confiance : personne, pas même l'admin, ne change la politique monétaire). À acter explicitement.
 
@@ -90,7 +90,7 @@ Rien ci-dessous n'est décidé — ce sont des propositions à instruire une par
   *Problème :* `AddValidator`/`RemoveValidator` existent en **type de tx** (0x05/0x06) **et** en `GovernanceAction` (via `AdminAction`), avec des sémantiques légèrement différentes.
   *Direction :* un seul chemin (probablement `AdminAction`), retirer les doublons.
 
-- **0008 — chain_id par défaut sûr** 🟠
+- **0008 — chain_id par défaut sûr** 🟠 **— ✅ implémenté**
   *Problème :* tous les constructeurs et le `serde(default)` retombent sur `DEVNET` — piège anti-replay pour une tx désérialisée sans chain_id.
   *Direction :* pas de défaut silencieux (chain_id explicite requis), ou défaut le plus sûr.
 

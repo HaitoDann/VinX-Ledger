@@ -29,6 +29,12 @@ pub const DEFAULT_FEE_FLOOR_ATOMS: u128 = DECIMAL_FACTOR / 10_000;
 /// Minimum amount that can be staked in a single transaction: 1 VinX.
 pub const MIN_STAKE_ATOMS: u128 = DECIMAL_FACTOR;
 
+/// Maximum concurrent unbonding entries per account (ADR 0009). Caps the state a single
+/// account can create by repeatedly unstaking tiny amounts — a hard bound is a stronger
+/// anti-spam than a negligible flat fee would be. An account at the cap must wait for an
+/// entry to mature before unstaking again.
+pub const MAX_PENDING_UNBONDS_PER_ACCOUNT: usize = 16;
+
 // ─── Emission by work — fair launch ────────────────────────────────────────────
 
 /// Halving period: the emission rate is divided by two every 8 real-time years.

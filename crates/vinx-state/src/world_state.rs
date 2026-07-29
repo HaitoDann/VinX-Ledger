@@ -655,6 +655,19 @@ impl WorldState {
         let is_active_validator = self.validator_set.contains(&tx.from);
         let unlock_ts = self.current_block_ts.saturating_add(UNBONDING_SECS);
 
+        // ADR 0009: cap concurrent unbonding entries per account (anti-spam on
+        // `pending_unbonds`, a stronger bound than a negligible flat fee would be).
+        let pending_for_sender = self
+            .pending_unbonds
+            .iter()
+            .filter(|u| u.address == tx.from)
+            .count();
+        if pending_for_sender >= vinx_core::amount::MAX_PENDING_UNBONDS_PER_ACCOUNT {
+            return Err(CoreError::InvalidTransaction(
+                "too many pending unbonds — wait for one to mature".to_string(),
+            ));
+        }
+
         let account = self
             .accounts
             .get_mut(&tx.from)
@@ -1195,6 +1208,37 @@ mod tests {
         s.settle_block(&addr, 1_000 + UNBONDING_SECS);
         assert!(s.pending_unbonds.is_empty());
         assert_eq!(s.accounts[&addr].balance, Amount::from_vinx(1_000));
+    }
+
+    #[test]
+    fn test_unstake_pending_cap_enforced() {
+        use vinx_core::amount::MAX_PENDING_UNBONDS_PER_ACCOUNT;
+        let mut s = WorldState::new();
+        let (kp, addr) = kp_addr();
+        s.credit_for_test(addr, Amount::from_vinx(1_000));
+        s.apply_transaction(&Transaction::new_stake(
+            &kp,
+            Amount::from_vinx(100),
+            Amount::ZERO,
+            0,
+        ))
+        .unwrap();
+        s.set_block_context(1_000);
+        // Unstake 1 VINX up to the cap — all accepted.
+        for i in 0..MAX_PENDING_UNBONDS_PER_ACCOUNT {
+            let tx =
+                Transaction::new_unstake(&kp, Amount::from_vinx(1), Amount::ZERO, (i + 1) as u64);
+            s.apply_transaction(&tx).unwrap();
+        }
+        assert_eq!(s.pending_unbonds.len(), MAX_PENDING_UNBONDS_PER_ACCOUNT);
+        // One more → rejected (anti-spam).
+        let over = Transaction::new_unstake(
+            &kp,
+            Amount::from_vinx(1),
+            Amount::ZERO,
+            (MAX_PENDING_UNBONDS_PER_ACCOUNT + 1) as u64,
+        );
+        assert!(s.apply_transaction(&over).is_err());
     }
 
     #[test]

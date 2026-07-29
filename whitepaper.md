@@ -115,7 +115,7 @@ frais = FRAIS_BASE × poids(type) × multiplicateur_congestion
 ```
 
 - **`FRAIS_BASE = 0,0001 VinX`** (gouvernable) — un centième de centime. Le coût de traiter une transaction (vérifier une signature, l'appliquer, la stocker) ne dépend pas de la somme transportée : envoyer 1 VINX ou 1 million coûte **la même chose**. C'est le comportement attendu d'un vrai cash.
-- **`poids(type)`** — un transfert / stake / unstake pèse `1` ; les actions de gouvernance (admin) sont **exemptes** (`0`).
+- **`poids(type)`** — un **transfert** pèse `1` ; le **stake / unstake** est **exempt** (`0`) — le bond a déjà un coût d'immobilisation, et le nombre de déliaisons par compte est plafonné contre le spam (ADR 0009) ; les **actions de gouvernance** (admin) sont **exemptes** (`0`).
 - **`multiplicateur_congestion`** — façon EIP-1559 : `×1` jusqu'à 80 % de remplissage du mempool, montée linéaire jusqu'à `×3` à saturation. Basé sur la **demande**, jamais sur la valeur.
 
 > VinX abandonne l'ancien frais *ad valorem* (0,05 % du montant), qui taxait injustement les gros paiements légitimes sans justification technique.
