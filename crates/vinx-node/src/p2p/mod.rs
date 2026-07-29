@@ -442,7 +442,13 @@ async fn dispatch_message(
                     sg.check_upgrade_activation();
                     let _ = sg.settle_block(&block.header.validator, block.header.timestamp);
                     let root = sg.compute_state_root();
-                    if root != block.header.state_root {
+                    // ADR 0004: the state_root only covers accounts, not the Foundry —
+                    // check the supply invariant explicitly on received blocks too.
+                    if !sg.supply_invariant_holds() {
+                        warn!(height, "P2P block breaks supply invariant, rolling back");
+                        *sg = snapshot;
+                        ok = false;
+                    } else if root != block.header.state_root {
                         warn!(height, "P2P block state_root mismatch, rolling back");
                         *sg = snapshot;
                         ok = false;
@@ -600,7 +606,11 @@ async fn dispatch_message(
                         sg.check_upgrade_activation();
                         let _ = sg.settle_block(&block.header.validator, block.header.timestamp);
                         let root = sg.compute_state_root();
-                        if root != block.header.state_root {
+                        if !sg.supply_invariant_holds() {
+                            warn!(height, "SyncResponse block breaks supply invariant");
+                            *sg = snapshot.clone();
+                            ok = false;
+                        } else if root != block.header.state_root {
                             warn!(height, "SyncResponse state_root mismatch");
                             *sg = snapshot.clone();
                             ok = false;

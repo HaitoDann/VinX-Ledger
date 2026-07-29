@@ -88,6 +88,13 @@ pub async fn sync_from_peer(
             state.block_height = block.header.height;
             state.check_upgrade_activation();
             let _ = state.settle_block(&block.header.validator, block.header.timestamp);
+            if !state.supply_invariant_holds() {
+                tracing::error!(
+                    height = block.header.height,
+                    "Sync block breaks supply invariant — aborting"
+                );
+                return applied;
+            }
 
             chain.push(block);
             applied += 1;

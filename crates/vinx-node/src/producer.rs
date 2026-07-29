@@ -107,6 +107,14 @@ pub fn produce_block(
         tracing::debug!(fees = %fees, emission = %emission, height = next_height, "Producer rewarded");
     }
 
+    // ADR 0004: the founding invariant must hold. A violation here is a critical
+    // internal bug — refuse to seal a block with a corrupted supply.
+    if !state.supply_invariant_holds() {
+        return Err(NodeError::Consensus(format!(
+            "supply invariant violated producing block {next_height} — block not sealed"
+        )));
+    }
+
     // Compute Merkle root over all account states after all mutations
     let state_root = state.compute_state_root();
     let receipts_root = compute_receipts_root(&block_txs);
@@ -222,6 +230,11 @@ fn produce_block_inner(
     state.check_upgrade_activation();
 
     let (fees, emission) = state.settle_block(&config.validator_address, timestamp);
+    if !state.supply_invariant_holds() {
+        return Err(NodeError::Consensus(format!(
+            "supply invariant violated producing block {next_height} (backup) — block not sealed"
+        )));
+    }
     if fees > Amount::ZERO || emission > Amount::ZERO {
         tracing::debug!(fees = %fees, emission = %emission, "Producer rewarded (backup)");
     }

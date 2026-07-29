@@ -276,6 +276,18 @@ impl WorldState {
         (fees, emission)
     }
 
+    /// Checks the founding invariant `circulating_supply + foundry == MAX_SUPPLY`
+    /// (ADR 0004). Cheap (two reads + one add). The block paths (producer, P2P apply,
+    /// sync) treat `false` as a critical fault and reject/roll back the block rather
+    /// than committing a corrupted supply — the enforcement point, since the
+    /// state_root covers only accounts, not the Foundry.
+    pub fn supply_invariant_holds(&self) -> bool {
+        self.circulating_supply
+            .atoms()
+            .checked_add(self.foundry.atoms())
+            == Some(vinx_core::amount::MAX_SUPPLY_ATOMS)
+    }
+
     /// Returns matured bonds to their owners' balances. Circulation-neutral: the funds
     /// were already counted as circulating throughout the unbonding delay.
     fn mature_unbonds(&mut self, block_ts: u64) {
@@ -425,6 +437,15 @@ impl WorldState {
             .entry(address)
             .or_insert_with(|| Account::new(address));
         acc.balance = acc.balance.saturating_add(amount);
+    }
+
+    /// Test helper that funds an account **while preserving the supply invariant**:
+    /// it forges from the Foundry (like real emission) instead of conjuring balance.
+    /// Prefer this over `credit_for_test` when the test then produces a block (which
+    /// enforces the invariant in `settle_block`). Requires a genesis-funded Foundry.
+    pub fn credit_from_foundry_for_test(&mut self, address: Address, amount: Amount) {
+        let forged = self.forge_from_foundry(amount);
+        self.credit(&address, forged);
     }
 
     /// Applies a transaction with full verification: chain-id/TTL replay checks
@@ -1051,6 +1072,16 @@ mod tests {
     use vinx_core::amount::{cumulative_emission_atoms, HALVING_PERIOD_SECS, MAX_SUPPLY_ATOMS};
     use vinx_core::block::GENESIS_PREV_HASH;
     use vinx_core::{BlockHeader, BlockSignature, SlashEvidence};
+
+    #[test]
+    fn test_supply_invariant_detects_corruption() {
+        let mut s = WorldState::new();
+        s.foundry = Amount::from_atoms(MAX_SUPPLY_ATOMS);
+        assert!(s.supply_invariant_holds());
+        // Corrupt the reserve → the invariant must report a violation.
+        s.foundry = Amount::from_atoms(MAX_SUPPLY_ATOMS - 1);
+        assert!(!s.supply_invariant_holds());
+    }
 
     #[test]
     fn test_first_block_sets_emission_epoch_and_emits_nothing() {
