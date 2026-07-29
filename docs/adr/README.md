@@ -66,9 +66,13 @@ Rien ci-dessous n'est décidé — ce sont des propositions à instruire une par
 
 ### Données, état & scaling
 
+- **0026 — [Dépôt existentiel (anti-bloat de l'état)](./0026-depot-existentiel.md)** 🔴 **— rédigé (Proposé)**
+  *Problème :* `apply_transfer`/`credit` matérialisent un compte (60 o **définitifs**) pour n'importe quel solde, même 1 atom → **inflation d'état à coût quasi nul**, seul terme non borné du stockage (la simulation le confirme : ~33 des 48 GB à 30 ans en régime saturé sont de l'état).
+  *Direction :* solde plancher `EXISTENTIAL_DEPOSIT_ATOMS` gravé — sous ce seuil un compte ne peut exister ; un compte vidé à `0` est **reapé** (rend ses 60 o). Minimum viable anti-bloat, complémentaire de l'ADR 0013.
+
 - **0013 — Cycle de vie de l'état** 🟢
   *Problème :* les comptes ne sont **jamais élagués** → croissance non bornée de l'état (la chaîne est prunée, pas l'état).
-  *Direction :* expiration/rent d'état, nœuds d'archive, ou compaction des comptes dormants à solde nul.
+  *Direction :* expiration/rent d'état, nœuds d'archive, ou compaction des comptes dormants à solde nul. Le **dépôt existentiel (ADR 0026)** en est la première tranche ; ce ADR couvre le loyer d'état / resurrection au-delà.
 
 - **0014 — Standard light-client** 🟠
   *Direction :* formaliser le format de preuve (état Merkle — déjà là — + chaîne d'en-têtes + preuve de finalité), et la *weak subjectivity* / checkpoints pour un fast-sync sûr.
