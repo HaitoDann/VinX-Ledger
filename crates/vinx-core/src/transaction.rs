@@ -73,8 +73,11 @@ pub struct Transaction {
     pub sponsor_signature: Option<VinxSignature>,
 }
 
+/// serde default for a missing `chain_id` (ADR 0008): the invalid sentinel, not devnet.
+/// A transaction that omits its chain ID is thus rejected at validation instead of being
+/// silently bound to devnet.
 fn default_chain_id() -> u32 {
-    CHAIN_ID_DEVNET
+    crate::chain_id::CHAIN_ID_INVALID
 }
 
 impl Transaction {
@@ -542,6 +545,35 @@ mod tests {
         let tx1 = Transaction::new_transfer(&sender, to, Amount::from_vinx(10), fee, 1);
         assert_ne!(tx0.signing_bytes(), tx1.signing_bytes());
         assert_ne!(tx0.hash(), tx1.hash());
+    }
+
+    #[test]
+    fn test_missing_chain_id_deserializes_to_invalid() {
+        // ADR 0008: a transaction JSON that omits chain_id must deserialize to the
+        // invalid sentinel (rejected downstream), never silently to devnet.
+        // (Small atom amounts so the JSON round-trip via serde_json::Value — capped at
+        // u64 — doesn't overflow; unrelated to the chain_id default under test.)
+        use crate::chain_id::{CHAIN_ID_DEVNET, CHAIN_ID_INVALID};
+        let tx = Transaction {
+            tx_type: TransactionType::Transfer,
+            from: Address::from_bytes([0x11; 20]),
+            to: Address::from_bytes([0x22; 20]),
+            amount: Amount::from_atoms(5),
+            fee: Amount::from_atoms(1),
+            nonce: 0,
+            chain_id: CHAIN_ID_DEVNET,
+            expires_at_height: None,
+            payload: vec![],
+            pub_key: None,
+            signature: None,
+            sponsor: None,
+            sponsor_pub_key: None,
+            sponsor_signature: None,
+        };
+        let mut v = serde_json::to_value(&tx).unwrap();
+        v.as_object_mut().unwrap().remove("chain_id");
+        let tx2: Transaction = serde_json::from_value(v).unwrap();
+        assert_eq!(tx2.chain_id, CHAIN_ID_INVALID);
     }
 
     #[test]
