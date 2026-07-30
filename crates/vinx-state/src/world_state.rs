@@ -2,8 +2,9 @@ use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, HashMap, HashSet};
 use vinx_core::{
     amount::{
-        cumulative_emission_atoms, Amount, BPS_DENOM, DEFAULT_FEE_FLOOR_ATOMS, MIN_STAKE_ATOMS,
-        MIN_VALIDATOR_BOND_ATOMS, SLASH_BOUNTY_BPS, SLASH_EQUIVOCATION_BPS, UNBONDING_SECS,
+        cumulative_emission_atoms, Amount, BPS_DENOM, DEFAULT_FEE_FLOOR_ATOMS,
+        EXISTENTIAL_DEPOSIT_ATOMS, MIN_STAKE_ATOMS, MIN_VALIDATOR_BOND_ATOMS, SLASH_BOUNTY_BPS,
+        SLASH_EQUIVOCATION_BPS, UNBONDING_SECS,
     },
     block::SlashEvidence,
     chain_id::CHAIN_ID_DEVNET,
@@ -345,6 +346,48 @@ impl WorldState {
         acc.balance = acc.balance.saturating_add(amount);
     }
 
+    /// Reaps an account that holds nothing worth 60 permanent bytes of state (ADR 0026):
+    /// zero balance, zero stake, and no bond still unbonding. Removes it from the map —
+    /// freeing its Merkle leaf — and marks the address for **deletion** from the
+    /// persistence store (not just the in-memory map, or it would resurrect on reload).
+    /// No-op if the account still holds value, has funds unbonding, or does not exist.
+    ///
+    /// Circulation-neutral: a reaped account has `balance == 0 && staked == 0`, so the
+    /// tracked `circulating_supply` is untouched and the ADR 0004 mass invariant holds.
+    fn reap_if_empty(&mut self, addr: &Address) {
+        let empty = match self.accounts.get(addr) {
+            Some(a) => a.balance == Amount::ZERO && a.staked == Amount::ZERO,
+            None => false,
+        };
+        if !empty {
+            return;
+        }
+        if self.pending_unbonds.iter().any(|u| &u.address == addr) {
+            return; // funds still unbonding — the account must stay to receive them
+        }
+        self.accounts.remove(addr);
+        self.leaf_index.remove(addr);
+        // The leaf set shrank: the incremental tree needs a full rebuild, and the row
+        // must be erased from persistence (mark_dirty only handles upserts).
+        self.needs_rebuild = true;
+        self.persist_dirty.insert(*addr);
+    }
+
+    /// Debug/test invariant for the existential deposit (ADR 0026 §Modèle): every account
+    /// in the map holds either `balance >= ED`, or `staked > 0` (a bonded account is never
+    /// dust), and no account with `balance == 0 && staked == 0` lingers in the map.
+    pub fn existential_invariant_holds(&self) -> bool {
+        let ed = Amount::from_atoms(EXISTENTIAL_DEPOSIT_ATOMS);
+        self.accounts.values().all(|a| {
+            if a.staked > Amount::ZERO {
+                return true;
+            }
+            // No stake: balance must be a "real" balance (>= ED), never zero (should have
+            // been reaped) and never dust (should have been rejected at write time).
+            a.balance >= ed
+        })
+    }
+
     pub fn get_account(&self, address: &Address) -> Option<&Account> {
         self.accounts.get(address)
     }
@@ -576,6 +619,34 @@ impl WorldState {
             (total, tx.from)
         };
 
+        // ── ADR 0026: existential deposit. Validate every party's resulting balance
+        // BEFORE mutating any state: the block producer skips a rejected tx *without*
+        // rolling back partial mutations, so a late rejection here would corrupt the block.
+        // A party may land at exactly 0 (it gets reaped below) or at >= ED — never in the
+        // forbidden ]0, ED[ band, unless it is staked (a bonded account is never dust).
+        {
+            let ed = EXISTENTIAL_DEPOSIT_ATOMS;
+            let mut deltas: HashMap<Address, i128> = HashMap::new();
+            *deltas.entry(tx.from).or_default() -= sender_debit.atoms() as i128;
+            if fee_payer != tx.from {
+                *deltas.entry(fee_payer).or_default() -= tx.fee.atoms() as i128;
+            }
+            *deltas.entry(tx.to).or_default() += tx.amount.atoms() as i128;
+            for (addr, delta) in deltas {
+                let cur = self.accounts.get(&addr);
+                let bal = cur.map(|a| a.balance.atoms()).unwrap_or(0) as i128;
+                let staked = cur.map(|a| a.staked.atoms()).unwrap_or(0);
+                let after = bal + delta;
+                // after < 0 (overspend) and after == 0 (exact drain → reaped) are both fine
+                // here: overspend is surfaced with the precise error by the mutation block
+                // below, and a zero balance is allowed. Only ]0, ED[ on an unstaked account
+                // is forbidden.
+                if after > 0 && staked == 0 && (after as u128) < ed {
+                    return Err(CoreError::BelowExistentialDeposit);
+                }
+            }
+        }
+
         {
             let sender = self
                 .accounts
@@ -625,6 +696,14 @@ impl WorldState {
         if fee_payer != tx.from {
             self.mark_dirty(&fee_payer);
         }
+
+        // ADR 0026: reap any party the transfer left at exactly zero (no balance, no
+        // stake, no bond unbonding), returning its 60 bytes to the free state.
+        self.reap_if_empty(&tx.from);
+        if fee_payer != tx.from {
+            self.reap_if_empty(&fee_payer);
+        }
+        self.reap_if_empty(&tx.to);
 
         Ok(())
     }
@@ -1200,6 +1279,150 @@ mod tests {
         s.settle_block(&addr, 1_000 + UNBONDING_SECS);
         assert!(s.pending_unbonds.is_empty());
         assert_eq!(s.accounts[&addr].balance, Amount::from_vinx(1_000));
+    }
+
+    // ─── ADR 0026: existential deposit & account reaping ─────────────────────
+    use vinx_core::amount::EXISTENTIAL_DEPOSIT_ATOMS;
+
+    #[test]
+    fn test_transfer_creating_dust_account_is_rejected() {
+        // A transfer that would leave a fresh receiver in ]0, ED[ is refused — no
+        // dust account is ever materialized, and the sender is left untouched.
+        let mut s = WorldState::new();
+        let (sender_kp, sender) = kp_addr();
+        let (_, receiver) = kp_addr();
+        s.credit_for_test(sender, Amount::from_vinx(1_000));
+        let dust = Amount::from_atoms(EXISTENTIAL_DEPOSIT_ATOMS / 2); // below ED
+        let fee = dust.calculate_fee(s.base_fee);
+        let tx = Transaction::new_transfer(&sender_kp, receiver, dust, fee, 0);
+        assert_eq!(
+            s.apply_transaction(&tx),
+            Err(CoreError::BelowExistentialDeposit)
+        );
+        // Rejected before any mutation: receiver never created, sender nonce intact.
+        assert!(s.get_account(&receiver).is_none());
+        assert_eq!(s.accounts[&sender].nonce, 0);
+        assert!(s.existential_invariant_holds());
+    }
+
+    #[test]
+    fn test_transfer_of_exactly_ed_is_accepted() {
+        let mut s = WorldState::new();
+        let (sender_kp, sender) = kp_addr();
+        let (_, receiver) = kp_addr();
+        s.credit_for_test(sender, Amount::from_vinx(1_000));
+        let ed = Amount::from_atoms(EXISTENTIAL_DEPOSIT_ATOMS);
+        let fee = ed.calculate_fee(s.base_fee);
+        let tx = Transaction::new_transfer(&sender_kp, receiver, ed, fee, 0);
+        s.apply_transaction(&tx).unwrap();
+        assert_eq!(s.accounts[&receiver].balance, ed);
+        assert!(s.existential_invariant_holds());
+    }
+
+    #[test]
+    fn test_sweep_to_zero_reaps_sender_and_conserves_supply() {
+        // Draining an account to exactly 0 removes it from state (frees its 60 bytes)
+        // without changing circulating supply (ADR 0004 mass invariant untouched).
+        let mut s = WorldState::new();
+        let (sender_kp, sender) = kp_addr();
+        let (_, receiver) = kp_addr();
+        let amount = Amount::from_vinx(100);
+        let fee = amount.calculate_fee(s.base_fee);
+        let total = amount.checked_add(fee).unwrap();
+        s.credit_for_test(sender, total);
+        s.circulating_supply = total;
+        let supply_before = s.circulating_supply;
+
+        let tx = Transaction::new_transfer(&sender_kp, receiver, amount, fee, 0);
+        s.apply_transaction(&tx).unwrap();
+
+        // Sender drained to exactly 0 → reaped and gone from the map and the tree.
+        assert!(s.get_account(&sender).is_none());
+        assert!(!s.accounts_sorted().iter().any(|a| a.address == sender));
+        // The receiver holds the funds; the fee is still in the block pool (circulation).
+        assert_eq!(s.accounts[&receiver].balance, amount);
+        assert_eq!(s.circulating_supply, supply_before);
+        assert!(s.existential_invariant_holds());
+        // The tree recomputes cleanly without the reaped leaf.
+        let _ = s.compute_state_root();
+    }
+
+    #[test]
+    fn test_transfer_leaving_sender_as_dust_is_rejected() {
+        // Symmetric to the receiver rule: a transfer that would strand the *sender* in
+        // ]0, ED[ is refused (they must land at exactly 0 or keep >= ED).
+        let mut s = WorldState::new();
+        let (sender_kp, sender) = kp_addr();
+        let (_, receiver) = kp_addr();
+        let amount = Amount::from_vinx(1);
+        let fee = amount.calculate_fee(s.base_fee);
+        // Fund the sender to end at ED/2 after amount + fee.
+        let leftover = Amount::from_atoms(EXISTENTIAL_DEPOSIT_ATOMS / 2);
+        let funded = amount
+            .checked_add(fee)
+            .unwrap()
+            .checked_add(leftover)
+            .unwrap();
+        s.credit_for_test(sender, funded);
+        let tx = Transaction::new_transfer(&sender_kp, receiver, amount, fee, 0);
+        assert_eq!(
+            s.apply_transaction(&tx),
+            Err(CoreError::BelowExistentialDeposit)
+        );
+        // Untouched: no partial mutation, receiver never created.
+        assert_eq!(s.accounts[&sender].balance, funded);
+        assert_eq!(s.accounts[&sender].nonce, 0);
+        assert!(s.get_account(&receiver).is_none());
+    }
+
+    #[test]
+    fn test_staked_account_is_exempt_from_ed_floor_and_not_reaped() {
+        // A bonded account is never dust: it may hold a tiny balance (< ED) and must not
+        // be reaped while it still has stake.
+        let mut s = WorldState::new();
+        let (sender_kp, sender) = kp_addr();
+        let (_, receiver) = kp_addr();
+        let ed = Amount::from_atoms(EXISTENTIAL_DEPOSIT_ATOMS);
+        let amount = ed; // receiver ends exactly at ED — fine
+        let fee = amount.calculate_fee(s.base_fee);
+        let leftover = Amount::from_atoms(EXISTENTIAL_DEPOSIT_ATOMS / 2); // sender ends as sub-ED
+        let funded = amount
+            .checked_add(fee)
+            .unwrap()
+            .checked_add(leftover)
+            .unwrap();
+        // Stake first (set_staked_for_test zeroes the balance), then fund.
+        s.set_staked_for_test(&sender, Amount::from_vinx(1));
+        s.credit_for_test(sender, funded);
+
+        let tx = Transaction::new_transfer(&sender_kp, receiver, amount, fee, 0);
+        s.apply_transaction(&tx).unwrap(); // allowed: sender is staked
+        assert_eq!(s.accounts[&sender].balance, leftover);
+        assert!(s.accounts[&sender].staked > Amount::ZERO);
+        assert!(s.existential_invariant_holds());
+    }
+
+    #[test]
+    fn test_unstake_leaving_zero_balance_is_not_reaped_until_matured() {
+        // An account with everything unbonding (balance 0, staked 0, pending unbond) must
+        // survive to receive the maturing funds — reaping it would burn them.
+        let mut s = WorldState::new();
+        let (kp, addr) = kp_addr();
+        let stake = Amount::from_vinx(10);
+        s.credit_for_test(addr, stake);
+        s.apply_transaction(&Transaction::new_stake(&kp, stake, Amount::ZERO, 0))
+            .unwrap();
+        assert_eq!(s.accounts[&addr].balance, Amount::ZERO);
+        s.set_block_context(1_000);
+        s.apply_transaction(&Transaction::new_unstake(&kp, stake, Amount::ZERO, 1))
+            .unwrap();
+        // balance 0, staked 0, but a pending unbond exists → account must remain.
+        assert!(s.get_account(&addr).is_some());
+        assert_eq!(s.accounts[&addr].balance, Amount::ZERO);
+        assert_eq!(s.accounts[&addr].staked, Amount::ZERO);
+        // After maturation the funds return.
+        s.settle_block(&addr, 1_000 + UNBONDING_SECS);
+        assert_eq!(s.accounts[&addr].balance, stake);
     }
 
     #[test]

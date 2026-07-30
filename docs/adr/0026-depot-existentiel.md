@@ -1,6 +1,7 @@
 # ADR 0026 — Dépôt existentiel (anti-bloat de l'état)
 
-- **Statut :** Proposé
+- **Statut :** Accepté — ✅ implémenté (consensus-breaking : la règle entre dans la
+  fonction de transition d'état)
 - **Catégorie :** Données, état & scaling · **Priorité :** 🔴 haute
 - **Date :** Juillet 2026
 - **Liens :** complète l'ADR 0013 (cycle de vie de l'état) ; motivé par la
@@ -154,6 +155,42 @@ supprimable que si `balance == 0 && staked == 0 && aucun pending_unbond`.
    Merkle ; `circulating_supply` inchangé par un reap (ADR 0004) ; reload après
    reap ne ressuscite pas le compte ; validateur à bond exempté du plancher mais
    non reapé tant que `staked > 0`.
+
+## État de l'implémentation
+
+Implémenté conformément au design ci-dessus, avec une précision de sûreté importante :
+
+- `EXISTENTIAL_DEPOSIT_ATOMS = DECIMAL_FACTOR / 1_000` (0,001 VinX) + test-tripwire
+  `test_existential_deposit_is_constitutional` (constante gravée, non gouvernable).
+- `CoreError::BelowExistentialDeposit`.
+- `apply_transfer` valide l'ED **avant toute mutation**, via un calcul de deltas par
+  adresse (expéditeur, payeur de frais, destinataire — gère `from == to` et
+  `sponsor == to`). **Raison de sûreté :** le producteur applique chaque tx et, sur erreur,
+  **saute la tx sans rollback** ; une vérification tardive laisserait des mutations
+  partielles dans le bloc → divergence. La vérif est donc strictement en amont.
+- `reap_if_empty(addr)` : reap si `balance == 0 && staked == 0 && aucun pending_unbond`
+  (sinon les fonds en cours de déliaison seraient brûlés). Appelé sur les trois parties en
+  fin de `apply_transfer`. Le reap force un `needs_rebuild` du Merkle et **marque la ligne
+  pour suppression** en persistance.
+- **Persistance (redb).** `StateWrite.account_deletes` : une adresse *dirty* absente de la
+  map ⇒ ligne effacée du store (`serialize_incremental` la classe en delete,
+  `write_state` la supprime). Garantit qu'un compte reapé **ne ressuscite pas** au reload.
+- `existential_invariant_holds()` (debug/tests) : `∀ c, staked>0 ∨ balance>=ED`.
+- `credit` (récompenses, maturation d'unbond, bounty) **inchangé** : ses bénéficiaires sont
+  soit des validateurs (`staked > 0`, exemptés), soit des retours de bond `>= MIN_STAKE`
+  (1 VinX ≫ ED) — jamais de poussière. Y appliquer un rejet casserait l'invariant de masse
+  (on ne peut pas « refuser » une récompense de bloc). Le vecteur de poussière réel (les
+  transferts) est fermé côté `apply_transfer`.
+- Tests : compte-poussière rejeté (création et balayage laissant l'expéditeur en poussière),
+  transfert d'exactement ED accepté, balayage à 0 → reap + `circulating_supply` inchangé,
+  compte staké exempté du plancher et non reapé, compte tout-en-déliaison non reapé jusqu'à
+  maturation, et non-résurrection après reload (persistance).
+
+**Reste (non-consensus, UX) :** le garde-fou **côté clients** (`vinx-wallet`,
+`vinx-desktop-core`, SDK, UI) — refuser en amont un montant laissant une partie dans
+`]0, ED[` et proposer un mode « tout envoyer » qui vide exactement à 0. Le nœud applique
+déjà la règle (frontière de sécurité) ; le travail client n'améliore que le message d'erreur
+et ne touche pas le consensus.
 
 ## Portée / ce que cet ADR ne fait PAS
 

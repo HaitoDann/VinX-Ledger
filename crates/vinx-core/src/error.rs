@@ -4,6 +4,8 @@ use thiserror::Error;
 pub enum CoreError {
     #[error("Insufficient balance")]
     InsufficientBalance,
+    #[error("Resulting balance is below the existential deposit")]
+    BelowExistentialDeposit,
     #[error("Invalid nonce: expected {expected}, got {got}")]
     InvalidNonce { expected: u64, got: u64 },
     #[error("Account is frozen")]

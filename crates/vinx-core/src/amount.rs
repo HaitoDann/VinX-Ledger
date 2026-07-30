@@ -29,6 +29,17 @@ pub const DEFAULT_FEE_FLOOR_ATOMS: u128 = DECIMAL_FACTOR / 10_000;
 /// Minimum amount that can be staked in a single transaction: 1 VinX.
 pub const MIN_STAKE_ATOMS: u128 = DECIMAL_FACTOR;
 
+/// Existential deposit: minimum non-zero balance a plain account may hold (ADR 0026).
+/// 0.001 VinX. An account cannot exist with a balance in `]0, ED[`: a transfer that would
+/// leave either party with such a balance is rejected, and an account drained to exactly
+/// `0` (with no stake and no pending unbond) is *reaped* — removed from the state, freeing
+/// its 60 bytes. This closes the only unbounded term in VinX's storage model (dust-account
+/// spam) by making state inflation cost real, immobilized capital.
+///
+/// Consensus-critical: it enters the state-transition function, so it is a **graved
+/// constant**, never governable — pinned by `test_existential_deposit_is_constitutional`.
+pub const EXISTENTIAL_DEPOSIT_ATOMS: u128 = DECIMAL_FACTOR / 1_000;
+
 /// Maximum concurrent unbonding entries per account (ADR 0009). Caps the state a single
 /// account can create by repeatedly unstaking tiny amounts — a hard bound is a stronger
 /// anti-spam than a negligible flat fee would be. An account at the cap must wait for an
@@ -286,6 +297,22 @@ mod tests {
             );
             prev = e;
         }
+    }
+
+    #[test]
+    fn test_existential_deposit_is_constitutional() {
+        // ADR 0026: ED enters the state-transition function — two nodes with different
+        // values diverge — so it is a graved constant, never governable. This tripwire
+        // forces any change to be a conscious, breaking act.
+        assert_eq!(
+            EXISTENTIAL_DEPOSIT_ATOMS,
+            DECIMAL_FACTOR / 1_000,
+            "existential deposit is 0.001 VinX — graved, non-governable"
+        );
+        // Sanity: ED must be negligible for a user yet far below the validator bond, so a
+        // staked account is never dust (the `staked > 0` exemption stays coherent).
+        assert!(EXISTENTIAL_DEPOSIT_ATOMS < MIN_STAKE_ATOMS);
+        assert!(EXISTENTIAL_DEPOSIT_ATOMS < MIN_VALIDATOR_BOND_ATOMS);
     }
 
     #[test]

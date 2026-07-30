@@ -21,7 +21,7 @@ Rien ci-dessous n'est décidé — ce sont des propositions à instruire une par
 > [0007](./0007-unification-gouvernance.md) · [0008](./0008-chain-id-defaut-sur.md) ·
 > [0009](./0009-frais-stake-unstake.md) · [0020](./0020-serialisation-canonique.md) ·
 > [0021](./0021-immutabilite-emission.md).
-> **Anti-bloat de l'état :** [0026](./0026-depot-existentiel.md) (Proposé).
+> **Anti-bloat de l'état :** [0026](./0026-depot-existentiel.md) (✅ implémenté).
 
 ### Consensus & finalité
 
@@ -67,9 +67,9 @@ Rien ci-dessous n'est décidé — ce sont des propositions à instruire une par
 
 ### Données, état & scaling
 
-- **0026 — [Dépôt existentiel (anti-bloat de l'état)](./0026-depot-existentiel.md)** 🔴 **— rédigé (Proposé)**
-  *Problème :* `apply_transfer`/`credit` matérialisent un compte (60 o **définitifs**) pour n'importe quel solde, même 1 atom → **inflation d'état à coût quasi nul**, seul terme non borné du stockage (la simulation le confirme : ~33 des 48 GB à 30 ans en régime saturé sont de l'état).
-  *Direction :* solde plancher `EXISTENTIAL_DEPOSIT_ATOMS` gravé — sous ce seuil un compte ne peut exister ; un compte vidé à `0` est **reapé** (rend ses 60 o). Minimum viable anti-bloat, complémentaire de l'ADR 0013.
+- **0026 — [Dépôt existentiel (anti-bloat de l'état)](./0026-depot-existentiel.md)** 🔴 **— ✅ implémenté** (consensus-breaking)
+  *Problème :* `apply_transfer` matérialisait un compte (60 o **définitifs**) pour n'importe quel solde, même 1 atom → **inflation d'état à coût quasi nul**, seul terme non borné du stockage (la simulation le confirme : ~33 des 48 GB à 30 ans en régime saturé sont de l'état).
+  *Fait :* solde plancher `EXISTENTIAL_DEPOSIT_ATOMS` (0,001 VinX) **gravé** — un transfert laissant une partie dans `]0, ED[` est rejeté (`BelowExistentialDeposit`), validé **avant toute mutation** (le producteur ne rollback pas une tx échouée) ; un compte vidé à `0` (sans stake ni déliaison) est **reapé** — retiré de la map *et effacé du store* (pas de résurrection au reload). Compte staké exempté du plancher, jamais reapé tant que `staked > 0`. `circulating_supply` inchangé (ADR 0004 tient). Test-tripwire constitutionnel sur la constante.
 
 - **0013 — Cycle de vie de l'état** 🟢
   *Problème :* les comptes ne sont **jamais élagués** → croissance non bornée de l'état (la chaîne est prunée, pas l'état).

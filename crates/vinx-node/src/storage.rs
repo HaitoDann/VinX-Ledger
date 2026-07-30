@@ -48,6 +48,10 @@ pub struct StateWrite {
     pub meta: Vec<u8>,
     /// Changed account rows: (20-byte address, bincode(Account)). Empty on a no-op flush.
     pub account_rows: Vec<([u8; 20], Vec<u8>)>,
+    /// Addresses of accounts reaped this flush (ADR 0026): their rows must be **deleted**
+    /// from the accounts table, not merely absent from `account_rows`, or they would
+    /// resurrect on the next load. Ignored when `replace_accounts` (the table is wiped).
+    pub account_deletes: Vec<[u8; 20]>,
     /// When true, the accounts table is wiped before writing `account_rows`
     /// (used by full snapshot import to drop rows no longer present).
     pub replace_accounts: bool,
@@ -190,17 +194,22 @@ impl Storage {
             .map_err(|e| Self::io_err(format!("serialize meta: {e}")))?;
         let dirty = state.take_persist_dirty();
         let mut account_rows = Vec::with_capacity(dirty.len());
+        let mut account_deletes = Vec::new();
         for addr in dirty {
             if let Some(acc) = state.account_by_addr(&addr) {
                 let bytes = bincode::serialize(acc)
                     .map_err(|e| Self::io_err(format!("serialize account: {e}")))?;
                 account_rows.push((*addr.as_bytes(), bytes));
+            } else {
+                // Dirty but no longer in the map ⇒ reaped (ADR 0026): erase its row.
+                account_deletes.push(*addr.as_bytes());
             }
         }
         let (chain, tx_index, account_tx_index) = Self::serialize_chain(chain)?;
         Ok(StateWrite {
             meta,
             account_rows,
+            account_deletes,
             replace_accounts: false,
             chain,
             tx_index,
@@ -254,6 +263,13 @@ impl Storage {
             for (addr, bytes) in &w.account_rows {
                 atbl.insert(addr.as_slice(), bytes.as_slice())
                     .map_err(Self::io_err)?;
+            }
+            // ADR 0026: erase reaped account rows. Skipped when the whole table was just
+            // wiped (`replace_accounts`), where there is nothing left to delete.
+            if !w.replace_accounts {
+                for addr in &w.account_deletes {
+                    atbl.remove(addr.as_slice()).map_err(Self::io_err)?;
+                }
             }
         }
         tx.commit().map_err(Self::io_err)?;
@@ -562,6 +578,71 @@ mod tests {
         assert!(
             loaded_chain.get_tx_by_hash(&tx_hash).is_some(),
             "tx index must be rebuilt after migration"
+        );
+    }
+
+    // ADR 0026: a reaped account must be *erased* from the store, not merely dropped from
+    // the in-memory map — otherwise it resurrects on the next load.
+    #[test]
+    fn test_reaped_account_does_not_resurrect_on_reload() {
+        use vinx_core::amount::Amount;
+        use vinx_core::Transaction;
+        use vinx_crypto::{Address, KeyPair};
+        use vinx_state::{create_genesis_state, GenesisConfig};
+
+        let tmp = Tmp::new();
+        let admin = Address::from_public_key(&KeyPair::generate().public_key());
+        let validator = Address::from_public_key(&KeyPair::generate().public_key());
+        let bob_kp = KeyPair::generate();
+        let bob = Address::from_public_key(&bob_kp.public_key());
+        let (_, carol) = {
+            let kp = KeyPair::generate();
+            (kp.clone(), Address::from_public_key(&kp.public_key()))
+        };
+
+        let mut state = create_genesis_state(&GenesisConfig {
+            chain_id: vinx_core::CHAIN_ID_DEVNET,
+            admin_address: admin,
+            validator_address: validator,
+        });
+        let (chain, _) = Chain::new_with_genesis(validator, 0);
+
+        // Fund bob with exactly amount + fee so a single transfer drains him to zero.
+        let amount = Amount::from_vinx(10);
+        let fee = amount.calculate_fee(state.base_fee);
+        let total = amount.checked_add(fee).unwrap();
+        state.credit_for_test(bob, total);
+        state.circulating_supply = total;
+
+        // Scoped so the redb handle (and its file lock) is released before reopening.
+        {
+            let storage = Storage::open(&tmp.0).unwrap();
+            storage.save(&mut state, &chain).unwrap(); // bob's row is on disk
+
+            // Drain bob → he is reaped from the map.
+            let tx = Transaction::new_transfer(&bob_kp, carol, amount, fee, 0);
+            state.apply_transaction(&tx).unwrap();
+            assert!(state.get_account(&bob).is_none(), "bob reaped in memory");
+
+            // Persist incrementally.
+            let w = Storage::serialize_incremental(&mut state, &chain).unwrap();
+            assert!(
+                w.account_deletes.iter().any(|a| a == bob.as_bytes()),
+                "reaped account must be scheduled for deletion"
+            );
+            storage.write_state(w).unwrap();
+        }
+
+        let reopened = Storage::open(&tmp.0).unwrap();
+        let (loaded, _) = reopened.load().expect("state reloads");
+        assert!(
+            loaded.get_account(&bob).is_none(),
+            "reaped account must NOT resurrect after reload"
+        );
+        assert_eq!(
+            loaded.account_balance(&carol),
+            amount,
+            "carol keeps the funds"
         );
     }
 }

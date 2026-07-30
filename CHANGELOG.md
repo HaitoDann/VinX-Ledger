@@ -5,6 +5,19 @@ Format : `MAJEUR.MINEUR.CORRECTIF` — les versions `0.x.y` sont des versions de
 
 ---
 
+## [0.37.0] — ⚠️ BREAKING (consensus) — Dépôt existentiel & reaping (ADR 0026)
+
+> Ajout d'un **solde plancher** dans la fonction de transition d'état, et **suppression** (reap) des comptes vidés. Consensus-breaking : la règle entre dans l'exécution — deux nœuds avec des paramètres différents divergeraient — donc la constante est **gravée**.
+
+- **Dépôt existentiel gravé.** `EXISTENTIAL_DEPOSIT_ATOMS = 0,001 VinX`. Un transfert qui laisserait l'expéditeur **ou** le destinataire dans `]0, ED[` est rejeté (`CoreError::BelowExistentialDeposit`). Ferme le seul terme **non borné** du modèle de stockage (spam de comptes-poussière à coût quasi nul) : immobiliser 1 M de comptes coûte désormais **1 000 VinX** au lieu de ~0.
+- **Validation avant mutation.** La règle ED est vérifiée **en amont** de toute écriture (calcul de deltas par adresse, gère `from == to` et `sponsor == to`), parce que le producteur **saute une tx échouée sans rollback** — une vérif tardive aurait laissé des mutations partielles dans le bloc (divergence).
+- **Reaping.** Un compte vidé à `balance == 0` (sans `staked` ni déliaison en cours) est **retiré de l'état** et **effacé du store** (redb : nouveau canal `account_deletes` ; il ne ressuscite pas au reload). L'état peut désormais **décroître**. `circulating_supply` inchangé par un reap → invariant de masse (ADR 0004) préservé.
+- **Comptes stakés exemptés.** Un compte bondé (`staked > 0`) n'est jamais poussière : exempté du plancher de solde, et non reapé tant qu'il a du stake ou une déliaison en cours.
+- **`credit` inchangé** (récompenses, maturation, bounty) : ses bénéficiaires sont des validateurs ou des retours de bond `≥ 1 VinX ≫ ED`, jamais de la poussière.
+- Test-tripwire constitutionnel (`test_existential_deposit_is_constitutional`) + couverture : rejet poussière, transfert d'exactement ED, balayage→reap, exemption staké, non-reap tant qu'en déliaison, non-résurrection après reload.
+
+---
+
 ## [0.36.0] — Validation de bloc parallélisée (ADR 0015, tranche 1)
 
 > Ajout **non-breaking** : la vérification des signatures de transactions passe du séquentiel au parallèle sur tous les chemins de validation de bloc reçu. Aucune modification du format ni du consensus — même posture de sécurité, off du chemin critique séquentiel.
