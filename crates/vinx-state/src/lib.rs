@@ -2,7 +2,7 @@ pub mod genesis;
 pub mod world_state;
 
 pub use genesis::{create_genesis_state, GenesisConfig};
-pub use world_state::WorldState;
+pub use world_state::{v8_meta_suffix, AdminPolicy, GovernanceProposal, WorldState};
 
 #[cfg(test)]
 mod tests {

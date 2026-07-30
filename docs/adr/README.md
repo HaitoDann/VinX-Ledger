@@ -101,8 +101,9 @@ Rien ci-dessous n'est décidé — ce sont des propositions à instruire une par
   *Problème :* tous les constructeurs et le `serde(default)` retombent sur `DEVNET` — piège anti-replay pour une tx désérialisée sans chain_id.
   *Direction :* pas de défaut silencieux (chain_id explicite requis), ou défaut le plus sûr.
 
-- **0011 — Décentralisation de la gouvernance** 🟠
-  *Direction :* clé admin unique → **signature à seuil / multisig** → éventuellement gouvernance par les validateurs. Roadmap graduelle, sans casser le modèle actuel.
+- **0011 — [Décentralisation de la gouvernance](./0011-decentralisation-gouvernance.md)** 🟠 **— ✅ tranche 1 implémentée** (consensus-breaking)
+  *Fait :* **multisig K-of-M** par proposition/approbation (chaque approbation = une tx mono-signée, aucun changement de format de tx). `AdminPolicy {signers, threshold}`, `GovernanceAction::SetAdminPolicy`, exécution au seuil, purge des propositions au changement de comité. `check_admin` durci (une clé isolée ne court-circuite plus le seuil une fois le comité installé). Migration de persistance in-place (v7→v8 append). Wallet CLI déjà compatible (JSON).
+  *Différé (tranche 2) :* gouvernance par les validateurs (poids par bond), expiration temporelle des propositions, signature à seuil cryptographique (BLS/FROST).
 
 ### Modules (par-dessus l'ADR 0001)
 

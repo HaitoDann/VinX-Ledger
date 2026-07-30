@@ -94,6 +94,21 @@ pub struct WorldState {
     /// only the accounts that actually changed instead of the whole map.
     #[serde(skip)]
     persist_dirty: HashSet<Address>,
+    /// Optional K-of-M admin committee (ADR 0011). When set, governance actions require
+    /// `threshold` approvals among `signers`, superseding the single `admin_address`. When
+    /// `None`, `admin_address` is the sole authority (legacy 1-of-1). `serde(default)` so
+    /// pre-0011 state (bincode meta / JSON snapshot) loads with no committee.
+    ///
+    /// Declared after the `serde(skip)` fields so it is the last *serialized* field: a
+    /// pre-0011 meta blob is a strict prefix of a current one, which the v7→v8 storage
+    /// migration exploits by appending this field's default encoding.
+    #[serde(default)]
+    pub admin_policy: Option<AdminPolicy>,
+    /// Governance proposals awaiting enough committee approvals to execute (ADR 0011).
+    /// Empty under a single admin (actions execute immediately). Consensus meta, like
+    /// `pending_unbonds`: derived deterministically from the same transaction history.
+    #[serde(default)]
+    pub pending_governance: Vec<GovernanceProposal>,
 }
 
 /// A bond amount in its unbonding delay, waiting to return to `address`'s balance
@@ -103,6 +118,73 @@ pub struct PendingUnbond {
     pub address: Address,
     pub amount: Amount,
     pub unlock_ts: u64,
+}
+
+/// A K-of-M admin committee (ADR 0011). `threshold` signatures among the distinct
+/// `signers` are required to enact any governance action.
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
+pub struct AdminPolicy {
+    pub signers: Vec<Address>,
+    pub threshold: u16,
+}
+
+/// A governance action accumulating committee approvals until it reaches the threshold and
+/// executes (ADR 0011). Identified by `action_hash = sha256(bincode(action))` so identical
+/// actions proposed by different signers converge on the same tally.
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
+pub struct GovernanceProposal {
+    pub action_hash: Hash32,
+    pub action: GovernanceAction,
+    /// Distinct signer addresses that have approved, in first-seen order.
+    pub approvals: Vec<Address>,
+}
+
+/// Upper bound on committee size (ADR 0011) — bounds the signer set stored in state and the
+/// work to authorize an action. Generous for a realistic governance council.
+pub const MAX_ADMIN_SIGNERS: usize = 64;
+
+/// Upper bound on concurrently pending governance proposals (ADR 0011) — bounds the state a
+/// committee can accumulate from partially-approved actions.
+pub const MAX_PENDING_GOVERNANCE: usize = 64;
+
+/// Validates a proposed committee (ADR 0011): non-empty, no duplicate signers, size within
+/// [`MAX_ADMIN_SIGNERS`], and `threshold` in `1..=signers.len()`.
+fn validate_admin_policy(signers: Vec<Address>, threshold: u16) -> Result<AdminPolicy, CoreError> {
+    if signers.is_empty() {
+        return Err(CoreError::InvalidTransaction(
+            "committee needs at least one signer".to_string(),
+        ));
+    }
+    if signers.len() > MAX_ADMIN_SIGNERS {
+        return Err(CoreError::InvalidTransaction(
+            "committee exceeds the maximum signer count".to_string(),
+        ));
+    }
+    let mut sorted = signers.clone();
+    sorted.sort();
+    sorted.dedup();
+    if sorted.len() != signers.len() {
+        return Err(CoreError::InvalidTransaction(
+            "duplicate signer in committee".to_string(),
+        ));
+    }
+    if threshold == 0 || threshold as usize > signers.len() {
+        return Err(CoreError::InvalidTransaction(
+            "threshold must be between 1 and the number of signers".to_string(),
+        ));
+    }
+    Ok(AdminPolicy { signers, threshold })
+}
+
+/// The bincode bytes appended to a pre-0011 (v7) `WorldState` meta blob to bring it to v8
+/// (ADR 0011): the default `admin_policy` (`None`) followed by the default
+/// `pending_governance` (empty vec). Because bincode concatenates struct fields with no
+/// framing and these are the last two *serialized* fields, appending exactly these bytes to
+/// a v7 blob yields a valid v8 blob. Shared by the storage v7→v8 migration and its tests.
+pub fn v8_meta_suffix() -> Vec<u8> {
+    let mut out = bincode::serialize(&None::<AdminPolicy>).expect("serialize None");
+    out.extend(bincode::serialize(&Vec::<GovernanceProposal>::new()).expect("serialize empty vec"));
+    out
 }
 
 fn default_fee_floor() -> Amount {
@@ -146,6 +228,8 @@ impl WorldState {
             dirty_addrs: HashSet::new(),
             needs_rebuild: false,
             persist_dirty: HashSet::new(),
+            admin_policy: None,
+            pending_governance: Vec::new(),
         }
     }
 
@@ -590,6 +674,12 @@ impl WorldState {
     }
 
     fn check_admin(&self, tx: &Transaction) -> Result<(), CoreError> {
+        // ADR 0011: once a K-of-M committee is installed, the legacy single-admin shortcuts
+        // (e.g. the dedicated AnnounceUpgrade tx) are disabled — a lone key must not bypass
+        // the threshold. Such actions must go through the committee AdminAction path.
+        if self.admin_policy.is_some() {
+            return Err(CoreError::Unauthorized);
+        }
         if let Some(ref admin) = self.admin_address {
             if &tx.from != admin {
                 return Err(CoreError::Unauthorized);
@@ -1007,17 +1097,19 @@ impl WorldState {
     }
 
     fn apply_admin_action(&mut self, tx: &Transaction) -> Result<(), CoreError> {
-        // Require sender to be the admin
-        self.check_admin(tx)?;
+        // ADR 0011: authorize against the effective admin authority — the K-of-M committee
+        // if one is set, else the legacy single admin key, else dev mode (open).
+        let (signers, threshold) = self.effective_admin();
+        if let Some(ref signers) = signers {
+            if !signers.contains(&tx.from) {
+                return Err(CoreError::Unauthorized);
+            }
+        }
 
-        let action: GovernanceAction = bincode::deserialize(&tx.payload).map_err(|_| {
-            CoreError::InvalidTransaction("malformed governance action payload".to_string())
-        })?;
-
-        // ADR 0007: check the nonce but do NOT consume it yet — a governance action
-        // that fails validation (e.g. duplicate validator, missing bond) must leave the
-        // nonce untouched, matching the old dedicated handlers. The nonce is only bumped
-        // once the action has been applied successfully.
+        // ADR 0007: check the nonce but do NOT consume it yet — a governance action that
+        // fails validation (e.g. duplicate validator, missing bond) must leave the nonce
+        // untouched. It is only bumped once the action has been applied (or an approval
+        // recorded) successfully.
         let cur_nonce = self
             .accounts
             .get(&tx.from)
@@ -1030,6 +1122,97 @@ impl WorldState {
             });
         }
 
+        let action: GovernanceAction = bincode::deserialize(&tx.payload).map_err(|_| {
+            CoreError::InvalidTransaction("malformed governance action payload".to_string())
+        })?;
+
+        // Single admin (or dev mode) executes immediately; a committee accumulates approvals
+        // and executes on the one that reaches the threshold. Either path mutates state only
+        // after full validation, so a rejected action consumes no nonce (the producer skips
+        // a failed tx without rolling back — ADR 0026).
+        if threshold <= 1 {
+            self.execute_governance_action(action)?;
+        } else {
+            self.record_governance_approval(action, tx.from, threshold)?;
+        }
+
+        // Success: consume the nonce.
+        self.accounts
+            .get_mut(&tx.from)
+            .expect("sender existence checked above")
+            .nonce += 1;
+        self.mark_dirty(&tx.from);
+        Ok(())
+    }
+
+    /// The effective admin authority (ADR 0011): `(Some(signers), threshold)` under a
+    /// committee or a single admin key; `(None, 1)` in dev mode (no admin restriction).
+    fn effective_admin(&self) -> (Option<Vec<Address>>, u16) {
+        if let Some(ref p) = self.admin_policy {
+            (Some(p.signers.clone()), p.threshold)
+        } else if let Some(admin) = self.admin_address {
+            (Some(vec![admin]), 1)
+        } else {
+            (None, 1)
+        }
+    }
+
+    /// Records `approver`'s approval of `action` (ADR 0011). When the approval reaches
+    /// `threshold` the action is executed and its proposal cleared; otherwise the approval
+    /// is tallied. Re-approval by the same signer is rejected. Mutates nothing on failure.
+    fn record_governance_approval(
+        &mut self,
+        action: GovernanceAction,
+        approver: Address,
+        threshold: u16,
+    ) -> Result<(), CoreError> {
+        let action_hash = sha256(&bincode::serialize(&action).map_err(|_| {
+            CoreError::InvalidTransaction("cannot serialize governance action".to_string())
+        })?);
+        let existing = self
+            .pending_governance
+            .iter()
+            .position(|p| p.action_hash == action_hash);
+        if let Some(i) = existing {
+            if self.pending_governance[i].approvals.contains(&approver) {
+                return Err(CoreError::InvalidTransaction(
+                    "signer has already approved this action".to_string(),
+                ));
+            }
+        }
+        let prospective = existing
+            .map(|i| self.pending_governance[i].approvals.len())
+            .unwrap_or(0)
+            + 1;
+
+        if prospective as u16 >= threshold {
+            // Threshold reached — execute (validates before mutating). On failure nothing
+            // is recorded. `retain` (not index removal) is safe even if the action cleared
+            // the queue itself (SetAdminPolicy).
+            self.execute_governance_action(action)?;
+            self.pending_governance
+                .retain(|p| p.action_hash != action_hash);
+        } else if let Some(i) = existing {
+            self.pending_governance[i].approvals.push(approver);
+        } else {
+            if self.pending_governance.len() >= MAX_PENDING_GOVERNANCE {
+                return Err(CoreError::InvalidTransaction(
+                    "too many pending governance proposals".to_string(),
+                ));
+            }
+            self.pending_governance.push(GovernanceProposal {
+                action_hash,
+                action,
+                approvals: vec![approver],
+            });
+        }
+        Ok(())
+    }
+
+    /// Executes a fully-authorized governance action (ADR 0007 semantics; ADR 0011 for
+    /// `SetAdminPolicy`). Each arm validates before mutating so a rejected action leaves
+    /// state untouched.
+    fn execute_governance_action(&mut self, action: GovernanceAction) -> Result<(), CoreError> {
         match action {
             GovernanceAction::AddValidator(addr) => {
                 // ADR 0007: single, strict validation path (was previously duplicated in
@@ -1090,14 +1273,15 @@ impl WorldState {
                 self.admin_address = Some(new_admin);
                 tracing::info!(%new_admin, "Admin: admin key rotated");
             }
+            GovernanceAction::SetAdminPolicy { signers, threshold } => {
+                // ADR 0011: install (or replace) the K-of-M committee. A changed committee
+                // invalidates in-flight approvals — the eligible signer set just changed.
+                let policy = validate_admin_policy(signers, threshold)?;
+                self.admin_policy = Some(policy);
+                self.pending_governance.clear();
+                tracing::info!(threshold, "Admin: committee policy set");
+            }
         }
-
-        // Success: consume the nonce.
-        self.accounts
-            .get_mut(&tx.from)
-            .expect("sender existence checked above")
-            .nonce += 1;
-        self.mark_dirty(&tx.from);
         Ok(())
     }
 
@@ -1423,6 +1607,157 @@ mod tests {
         // After maturation the funds return.
         s.settle_block(&addr, 1_000 + UNBONDING_SECS);
         assert_eq!(s.accounts[&addr].balance, stake);
+    }
+
+    // ─── ADR 0011: K-of-M governance committee ───────────────────────────────
+
+    fn committee(state: &mut WorldState, kps: &[KeyPair], threshold: u16) {
+        let signers: Vec<Address> = kps
+            .iter()
+            .map(|k| Address::from_public_key(&k.public_key()))
+            .collect();
+        for a in &signers {
+            state.credit_for_test(*a, Amount::from_vinx(1)); // materialize accounts (nonces)
+        }
+        state.admin_policy = Some(AdminPolicy { signers, threshold });
+    }
+
+    #[test]
+    fn test_committee_requires_threshold_approvals() {
+        use vinx_core::GovernanceAction;
+        let mut s = WorldState::new();
+        let kps: Vec<KeyPair> = (0..3).map(|_| KeyPair::generate()).collect();
+        committee(&mut s, &kps, 2); // 2-of-3
+        let action = GovernanceAction::UpdateFeeFloor { atoms: 777 };
+
+        // First approval: recorded, not yet executed.
+        s.apply_transaction(&Transaction::new_admin_action(&kps[0], &action, 0))
+            .unwrap();
+        assert_eq!(s.pending_governance.len(), 1);
+        assert_ne!(s.fee_floor.atoms(), 777);
+
+        // Second, distinct approval: threshold reached → executed, proposal cleared.
+        s.apply_transaction(&Transaction::new_admin_action(&kps[1], &action, 0))
+            .unwrap();
+        assert_eq!(s.fee_floor.atoms(), 777);
+        assert!(s.pending_governance.is_empty());
+    }
+
+    #[test]
+    fn test_committee_rejects_unauthorized_signer() {
+        use vinx_core::GovernanceAction;
+        let mut s = WorldState::new();
+        let kps: Vec<KeyPair> = (0..2).map(|_| KeyPair::generate()).collect();
+        committee(&mut s, &kps, 2);
+        let outsider = KeyPair::generate();
+        s.credit_for_test(
+            Address::from_public_key(&outsider.public_key()),
+            Amount::from_vinx(1),
+        );
+        let action = GovernanceAction::UpdateFeeFloor { atoms: 5 };
+        assert_eq!(
+            s.apply_transaction(&Transaction::new_admin_action(&outsider, &action, 0)),
+            Err(CoreError::Unauthorized)
+        );
+        assert!(s.pending_governance.is_empty());
+    }
+
+    #[test]
+    fn test_committee_rejects_duplicate_approval() {
+        use vinx_core::GovernanceAction;
+        let mut s = WorldState::new();
+        let kps: Vec<KeyPair> = (0..3).map(|_| KeyPair::generate()).collect();
+        committee(&mut s, &kps, 2);
+        let action = GovernanceAction::UpdateFeeFloor { atoms: 9 };
+        s.apply_transaction(&Transaction::new_admin_action(&kps[0], &action, 0))
+            .unwrap();
+        // Same signer approving again is rejected; nonce not consumed.
+        assert!(s
+            .apply_transaction(&Transaction::new_admin_action(&kps[0], &action, 1))
+            .is_err());
+        let a0 = Address::from_public_key(&kps[0].public_key());
+        assert_eq!(s.accounts[&a0].nonce, 1);
+        assert_eq!(s.pending_governance[0].approvals.len(), 1);
+    }
+
+    #[test]
+    fn test_single_admin_installs_committee_then_requires_it() {
+        use vinx_core::GovernanceAction;
+        let (mut s, admin_kp, admin) = admin_state();
+        let member = KeyPair::generate();
+        let member_addr = Address::from_public_key(&member.public_key());
+        s.credit_for_test(member_addr, Amount::from_vinx(1));
+
+        // Single admin installs a 2-of-2 committee — executes immediately (threshold 1 path).
+        let set = GovernanceAction::SetAdminPolicy {
+            signers: vec![admin, member_addr],
+            threshold: 2,
+        };
+        s.apply_transaction(&Transaction::new_admin_action(&admin_kp, &set, 0))
+            .unwrap();
+        assert!(s.admin_policy.is_some());
+
+        // Now a fee change needs both signers; one alone only tallies.
+        let fee = GovernanceAction::UpdateFeeFloor { atoms: 42 };
+        s.apply_transaction(&Transaction::new_admin_action(&admin_kp, &fee, 1))
+            .unwrap();
+        assert_ne!(s.fee_floor.atoms(), 42);
+        s.apply_transaction(&Transaction::new_admin_action(&member, &fee, 0))
+            .unwrap();
+        assert_eq!(s.fee_floor.atoms(), 42);
+    }
+
+    #[test]
+    fn test_set_admin_policy_validation() {
+        use vinx_core::GovernanceAction;
+        let (mut s, admin_kp, admin) = admin_state();
+        // threshold greater than the signer count.
+        let bad_threshold = GovernanceAction::SetAdminPolicy {
+            signers: vec![admin],
+            threshold: 2,
+        };
+        assert!(s
+            .apply_transaction(&Transaction::new_admin_action(&admin_kp, &bad_threshold, 0))
+            .is_err());
+        // duplicate signer.
+        let dup = GovernanceAction::SetAdminPolicy {
+            signers: vec![admin, admin],
+            threshold: 1,
+        };
+        assert!(s
+            .apply_transaction(&Transaction::new_admin_action(&admin_kp, &dup, 0))
+            .is_err());
+        // A rejected policy leaves no committee and does not consume the nonce.
+        assert!(s.admin_policy.is_none());
+        assert_eq!(s.accounts[&admin].nonce, 0);
+    }
+
+    #[test]
+    fn test_policy_change_clears_pending_proposals() {
+        use vinx_core::GovernanceAction;
+        let mut s = WorldState::new();
+        let kps: Vec<KeyPair> = (0..2).map(|_| KeyPair::generate()).collect();
+        committee(&mut s, &kps, 2); // 2-of-2
+        let a0 = Address::from_public_key(&kps[0].public_key());
+        let a1 = Address::from_public_key(&kps[1].public_key());
+
+        // A fee proposal is pending (1 of 2 approvals).
+        let fee = GovernanceAction::UpdateFeeFloor { atoms: 1 };
+        s.apply_transaction(&Transaction::new_admin_action(&kps[0], &fee, 0))
+            .unwrap();
+        assert_eq!(s.pending_governance.len(), 1);
+
+        // The committee replaces itself; on execution all in-flight proposals are cleared.
+        let set = GovernanceAction::SetAdminPolicy {
+            signers: vec![a0, a1],
+            threshold: 1,
+        };
+        s.apply_transaction(&Transaction::new_admin_action(&kps[0], &set, 1))
+            .unwrap(); // 1 of 2 for the policy change
+        s.apply_transaction(&Transaction::new_admin_action(&kps[1], &set, 0))
+            .unwrap(); // threshold → executes, clears pending
+        assert_eq!(s.admin_policy.as_ref().unwrap().threshold, 1);
+        assert!(s.pending_governance.is_empty());
     }
 
     #[test]

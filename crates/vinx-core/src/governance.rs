@@ -18,6 +18,16 @@ pub enum GovernanceAction {
     },
     /// Rotate the admin key to a new address.
     RotateAdmin(Address),
+    /// Replace the admin authority with a K-of-M committee (ADR 0011): `threshold`
+    /// signatures among `signers` are required to enact any governance action. A single
+    /// signer with `threshold == 1` is equivalent to the legacy single admin key.
+    ///
+    /// Appended last so existing bincode discriminants (0..=4) are unchanged — the encoding
+    /// is consensus-critical (it enters the signed `AdminAction` payload).
+    SetAdminPolicy {
+        signers: Vec<Address>,
+        threshold: u16,
+    },
 }
 
 #[cfg(test)]
@@ -41,6 +51,10 @@ mod tests {
                 activation_ts: 999,
             },
             GovernanceAction::RotateAdmin(addr),
+            GovernanceAction::SetAdminPolicy {
+                signers: vec![addr, Address::from_bytes([0x22; 20])],
+                threshold: 2,
+            },
         ];
         for a in actions {
             let bytes = bincode::serialize(&a).unwrap();

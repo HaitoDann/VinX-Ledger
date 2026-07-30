@@ -5,6 +5,19 @@ Format : `MAJEUR.MINEUR.CORRECTIF` — les versions `0.x.y` sont des versions de
 
 ---
 
+## [0.39.0] — ⚠️ BREAKING (consensus + stockage) — Multisig gouvernance K-of-M (ADR 0011)
+
+> Remplace la clé admin unique par un **comité à seuil K-parmi-M** optionnel. Consensus-breaking (l'autorisation entre dans la transition d'état) et changement de format d'état (bump `STORAGE_VERSION 7 → 8`, migration in-place).
+
+- **Comité K-of-M par proposition/approbation.** Une action de gouvernance s'exécute une fois qu'elle a réuni `threshold` approbations de signataires distincts. Chaque approbation reste une **transaction mono-signée** — aucun changement du format `Transaction`. Nouveaux `AdminPolicy {signers, threshold}`, `GovernanceProposal`, et `GovernanceAction::SetAdminPolicy` (appendé → discriminants existants inchangés).
+- **Rétro-compatible & graduel.** Sans policy installée, l'`admin_address` reste l'autorité (1-de-1, comportement inchangé). Un déploiement passe au comité par une simple `SetAdminPolicy`. Une action rejetée ne consomme pas de nonce (validation avant mutation, cf. ADR 0026) ; la ré-approbation par le même signataire est refusée ; changer de comité purge les propositions en cours.
+- **Fermeture de contournement.** Une fois un comité installé, `check_admin` désactive les raccourcis mono-admin (p.ex. la tx dédiée `AnnounceUpgrade`) — une clé isolée ne peut plus court-circuiter le seuil.
+- **Persistance.** Les deux champs meta sont ajoutés en dernier ; un blob v7 est un préfixe strict d'un v8, migré **in-place** en appendant les défauts. Le snapshot JSON les porte nativement (`serde(default)`). Bornes anti-bloat : `MAX_ADMIN_SIGNERS`/`MAX_PENDING_GOVERNANCE = 64`.
+- **Clients.** Le wallet CLI `admin-action --action '<JSON>'` accepte déjà `SetAdminPolicy` (désérialisation générique) — aucun changement.
+- **Différé (tranche 2) :** gouvernance par les validateurs, expiration temporelle des propositions, signature à seuil cryptographique (BLS/FROST).
+
+---
+
 ## [0.38.0] — Durcissement P2P / anti-DoS (ADR 0022, tranche 1)
 
 > Ajout **non-breaking** (réseau uniquement, aucun changement de format ni de consensus) : défense en profondeur contre les abus P2P.

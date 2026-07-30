@@ -24,7 +24,10 @@ use zstd;
 /// v7: tx indexes are keyed by raw bytes (`Hash32`, `Address`) instead of hex/bech32
 ///     Strings, and hashed with ahash. The persisted index blobs change layout;
 ///     they are derived data, so a fresh start simply rebuilds them from blocks.
-const STORAGE_VERSION: u64 = 7;
+/// v8: WorldState meta gains ADR 0011 governance fields (`admin_policy`,
+///     `pending_governance`), appended last. A v7 meta blob is a strict prefix of a v8
+///     one, so the migration simply appends those fields' default encodings.
+const STORAGE_VERSION: u64 = 8;
 
 /// zstd compression level — level 3 is the sweet spot: ~60-70% size reduction,
 /// negligible latency compared to disk I/O.
@@ -140,6 +143,24 @@ impl Storage {
                     let mut state = tx.open_table(STATE).map_err(Self::io_err)?;
                     state.remove("tx_index").map_err(Self::io_err)?;
                     state.remove("account_tx_index").map_err(Self::io_err)?;
+                }
+                // v7 → v8 (ADR 0011): the WorldState meta gained two trailing serialized
+                // fields. A v7 blob is a strict prefix of a v8 one, so append their default
+                // encodings in place — no wipe, accounts and chain untouched.
+                7 => {
+                    let mut state = tx.open_table(STATE).map_err(Self::io_err)?;
+                    let compressed = state
+                        .get("world_state_meta")
+                        .map_err(Self::io_err)?
+                        .map(|g| g.value().to_vec());
+                    if let Some(compressed) = compressed {
+                        let mut meta = Self::decompress(&compressed)?;
+                        meta.extend_from_slice(&vinx_state::v8_meta_suffix());
+                        let recompressed = Self::compress(&meta)?;
+                        state
+                            .insert("world_state_meta", recompressed.as_slice())
+                            .map_err(Self::io_err)?;
+                    }
                 }
                 unknown => {
                     return Err(Self::io_err(format!(
@@ -474,6 +495,25 @@ mod tests {
         s.get(key).unwrap().is_some()
     }
 
+    /// Strips the v8 governance suffix from the persisted meta blob, turning a current-format
+    /// meta back into its v7 prefix so the v7→v8 append migration can be exercised on data
+    /// that genuinely predates ADR 0011.
+    fn downgrade_meta_to_v7(dir: &Path) {
+        let db = Database::create(dir.join("vinx.redb")).unwrap();
+        let tx = db.begin_write().unwrap();
+        {
+            let mut s = tx.open_table(STATE).unwrap();
+            let compressed = s.get("world_state_meta").unwrap().unwrap().value().to_vec();
+            let mut meta = zstd::decode_all(&compressed[..]).unwrap();
+            let suffix_len = vinx_state::v8_meta_suffix().len();
+            meta.truncate(meta.len() - suffix_len);
+            let recompressed = zstd::encode_all(&meta[..], ZSTD_LEVEL).unwrap();
+            s.insert("world_state_meta", recompressed.as_slice())
+                .unwrap();
+        }
+        tx.commit().unwrap();
+    }
+
     #[test]
     fn test_migrate_v6_rebuilds_indexes_and_bumps() {
         let tmp = Tmp::new();
@@ -558,14 +598,17 @@ mod tests {
         };
         chain.push(block);
 
-        // Save at the current version, then simulate an older (v6) on-disk marker.
+        // Save at the current version, then simulate genuinely old on-disk data: strip the
+        // v8 governance suffix so the meta is v7-format, and stamp an older (v6) marker.
         {
             let storage = Storage::open(&tmp.0).unwrap();
             storage.save(&mut state, &chain).unwrap();
         }
+        downgrade_meta_to_v7(&tmp.0);
         set_version(&tmp.0, 6);
 
-        // Reopen → migrates in place (no wipe); load rebuilds the derived index.
+        // Reopen → migrates in place (v6→v7 drops indexes; v7→v8 re-appends governance
+        // defaults); load rebuilds the derived index.
         let storage = Storage::open(&tmp.0).expect("v6 must migrate, not wipe");
         let (loaded_state, loaded_chain) = storage.load().expect("data survives migration");
 
@@ -574,6 +617,9 @@ mod tests {
             Amount::from_vinx(500),
             "account balance must survive migration"
         );
+        // ADR 0011: the appended governance fields load with their defaults.
+        assert!(loaded_state.admin_policy.is_none());
+        assert!(loaded_state.pending_governance.is_empty());
         assert_eq!(loaded_chain.tip_height(), 1, "chain must survive migration");
         assert!(
             loaded_chain.get_tx_by_hash(&tx_hash).is_some(),
