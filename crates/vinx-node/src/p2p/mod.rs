@@ -386,6 +386,19 @@ async fn handle_swarm_event(
     }
 }
 
+/// Verifies every **transaction** signature in a block in parallel (rayon, ADR 0015).
+///
+/// Ed25519 verification is the dominant CPU cost of validating a received block, it reads
+/// no chain state, and it is a pure pass/fail conjunction — so running it across all cores
+/// is both a large throughput win and fully deterministic (order-independent). State is
+/// still applied **sequentially** afterwards via `apply_transaction_trusted`, which keeps
+/// the deterministic execution order untouched. This parallelises validation, not
+/// execution: the risky part (parallel state transitions) is deferred — see ADR 0015.
+fn verify_block_tx_signatures_parallel(txs: &[Transaction]) -> bool {
+    txs.par_iter()
+        .all(|tx| WorldState::verify_tx_signature_pure(tx).is_ok())
+}
+
 /// Verifies all co-signatures on a block in parallel (rayon).
 /// Returns `true` only if every signature has a valid pubkey→address binding
 /// and a valid ed25519 signature over `block_hash`.
@@ -539,6 +552,12 @@ async fn dispatch_message(
                 warn!(height, "P2P block has invalid signature(s)");
                 return;
             }
+            // ADR 0015: verify every transaction signature in parallel up front, then apply
+            // state sequentially with the trusted path (which skips re-verification).
+            if !verify_block_tx_signatures_parallel(&block.transactions) {
+                warn!(height, "P2P block has invalid transaction signature(s)");
+                return;
+            }
 
             // 4. State transition with rollback
             let applied = {
@@ -547,7 +566,7 @@ async fn dispatch_message(
                 sg.set_block_context(block.header.timestamp);
                 let mut ok = true;
                 for tx in &block.transactions {
-                    if let Err(e) = sg.apply_transaction(tx) {
+                    if let Err(e) = sg.apply_transaction_trusted(tx) {
                         warn!(height, error = %e, "P2P block tx failed, rolling back");
                         *sg = snapshot.clone();
                         ok = false;
@@ -712,13 +731,22 @@ async fn dispatch_message(
                     warn!(height, "SyncResponse block has invalid signature(s)");
                     break;
                 }
+                // ADR 0015: parallel transaction-signature verification, then sequential
+                // trusted apply.
+                if !verify_block_tx_signatures_parallel(&block.transactions) {
+                    warn!(
+                        height,
+                        "SyncResponse block has invalid transaction signature(s)"
+                    );
+                    break;
+                }
                 let ok = {
                     let mut sg = state.write().await;
                     let snapshot = sg.clone();
                     sg.set_block_context(block.header.timestamp);
                     let mut ok = true;
                     for tx in &block.transactions {
-                        if let Err(e) = sg.apply_transaction(tx) {
+                        if let Err(e) = sg.apply_transaction_trusted(tx) {
                             warn!(height, error=%e, "SyncResponse tx failed");
                             *sg = snapshot.clone();
                             ok = false;

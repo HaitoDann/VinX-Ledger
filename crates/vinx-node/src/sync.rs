@@ -1,5 +1,6 @@
 //! Startup chain-sync: fetches blocks from a trusted peer and replays them.
 
+use rayon::prelude::*;
 use serde::Deserialize;
 use vinx_core::{Block, ValidatorSet};
 use vinx_state::WorldState;
@@ -77,10 +78,24 @@ pub async fn sync_from_peer(
                 return applied;
             }
 
+            // ADR 0015: verify all transaction signatures in parallel (Ed25519 is the
+            // dominant cost of replaying a synced block), then apply state sequentially
+            // via the trusted path. Same security posture, off the sequential critical path.
+            if !block
+                .transactions
+                .par_iter()
+                .all(|tx| WorldState::verify_tx_signature_pure(tx).is_ok())
+            {
+                tracing::error!(
+                    height = block.header.height,
+                    "Sync block has invalid transaction signature(s) — aborting"
+                );
+                return applied;
+            }
             // Apply all transactions to state
             state.set_block_context(block.header.timestamp);
             for tx in &block.transactions {
-                if let Err(e) = state.apply_transaction(tx) {
+                if let Err(e) = state.apply_transaction_trusted(tx) {
                     tracing::error!(error = %e, height = block.header.height, "Sync tx failed — aborting");
                     return applied;
                 }

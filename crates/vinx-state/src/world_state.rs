@@ -496,6 +496,18 @@ impl WorldState {
     /// Verifies the sender's (and optional sponsor's) public-key binding and Ed25519
     /// signature. This is the expensive part of applying a transaction.
     fn verify_tx_signatures(&self, tx: &Transaction) -> Result<(), CoreError> {
+        Self::verify_tx_signature_pure(tx)
+    }
+
+    /// Pure, state-independent signature verification for a single transaction.
+    ///
+    /// Depends only on the transaction's own bytes — it reads no `WorldState` — so it is
+    /// safe to call from multiple threads at once (ADR 0015): verifying a block's
+    /// signatures is embarrassingly parallel and, being a pure pass/fail conjunction, is
+    /// fully deterministic regardless of the order in which the checks run. The parallel
+    /// batch driver lives at the block-validation call sites in `vinx-node`, which then
+    /// apply state sequentially via [`WorldState::apply_transaction_trusted`].
+    pub fn verify_tx_signature_pure(tx: &Transaction) -> Result<(), CoreError> {
         let pk = tx.pub_key.as_ref().ok_or(CoreError::InvalidSignature)?;
         let derived = Address::from_public_key(pk);
         if derived != tx.from {

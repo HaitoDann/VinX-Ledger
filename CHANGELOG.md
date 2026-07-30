@@ -5,6 +5,16 @@ Format : `MAJEUR.MINEUR.CORRECTIF` — les versions `0.x.y` sont des versions de
 
 ---
 
+## [0.36.0] — Validation de bloc parallélisée (ADR 0015, tranche 1)
+
+> Ajout **non-breaking** : la vérification des signatures de transactions passe du séquentiel au parallèle sur tous les chemins de validation de bloc reçu. Aucune modification du format ni du consensus — même posture de sécurité, off du chemin critique séquentiel.
+
+- **Vérification parallèle des signatures.** À la réception d'un bloc (P2P `NewBlock`, `SyncResponse`, sync au démarrage), toutes les signatures Ed25519 des transactions sont vérifiées **en parallèle** (rayon `par_iter`) **en amont**, puis l'état est appliqué **séquentiellement** via `apply_transaction_trusted`. Le coût CPU dominant de la validation passe de 1 cœur à *N* cœurs — gain direct sur la vitesse de sync et la validation de blocs pleins.
+- **Sûr par construction.** `WorldState::verify_tx_signature_pure` est **pure** (ne lit pas l'état) ; la vérification est une conjonction pass/fail **indépendante de l'ordre** → déterministe, zéro risque de divergence. **L'ordre d'exécution de l'état reste strictement séquentiel** : on parallélise la *validation*, pas l'*exécution*.
+- **Exécution d'état parallèle : différée** (ADR 0015 tranche 2). Documentée et encadrée (Block-STM), avec des **critères de déclenchement** explicites (banc 3-validateurs + profilage + TPS réellement au-delà d'un cœur) — pas d'optimisation prématurée sur le terme le plus risqué du système.
+
+---
+
 ## [0.35.0] — ⚠️ BREAKING (consensus) — Gouvernance unifiée + préavis d'upgrade en temps réel
 
 > Lot **consensus-breaking → nouvelle genèse.** Clôt les deux derniers ADR « Cohérence & Robustesse » lourds (0006, 0007). Implémenté de bout en bout (`vinx-core`, `vinx-state`, `vinx-node`, wallet CLI, desktop-core, app desktop, console admin JS, SDK). Tests réécrits, clippy `-D warnings` & fmt verts.

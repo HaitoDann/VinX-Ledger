@@ -78,8 +78,9 @@ Rien ci-dessous n'est décidé — ce sont des propositions à instruire une par
 - **0014 — Standard light-client** 🟠
   *Direction :* formaliser le format de preuve (état Merkle — déjà là — + chaîne d'en-têtes + preuve de finalité), et la *weak subjectivity* / checkpoints pour un fast-sync sûr.
 
-- **0015 — Exécution parallèle** 🟢
-  *Direction :* exécution parallèle des tx sans conflit d'accès — pertinent seulement à des dizaines de milliers de TPS soutenus. Risque de déterminisme à cadrer.
+- **0015 — [Exécution parallèle & vérification parallèle](./0015-execution-parallele.md)** 🟢 **— ✅ tranche 1 (vérif) implémentée ; exécution différée**
+  *Fait (tranche 1) :* vérification **parallèle** (rayon) de toutes les signatures de tx sur les chemins de validation de bloc (P2P `NewBlock`/`SyncResponse`, sync au démarrage), puis application d'état **séquentielle** trusted. Coût CPU dominant passé de 1 à *N* cœurs, **zéro risque consensus** (vérif pure, order-independent). `WorldState::verify_tx_signature_pure`.
+  *Différé (tranche 2) :* exécution d'état parallèle (Block-STM) — pertinente seulement à des dizaines de milliers de TPS soutenus, consensus-critique. Critères de déclenchement listés dans l'ADR (banc 3-validateurs + profilage + besoin réel).
 
 - **0020 — Sérialisation canonique consensus-critique** 🟠 **— ✅ tranche 1** (tests-tripwire de déterminisme + round-trip canonique pour `GovernanceAction` et `SlashEvidence` ; audit complet + vecteurs dorés hex = suite)
   *Direction :* garantir l'encodage canonique (borsh/bincode) des structures qui entrent dans un hash signé, pour empêcher toute malléabilité inter-implémentations.
