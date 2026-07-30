@@ -5,6 +5,15 @@ Format : `MAJEUR.MINEUR.CORRECTIF` — les versions `0.x.y` sont des versions de
 
 ---
 
+## [0.41.0] — Vecteurs dorés de sérialisation canonique (ADR 0020, tranche 2)
+
+> Ajout **non-breaking** (tests uniquement) : fige les octets exacts des encodages consensus-critiques.
+
+- **Vecteurs dorés hex.** Les octets bincode exacts sont figés en dur pour `GovernanceAction` (6 variants) et `ModuleOp` (3 variants), et le hash de `BlockHeader` (le message co-signé par les validateurs) est épinglé. Strictement plus fort qu'un round-trip : attrape un **décalage de discriminant** ou un **réordonnancement de champ** interne-cohérent, qui casserait silencieusement la vérification de signature inter-implémentations.
+- **Audit.** bincode par défaut est déterministe (entiers LE à largeur fixe, discriminants d'enum u32, longueurs u64) ; le registre de modules (ADR 0010) utilise une **`BTreeMap`** (ordre de clés canonique) et jamais une `HashMap`. Les nouveaux variants sont appendés → discriminants existants inchangés, épinglés par les vecteurs.
+
+---
+
 ## [0.40.0] — ⚠️ BREAKING (consensus + stockage) — Ancrage & registre de modules (ADR 0010)
 
 > Première brique exécutable de l'ADR 0001 (L1 monnaie pure + surcouches par ancrage bondé). Consensus-breaking (nouveau type de tx + état) ; bump `STORAGE_VERSION 8 → 9` (migration in-place).

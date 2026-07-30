@@ -245,6 +245,28 @@ mod tests {
     }
 
     #[test]
+    fn test_block_header_hash_golden_vector() {
+        // ADR 0020 t2: BlockHeader::hash() is the exact message validators co-sign. Its
+        // manual big-endian layout is consensus-critical across implementations — pin the
+        // hash of a fixed header so any layout change (field order, width, extra field) is
+        // a conscious, breaking act caught here.
+        let h = BlockHeader {
+            height: 5,
+            prev_hash: [0u8; 32],
+            timestamp: 7,
+            validator: Address::from_bytes([0x11; 20]),
+            tx_count: 2,
+            state_root: [0xAB; 32],
+            base_fee: 42,
+            receipts_root: [0xCD; 32],
+        };
+        assert_eq!(
+            hex::encode(h.hash()),
+            "9456af3f0cb75ac60b2a5559e918a9f7eae17198361f5a3cdebc9383e7bf2640"
+        );
+    }
+
+    #[test]
     fn test_slash_evidence_encoding_is_canonical() {
         // ADR 0020: SlashEvidence enters the SlashValidator transaction payload —
         // consensus-critical. Pin that its bincode encoding is deterministic and

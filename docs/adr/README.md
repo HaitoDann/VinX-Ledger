@@ -82,8 +82,8 @@ Rien ci-dessous n'est décidé — ce sont des propositions à instruire une par
   *Fait (tranche 1) :* vérification **parallèle** (rayon) de toutes les signatures de tx sur les chemins de validation de bloc (P2P `NewBlock`/`SyncResponse`, sync au démarrage), puis application d'état **séquentielle** trusted. Coût CPU dominant passé de 1 à *N* cœurs, **zéro risque consensus** (vérif pure, order-independent). `WorldState::verify_tx_signature_pure`.
   *Différé (tranche 2) :* exécution d'état parallèle (Block-STM) — pertinente seulement à des dizaines de milliers de TPS soutenus, consensus-critique. Critères de déclenchement listés dans l'ADR (banc 3-validateurs + profilage + besoin réel).
 
-- **0020 — Sérialisation canonique consensus-critique** 🟠 **— ✅ tranche 1** (tests-tripwire de déterminisme + round-trip canonique pour `GovernanceAction` et `SlashEvidence` ; audit complet + vecteurs dorés hex = suite)
-  *Direction :* garantir l'encodage canonique (borsh/bincode) des structures qui entrent dans un hash signé, pour empêcher toute malléabilité inter-implémentations.
+- **0020 — [Sérialisation canonique consensus-critique](./0020-serialisation-canonique.md)** 🟠 **— ✅ tranches 1 & 2**
+  *Fait :* **vecteurs dorés hex** (octets exacts figés) pour `GovernanceAction` (6 variants), `ModuleOp` (3 variants) et `BlockHeader::hash` (message co-signé), en plus des round-trips canoniques (`SlashEvidence`) et des vecteurs `signing_bytes` pré-existants. Attrape un décalage de discriminant / réordonnancement de champ qu'un round-trip laisse passer. Audit : bincode déterministe (LE, discriminants u32, longueurs u64), registre de modules en `BTreeMap` (ordre canonique, jamais `HashMap`).
 
 ### Réseau P2P
 

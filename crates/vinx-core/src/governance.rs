@@ -66,4 +66,49 @@ mod tests {
             assert_eq!(decoded, a);
         }
     }
+
+    #[test]
+    fn test_governance_action_golden_vectors() {
+        // ADR 0020 t2: pin the EXACT bincode bytes of every GovernanceAction variant.
+        // Stronger than the round-trip test above — this catches a discriminant shift or a
+        // field reorder that is still internally consistent, which would silently break
+        // cross-implementation signature verification of the AdminAction payload.
+        let a = Address::from_bytes([0x11; 20]);
+        let b = Address::from_bytes([0x22; 20]);
+        let cases: [(GovernanceAction, &str); 6] = [
+            (
+                GovernanceAction::AddValidator(a),
+                "000000001111111111111111111111111111111111111111",
+            ),
+            (
+                GovernanceAction::RemoveValidator(a),
+                "010000001111111111111111111111111111111111111111",
+            ),
+            (
+                GovernanceAction::UpdateFeeFloor { atoms: 123_456 },
+                "0200000040e2010000000000",
+            ),
+            (
+                GovernanceAction::ScheduleUpgrade {
+                    version: ProtocolVersion::new(1, 2, 3),
+                    activation_ts: 999,
+                },
+                "03000000010002000300e703000000000000",
+            ),
+            (
+                GovernanceAction::RotateAdmin(a),
+                "040000001111111111111111111111111111111111111111",
+            ),
+            (
+                GovernanceAction::SetAdminPolicy {
+                    signers: vec![a, b],
+                    threshold: 2,
+                },
+                "050000000200000000000000111111111111111111111111111111111111111122222222222222222222222222222222222222220200",
+            ),
+        ];
+        for (action, hex_want) in cases {
+            assert_eq!(hex::encode(bincode::serialize(&action).unwrap()), hex_want);
+        }
+    }
 }
