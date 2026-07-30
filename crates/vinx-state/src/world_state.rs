@@ -3,12 +3,13 @@ use std::collections::{BTreeMap, HashMap, HashSet};
 use vinx_core::{
     amount::{
         cumulative_emission_atoms, Amount, BPS_DENOM, DEFAULT_FEE_FLOOR_ATOMS,
-        EXISTENTIAL_DEPOSIT_ATOMS, MIN_STAKE_ATOMS, MIN_VALIDATOR_BOND_ATOMS, SLASH_BOUNTY_BPS,
-        SLASH_EQUIVOCATION_BPS, UNBONDING_SECS,
+        EXISTENTIAL_DEPOSIT_ATOMS, MAX_MODULES, MIN_MODULE_BOND_ATOMS, MIN_STAKE_ATOMS,
+        MIN_VALIDATOR_BOND_ATOMS, SLASH_BOUNTY_BPS, SLASH_EQUIVOCATION_BPS, UNBONDING_SECS,
     },
     block::SlashEvidence,
     chain_id::CHAIN_ID_DEVNET,
     governance::GovernanceAction,
+    module::ModuleOp,
     protocol::{ProtocolVersion, ScheduledUpgrade},
     Account, CoreError, Transaction, TransactionType, ValidatorSet,
 };
@@ -109,6 +110,12 @@ pub struct WorldState {
     /// `pending_unbonds`: derived deterministically from the same transaction history.
     #[serde(default)]
     pub pending_governance: Vec<GovernanceProposal>,
+    /// Bonded module registry (ADR 0010): `module_id → ModuleEntry`. The L1 stores only the
+    /// operator, its bond, and the latest committed anchor — never module logic. Appended
+    /// after `pending_governance` so the v8→v9 storage migration can append its default
+    /// (empty map). `serde(default)` for pre-0010 state.
+    #[serde(default)]
+    pub modules: BTreeMap<Hash32, ModuleEntry>,
 }
 
 /// A bond amount in its unbonding delay, waiting to return to `address`'s balance
@@ -137,6 +144,21 @@ pub struct GovernanceProposal {
     pub action: GovernanceAction,
     /// Distinct signer addresses that have approved, in first-seen order.
     pub approvals: Vec<Address>,
+}
+
+/// A registered module in the bonded anchor registry (ADR 0010). The L1 keeps only this
+/// commitment — never the module's logic or full state.
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
+pub struct ModuleEntry {
+    /// Address that registered the module and alone may anchor or deregister it.
+    pub operator: Address,
+    /// Locked bond, returned to the operator on deregistration. Circulation-neutral while
+    /// locked (the operator still owns it).
+    pub bond: Amount,
+    /// Latest committed state root of the off-chain module. All-zero until first anchored.
+    pub anchor_head: Hash32,
+    /// Number of successful anchors — a monotonic activity counter.
+    pub anchored_count: u64,
 }
 
 /// Upper bound on committee size (ADR 0011) — bounds the signer set stored in state and the
@@ -187,6 +209,14 @@ pub fn v8_meta_suffix() -> Vec<u8> {
     out
 }
 
+/// The bincode bytes appended to a v8 `WorldState` meta blob to bring it to v9 (ADR 0010):
+/// the default `modules` registry (empty map). Same append-only rationale as
+/// [`v8_meta_suffix`] — `modules` is the last serialized field. Shared by the storage
+/// v8→v9 migration and its tests.
+pub fn v9_meta_suffix() -> Vec<u8> {
+    bincode::serialize(&BTreeMap::<Hash32, ModuleEntry>::new()).expect("serialize empty map")
+}
+
 fn default_fee_floor() -> Amount {
     Amount::from_atoms(DEFAULT_FEE_FLOOR_ATOMS)
 }
@@ -230,6 +260,7 @@ impl WorldState {
             persist_dirty: HashSet::new(),
             admin_policy: None,
             pending_governance: Vec::new(),
+            modules: BTreeMap::new(),
         }
     }
 
@@ -670,6 +701,7 @@ impl WorldState {
             TransactionType::AnnounceUpgrade => self.apply_announce_upgrade(tx),
             TransactionType::SlashValidator => self.apply_slash_validator(tx),
             TransactionType::AdminAction => self.apply_admin_action(tx),
+            TransactionType::AnchorState => self.apply_anchor_state(tx),
         }
     }
 
@@ -1285,6 +1317,137 @@ impl WorldState {
         Ok(())
     }
 
+    /// Applies an `AnchorState` transaction: a bonded module-registry operation (ADR 0010).
+    /// The L1 records the operator, bond, and latest anchor — never module logic.
+    ///
+    /// Every op pays the base fee (anti-spam; credited to the producer like a transfer) and
+    /// leaves the operator with a live account (`balance >= ED`) — module operators are
+    /// never dust and never reaped. Each arm validates fully before mutating, so a rejected
+    /// op consumes no nonce (the producer skips a failed tx without rollback, cf. ADR 0026).
+    fn apply_anchor_state(&mut self, tx: &Transaction) -> Result<(), CoreError> {
+        let op: ModuleOp = bincode::deserialize(&tx.payload).map_err(|_| {
+            CoreError::InvalidTransaction("malformed module operation payload".to_string())
+        })?;
+
+        // Fee floor (same anti-spam forfait as a transfer).
+        if tx.fee < self.base_fee {
+            return Err(CoreError::InvalidTransaction(format!(
+                "fee {} is below minimum {}",
+                tx.fee, self.base_fee
+            )));
+        }
+        let ed = EXISTENTIAL_DEPOSIT_ATOMS;
+
+        let operator = tx.from;
+        let (nonce, balance) = {
+            let acc = self
+                .accounts
+                .get(&operator)
+                .ok_or(CoreError::InsufficientBalance)?;
+            (acc.nonce, acc.balance.atoms())
+        };
+        if nonce != tx.nonce {
+            return Err(CoreError::InvalidNonce {
+                expected: nonce,
+                got: tx.nonce,
+            });
+        }
+
+        // Compute the operator's balance debit for this op, validating fully before any
+        // mutation. Register locks a bond on top of the fee; Anchor/Deregister pay the fee
+        // only (Deregister also refunds the bond, applied after removal below).
+        let fee = tx.fee.atoms();
+        match &op {
+            ModuleOp::Register {
+                module_id,
+                bond_atoms,
+            } => {
+                if *bond_atoms < MIN_MODULE_BOND_ATOMS {
+                    return Err(CoreError::InvalidTransaction(
+                        "module bond is below the minimum".to_string(),
+                    ));
+                }
+                if self.modules.contains_key(module_id) {
+                    return Err(CoreError::InvalidTransaction(
+                        "module id is already registered".to_string(),
+                    ));
+                }
+                if self.modules.len() >= MAX_MODULES {
+                    return Err(CoreError::InvalidTransaction(
+                        "module registry is full".to_string(),
+                    ));
+                }
+                let debit = bond_atoms
+                    .checked_add(fee)
+                    .ok_or(CoreError::AmountOverflow)?;
+                if balance < debit {
+                    return Err(CoreError::InsufficientBalance);
+                }
+                // Operators keep a live account (>= ED): they must exist to anchor later.
+                if balance - debit < ed {
+                    return Err(CoreError::BelowExistentialDeposit);
+                }
+                let acc = self.accounts.get_mut(&operator).expect("checked above");
+                acc.balance = Amount::from_atoms(balance - debit);
+                acc.nonce += 1;
+                self.modules.insert(
+                    *module_id,
+                    ModuleEntry {
+                        operator,
+                        bond: Amount::from_atoms(*bond_atoms),
+                        anchor_head: [0u8; 32],
+                        anchored_count: 0,
+                    },
+                );
+            }
+            ModuleOp::Anchor {
+                module_id,
+                anchor_head,
+            } => {
+                let entry = self
+                    .modules
+                    .get(module_id)
+                    .ok_or_else(|| CoreError::InvalidTransaction("unknown module".to_string()))?;
+                if entry.operator != operator {
+                    return Err(CoreError::Unauthorized);
+                }
+                if balance < fee || balance - fee < ed {
+                    return Err(CoreError::InsufficientBalance);
+                }
+                let new_head = *anchor_head;
+                let acc = self.accounts.get_mut(&operator).expect("checked above");
+                acc.balance = Amount::from_atoms(balance - fee);
+                acc.nonce += 1;
+                let entry = self.modules.get_mut(module_id).expect("checked above");
+                entry.anchor_head = new_head;
+                entry.anchored_count += 1;
+            }
+            ModuleOp::Deregister { module_id } => {
+                let entry = self
+                    .modules
+                    .get(module_id)
+                    .ok_or_else(|| CoreError::InvalidTransaction("unknown module".to_string()))?;
+                if entry.operator != operator {
+                    return Err(CoreError::Unauthorized);
+                }
+                if balance < fee {
+                    return Err(CoreError::InsufficientBalance);
+                }
+                let refund = entry.bond.atoms();
+                let acc = self.accounts.get_mut(&operator).expect("checked above");
+                // Net: −fee +refunded bond. Refund keeps the account well above ED.
+                acc.balance = Amount::from_atoms(balance - fee + refund);
+                acc.nonce += 1;
+                self.modules.remove(module_id);
+            }
+        }
+
+        // The fee changes hands into the block pool → credited to the producer at settle.
+        self.block_fees = self.block_fees.saturating_add(tx.fee);
+        self.mark_dirty(&operator);
+        Ok(())
+    }
+
     #[cfg(test)]
     fn set_staked_for_test(&mut self, address: &Address, staked: Amount) {
         let acc = self
@@ -1758,6 +1921,172 @@ mod tests {
             .unwrap(); // threshold → executes, clears pending
         assert_eq!(s.admin_policy.as_ref().unwrap().threshold, 1);
         assert!(s.pending_governance.is_empty());
+    }
+
+    // ─── ADR 0010: bonded module registry ────────────────────────────────────
+    use vinx_core::amount::MIN_MODULE_BOND_ATOMS;
+    use vinx_core::module::ModuleOp;
+
+    fn operator_state() -> (WorldState, KeyPair, Address) {
+        let mut s = WorldState::new();
+        let kp = KeyPair::generate();
+        let addr = Address::from_public_key(&kp.public_key());
+        s.credit_for_test(addr, Amount::from_vinx(5_000));
+        s.circulating_supply = Amount::from_vinx(5_000);
+        (s, kp, addr)
+    }
+
+    #[test]
+    fn test_module_register_locks_bond_and_conserves_supply() {
+        let (mut s, kp, addr) = operator_state();
+        let fee = s.base_fee;
+        let supply_before = s.circulating_supply;
+        let id = [7u8; 32];
+        let op = ModuleOp::Register {
+            module_id: id,
+            bond_atoms: MIN_MODULE_BOND_ATOMS,
+        };
+        s.apply_transaction(&Transaction::new_anchor_state(&kp, &op, fee, 0))
+            .unwrap();
+
+        let entry = s.modules.get(&id).unwrap();
+        assert_eq!(entry.operator, addr);
+        assert_eq!(entry.bond.atoms(), MIN_MODULE_BOND_ATOMS);
+        assert_eq!(entry.anchor_head, [0u8; 32]);
+        // Balance debited by bond + fee; bond is locked (not destroyed) so circulation holds.
+        let expected = Amount::from_vinx(5_000).atoms() - MIN_MODULE_BOND_ATOMS - fee.atoms();
+        assert_eq!(s.accounts[&addr].balance.atoms(), expected);
+        assert_eq!(s.circulating_supply, supply_before);
+    }
+
+    #[test]
+    fn test_module_register_rejects_low_bond_and_duplicate() {
+        let (mut s, kp, _) = operator_state();
+        let fee = s.base_fee;
+        // Below the minimum bond.
+        let low = ModuleOp::Register {
+            module_id: [1u8; 32],
+            bond_atoms: MIN_MODULE_BOND_ATOMS - 1,
+        };
+        assert!(s
+            .apply_transaction(&Transaction::new_anchor_state(&kp, &low, fee, 0))
+            .is_err());
+        assert!(s.modules.is_empty());
+        // Register, then a duplicate id is rejected.
+        let id = [2u8; 32];
+        let ok = ModuleOp::Register {
+            module_id: id,
+            bond_atoms: MIN_MODULE_BOND_ATOMS,
+        };
+        s.apply_transaction(&Transaction::new_anchor_state(&kp, &ok, fee, 0))
+            .unwrap();
+        let dup = ModuleOp::Register {
+            module_id: id,
+            bond_atoms: MIN_MODULE_BOND_ATOMS,
+        };
+        assert!(s
+            .apply_transaction(&Transaction::new_anchor_state(&kp, &dup, fee, 1))
+            .is_err());
+    }
+
+    #[test]
+    fn test_module_anchor_is_operator_only() {
+        let (mut s, kp, _) = operator_state();
+        let fee = s.base_fee;
+        let id = [3u8; 32];
+        s.apply_transaction(&Transaction::new_anchor_state(
+            &kp,
+            &ModuleOp::Register {
+                module_id: id,
+                bond_atoms: MIN_MODULE_BOND_ATOMS,
+            },
+            fee,
+            0,
+        ))
+        .unwrap();
+
+        // Operator advances the anchor.
+        let head = [9u8; 32];
+        s.apply_transaction(&Transaction::new_anchor_state(
+            &kp,
+            &ModuleOp::Anchor {
+                module_id: id,
+                anchor_head: head,
+            },
+            fee,
+            1,
+        ))
+        .unwrap();
+        assert_eq!(s.modules[&id].anchor_head, head);
+        assert_eq!(s.modules[&id].anchored_count, 1);
+
+        // A non-operator cannot anchor.
+        let outsider = KeyPair::generate();
+        s.credit_for_test(
+            Address::from_public_key(&outsider.public_key()),
+            Amount::from_vinx(1),
+        );
+        let r = s.apply_transaction(&Transaction::new_anchor_state(
+            &outsider,
+            &ModuleOp::Anchor {
+                module_id: id,
+                anchor_head: [1u8; 32],
+            },
+            fee,
+            0,
+        ));
+        assert_eq!(r, Err(CoreError::Unauthorized));
+        assert_eq!(s.modules[&id].anchor_head, head); // unchanged
+    }
+
+    #[test]
+    fn test_module_deregister_returns_bond() {
+        let (mut s, kp, addr) = operator_state();
+        let fee = s.base_fee;
+        let id = [4u8; 32];
+        s.apply_transaction(&Transaction::new_anchor_state(
+            &kp,
+            &ModuleOp::Register {
+                module_id: id,
+                bond_atoms: MIN_MODULE_BOND_ATOMS,
+            },
+            fee,
+            0,
+        ))
+        .unwrap();
+        let bal_after_register = s.accounts[&addr].balance.atoms();
+        s.apply_transaction(&Transaction::new_anchor_state(
+            &kp,
+            &ModuleOp::Deregister { module_id: id },
+            fee,
+            1,
+        ))
+        .unwrap();
+        assert!(s.modules.is_empty());
+        // Bond refunded, minus the deregister fee.
+        assert_eq!(
+            s.accounts[&addr].balance.atoms(),
+            bal_after_register + MIN_MODULE_BOND_ATOMS - fee.atoms()
+        );
+    }
+
+    #[test]
+    fn test_module_register_insufficient_balance_rejected() {
+        let mut s = WorldState::new();
+        let kp = KeyPair::generate();
+        s.credit_for_test(
+            Address::from_public_key(&kp.public_key()),
+            Amount::from_vinx(500), // below the 1000 VINX bond
+        );
+        let fee = s.base_fee;
+        let op = ModuleOp::Register {
+            module_id: [5u8; 32],
+            bond_atoms: MIN_MODULE_BOND_ATOMS,
+        };
+        assert!(s
+            .apply_transaction(&Transaction::new_anchor_state(&kp, &op, fee, 0))
+            .is_err());
+        assert!(s.modules.is_empty());
     }
 
     #[test]

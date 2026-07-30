@@ -16,6 +16,9 @@ pub enum TransactionType {
     SlashValidator,
     /// Admin-only governance action executed immediately. `payload` = bincode(GovernanceAction).
     AdminAction,
+    /// Module-registry operation (ADR 0010). `payload` = bincode(ModuleOp). Appended last so
+    /// existing bincode/borsh variant indices are unchanged.
+    AnchorState,
 }
 
 impl TransactionType {
@@ -30,6 +33,7 @@ impl TransactionType {
             // The discriminants of the surviving types are kept stable.
             TransactionType::SlashValidator => 0x07,
             TransactionType::AdminAction => 0x08,
+            TransactionType::AnchorState => 0x09,
         }
     }
 }
@@ -306,6 +310,38 @@ impl Transaction {
             to: from,
             amount: Amount::ZERO,
             fee: Amount::ZERO,
+            nonce,
+            chain_id: CHAIN_ID_DEVNET,
+            expires_at_height: None,
+            payload,
+            pub_key: Some(pk),
+            signature: None,
+            sponsor: None,
+            sponsor_pub_key: None,
+            sponsor_signature: None,
+        };
+        tx.signature = Some(keypair.sign(&tx.signing_bytes()));
+        tx
+    }
+
+    /// Constructs and signs an AnchorState transaction carrying a module-registry
+    /// operation (ADR 0010). `fee` must cover the protocol minimum. The op's target module
+    /// is encoded in the payload, so `to` is set to the sender by convention.
+    pub fn new_anchor_state(
+        keypair: &KeyPair,
+        op: &crate::module::ModuleOp,
+        fee: Amount,
+        nonce: u64,
+    ) -> Self {
+        let pk = keypair.public_key();
+        let from = Address::from_public_key(&pk);
+        let payload = bincode::serialize(op).expect("ModuleOp serialization is infallible");
+        let mut tx = Self {
+            tx_type: TransactionType::AnchorState,
+            from,
+            to: from,
+            amount: Amount::ZERO,
+            fee,
             nonce,
             chain_id: CHAIN_ID_DEVNET,
             expires_at_height: None,

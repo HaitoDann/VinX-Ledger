@@ -5,6 +5,18 @@ Format : `MAJEUR.MINEUR.CORRECTIF` — les versions `0.x.y` sont des versions de
 
 ---
 
+## [0.40.0] — ⚠️ BREAKING (consensus + stockage) — Ancrage & registre de modules (ADR 0010)
+
+> Première brique exécutable de l'ADR 0001 (L1 monnaie pure + surcouches par ancrage bondé). Consensus-breaking (nouveau type de tx + état) ; bump `STORAGE_VERSION 8 → 9` (migration in-place).
+
+- **Type de tx `AnchorState` (0x09)** portant un `ModuleOp` : `Register {module_id, bond_atoms}`, `Anchor {module_id, anchor_head}`, `Deregister {module_id}` (appendé → discriminants existants inchangés).
+- **Registre bondé.** `WorldState.modules: BTreeMap<Hash32, ModuleEntry {operator, bond, anchor_head, anchored_count}>`. La L1 **n'exécute jamais** la logique du module — elle enregistre seulement l'opérateur, son bond et la dernière racine engagée. Ancrage/désenregistrement **opérateur uniquement**.
+- **Économie.** Bond min `MIN_MODULE_BOND_ATOMS` (1 000 VinX) + cap `MAX_MODULES` (anti-bloat) ; chaque op paie le forfait de base (anti-spam, va au producteur) ; l'opérateur garde un compte vivant (≥ ED). Le bond est **verrouillé, pas détruit** → `circulating_supply` inchangé, invariant de masse (ADR 0004) préservé (testé). `Deregister` rend le bond intégralement.
+- **Persistance.** `modules` appendé en dernier ; blob v8 = préfixe strict d'un v9, migré in-place en appendant la map vide (`append_meta_suffix` factorisé). Snapshot JSON natif.
+- **Différé :** adjudication de fraude / slashing du bond (**→ ADR 0023**), délai de déliaison, commande wallet dédiée.
+
+---
+
 ## [0.39.0] — ⚠️ BREAKING (consensus + stockage) — Multisig gouvernance K-of-M (ADR 0011)
 
 > Remplace la clé admin unique par un **comité à seuil K-parmi-M** optionnel. Consensus-breaking (l'autorisation entre dans la transition d'état) et changement de format d'état (bump `STORAGE_VERSION 7 → 8`, migration in-place).

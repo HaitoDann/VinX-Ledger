@@ -107,8 +107,9 @@ Rien ci-dessous n'est décidé — ce sont des propositions à instruire une par
 
 ### Modules (par-dessus l'ADR 0001)
 
-- **0010 — Primitive d'ancrage & registre de modules** 🟠
-  *Direction :* première tranche concrète de l'ADR 0001 — type de tx `AnchorState` (0x09), registre `ModuleEntry { operator, bond, anchor_head }`, actions `RegisterModule` / `DeregisterModule`. Réutilise bond + Merkle + payload générique.
+- **0010 — [Primitive d'ancrage & registre de modules](./0010-primitive-ancrage-modules.md)** 🟠 **— ✅ tranche 1 implémentée** (consensus-breaking)
+  *Fait :* type de tx `AnchorState` (0x09) portant un `ModuleOp` (Register/Anchor/Deregister), registre `modules: BTreeMap<Hash32, ModuleEntry {operator, bond, anchor_head, anchored_count}>`. La L1 n'exécute **jamais** la logique de module — elle n'ancre que des commitments bondés. Bond verrouillé (neutralité de circulation, ADR 0004), min-bond + `MAX_MODULES` anti-bloat, opérateur ≥ ED (jamais reapé). Migration in-place v8→v9.
+  *Différé :* adjudication de fraude / slashing du bond (**→ ADR 0023**), délai de déliaison du bond, métadonnées & commande wallet dédiée.
 
 - **0023 — Adjudication du slashing de module** 🟢
   *Direction :* comment une fraude d'opérateur de module est prouvée et sanctionnée (bond → réputation → preuves de fraude → zk), sans jamais exécuter la logique du module sur la L1.

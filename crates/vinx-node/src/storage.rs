@@ -27,7 +27,9 @@ use zstd;
 /// v8: WorldState meta gains ADR 0011 governance fields (`admin_policy`,
 ///     `pending_governance`), appended last. A v7 meta blob is a strict prefix of a v8
 ///     one, so the migration simply appends those fields' default encodings.
-const STORAGE_VERSION: u64 = 8;
+/// v9: WorldState meta gains the ADR 0010 module registry (`modules`), appended last —
+///     same prefix property, migrated by appending the empty-map encoding.
+const STORAGE_VERSION: u64 = 9;
 
 /// zstd compression level — level 3 is the sweet spot: ~60-70% size reduction,
 /// negligible latency compared to disk I/O.
@@ -147,21 +149,10 @@ impl Storage {
                 // v7 → v8 (ADR 0011): the WorldState meta gained two trailing serialized
                 // fields. A v7 blob is a strict prefix of a v8 one, so append their default
                 // encodings in place — no wipe, accounts and chain untouched.
-                7 => {
-                    let mut state = tx.open_table(STATE).map_err(Self::io_err)?;
-                    let compressed = state
-                        .get("world_state_meta")
-                        .map_err(Self::io_err)?
-                        .map(|g| g.value().to_vec());
-                    if let Some(compressed) = compressed {
-                        let mut meta = Self::decompress(&compressed)?;
-                        meta.extend_from_slice(&vinx_state::v8_meta_suffix());
-                        let recompressed = Self::compress(&meta)?;
-                        state
-                            .insert("world_state_meta", recompressed.as_slice())
-                            .map_err(Self::io_err)?;
-                    }
-                }
+                7 => Self::append_meta_suffix(tx, &vinx_state::v8_meta_suffix())?,
+                // v8 → v9 (ADR 0010): the module registry was appended last — same prefix
+                // property, migrated by appending the empty-map encoding.
+                8 => Self::append_meta_suffix(tx, &vinx_state::v9_meta_suffix())?,
                 unknown => {
                     return Err(Self::io_err(format!(
                         "no automatic migration from schema v{unknown} to v{STORAGE_VERSION}. \
@@ -171,6 +162,26 @@ impl Storage {
                 }
             }
             v += 1;
+        }
+        Ok(())
+    }
+
+    /// Appends `suffix` to the persisted (compressed) WorldState meta blob in place — the
+    /// append-only bincode migration used by every meta-field addition (ADR 0010/0011).
+    /// A no-op if no meta has been written yet.
+    fn append_meta_suffix(tx: &redb::WriteTransaction, suffix: &[u8]) -> io::Result<()> {
+        let mut state = tx.open_table(STATE).map_err(Self::io_err)?;
+        let compressed = state
+            .get("world_state_meta")
+            .map_err(Self::io_err)?
+            .map(|g| g.value().to_vec());
+        if let Some(compressed) = compressed {
+            let mut meta = Self::decompress(&compressed)?;
+            meta.extend_from_slice(suffix);
+            let recompressed = Self::compress(&meta)?;
+            state
+                .insert("world_state_meta", recompressed.as_slice())
+                .map_err(Self::io_err)?;
         }
         Ok(())
     }
@@ -495,9 +506,9 @@ mod tests {
         s.get(key).unwrap().is_some()
     }
 
-    /// Strips the v8 governance suffix from the persisted meta blob, turning a current-format
-    /// meta back into its v7 prefix so the v7→v8 append migration can be exercised on data
-    /// that genuinely predates ADR 0011.
+    /// Strips the appended v8 (governance) and v9 (module registry) suffixes from the
+    /// persisted meta blob, turning a current-format meta back into its v7 prefix so the
+    /// append migrations can be exercised on data that genuinely predates ADR 0010/0011.
     fn downgrade_meta_to_v7(dir: &Path) {
         let db = Database::create(dir.join("vinx.redb")).unwrap();
         let tx = db.begin_write().unwrap();
@@ -505,7 +516,8 @@ mod tests {
             let mut s = tx.open_table(STATE).unwrap();
             let compressed = s.get("world_state_meta").unwrap().unwrap().value().to_vec();
             let mut meta = zstd::decode_all(&compressed[..]).unwrap();
-            let suffix_len = vinx_state::v8_meta_suffix().len();
+            let suffix_len =
+                vinx_state::v8_meta_suffix().len() + vinx_state::v9_meta_suffix().len();
             meta.truncate(meta.len() - suffix_len);
             let recompressed = zstd::encode_all(&meta[..], ZSTD_LEVEL).unwrap();
             s.insert("world_state_meta", recompressed.as_slice())
@@ -617,9 +629,10 @@ mod tests {
             Amount::from_vinx(500),
             "account balance must survive migration"
         );
-        // ADR 0011: the appended governance fields load with their defaults.
+        // ADR 0011/0010: the appended governance + module fields load with their defaults.
         assert!(loaded_state.admin_policy.is_none());
         assert!(loaded_state.pending_governance.is_empty());
+        assert!(loaded_state.modules.is_empty());
         assert_eq!(loaded_chain.tip_height(), 1, "chain must survive migration");
         assert!(
             loaded_chain.get_tx_by_hash(&tx_hash).is_some(),

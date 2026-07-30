@@ -58,6 +58,17 @@ pub const HALVING_PERIOD_SECS: u64 = 252_460_800;
 /// exactly `MAX_SUPPLY_ATOMS` — the whole supply is emitted, ever more slowly.
 pub const ERA0_EMISSION_ATOMS: u128 = MAX_SUPPLY_ATOMS / 2;
 
+// ─── Module registry (ADR 0010) ─────────────────────────────────────────────────
+
+/// Minimum bond to register a module (1,000 VinX). Skin in the game for a module operator —
+/// far below the validator bond (a module secures itself, not the L1) but high enough that
+/// registering millions of dust modules is economically absurd (anti-bloat, cf. ADR 0026).
+pub const MIN_MODULE_BOND_ATOMS: u128 = 1_000 * DECIMAL_FACTOR;
+
+/// Hard cap on the number of registered modules — bounds the module-registry state a
+/// coordinated actor could accumulate. Generous for realistic ecosystems.
+pub const MAX_MODULES: usize = 100_000;
+
 // ─── Validator bond & slashing ─────────────────────────────────────────────────
 
 /// Minimum bond required to be admitted to the validator set (100,000 VinX).
