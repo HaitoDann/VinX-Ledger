@@ -1,6 +1,6 @@
+pub mod guard;
 pub mod messages;
 
-use std::collections::HashMap;
 use std::sync::Arc;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
@@ -162,6 +162,10 @@ pub async fn start(
             let gossipsub_config = gossipsub::ConfigBuilder::default()
                 .heartbeat_interval(Duration::from_secs(1))
                 .validation_mode(gossipsub::ValidationMode::Strict)
+                // ADR 0022: cap the on-wire message size. Also lifts the libp2p 64 KiB
+                // default so full blocks and sync batches can be gossiped, while the
+                // decoder separately bounds the *decompressed* size (anti zip-bomb).
+                .max_transmit_size(messages::MAX_DECODED_BYTES)
                 .build()
                 .expect("valid gossipsub config");
             let gossipsub = gossipsub::Behaviour::new(
@@ -256,8 +260,6 @@ pub async fn start(
     })
 }
 
-const BAN_THRESHOLD: i32 = -5;
-
 #[allow(clippy::too_many_arguments)]
 async fn run_event_loop(
     mut swarm: libp2p::Swarm<VinxBehaviour>,
@@ -270,7 +272,7 @@ async fn run_event_loop(
     local_addr: Address,
     metrics: NodeMetrics,
 ) {
-    let mut reputation: HashMap<PeerId, i32> = HashMap::new();
+    let mut guard = guard::PeerGuard::new();
 
     loop {
         tokio::select! {
@@ -290,7 +292,7 @@ async fn run_event_loop(
             }
             event = swarm.next() => {
                 if let Some(event) = event {
-                    handle_swarm_event(event, &chain, &mempool, &state, &validator_set, &local_kp, &local_addr, &mut swarm, &mut reputation, &metrics).await;
+                    handle_swarm_event(event, &chain, &mempool, &state, &validator_set, &local_kp, &local_addr, &mut swarm, &mut guard, &metrics).await;
                 }
             }
         }
@@ -307,7 +309,7 @@ async fn handle_swarm_event(
     local_kp: &vinx_crypto::KeyPair,
     local_addr: &Address,
     swarm: &mut libp2p::Swarm<VinxBehaviour>,
-    reputation: &mut HashMap<PeerId, i32>,
+    guard: &mut guard::PeerGuard,
     metrics: &NodeMetrics,
 ) {
     match event {
@@ -319,6 +321,8 @@ async fn handle_swarm_event(
         }
         SwarmEvent::ConnectionClosed { peer_id, .. } => {
             debug!(peer = %peer_id, "Peer disconnected");
+            // Bound per-peer state against connection churn.
+            guard.forget(&peer_id);
         }
 
         // mDNS: automatic LAN peer discovery
@@ -344,12 +348,24 @@ async fn handle_swarm_event(
             propagation_source,
             ..
         })) => {
+            // ADR 0022: rate-limit inbound messages per peer before doing any work.
+            if let guard::Admit::RateLimited { ban } =
+                guard.admit(propagation_source, std::time::Instant::now())
+            {
+                if ban {
+                    warn!(peer = %propagation_source, "Banning peer for flooding");
+                    swarm
+                        .behaviour_mut()
+                        .gossipsub
+                        .blacklist_peer(&propagation_source);
+                }
+                return;
+            }
+
             let Some(msg) = P2pMessage::decode(&message.data) else {
-                // Undecipherable message — penalize sender
-                let score = reputation.entry(propagation_source).or_insert(0);
-                *score -= 1;
-                if *score <= BAN_THRESHOLD {
-                    warn!(peer = %propagation_source, score, "Banning peer for invalid messages");
+                // Undecipherable or oversized (incl. decompression-bomb) message — penalize.
+                if guard.penalize(propagation_source, guard::BAD_MESSAGE_PENALTY) {
+                    warn!(peer = %propagation_source, "Banning peer for invalid messages");
                     swarm
                         .behaviour_mut()
                         .gossipsub
@@ -683,11 +699,25 @@ async fn dispatch_message(
         P2pMessage::SyncRequest { from_height, limit } => {
             let c = chain.read().await;
             let tip = c.tip_height();
-            let end = (from_height + limit as u64).min(tip + 1);
-            let blocks: Vec<Block> = (from_height..end)
+            // ADR 0022: clamp the requested count, use saturating arithmetic (a crafted
+            // `from_height` near u64::MAX would otherwise overflow), then trim the batch to
+            // the byte budget so a single response can never exceed MAX_DECODED_BYTES.
+            let limit = limit.min(messages::MAX_SYNC_RESPONSE_BLOCKS);
+            let end = from_height.saturating_add(limit as u64).min(tip + 1);
+            let candidates: Vec<Block> = (from_height..end)
                 .filter_map(|h| c.get_block(h).cloned())
                 .collect();
             drop(c);
+            let sizes: Vec<usize> = candidates
+                .iter()
+                .map(|b| borsh::to_vec(b).map(|v| v.len()).unwrap_or(usize::MAX))
+                .collect();
+            let take = messages::sync_batch_len(
+                &sizes,
+                messages::SYNC_RESPONSE_BUDGET_BYTES,
+                messages::MAX_SYNC_RESPONSE_BLOCKS as usize,
+            );
+            let blocks: Vec<Block> = candidates.into_iter().take(take).collect();
             if !blocks.is_empty() {
                 let n = blocks.len();
                 let resp = P2pMessage::SyncResponse { blocks };

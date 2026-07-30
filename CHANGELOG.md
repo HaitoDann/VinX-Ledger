@@ -5,6 +5,18 @@ Format : `MAJEUR.MINEUR.CORRECTIF` — les versions `0.x.y` sont des versions de
 
 ---
 
+## [0.38.0] — Durcissement P2P / anti-DoS (ADR 0022, tranche 1)
+
+> Ajout **non-breaking** (réseau uniquement, aucun changement de format ni de consensus) : défense en profondeur contre les abus P2P.
+
+- **Anti-bombe de décompression.** `P2pMessage::decode` bornait auparavant *rien* : quelques Ko compressés de zéros décompressaient en Go → **OOM du nœud** avec un seul message. La sortie zstd est désormais tronquée à `MAX_DECODED_BYTES = 16 Mio` (mémoire par message bornée quelle que soit la taille du cadre compressé) ; un cadre `FLAG_RAW` surdimensionné est aussi rejeté.
+- **Plafond de taille de message.** `max_transmit_size(16 Mio)` explicite sur gossipsub — borne l'on-wire **et** lève le défaut 64 Kio qui empêchait de gossiper un bloc plein (~2,5 Mo).
+- **Bornes de sync.** Le serveur `SyncRequest` clampe `limit` à 512 blocs, utilise une arithmétique **saturante** (un `from_height` proche de `u64::MAX` pouvait **faire paniquer** le nœud), et tronque le lot à un budget de 8 Mio (`sync_batch_len`, au moins un bloc → progression garantie).
+- **Rate-limiting par pair + réputation (`p2p::guard`).** Token bucket par pair (burst 200, 50 msg/s) : un flot est throttlé puis, via pénalité de réputation, **banni** au seuil −5. Réputation également dockée sur message indéchiffrable/surdimensionné/bombe. État par pair purgé à la déconnexion (borne mémoire vs churn). Logique de débit pure (temps injecté) et testée.
+- **Différé (tranche 2) :** peer-scoring de mesh gossipsub natif, pénalité sur contenu invalide (bloc mal signé), fast-sync par checkpoints, rate-limit par IP.
+
+---
+
 ## [0.37.0] — ⚠️ BREAKING (consensus) — Dépôt existentiel & reaping (ADR 0026)
 
 > Ajout d'un **solde plancher** dans la fonction de transition d'état, et **suppression** (reap) des comptes vidés. Consensus-breaking : la règle entre dans l'exécution — deux nœuds avec des paramètres différents divergeraient — donc la constante est **gravée**.

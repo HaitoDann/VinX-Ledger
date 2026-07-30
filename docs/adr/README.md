@@ -87,8 +87,9 @@ Rien ci-dessous n'est décidé — ce sont des propositions à instruire une par
 
 ### Réseau P2P
 
-- **0022 — Durcissement P2P / anti-DoS** 🟠
-  *Direction :* limites de taille de message, quotas par pair, formalisation du scoring/ban (partiellement présent), robustesse du protocole de sync (checkpoints, back-pressure).
+- **0022 — [Durcissement P2P / anti-DoS](./0022-durcissement-p2p.md)** 🟠 **— ✅ tranche 1 implémentée**
+  *Fait :* garde **anti-bombe de décompression** (borne la sortie zstd à 16 Mio — fermait un OOM à un seul message), `max_transmit_size` explicite, bornes de sync (cap 512 blocs + budget 8 Mio + `saturating_add` anti-panique), et **rate-limiting par pair** (token bucket) + réputation/ban formalisés (`p2p::guard`).
+  *Différé (tranche 2) :* peer-scoring de mesh gossipsub natif (décroissance temporelle), pénalité sur contenu sémantiquement invalide (verdict de dispatch), fast-sync par checkpoints (⇄ 0014), rate-limit par IP/sous-réseau (anti-Sybil transport).
 
 ### Gouvernance
 
