@@ -113,9 +113,12 @@ Un détenteur lambda ne stake pas : il garde son VINX pour **l'utiliser comme ca
 
 ## Roadmap
 
-- **Fait** — protocole L1 Rust complet (PoA Threshold) et modèle *fair launch* (émission par le travail, bond de validateur avec slashing prouvable, frais au producteur) **implémentés et testés**. Exploité en local.
-- **Ensuite** — redondance 1 → 3 validateurs, finalité au quorum, amorçage de la micro-économie par l'émission, premiers usages réels.
-- **Plus tard (optionnel)** — réseau public, et **surcouches / modules hors-nœud** (token factory, etc.) reliés par **ancrage bondé**, sans jamais salir le cœur — voir [ADR 0001](./docs/adr/0001-l1-monnaie-pure-modules-ancrage-bonde.md).
+> Feuille de route détaillée et priorisée : **[`docs/adr/README.md`](./docs/adr/README.md)** (index de tous les ADR avec statut).
+
+- **Fait** — protocole L1 Rust complet (PoA Threshold, *fair launch*, slashing prouvable, frais au producteur), plus une série de durcissements/extensions : vérif parallèle des signatures (ADR 0015), dépôt existentiel anti-bloat (0026), durcissement P2P anti-DoS (0022), gouvernance **K-of-M** (0011), **registre de modules bondés** (0010, 1ʳᵉ brique de l'ancrage), vecteurs dorés canoniques (0020). `cargo test --workspace` vert (281 tests).
+- **Chemin critique** — **banc 3 validateurs** puis finalité au quorum (0002), fork-choice (0031), jailing (0027), accountability co-sign (0030).
+- **Ensuite** — partage d'émission sur le quorum (0028), garde-fous de gouvernance (0032), DA & preuves d'ancre pour les modules (0034), premiers usages réels.
+- **Plus tard** — décentralisation à l'échelle (BLS + comité VRF, 0029), light client (0014), réseau public. Vision d'ensemble : [ADR 0001](./docs/adr/0001-l1-monnaie-pure-modules-ancrage-bonde.md).
 
 ---
 

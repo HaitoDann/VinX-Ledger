@@ -1,21 +1,29 @@
 # VinX Ledger — État du Projet
 
 > Document de référence interne — mis à jour à chaque sprint.
-> Dernière mise à jour : juillet 2026 (**refonte économique v5 adoptée — fair launch / émission par le travail** ; voir whitepaper v4.0).
+> Dernière mise à jour : juillet 2026 (**série ADR — durcissement, anti-bloat, gouvernance décentralisée, modules, mise à l'échelle**). Base économique : fair launch v5 (whitepaper v4.0).
 
 ---
 
-> ## ✅ Refonte économique v5 — fair launch (implémentée)
+> ## 🧭 Où en est le projet (lis ceci en premier)
 >
-> Le modèle économique de VinX a été **entièrement repensé et implémenté** (whitepaper v4.0). Le cycle *melt/forge* est remplacé par un **fair launch** :
+> **Le socle est solide et éprouvé en mono-validateur** : fair launch v5 (émission par le travail, halving 8 ans), état anti-bloat, P2P durci, gouvernance K-of-M, primitive de modules bondés. `cargo test --workspace` **vert**, clippy `-D warnings` & fmt propres.
 >
-> - **Aucun pre-mine** : à la genèse, 0 en circulation, 100 Md scellés dans La Fonderie.
-> - **Émission par le travail des validateurs** : décroissance par **halving tous les 8 ans** (arithmétique entière déterministe), calculée en **temps réel** (timestamps). Créditée au producteur, **non pondérée par le bond**. Relais automatique vers les frais quand La Fonderie se vide.
-> - **Frais forfaitaires** (indépendants du montant), **100 % au validateur producteur** (plus de melt).
-> - **Staking = bond de validateur** (min 100 000 VINX, gouvernable), **déliaison 3 jours** temps réel, **slash équivocation 100 %** avec preuve réellement vérifiée. **Aucun rendement de staking.**
-> - Le **timestamp** devient la référence de temps.
+> **La source de vérité de la feuille de route, c'est [`docs/adr/README.md`](./docs/adr/README.md)** — l'index de tous les ADR (Décisions d'Architecture), avec pour chacun son statut (✅ implémenté / Proposé / 🚧 brouillon). Ce document-ci décrit le **code tel qu'il tourne** ; l'index ADR décrit **ce qui est décidé et ce qui reste**.
 >
-> **État du code : implémenté, testé** (`cargo test --workspace` vert, clippy `-D warnings` & fmt propres). Les sections ci-dessous portant la mention *« modèle actuel melt/forge »* décrivent l'**ancien** code désormais remplacé — l'annotation *« → v5 »* indique le comportement en vigueur. **Différé** : préavis d'upgrade en temps réel + cosmétique UI admin / SDK ([§8](#8-ce-qui-reste-à-faire)).
+> ### Implémenté dans cette série (avec ADR dédié)
+> - **ADR 0015** — vérification **parallèle** des signatures (rayon) sur tous les chemins de validation de bloc.
+> - **ADR 0026** — **dépôt existentiel + reaping** : plancher de solde gravé (0,001 VINX), comptes vidés supprimés de l'état (anti-bloat ; le seul terme non borné du stockage).
+> - **ADR 0022** — **durcissement P2P** : garde anti-bombe de décompression (fermait un OOM à un seul message), bornes de taille/sync, rate-limiting par pair (`p2p::guard`).
+> - **ADR 0011** — **gouvernance K-of-M** : comité multisig par proposition/approbation (remplace/complète la clé admin unique).
+> - **ADR 0010** — **registre de modules bondés** : type de tx `AnchorState` (0x09), ancrage de racines sans exécuter la logique du module (1ʳᵉ brique de l'ADR 0001).
+> - **ADR 0020** — **vecteurs dorés** de sérialisation canonique (octets exacts figés).
+>
+> ### Proposé / à faire (design rédigé, non implémenté) — voir l'index ADR
+> Consensus & sûreté : **0002** (finir la finalité), **0027** (jailing), **0030** (accountability co-sign), **0031** (fork-choice), **0036** (churn validateurs). Économie/lancement : **0028** (partage d'émission), **0033** (bootstrap fair-launch). Modules : **0034** (DA & preuve d'ancre), **0023** (slashing de fraude). Gouvernance : **0032** (garde-fous, 🚧 à discuter). Scaling : **0029** (BLS + comité VRF), **0035** (bornes de ressources), **0037** (blocs compacts). Divers : **0012** (clés HSM), **0013** (rent d'état), **0014** (light client), **0016** (post-quantique), **0017** (halt), **0018** (SLO), **0019** (TLS).
+>
+> ### ⚠️ Le chemin critique
+> Rien du backlog n'a de valeur tant que le **consensus multi-validateur (n≥3) n'est pas éprouvé au banc**. Priorité : monter un **banc 3-validateurs** → il débloque d'un coup 0002 (finalité), 0027 (jailing) et 0031 (fork-choice). Ensuite 0030 (sûreté, faible risque), puis 0028 (économie, avant que le réseau ait de la valeur).
 
 ---
 
@@ -40,7 +48,7 @@ VinX Ledger est une blockchain L1 de paiement écrite intégralement en Rust, sa
 ### Protocole de base
 - [x] Cryptographie Ed25519 + SHA-256 + adresses Bech32 (`vinx1...`)
 - [x] Arbre de Merkle avec preuves d'inclusion vérifiables
-- [x] 8 types de transactions (transfer, stake, unstake, announce-upgrade, add/remove/slash validator, admin action)
+- [x] 7 types de transactions (transfer, stake, unstake, announce-upgrade, slash-validator, admin-action, anchor-state) — voir §2
 - [x] État mondial (`WorldState`) avec validation complète
 - [x] État de genèse configurable (admin + validateur initial)
 - [x] Consensus PoA Threshold — quorum `⌈2n/3⌉`, round-robin leader
@@ -50,7 +58,7 @@ VinX Ledger est une blockchain L1 de paiement écrite intégralement en Rust, sa
 - [x] Producteur **à la demande, cadence adaptative** : repos → aucun bloc ; activité légère → ~`block_time` (5 s) ; charge → l'écart se resserre avec le remplissage ; saturation → blocs dos-à-dos. Garde anti-spin (pas de blocs vides en boucle)
 - [x] Capacités : **10 000 tx/bloc**, mempool **100 000** (réglables `max_block_txs` / `max_mempool_size`)
 - [x] Frais dynamiques style EIP-1559 (×1 à ×3 selon la charge mémoire)
-- [x] **Melt intégral** : 100 % des frais fondent dans La Fonderie
+- [x] **Frais au producteur** : 100 % des frais du bloc créditent le validateur producteur (plus de melt)
 - [x] Vérification des signatures en parallèle (rayon, tous les cœurs CPU)
 - [x] Détection des slots manqués (leader timeout ≥ 3 slots consécutifs)
 
@@ -62,22 +70,20 @@ VinX Ledger est une blockchain L1 de paiement écrite intégralement en Rust, sa
 - [x] Synchronisation de blocs par P2P (`SyncRequest` / `SyncResponse`)
 - [x] Synchronisation au démarrage depuis un pair de confiance (HTTP)
 
-### Économie — ⚠️ modèle actuel (melt / forge), en cours de remplacement par le fair launch (v5)
-> Ce qui suit décrit le **code actuel**. Il sera remplacé par l'émission par le travail (voir bandeau en tête et [§8](#8-ce-qui-reste-à-faire)).
-- [x] Supply totale : 100 milliards de VinX, **immuable, sans burn** (précision : 18 décimales) — *conservé en v5*
-- [x] **Genèse** : 1 Md (1 %) forgé au fondateur · 99 Md (99 %) dans **La Fonderie** — *v5 : plus de pre-mine, 100 % en Fonderie*
-- [x] **Invariant vérifié à chaque bloc** : `circulating_supply + foundry == 100 Md` — *conservé en v5*
-- [x] **Melt** : 100 % des frais fondent dans La Fonderie (`melt_to_foundry`) — *v5 : frais 100 % au validateur, plus de melt*
-- [x] **Forge** : récompenses de staking (`FORGE_RATE_BPS = 10`, toutes les 100 blocs) — *v5 : supprimé, remplacé par l'émission par le travail (halving 8 ans)*
-- [x] **Warm-up de staking** (`STAKE_WARMUP_BLOCKS = 100`) — *v5 : supprimé (plus de récompense de staking)*
+### Économie — fair launch v5 (implémenté)
+- [x] Supply totale : 100 milliards de VinX, **immuable, sans burn** (18 décimales) — courbe d'émission **gravée immuable** (ADR 0021)
+- [x] **Genèse sans pre-mine** : 0 en circulation, 100 Md scellés dans **La Fonderie**
+- [x] **Invariant vérifié à chaque bloc** (garde dure) : `circulating_supply + foundry == 100 Md` (ADR 0004)
+- [x] **Émission par le travail** : La Fonderie se vide *uniquement* pour rémunérer la production, décroissance par **halving 8 ans** (arithmétique entière déterministe), intégrée sur les **timestamps**. Créditée au producteur, **non pondérée par le bond**
+- [x] **Frais forfaitaires** (indépendants du montant), **100 % au producteur** (plus de melt) ; multiplicateur de congestion ×1–3
+- [x] **Dépôt existentiel + reaping** (ADR 0026) : plancher 0,001 VINX, comptes vidés supprimés de l'état
 
-### Gouvernance — clé admin unique
+### Gouvernance — clé admin OU comité K-of-M (ADR 0011)
 
-La gouvernance est **centralisée** : une **clé admin unique** (le fondateur), **rotatable à chaud**, exécute les décisions de protocole on-chain. Pas de vote de validateurs, pas de DAO, **pas de gel de compte**.
-
-- [x] 5 actions admin exécutables directement : `AddValidator`, `RemoveValidator`, `UpdateFeeFloor`, `ScheduleUpgrade`, `RotateAdmin`
-- [x] Transaction `AdminAction` (0x08) : encapsule une `GovernanceAction` dans la payload, requiert la signature de la clé admin, s'exécute immédiatement
-- [x] Rotation de la clé admin possible via `AdminAction::RotateAdmin` (sans redémarrage du nœud)
+- [x] `AdminAction` (0x08) encapsule une `GovernanceAction`. **Sans policy installée** : une clé admin unique (legacy) exécute immédiatement. **Avec un comité K-of-M** (`SetAdminPolicy`) : une action requiert `threshold` approbations de signataires distincts (chaque approbation = une tx mono-signée)
+- [x] 6 `GovernanceAction` : `AddValidator`, `RemoveValidator`, `UpdateFeeFloor`, `ScheduleUpgrade`, `RotateAdmin`, `SetAdminPolicy`
+- [x] Une fois un comité installé, les raccourcis mono-admin sont désactivés (une clé isolée ne court-circuite plus le seuil). **Pas de gel de compte** (interdit par le protocole)
+- [ ] *Différé* : garde-fous de gouvernance (ADR 0032, 🚧 à discuter), gouvernance par les validateurs (ADR 0011 t2)
 
 ### Sécurité
 - [x] Slashing : preuve d'équivocation → 10 % bounty au rapporteur, 90 % **fondu dans La Fonderie**, validateur exclu
@@ -145,22 +151,24 @@ sdk/
 | `Block` / `BlockHeader` | Bloc avec hauteur, hash, validateur, frais de base |
 | `BlockSignature` | Co-signature d'un validateur |
 | `SlashEvidence` | Preuve de double-signature |
-| `Transaction` | 8 types encodés dans un objet unique |
-| `ValidatorSet` | Ensemble des validateurs autorisés + calcul quorum |
-| `GovernanceAction` | Actions admin exécutables (5 variants) |
+| `Transaction` | 7 types actifs encodés dans un objet unique (voir table plus bas) |
+| `ValidatorSet` | Ensemble des validateurs autorisés + calcul quorum `⌈2n/3⌉` |
+| `GovernanceAction` | Actions de gouvernance (6 variants, dont `SetAdminPolicy`) |
+| `ModuleOp` | Opérations du registre de modules (Register/Anchor/Deregister — ADR 0010) |
 
-**Les 8 types de transactions :**
+**Les types de transactions** (`0x05`/`0x06` retirés en ADR 0007 — l'ajout/retrait de validateur passe par `AdminAction`) :
 
 | Code | Type | Rôle |
 |------|------|------|
 | `0x01` | `Transfer` | Envoi de VinX |
-| `0x02` | `Stake` | Verrouillage en staking |
-| `0x03` | `Unstake` | Déverrouillage du staking |
+| `0x02` | `Stake` | Verrouillage en staking (bond) |
+| `0x03` | `Unstake` | Déverrouillage (file de déliaison 3 j) |
 | `0x04` | `AnnounceUpgrade` | Annonce d'une mise à jour protocole (admin) |
-| `0x05` | `AddValidator` | Ajout d'un validateur (admin) |
-| `0x06` | `RemoveValidator` | Suppression d'un validateur (admin) |
-| `0x07` | `SlashValidator` | Slashing pour équivocation |
-| `0x08` | `AdminAction` | Action de gouvernance directe (admin, exécution immédiate) |
+| `0x07` | `SlashValidator` | Slashing pour équivocation (preuve vérifiée) |
+| `0x08` | `AdminAction` | Action de gouvernance (`GovernanceAction`) — mono-admin ou comité K-of-M (ADR 0011) |
+| `0x09` | `AnchorState` | Opération de registre de modules (`ModuleOp` : Register/Anchor/Deregister — ADR 0010) |
+
+**Les `GovernanceAction`** (payload d'`AdminAction`) : `AddValidator`, `RemoveValidator`, `UpdateFeeFloor`, `ScheduleUpgrade`, `RotateAdmin`, **`SetAdminPolicy`** (installe le comité K-of-M — ADR 0011).
 
 ### `vinx-state` — WorldState
 
@@ -171,13 +179,16 @@ Le `WorldState` est l'état complet de la chaîne. Il est sérialisé sur disque
 | `accounts` | `BTreeMap<Address, Account>` | Tous les comptes (clé = adresse 20 octets, itération triée) |
 | `circulating_supply` | `Amount` | Tokens détenus par les comptes (= `MAX_SUPPLY - foundry`) |
 | `block_height` | `u64` | Hauteur actuelle |
-| `foundry` | `Amount` | **La Fonderie** — réserve (melt/forge actuel · réserve d'émission en v5). `circulation + foundry == 100 Md` |
-| `fee_floor` | `Amount` | Plancher de frais minimum |
-| `base_fee` | `Amount` | Frais dynamiques actuels |
-| `admin_address` | `Option<Address>` | Clé admin (rotatable via `AdminAction::RotateAdmin`) |
-| `current_version` | `ProtocolVersion` | Version actuelle du protocole |
-| `pending_upgrade` | `Option<ScheduledUpgrade>` | Mise à jour planifiée |
-| `validator_set` | `ValidatorSet` | Validateurs actifs |
+| `foundry` | `Amount` | **La Fonderie** — réserve d'émission (fair launch). `circulation + foundry == 100 Md`, gardé à chaque bloc |
+| `emission_epoch_ts` / `emitted_atoms` | `u64` / `u128` | Époque d'émission + cumul émis (suivi de la courbe halving) |
+| `pending_unbonds` | `Vec<PendingUnbond>` | Déliaisons en cours (bond, `unlock_ts`) — slashable jusqu'à maturation |
+| `fee_floor` / `base_fee` | `Amount` | Plancher de frais gouvernable / frais dynamiques (congestion ×1–3) |
+| `admin_address` | `Option<Address>` | Clé admin legacy (1-de-1, si aucun comité) |
+| `admin_policy` | `Option<AdminPolicy>` | **Comité K-of-M** (ADR 0011) — supersède `admin_address` quand présent |
+| `pending_governance` | `Vec<GovernanceProposal>` | Propositions en attente d'approbations (ADR 0011) |
+| `modules` | `BTreeMap<Hash32, ModuleEntry>` | **Registre de modules bondés** (ADR 0010) |
+| `current_version` / `pending_upgrade` | | Version protocole + upgrade planifié (activation par timestamp, ADR 0006) |
+| `validator_set` | `ValidatorSet` | Validateurs actifs (quorum `⌈2n/3⌉`, round-robin) |
 
 ### `vinx-node` — Nœud complet
 
@@ -216,34 +227,28 @@ multiplier = 1.0 + 2.0 × max(0, charge - 0.8) / 0.2
 base_fee = fee_floor × multiplier  (cap à 3×)
 ```
 
-Le multiplicateur de congestion (×1–3) est **conservé en v5** — il est basé sur la demande, pas sur la valeur.
+Le multiplicateur de congestion (×1–3) est basé sur la **demande** (remplissage du mempool), pas sur la valeur transférée. Le frais est un **forfait × poids(type)**, indépendant du montant, et va **100 % au producteur**. Le multiplicateur s'applique au `base_fee` gouvernable courant.
 
-> **v5 :** deux changements. (1) Le frais devient un **forfait × poids(type)** (indépendant du montant), au lieu de 0,05 % du montant. (2) Le frais va **100 % au validateur producteur**, plus de melt. Le multiplicateur s'applique désormais au `base_fee` **gouvernable** courant (correction : le code actuel repart de la constante `DEFAULT_FEE_FLOOR_ATOMS`).
+### Gouvernance — clé admin OU comité K-of-M (ADR 0011)
 
-### Gouvernance — clé admin unique
-
-La gouvernance de VinX est **centralisée** : une clé admin unique (le fondateur) prend les décisions de protocole. Les échanges communautaires se font hors-chaîne.
-
-On-chain, l'admin soumet une transaction `AdminAction` avec la `GovernanceAction` souhaitée en payload. Elle est vérifiée (signature admin) et exécutée immédiatement dans le même bloc. Pas de vote, pas de délai.
+On-chain, une `GovernanceAction` est soumise via `AdminAction`. **Sans comité installé**, une clé admin unique l'exécute immédiatement (legacy 1-de-1). **Avec un comité K-of-M** (`SetAdminPolicy`), l'action s'exécute une fois qu'elle a réuni `threshold` approbations de signataires distincts — chaque approbation reste une **tx mono-signée** (aucun changement du format `Transaction`). Une action rejetée ne consomme pas de nonce (validation avant mutation). Pas de gel de compte.
 
 Actions disponibles :
 
 | Action | Effet |
 |--------|-------|
-| `AddValidator(addr)` | Ajoute un validateur au PoA set |
-| `RemoveValidator(addr)` | Retire un validateur du PoA set |
+| `AddValidator(addr)` | Ajoute un validateur (bond requis) |
+| `RemoveValidator(addr)` | Retire un validateur (refus du dernier) |
 | `UpdateFeeFloor { atoms }` | Modifie le plancher de frais |
-| `ScheduleUpgrade { version, height }` | Planifie une mise à jour protocole |
-| `RotateAdmin(addr)` | Change la clé admin sans redémarrage |
+| `ScheduleUpgrade { version, activation_ts }` | Planifie un upgrade (timestamp, ADR 0006) |
+| `RotateAdmin(addr)` | Change la clé admin legacy |
+| `SetAdminPolicy { signers, threshold }` | Installe/remplace le comité K-of-M (ADR 0011) |
 
-### Le cycle melt / forge — ⚠️ modèle actuel, remplacé en v5
+### Émission par le travail (fair launch)
 
-> **Code actuel.** VinX n'a aucun burn : les frais **fondent** dans La Fonderie (`melt_to_foundry`) et des récompenses de staking en sont **forgées** (`FORGE_RATE_BPS = 10`, toutes les 100 blocs). L'invariant `circulation + Fonderie = 100 Md` tient à chaque bloc.
+> La Fonderie se vide **uniquement** pour rémunérer la production de blocs, selon une décroissance par **halving tous les 8 ans** (`débit(t) = R₀·2^(−t/8 ans)`), **intégrée sur les timestamps** — une chaîne inactive ne produit aucun bloc (donc rien n'est forgé), et le premier bloc après une période d'activité forge l'émission accumulée depuis le précédent. La Fonderie ne se recharge jamais (aucun melt) — elle décroît de façon monotone jusqu'à la poussière, puis c'est **fees-only**. L'invariant `circulation + Fonderie = 100 Md` reste vrai trivialement.
 >
-> **En v5 (fair launch), ce cycle est remplacé** par :
-> - **Émission par le travail** : La Fonderie se vide *uniquement* pour rémunérer la production de blocs, selon une décroissance exponentielle (halving 8 ans, `débit(t) = R₀·2^(−t/8 ans)`, R₀ ≈ 8,66 Md/an), calculée sur les **timestamps**. La Fonderie ne se recharge plus (plus de melt) — elle décroît monotone jusqu'à la poussière, puis c'est **fees-only**.
-> - **Frais 100 % au producteur** : plus de melt, le frais change simplement de main.
-> - L'invariant `circulation + Fonderie = 100 Md` reste vrai, trivialement.
+> *Note d'incitation (voir ADR 0028) :* l'émission va aujourd'hui **100 % au producteur** ; l'ADR 0028 (proposé) la partagerait entre le proposeur et les co-signataires du quorum, pour rémunérer la finalité et lisser la distribution.
 
 ---
 
@@ -425,7 +430,7 @@ Lance 3 nœuds en réseau isolé :
 
 | Job | Ce qu'il vérifie |
 |-----|-----------------|
-| `cargo test` | 186 tests unitaires et d'intégration |
+| `cargo test` | 281 tests unitaires et d'intégration (workspace) |
 | `clippy` | Qualité du code Rust (zéro warning autorisé) |
 | `rustfmt` | Formatage du code |
 | `sdk-test` | 19 tests TypeScript Jest |
@@ -449,31 +454,23 @@ sync_peer_rpc = "http://1.2.3.4:8545"  # Sync depuis un pair au démarrage
 
 ## 8. Ce qui reste à faire
 
-| Priorité | Fonctionnalité | Détail |
-|----------|---------------|--------|
-| ✅ Fait | **Bascule fair launch (v5)** | **Implémentée et testée** (voir décomposition ci-dessous). Reste différé : préavis d'upgrade en temps réel, cosmétique UI admin / SDK. |
-| 🔴 Haute | **Usage réel** | Faire tourner la chaîne, amorcer la micro-économie par l'émission, premiers usages |
-| 🟡 Moyenne | **Run 3 validateurs** | Valider co-signing / quorum / tolérance de panne en réel (le P2P existe, testé à 1) |
-| 🟢 Future | **Surcouches / modules** | Monnaie pure + modules hors-nœud par **ancrage bondé** (token factory, traçabilité…). Design gravé dans [ADR 0001](./docs/adr/0001-l1-monnaie-pure-modules-ancrage-bonde.md). Socle déjà présent : bond/slashing, Merkle, payload générique. |
-| 🟢 Future | **Exécution parallèle** | Pertinent seulement à des dizaines de milliers de TPS soutenus — chantier d'architecture, risque de déterminisme |
-| 🟢 Future | **TLS natif** (rustls) | HTTPS sur le RPC sans dépendance à un reverse-proxy |
+> **La feuille de route détaillée vit dans [`docs/adr/README.md`](./docs/adr/README.md)** (chaque item a un ADR avec statut, contexte, décision, alternatives). Ci-dessous, la vue d'ensemble priorisée.
 
-### Décomposition du chantier fair launch (v5) — ✅ étapes 1-6 & 8 faites
+| Priorité | Chantier | ADR |
+|----------|----------|-----|
+| 🔴 **Critique** | **Banc 3-validateurs** — éprouver co-signing / quorum / finalité / tolérance de panne en réel. Débloque tout le reste du consensus. | (prérequis de 0002/0027/0031) |
+| 🔴 Haute | **Finir la finalité** (view-change, refus de bâtir trop loin), **fork-choice**, **jailing**, **accountability co-sign** | 0002, 0031, 0027, 0030 |
+| 🟠 Moyenne | **Partage d'émission sur le quorum** (avant que le réseau ait de la valeur), **bootstrap fair-launch** | 0028, 0033 |
+| 🟠 Moyenne | **Garde-fous de gouvernance** (🚧 à discuter), **bornes de churn** & **de ressources par tx** | 0032, 0036, 0035 |
+| 🟠 Moyenne | **Modules : DA & preuve d'ancre** puis **slashing de fraude** | 0034, 0023 |
+| 🟢 Future | **Décentralisation à l'échelle** (BLS + comité VRF), **blocs compacts** | 0029, 0037 |
+| 🟢 Future | Light client (0014), rent d'état (0013), clés HSM (0012), halt d'urgence (0017), TLS natif (0019), post-quantique (0016), SLO (0018) | — |
 
-Les étapes suivantes sont **implémentées et testées** ; l'étape 7 (préavis d'upgrade en temps réel) est **différée** avec la cosmétique UI admin / SDK.
+### Déjà fait (historique)
 
-1. **Réparer le slashing** (bug de sécurité préexistant) : `SlashEvidence` porte les deux `BlockHeader` signés ; `apply_slash_validator` vérifie réellement les deux signatures Ed25519 (aujourd'hui aucune n'est vérifiée — n'importe qui peut faire slasher un validateur).
-2. **Genèse sans pre-mine** : retirer `FOUNDER_ALLOCATION_ATOMS` ; `foundry = MAX_SUPPLY`, `circulating = 0` ; validateur genesis dispensé de bond.
-3. **Émission par le travail** : champ `last_emission_ts` (persisté) ; `emit(elapsed)` forge l'intégrale de `R₀·2^(−t/8 ans)` sur `[last, timestamp]`, créditée au producteur ; seuil de poussière → fees-only. Supprimer `distribute_staking_rewards`, `FORGE_RATE_*`, `STAKING_DISTRIBUTION_INTERVAL`, `STAKE_WARMUP_BLOCKS`.
-4. **Bornes de timestamp** dans `validate_block` (monotonie + plafond horloge+tolérance) — requis puisque l'émission fait confiance au timestamp.
-5. **Frais forfaitaires au producteur** : `calculate_fee` → forfait × poids ; `apply_transfer` accumule le frais dans un compteur de bloc au lieu de `melt_to_foundry` ; `produce_block` crédite le producteur. Corriger `update_base_fee` (partir du `fee_floor` gouvernable).
-6. **Bond de validateur** : `MIN_VALIDATOR_BOND_ATOMS` (gouvernable) ; `AddValidator` exige le bond (genesis dispensé) ; `apply_unstake` → file de déliaison `Vec<(Amount, u64_timestamp)>` avec `UNBONDING_SECS = 3 j` ; maturation par timestamp ; l'unbond en attente rejoint `has_pending_time_sensitive_ops`.
-7. **Préavis d'upgrade en temps réel** : `UPGRADE_NOTICE_*` en secondes au lieu de blocs.
-8. **Tests + SDK + genesis** : réécrire les tests économiques ; nouvelle genèse (schéma stockage bumpé).
-
-> **Fait cette itération** : refonte économique fair launch v5 **implémentée et testée** (genèse sans pre-mine, émission par le travail avec halving 8 ans, frais forfaitaires au producteur, bond de validateur + déliaison temps réel, slashing réparé avec vérification cryptographique), **plus** l'alignement complet de la documentation (whitepaper v4.0, README, GUIDE, GETTING_STARTED, ce document).
->
-> **Itérations précédentes** : warm-up de staking, console admin `/admin`, robustesse au démarrage, clés typées + ahash, capacités relevées (10k tx/bloc, mempool 100k), cadence de bloc adaptative à la demande, migration de schéma sans wipe.
+- **Cette série (durcissement & extensions)** : vérif parallèle des signatures (0015), dépôt existentiel + reaping (0026), durcissement P2P anti-DoS (0022), gouvernance K-of-M (0011), registre de modules bondés (0010), vecteurs dorés canoniques (0020). *Plus* un lot antérieur « cohérence & robustesse » : chain_id sûr (0008), immutabilité d'émission (0021), temps réseau (0005), frais stake/unstake (0009), unification gouvernance (0007), préavis upgrade temps réel (0006).
+- **Refonte économique fair launch v5** : genèse sans pre-mine, émission par le travail (halving 8 ans), frais forfaitaires au producteur, bond de validateur + déliaison temps réel, slashing réparé (vérification cryptographique réelle).
+- **Itérations plus anciennes** : console admin `/admin`, robustesse au démarrage, clés typées + ahash, capacités relevées (10k tx/bloc, mempool 100k), cadence de bloc adaptative, migration de schéma sans wipe.
 
 ---
 
