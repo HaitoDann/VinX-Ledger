@@ -38,6 +38,18 @@ Rien ci-dessous n'est décidé — ce sont des propositions à instruire une par
   *Problème :* le round-robin + *tous* co-signent est O(N) → plafonne à des dizaines de validateurs.
   *Direction (phasée) :* **phase 1** agrégation **BLS** (N signatures → 1 agrégat + bitmap, blocs bornés, centaines de validateurs) ; **phase 2** **échantillonnage de comité par VRF** (tirage uniforme parmi les bondés, leader imprévisible anti-DoS, milliers de validateurs). Étend (ne remplace pas) le quorum ; intègre 0027/0028 ; exige 0014 (weak subjectivity) avant la phase 2.
 
+- **0030 — [Accountability des co-signatures conflictuelles](./0030-accountability-cosignatures-conflictuelles.md)** 🔴 **— Proposé** (sûreté)
+  *Problème :* la primitive de slashing on-chain punit **déjà** tout validateur signant deux en-têtes conflictuels à la même hauteur, mais le P2P ne **détecte** que la double-*proposition*, pas les **co-signatures** conflictuelles → la finalité n'est pas *accountable* (une double-finalité resterait impunie).
+  *Direction :* fermer la boucle **côté détection** (rétention bornée des en-têtes/co-sigs conflictuels, assemblage de `SlashEvidence`, auto-report) — la vérif on-chain est inchangée. Rend la finalité (0002) économiquement *accountable* (argument de recoupement de quorums). Coût faible, sûreté élevée.
+
+- **0031 — [Règle de fork-choice](./0031-regle-fork-choice.md)** 🔴 **— Proposé** (sûreté)
+  *Problème :* on a `finalized_height` (plancher inréorganisable) mais **aucune règle déterministe** pour choisir entre forks concurrents *avant* finalité — un leader et son backup peuvent produire deux blocs valides à la même hauteur ; le « premier-vu » actuel dépend de l'ordre réseau (divergence transitoire).
+  *Direction :* fonction de fork-choice **pure et déterministe** (finalité d'abord, puis poids de co-signatures, puis priorité au leader prévu, puis départage par hash), réorg bornée sous finalité, cohérente avec le slot-skip (0027) et la VRF future (0029). Évite en amont la double-finalité que 0030 punit en aval.
+
+- **0032 — [Garde-fous de gouvernance](./0032-garde-fous-gouvernance.md)** 🟠 **— 🚧 brouillon de discussion**
+  *Problème :* depuis 0011, un comité capté/piraté peut bricoler la chaîne (frais censurants, vidage du set, verrouillage de la gouvernance) — rien ne borne l'amplitude de ces pouvoirs.
+  *Direction (à trancher ensemble) :* bornes dures **uniquement sur l'irréversible** (verrouillage de gouvernance, plancher du set), bornes de *vitesse* sur le réversible (frais) ; arbitrage central **immuable vs gouvernable**. Tension à ne pas rater : résistance à la capture ⟂ réactivité en urgence (0017). Questions ouvertes listées, aucune valeur gravée.
+
 - **0005 — Temps réseau robuste** 🟠 **— ✅ implémenté** (bornes de timestamp à la réception + helper Median Time Past ; câblage émission↔MTP à finir au banc n≥2)
   *Problème :* l'émission et la déliaison font confiance au `timestamp` du bloc, posé par un seul producteur. Bornes actuelles : monotonie + horloge locale à la production seulement.
   *Direction :* timestamp = médiane des horloges des validateurs (façon Bitcoin "median time past"), bornes strictes à la **réception** P2P (plafond futur, monotonie).
