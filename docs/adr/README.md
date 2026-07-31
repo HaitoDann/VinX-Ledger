@@ -30,6 +30,14 @@ Rien ci-dessous n'est décidé — ce sont des propositions à instruire une par
   *Fait :* pointeur `finalized_height` explicite et **prefix-closed** (avance sur le préfixe contigu de blocs quorum-signés), mis à jour à la production et à chaque co-signature, exposé sur `/health`, avec `is_final(height)`. À n=1 la finalité est immédiate ; à n≥2 elle suit les co-signatures.
   *Reste (nécessite le banc 3-validateurs) :* refuser de bâtir au-delà d'une profondeur non finalisée, view-change formel, latence de finalité = 1 aller-retour.
 
+- **0027 — [Fiabilité & jailing des validateurs](./0027-fiabilite-jailing-validateurs.md)** 🟠 **— Proposé**
+  *Problème :* aucun mécanisme pour écarter un validateur lent/hors-ligne (distinct du slashing d'équivocation) ; un leader mort dégrade la liveness à chaque tour.
+  *Direction :* note de fiabilité **déterministe** (slots manqués + co-signatures absentes, jamais la latence subjective → fork) pilotant un **jailing** réversible (retrait de rotation, bond conservé, unjail après cooldown). Attribution propre en block-on-demand (un créneau inactif n'est pas un manquement). Complète le view-change de l'ADR 0002.
+
+- **0029 — [Décentralisation à grande échelle : agrégation & comité dynamique](./0029-agregation-signatures-comite-dynamique.md)** 🟢 **— Proposé** (évolution majeure du consensus)
+  *Problème :* le round-robin + *tous* co-signent est O(N) → plafonne à des dizaines de validateurs.
+  *Direction (phasée) :* **phase 1** agrégation **BLS** (N signatures → 1 agrégat + bitmap, blocs bornés, centaines de validateurs) ; **phase 2** **échantillonnage de comité par VRF** (tirage uniforme parmi les bondés, leader imprévisible anti-DoS, milliers de validateurs). Étend (ne remplace pas) le quorum ; intègre 0027/0028 ; exige 0014 (weak subjectivity) avant la phase 2.
+
 - **0005 — Temps réseau robuste** 🟠 **— ✅ implémenté** (bornes de timestamp à la réception + helper Median Time Past ; câblage émission↔MTP à finir au banc n≥2)
   *Problème :* l'émission et la déliaison font confiance au `timestamp` du bloc, posé par un seul producteur. Bornes actuelles : monotonie + horloge locale à la production seulement.
   *Direction :* timestamp = médiane des horloges des validateurs (façon Bitcoin "median time past"), bornes strictes à la **réception** P2P (plafond futur, monotonie).
@@ -53,6 +61,10 @@ Rien ci-dessous n'est décidé — ce sont des propositions à instruire une par
   *Direction :* halt coordonné par la gouvernance (pas de gel de solde), procédure de reprise/rollback documentée.
 
 ### Tokenomics & frais
+
+- **0028 — [Partage de l'émission sur le quorum de finalité](./0028-partage-emission-quorum.md)** 🟠 **— Proposé**
+  *Problème :* 100 % de l'émission va au seul proposeur ; la co-signature (qui donne la finalité) est un travail non payé, les revenus sont en grumeaux, et le *winner-take-all* + émission temporelle amplifie la concentration early (fair launch) et l'incitation à retarder.
+  *Direction :* répartir l'émission de chaque bloc entre le proposeur (`PROPOSER_SHARE_BPS`, gouvernable) et les **co-signataires** qui l'ont finalisé, à parts égales (non pondéré par le bond). **Ne touche pas la courbe** (ADR 0021 immuable) : même masse par unité de temps, distribution différente. Impose de créditer à la **finalisation** (les co-sigs arrivent après la production). À `n=1` : inchangé.
 
 - **0004 — Invariant exécutable** 🔴 **— ✅ implémenté**
   *Fait :* `supply_invariant_holds()` (`circulation + Fonderie == MAX`) appliqué comme **garde dure** sur tous les chemins de bloc (producer → refus de sceller ; P2P/sync → rollback), car le state_root ne couvre pas la Fonderie. Ajout de `credit_from_foundry_for_test` pour les setups de test.
