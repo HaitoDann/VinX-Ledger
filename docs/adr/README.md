@@ -50,6 +50,10 @@ Rien ci-dessous n'est décidé — ce sont des propositions à instruire une par
   *Problème :* depuis 0011, un comité capté/piraté peut bricoler la chaîne (frais censurants, vidage du set, verrouillage de la gouvernance) — rien ne borne l'amplitude de ces pouvoirs.
   *Direction (à trancher ensemble) :* bornes dures **uniquement sur l'irréversible** (verrouillage de gouvernance, plancher du set), bornes de *vitesse* sur le réversible (frais) ; arbitrage central **immuable vs gouvernable**. Tension à ne pas rater : résistance à la capture ⟂ réactivité en urgence (0017). Questions ouvertes listées, aucune valeur gravée.
 
+- **0036 — [Bornes de churn du set de validateurs](./0036-bornes-churn-validateurs.md)** 🟠 **— Proposé**
+  *Problème :* 0009 borne les unbonds *par compte* mais pas l'**agrégat** — une sortie massive simultanée (même honnête) fait chuter le set d'un coup → quorum inatteignable / sécurité effondrée.
+  *Direction :* **file de sortie (et d'entrée) bornée** — au plus N sorties par fenêtre, ordre déterministe, bond retenu/slashable dans la file, **plancher de set** jamais franchi (partagé avec 0032). Généralise le délai d'unbonding (0009) au set entier ; distinct du jail temporaire (0027) ; s'articule avec l'admission permissionless (0033).
+
 - **0005 — Temps réseau robuste** 🟠 **— ✅ implémenté** (bornes de timestamp à la réception + helper Median Time Past ; câblage émission↔MTP à finir au banc n≥2)
   *Problème :* l'émission et la déliaison font confiance au `timestamp` du bloc, posé par un seul producteur. Bornes actuelles : monotonie + horloge locale à la production seulement.
   *Direction :* timestamp = médiane des horloges des validateurs (façon Bitcoin "median time past"), bornes strictes à la **réception** P2P (plafond futur, monotonie).
@@ -78,6 +82,10 @@ Rien ci-dessous n'est décidé — ce sont des propositions à instruire une par
   *Problème :* 100 % de l'émission va au seul proposeur ; la co-signature (qui donne la finalité) est un travail non payé, les revenus sont en grumeaux, et le *winner-take-all* + émission temporelle amplifie la concentration early (fair launch) et l'incitation à retarder.
   *Direction :* répartir l'émission de chaque bloc entre le proposeur (`PROPOSER_SHARE_BPS`, gouvernable) et les **co-signataires** qui l'ont finalisé, à parts égales (non pondéré par le bond). **Ne touche pas la courbe** (ADR 0021 immuable) : même masse par unité de temps, distribution différente. Impose de créditer à la **finalisation** (les co-sigs arrivent après la production). À `n=1` : inchangé.
 
+- **0033 — [Genèse & bootstrap de fair-launch](./0033-genese-bootstrap-fair-launch.md)** 🟠 **— Proposé**
+  *Problème :* le lancement n'est pas cadré (`GenesisConfig` = 1 validateur + 1 clé admin) ; si le set de départ est petit et gated pendant la fenêtre de forte émission, une poignée d'acteurs capte le front-loading → contredit le fair-launch (le vrai risque du Q4 : *peu* gagnent beaucoup).
+  *Direction :* genèse **multi-validateurs** + comité K-of-M + `genesis_hash` empreinté ; surtout **ouverture permissionless par bond dès le départ** (le marché concourt pour les récompenses early → le set grossit quand l'émission est la plus riche). Optionnel/à débattre : plafond de forge par bloc + rampe de bond. **Ne touche pas la courbe** (0021) — agit sur *distribution/admission*. Dépend du consensus n≥3 éprouvé.
+
 - **0004 — Invariant exécutable** 🔴 **— ✅ implémenté**
   *Fait :* `supply_invariant_holds()` (`circulation + Fonderie == MAX`) appliqué comme **garde dure** sur tous les chemins de bloc (producer → refus de sceller ; P2P/sync → rollback), car le state_root ne couvre pas la Fonderie. Ajout de `credit_from_foundry_for_test` pour les setups de test.
 
@@ -94,6 +102,10 @@ Rien ci-dessous n'est décidé — ce sont des propositions à instruire une par
 - **0026 — [Dépôt existentiel (anti-bloat de l'état)](./0026-depot-existentiel.md)** 🔴 **— ✅ implémenté** (consensus-breaking)
   *Problème :* `apply_transfer` matérialisait un compte (60 o **définitifs**) pour n'importe quel solde, même 1 atom → **inflation d'état à coût quasi nul**, seul terme non borné du stockage (la simulation le confirme : ~33 des 48 GB à 30 ans en régime saturé sont de l'état).
   *Fait :* solde plancher `EXISTENTIAL_DEPOSIT_ATOMS` (0,001 VinX) **gravé** — un transfert laissant une partie dans `]0, ED[` est rejeté (`BelowExistentialDeposit`), validé **avant toute mutation** (le producteur ne rollback pas une tx échouée) ; un compte vidé à `0` (sans stake ni déliaison) est **reapé** — retiré de la map *et effacé du store* (pas de résurrection au reload). Compte staké exempté du plancher, jamais reapé tant que `staked > 0`. `circulating_supply` inchangé (ADR 0004 tient). Test-tripwire constitutionnel sur la constante.
+
+- **0035 — [Bornes de ressources par transaction](./0035-bornes-ressources-transaction.md)** 🟠 **— Proposé**
+  *Problème :* la machine d'état ne borne **aucune** ressource d'une tx individuelle — un `payload` peut aller jusqu'à la borne P2P (16 Mio) à **fee forfaitaire plat** (le fee ne price pas la taille) → bloat/DoS à coût faible.
+  *Direction :* plafond de taille de payload par type de tx + **poids de bloc borné** (pas seulement le nombre de tx), gravés et vérifiés avant mutation ; éventuelle composante fee par octet pour les gros payloads (sans casser le forfait plat du paiement nu). Défense en profondeur sous la borne transport (0022), poids prévisible pour la vérif parallèle (0015).
 
 - **0013 — Cycle de vie de l'état** 🟢
   *Problème :* les comptes ne sont **jamais élagués** → croissance non bornée de l'état (la chaîne est prunée, pas l'état).
@@ -115,6 +127,10 @@ Rien ci-dessous n'est décidé — ce sont des propositions à instruire une par
   *Fait :* garde **anti-bombe de décompression** (borne la sortie zstd à 16 Mio — fermait un OOM à un seul message), `max_transmit_size` explicite, bornes de sync (cap 512 blocs + budget 8 Mio + `saturating_add` anti-panique), et **rate-limiting par pair** (token bucket) + réputation/ban formalisés (`p2p::guard`).
   *Différé (tranche 2) :* peer-scoring de mesh gossipsub natif (décroissance temporelle), pénalité sur contenu sémantiquement invalide (verdict de dispatch), fast-sync par checkpoints (⇄ 0014), rate-limit par IP/sous-réseau (anti-Sybil transport).
 
+- **0037 — [Propagation compacte des blocs](./0037-propagation-compacte-blocs.md)** 🟢 **— Proposé**
+  *Problème :* le bloc est diffusé **plein** alors que ses tx ont déjà transité via `NewTransaction` et sont dans le mempool des pairs → **bande passante doublée** et latence accrue à l'échelle.
+  *Direction :* `CompactBlock` (en-tête + signatures + hachages de tx), reconstruction locale depuis le mempool, `GetBlockTxs` pour les manquantes, repli sur `NewBlock` plein. Additif/rétro-compatible ; gain surtout avec grand N (⇄ 0029). Priorité future.
+
 ### Gouvernance
 
 - **0007 — [Unification des chemins de gouvernance](./0007-unification-gouvernance.md)** 🟠 **— ✅ implémenté** (consensus-breaking)
@@ -135,8 +151,12 @@ Rien ci-dessous n'est décidé — ce sont des propositions à instruire une par
   *Fait :* type de tx `AnchorState` (0x09) portant un `ModuleOp` (Register/Anchor/Deregister), registre `modules: BTreeMap<Hash32, ModuleEntry {operator, bond, anchor_head, anchored_count}>`. La L1 n'exécute **jamais** la logique de module — elle n'ancre que des commitments bondés. Bond verrouillé (neutralité de circulation, ADR 0004), min-bond + `MAX_MODULES` anti-bloat, opérateur ≥ ED (jamais reapé). Migration in-place v8→v9.
   *Différé :* adjudication de fraude / slashing du bond (**→ ADR 0023**), délai de déliaison du bond, métadonnées & commande wallet dédiée.
 
+- **0034 — [Disponibilité des données & vérification d'ancre](./0034-disponibilite-donnees-verification-ancre.md)** 🟠 **— Proposé**
+  *Problème :* 0010 ancre une **racine** mais la L1 ne stocke pas les données — **où** sont-elles, et **comment** un tiers vérifie une ancre ? Sans ça, un opérateur ancre un nombre opaque et l'ADR 0023 (slashing de fraude) n'a rien sur quoi s'appuyer.
+  *Direction :* standardiser un **engagement de disponibilité** (hash du blob + backend DA, on-chain borné vs externe) et un **format de preuve d'inclusion** Merkle unique (réutilise la brique du state_root, aligné 0014). La L1 stocke l'engagement, jamais les données. Tranche 1 = engagement + preuve d'inclusion ; tranche 2 = contestation d'indisponibilité (érasure-coding). **Prérequis d'ADR 0023.**
+
 - **0023 — Adjudication du slashing de module** 🟢
-  *Direction :* comment une fraude d'opérateur de module est prouvée et sanctionnée (bond → réputation → preuves de fraude → zk), sans jamais exécuter la logique du module sur la L1.
+  *Direction :* comment une fraude d'opérateur de module est prouvée et sanctionnée (bond → réputation → preuves de fraude → zk), sans jamais exécuter la logique du module sur la L1. **Dépend d'ADR 0034** (DA + preuve pour qu'une fraude soit prouvable).
 
 ### Robustesse & exploitation
 
