@@ -245,6 +245,11 @@ async fn main() {
     }
     if let Some(token) = file_cfg.admin_token {
         config = config.with_admin_token(token);
+    } else {
+        tracing::warn!(
+            "No admin_token configured — the admin routes (/snapshot, /admin/compact, \
+             /validators/pending) are disabled. Set admin_token in config.toml to enable them."
+        );
     }
     config.max_block_txs = max_block_txs;
     config.max_mempool_size = max_mempool_size;

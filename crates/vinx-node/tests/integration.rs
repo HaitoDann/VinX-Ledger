@@ -48,7 +48,10 @@ async fn start_test_node() -> (Arc<Node>, String) {
     let config = NodeConfig::new(validator_kp)
         // Very long block time so auto-ticking never fires during tests
         .with_block_time(9_999)
-        .with_rpc_listen(local_addr.to_string());
+        .with_rpc_listen(local_addr.to_string())
+        // Admin routes are fail-closed: without a token they refuse everything,
+        // so tests exercising them need one configured.
+        .with_admin_token("test-admin-token");
 
     let node = Node::new(state, chain, config);
 

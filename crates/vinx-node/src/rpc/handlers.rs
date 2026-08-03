@@ -20,13 +20,41 @@ use vinx_state::WorldState;
 
 pub type ApiResult<T> = Result<Json<T>, ApiError>;
 
+/// Admin routes are **fail-closed**: with no `admin_token` configured they refuse
+/// every request instead of accepting all of them (the RPC listens on 0.0.0.0 by
+/// default — an open `POST /snapshot` would let anyone replace the node's state).
+/// Tokens are compared via their SHA-256 digests so the comparison cost is
+/// independent of how many leading bytes match (no timing side channel).
 fn check_admin_auth(headers: &axum::http::HeaderMap, expected: Option<&str>) -> bool {
-    let Some(token) = expected else { return true }; // auth disabled
-    headers
+    let Some(token) = expected else { return false };
+    let provided = headers
         .get(axum::http::header::AUTHORIZATION)
         .and_then(|v| v.to_str().ok())
-        .and_then(|s| s.strip_prefix("Bearer "))
-        == Some(token)
+        .and_then(|s| s.strip_prefix("Bearer "));
+    match provided {
+        Some(p) => {
+            vinx_crypto::sha256(p.as_bytes()) == vinx_crypto::sha256(token.as_bytes())
+        }
+        None => false,
+    }
+}
+
+/// `check_admin_auth` as a `Result`, with an error message that tells the operator
+/// *why* access is denied (missing configuration vs. bad token).
+fn require_admin(
+    headers: &axum::http::HeaderMap,
+    expected: Option<&str>,
+) -> Result<(), ApiError> {
+    if expected.is_none() {
+        return Err(ApiError::Unauthorized(
+            "admin routes are disabled: no admin_token configured (set admin_token in config.toml)"
+                .to_string(),
+        ));
+    }
+    if !check_admin_auth(headers, expected) {
+        return Err(ApiError::Unauthorized("invalid admin token".to_string()));
+    }
+    Ok(())
 }
 
 // ─── Error type ─────────────────────────────────────────────────────────────
@@ -196,9 +224,7 @@ pub async fn get_validator_requests(
     State(node): State<Arc<Node>>,
     headers: axum::http::HeaderMap,
 ) -> ApiResult<ValidatorJoinListResponse> {
-    if !check_admin_auth(&headers, node.config.admin_token.as_deref()) {
-        return Err(ApiError::Unauthorized("Admin token required".to_string()));
-    }
+    require_admin(&headers, node.config.admin_token.as_deref())?;
     let requests = node.validator_requests.lock().await;
     Ok(Json(ValidatorJoinListResponse {
         count: requests.len(),
@@ -415,14 +441,8 @@ pub async fn get_snapshot(
     headers: axum::http::HeaderMap,
     State(node): State<Arc<Node>>,
 ) -> impl IntoResponse {
-    if !check_admin_auth(&headers, node.config.admin_token.as_deref()) {
-        return (
-            StatusCode::UNAUTHORIZED,
-            Json(ErrorResponse {
-                error: "unauthorized".to_string(),
-            }),
-        )
-            .into_response();
+    if let Err(e) = require_admin(&headers, node.config.admin_token.as_deref()) {
+        return e.into_response();
     }
     let state_guard = node.state.read().await;
     let chain_guard = node.chain.read().await;
@@ -543,9 +563,7 @@ pub async fn post_compact(
     State(node): State<Arc<Node>>,
     axum::extract::Query(params): axum::extract::Query<CompactParams>,
 ) -> ApiResult<CompactResponse> {
-    if !check_admin_auth(&headers, node.config.admin_token.as_deref()) {
-        return Err(ApiError::Unauthorized("unauthorized".to_string()));
-    }
+    require_admin(&headers, node.config.admin_token.as_deref())?;
     let keep_last = params.keep_last.unwrap_or(1000);
     let mut chain = node.chain.write().await;
     let tip = chain.tip_height();
@@ -642,14 +660,8 @@ pub async fn post_snapshot(
     State(node): State<Arc<Node>>,
     Json(body): Json<SnapshotResponse>,
 ) -> impl IntoResponse {
-    if !check_admin_auth(&headers, node.config.admin_token.as_deref()) {
-        return (
-            StatusCode::UNAUTHORIZED,
-            Json(ErrorResponse {
-                error: "unauthorized".to_string(),
-            }),
-        )
-            .into_response();
+    if let Err(e) = require_admin(&headers, node.config.admin_token.as_deref()) {
+        return e.into_response();
     }
     match serde_json::from_value::<WorldState>(body.state) {
         Ok(new_state) => {

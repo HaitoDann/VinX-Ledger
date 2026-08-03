@@ -34,6 +34,13 @@
 # Défaut : "0.0.0.0:8545"
 # rpc_listen = "0.0.0.0:8545"
 
+# Token Bearer protégeant les routes d'administration : GET/POST /snapshot,
+# POST /admin/compact, GET /validators/pending.
+# ⚠ Sans token configuré, ces routes sont DÉSACTIVÉES (fail-closed) — elles
+# répondent 401 à toute requête. Utilisez une valeur longue et aléatoire :
+#   openssl rand -hex 32
+# admin_token = "changez-moi"
+
 # ─── P2P (réseau entre nœuds) ────────────────────────────────────────────────
 # Décommentez pour activer la couche P2P gossipsub.
 # p2p_listen = "/ip4/0.0.0.0/tcp/9000"
