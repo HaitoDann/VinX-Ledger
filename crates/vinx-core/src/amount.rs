@@ -102,6 +102,12 @@ pub const BLOCK_RETENTION_COUNT: u64 = 100_000;
 /// Pruning runs every N blocks to amortize the O(n) tx-index rebuild cost.
 pub const PRUNE_INTERVAL: u64 = 1_000;
 
+/// Maximum distance a transaction's nonce may run ahead of the sender's account
+/// nonce to be admitted into the mempool. Bounds nonce-gap parking (filling the
+/// mempool with far-future nonces that can never apply). Larger than the
+/// per-address mempool cap, so it never rejects a legitimately queued burst.
+pub const MAX_NONCE_AHEAD: u64 = 64;
+
 /// Heartbeat block interval when the mempool is empty: at least one (possibly
 /// empty) block every 10 minutes of real time (ADR 0038). Kills the incentive to
 /// force blocks with junk self-transactions to capture accrued emission (it will

@@ -81,7 +81,10 @@ enum RouteClass {
 fn classify(path: &str) -> RouteClass {
     match path {
         "/health" | "/metrics" | "/ws" | "/events" => RouteClass::Exempt,
-        "/tx/submit" => RouteClass::Submit,
+        // /tx/batch must share the strict submission budget: classified Standard it
+        // would allow 100 req/min × 100 tx = 10,000 tx/min per IP, a 500× bypass of
+        // the 20/min intended for submissions.
+        "/tx/submit" | "/tx/batch" => RouteClass::Submit,
         p if p.starts_with("/faucet") => RouteClass::Faucet,
         _ => RouteClass::Standard,
     }

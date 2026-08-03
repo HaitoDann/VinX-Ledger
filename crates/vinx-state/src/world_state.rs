@@ -3,8 +3,9 @@ use std::collections::{BTreeMap, HashMap, HashSet};
 use vinx_core::{
     amount::{
         cumulative_emission_atoms, Amount, BPS_DENOM, DEFAULT_FEE_FLOOR_ATOMS,
-        EXISTENTIAL_DEPOSIT_ATOMS, MAX_MODULES, MIN_MODULE_BOND_ATOMS, MIN_STAKE_ATOMS,
-        MIN_VALIDATOR_BOND_ATOMS, SLASH_BOUNTY_BPS, SLASH_EQUIVOCATION_BPS, UNBONDING_SECS,
+        EXISTENTIAL_DEPOSIT_ATOMS, MAX_MODULES, MAX_NONCE_AHEAD, MIN_MODULE_BOND_ATOMS,
+        MIN_STAKE_ATOMS, MIN_VALIDATOR_BOND_ATOMS, SLASH_BOUNTY_BPS, SLASH_EQUIVOCATION_BPS,
+        UNBONDING_SECS,
     },
     block::SlashEvidence,
     chain_id::CHAIN_ID_DEVNET,
@@ -575,6 +576,87 @@ impl WorldState {
     /// The Merkle tree and indexes are rebuilt lazily on the first state-root call.
     pub fn load_account(&mut self, account: Account) {
         self.accounts.insert(account.address, account);
+    }
+
+    /// Stateful mempool-admission checks (anti-spam). The signature must already be
+    /// verified by the caller; this validates everything an attacker could otherwise
+    /// claim for free:
+    ///
+    /// - `chain_id` matches (no cross-network replay filling the mempool),
+    /// - the fee meets the current `base_fee` for fee-bearing types (Transfer,
+    ///   AnchorState — stake/unstake/slash are exempt per ADR 0009),
+    /// - the sender account **exists** and its balance covers the transaction's
+    ///   worst-case debit (`admission_cost_atoms`) — so the fee used for mempool
+    ///   priority is actually funded, not just declared,
+    /// - a sponsored transaction's sponsor exists and covers the fee,
+    /// - the nonce is not consumed and not absurdly far ahead
+    ///   ([`MAX_NONCE_AHEAD`]) — bounds per-account nonce-gap parking,
+    /// - an unstake does not exceed the sender's staked amount.
+    ///
+    /// Deliberately **conservative**: it must never reject a transaction the apply
+    /// path would accept. Anything admitted can still fail at inclusion (state moved
+    /// on) — this is a cheap gate, not a simulation.
+    pub fn admission_check(&self, tx: &Transaction) -> Result<(), CoreError> {
+        if tx.chain_id != self.chain_id {
+            return Err(CoreError::InvalidTransaction(format!(
+                "chain_id {} does not match this network ({})",
+                tx.chain_id, self.chain_id
+            )));
+        }
+
+        // Fee floor for the fee-bearing types (mirrors apply_transfer / apply_anchor_state).
+        if matches!(
+            tx.tx_type,
+            TransactionType::Transfer | TransactionType::AnchorState
+        ) && tx.fee < self.base_fee
+        {
+            return Err(CoreError::InvalidTransaction(format!(
+                "fee {} is below the current base fee {}",
+                tx.fee, self.base_fee
+            )));
+        }
+
+        let Some(account) = self.accounts.get(&tx.from) else {
+            return Err(CoreError::InvalidTransaction(
+                "sender account does not exist (zero balance)".to_string(),
+            ));
+        };
+
+        if tx.nonce < account.nonce {
+            return Err(CoreError::InvalidNonce {
+                expected: account.nonce,
+                got: tx.nonce,
+            });
+        }
+        if tx.nonce - account.nonce >= MAX_NONCE_AHEAD {
+            return Err(CoreError::InvalidTransaction(format!(
+                "nonce {} is too far ahead of account nonce {}",
+                tx.nonce, account.nonce
+            )));
+        }
+
+        if account.balance.atoms() < tx.admission_cost_atoms() {
+            return Err(CoreError::InsufficientBalance);
+        }
+        if tx.tx_type == TransactionType::Unstake && account.staked < tx.amount {
+            return Err(CoreError::InvalidTransaction(
+                "unstake amount exceeds staked balance".to_string(),
+            ));
+        }
+
+        // Sponsored fee: the sponsor must exist and cover the fee it signed for.
+        if let Some(ref sponsor) = tx.sponsor {
+            let Some(sponsor_acc) = self.accounts.get(sponsor) else {
+                return Err(CoreError::InvalidTransaction(
+                    "sponsor account does not exist".to_string(),
+                ));
+            };
+            if sponsor_acc.balance < tx.fee {
+                return Err(CoreError::InsufficientBalance);
+            }
+        }
+
+        Ok(())
     }
 
     /// Returns true when a time-triggered operation is waiting on the chain to

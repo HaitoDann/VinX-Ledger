@@ -134,7 +134,7 @@ pub async fn submit_tx(
     }
 
     let tx_hash = hex::encode(tx.hash());
-    match node.mempool.write().await.add(tx) {
+    match admit_to_mempool(&node, tx).await {
         Ok(()) => {
             node.metrics.tx_submitted_ok.fetch_add(1, Ordering::Relaxed);
             Ok(Json(TxSubmitResponse {
@@ -146,9 +146,36 @@ pub async fn submit_tx(
             node.metrics
                 .tx_submitted_err
                 .fetch_add(1, Ordering::Relaxed);
-            Err(ApiError::BadRequest(e.to_string()))
+            Err(ApiError::BadRequest(e))
         }
     }
+}
+
+/// Stateful admission (anti-spam) + mempool insertion, shared by `/tx/submit`
+/// and `/tx/batch`. The signature must already be verified by the caller.
+///
+/// On top of `WorldState::admission_check` (chain_id, fee floor, funded sender,
+/// nonce window), this enforces the **cumulative** funding rule: the sender's
+/// balance must cover every transaction already queued for it plus this one —
+/// otherwise one funded fee could back a whole queue of unpayable high-priority
+/// entries. State is read-locked before the mempool write lock (same order as
+/// the persist path) so the check and the insert are atomic with respect to
+/// competing submissions.
+async fn admit_to_mempool(node: &Arc<Node>, tx: Transaction) -> Result<(), String> {
+    let state = node.state.read().await;
+    state.admission_check(&tx).map_err(|e| e.to_string())?;
+
+    let mut mempool = node.mempool.write().await;
+    let queued = mempool.queued_cost_atoms(&tx.from);
+    let needed = queued.saturating_add(tx.admission_cost_atoms());
+    if state.account_balance(&tx.from).atoms() < needed {
+        return Err(format!(
+            "sender balance does not cover already-queued transactions plus this one \
+             (queued cost {queued} atoms)"
+        ));
+    }
+    drop(state);
+    mempool.add(tx).map_err(|e| e.to_string())
 }
 
 pub async fn get_block(
@@ -743,10 +770,37 @@ pub async fn submit_tx_batch(
     let total = txs.len();
     let mut results = Vec::with_capacity(total);
     let mut accepted = 0usize;
+    // Same lock order as the persist path and admit_to_mempool: state before
+    // mempool. Held across the batch so admission + insertion stay atomic; the
+    // cumulative funding rule then naturally accounts for earlier transactions
+    // of the same batch (they are already in the mempool when the next one is
+    // checked).
+    let state = node.state.read().await;
     let mut mempool = node.mempool.write().await;
 
     for (tx, (hash, sig_result)) in txs.into_iter().zip(verifications) {
-        match sig_result {
+        let admit = sig_result.and_then(|()| {
+            state.admission_check(&tx).map_err(|e| e.to_string())?;
+            let queued = mempool.queued_cost_atoms(&tx.from);
+            let needed = queued.saturating_add(tx.admission_cost_atoms());
+            if state.account_balance(&tx.from).atoms() < needed {
+                return Err(format!(
+                    "sender balance does not cover already-queued transactions plus this one \
+                     (queued cost {queued} atoms)"
+                ));
+            }
+            mempool.add(tx).map_err(|e| e.to_string())
+        });
+        match admit {
+            Ok(()) => {
+                node.metrics.tx_submitted_ok.fetch_add(1, Ordering::Relaxed);
+                accepted += 1;
+                results.push(BatchTxResult {
+                    tx_hash: hash,
+                    accepted: true,
+                    error: None,
+                });
+            }
             Err(e) => {
                 node.metrics
                     .tx_submitted_err
@@ -757,27 +811,6 @@ pub async fn submit_tx_batch(
                     error: Some(e),
                 });
             }
-            Ok(()) => match mempool.add(tx) {
-                Ok(()) => {
-                    node.metrics.tx_submitted_ok.fetch_add(1, Ordering::Relaxed);
-                    accepted += 1;
-                    results.push(BatchTxResult {
-                        tx_hash: hash,
-                        accepted: true,
-                        error: None,
-                    });
-                }
-                Err(e) => {
-                    node.metrics
-                        .tx_submitted_err
-                        .fetch_add(1, Ordering::Relaxed);
-                    results.push(BatchTxResult {
-                        tx_hash: hash,
-                        accepted: false,
-                        error: Some(e.to_string()),
-                    });
-                }
-            },
         }
     }
 

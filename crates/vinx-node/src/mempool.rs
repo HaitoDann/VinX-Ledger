@@ -68,6 +68,20 @@ impl Mempool {
         self.pending_count == 0
     }
 
+    /// Sum of the worst-case balance debits of every transaction already queued
+    /// for `addr` (bounded by MAX_PER_ADDRESS, so at most a 50-entry walk).
+    /// Used by stateful admission: the sender's balance must cover the whole
+    /// queue plus the incoming transaction, not just each one individually —
+    /// otherwise one funded fee could back 50 unpayable high-priority entries.
+    pub fn queued_cost_atoms(&self, addr: &Address) -> u128 {
+        self.queues.get(addr).map_or(0, |queue| {
+            queue
+                .values()
+                .map(|tx| tx.admission_cost_atoms())
+                .fold(0u128, |acc, c| acc.saturating_add(c))
+        })
+    }
+
     /// Inserts a pre-verified transaction into the per-account nonce queue.
     /// The caller is responsible for verifying the signature before calling this.
     pub fn add(&mut self, tx: Transaction) -> Result<(), MempoolError> {

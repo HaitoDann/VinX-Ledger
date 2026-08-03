@@ -443,7 +443,14 @@ async fn dispatch_message(
     match msg {
         P2pMessage::NewTransaction(tx) => {
             metrics.p2p_tx_recv.fetch_add(1, Ordering::Relaxed);
-            // Stage for deferred parallel verification (flush_staged() called at block production)
+            // Stateful admission before staging (anti-spam): a gossiping peer must
+            // not get unfunded/wrong-chain transactions parked in our mempool any
+            // more than an RPC client would. Signatures are still verified later,
+            // in parallel, by flush_staged() at block production.
+            if let Err(e) = state.read().await.admission_check(&tx) {
+                debug!(error = %e, "P2P transaction rejected at admission");
+                return;
+            }
             mempool.write().await.stage(tx);
         }
 
