@@ -273,13 +273,7 @@ async fn main() {
     // Startup chain sync from trusted peer (if configured)
     if let Some(ref peer_url) = sync_peer_rpc {
         tracing::info!(peer = %peer_url, "Starting chain sync from peer");
-        let applied = vinx_node::sync::sync_from_peer(
-            peer_url,
-            &mut state,
-            &mut chain,
-            &config.validator_set,
-        )
-        .await;
+        let applied = vinx_node::sync::sync_from_peer(peer_url, &mut state, &mut chain).await;
         if applied > 0 {
             tracing::info!(applied, tip = chain.tip_height(), "Chain sync complete");
         } else {
