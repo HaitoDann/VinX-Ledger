@@ -260,7 +260,8 @@ async fn run(cmd: Commands) -> Result<(), WalletError> {
 
 fn cmd_keygen(output: &Path) -> Result<(), WalletError> {
     let (ks, _) = KeyStore::generate();
-    ks.save(output)?;
+    let pass = keystore::prompt_new_passphrase()?;
+    ks.save(output, pass.as_deref())?;
     println!("Address : {}", ks.address);
     println!("Saved   : {}", output.display());
     println!();
@@ -604,11 +605,9 @@ fn cmd_new_wallet(output: &Path) -> Result<(), WalletError> {
         .map_err(|_| WalletError::Keystore("seed too short".to_string()))?;
     let kp = vinx_crypto::KeyPair::from_secret_bytes(&key_bytes);
     let address = Address::from_public_key(&kp.public_key()).to_string();
-    let ks = keystore::KeyStore {
-        address: address.clone(),
-        secret_key_hex: hex::encode(kp.secret_bytes()),
-    };
-    ks.save(output)?;
+    let ks = keystore::KeyStore::from_keypair(&kp);
+    let pass = keystore::prompt_new_passphrase()?;
+    ks.save(output, pass.as_deref())?;
     println!("Wallet generated");
     println!("  Address  : {}", address);
     println!("  Mnemonic : {}", mnemonic);
@@ -638,11 +637,9 @@ fn cmd_restore_wallet(output: &Path) -> Result<(), WalletError> {
         .map_err(|_| WalletError::Keystore("seed too short".to_string()))?;
     let kp = vinx_crypto::KeyPair::from_secret_bytes(&key_bytes);
     let address = Address::from_public_key(&kp.public_key()).to_string();
-    let ks = keystore::KeyStore {
-        address: address.clone(),
-        secret_key_hex: hex::encode(kp.secret_bytes()),
-    };
-    ks.save(output)?;
+    let ks = keystore::KeyStore::from_keypair(&kp);
+    let pass = keystore::prompt_new_passphrase()?;
+    ks.save(output, pass.as_deref())?;
     println!("Wallet restored");
     println!("  Address : {}", address);
     println!("  File    : {}", output.display());
