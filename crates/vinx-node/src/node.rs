@@ -587,8 +587,8 @@ impl Node {
         };
         let state_write = {
             let mut state = self.state.write().await;
-            let chain = self.chain.read().await;
-            Storage::serialize_full(&mut state, &chain)
+            let mut chain = self.chain.write().await;
+            Storage::serialize_full(&mut state, &mut chain)
         };
         match state_write {
             Err(e) => tracing::warn!(error = %e, "Failed to serialize state for full persist"),
@@ -603,8 +603,9 @@ impl Node {
         }
     }
 
-    /// Serializes to bytes while holding read locks (fast, pure in-memory), releases
-    /// the locks, then offloads zstd compression + redb write to a blocking thread.
+    /// Serializes to bytes while holding short write locks (fast, pure in-memory —
+    /// draining the state/chain dirty sets requires `&mut`), releases the locks,
+    /// then offloads zstd compression + redb write to a blocking thread.
     /// The JoinHandle is awaited so the persist completes before the caller proceeds,
     /// but locks are never held during I/O.
     pub async fn persist(&self) {
@@ -617,10 +618,10 @@ impl Node {
         // accounts changed since the last flush are serialized here (O(dirty)).
         let (state_write, mempool_blob) = {
             let mut state = self.state.write().await;
-            let chain = self.chain.read().await;
+            let mut chain = self.chain.write().await;
             let mempool = self.mempool.read().await;
             let txs = mempool.pending_txs();
-            let sw = Storage::serialize_incremental(&mut state, &chain);
+            let sw = Storage::serialize_incremental(&mut state, &mut chain);
             let mp_blob = Storage::serialize_mempool(&txs);
             (sw, mp_blob)
         }; // all locks dropped here

@@ -24,6 +24,12 @@ pub struct Chain {
     /// Maps validator addr -> height -> set of block hashes signed (equivocation detection).
     #[serde(skip)]
     slash_evidence: AHashMap<Address, AHashMap<u64, AHashSet<Hash32>>>,
+    /// Heights whose stored block changed since the last persistence flush (new
+    /// block, co-signature landed, tx/sig data pruned). Drained by
+    /// `take_dirty_heights` so Storage writes only those rows instead of
+    /// re-serializing the whole chain on every persist.
+    #[serde(skip)]
+    dirty_heights: AHashSet<u64>,
 }
 
 impl Chain {
@@ -49,8 +55,39 @@ impl Chain {
             tx_index: AHashMap::new(),
             account_tx_index: AHashMap::new(),
             slash_evidence: AHashMap::new(),
+            dirty_heights: AHashSet::from_iter([0]),
         };
         (chain, genesis)
+    }
+
+    /// Rebuilds a chain from persisted parts: the per-height block rows (dense,
+    /// starting at genesis) and the finalized-height watermark. Tx indexes are
+    /// restored or rebuilt separately by the caller.
+    pub fn from_parts(blocks: Vec<(Hash32, Block)>, finalized_height: u64) -> Self {
+        Self {
+            blocks,
+            finalized_height,
+            tx_index: AHashMap::new(),
+            account_tx_index: AHashMap::new(),
+            slash_evidence: AHashMap::new(),
+            dirty_heights: AHashSet::new(),
+        }
+    }
+
+    /// Drains and returns the set of heights whose block row must be rewritten.
+    pub fn take_dirty_heights(&mut self) -> Vec<u64> {
+        self.dirty_heights.drain().collect()
+    }
+
+    /// Marks every stored block dirty — used by full saves (genesis bootstrap,
+    /// snapshot import) so the whole blocks table is rewritten.
+    pub fn mark_all_dirty(&mut self) {
+        self.dirty_heights = (0..self.blocks.len() as u64).collect();
+    }
+
+    /// Borrow of the stored `(hash, block)` row at `height`, for persistence.
+    pub fn block_row(&self, height: u64) -> Option<&(Hash32, Block)> {
+        self.blocks.get(height as usize)
     }
 
     /// Highest final (quorum-signed) height. Everything at or below is irreversible.
@@ -141,6 +178,7 @@ impl Chain {
         }
         let hash = block.hash();
         self.blocks.push((hash, block));
+        self.dirty_heights.insert(height);
         hash
     }
 
@@ -242,6 +280,7 @@ impl Chain {
     ) -> bool {
         if let Some((_, block)) = self.blocks.get_mut(height as usize) {
             block.signatures.push(signature);
+            self.dirty_heights.insert(height);
             return block.is_finalized(validator_set);
         }
         false
@@ -276,7 +315,12 @@ impl Chain {
         let compact_up_to = (tip - keep_last) as usize;
         for i in 0..compact_up_to {
             if let Some((_, block)) = self.blocks.get_mut(i) {
-                block.transactions.clear();
+                // Only touch (and re-persist) blocks that still had data — repeated
+                // compaction passes must not mark the whole history dirty again.
+                if !block.transactions.is_empty() {
+                    block.transactions.clear();
+                    self.dirty_heights.insert(i as u64);
+                }
             }
         }
         // Rebuild index to remove entries from pruned blocks
@@ -308,10 +352,15 @@ impl Chain {
 
         for i in 0..prune_up_to {
             if let Some((_, block)) = self.blocks.get_mut(i) {
-                tx_pruned += block.transactions.len();
-                block.transactions.clear();
-                sig_pruned += block.signatures.len();
-                block.signatures.clear();
+                // Same rule as compaction: already-empty blocks stay untouched so
+                // periodic prune passes only re-persist the newly pruned window.
+                if !block.transactions.is_empty() || !block.signatures.is_empty() {
+                    tx_pruned += block.transactions.len();
+                    block.transactions.clear();
+                    sig_pruned += block.signatures.len();
+                    block.signatures.clear();
+                    self.dirty_heights.insert(i as u64);
+                }
             }
         }
 
@@ -371,13 +420,7 @@ mod tests {
 
     #[test]
     fn test_equivocation_detection() {
-        let mut chain = Chain {
-            blocks: vec![],
-            finalized_height: 0,
-            tx_index: AHashMap::new(),
-            account_tx_index: AHashMap::new(),
-            slash_evidence: AHashMap::new(),
-        };
+        let mut chain = Chain::from_parts(vec![], 0);
         let addr = Address::from_public_key(&KeyPair::generate().public_key());
         let hash_a = [1u8; 32];
         let hash_b = [2u8; 32];

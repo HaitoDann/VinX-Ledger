@@ -46,14 +46,14 @@ fn test_storage_roundtrip() {
         admin_address: admin.clone(),
         validator_address: validator.clone(),
     });
-    let (chain, _) = Chain::new_with_genesis(validator.clone(), 0);
+    let (mut chain, _) = Chain::new_with_genesis(validator.clone(), 0);
 
     let storage = Storage::new(tmp.path());
     assert!(!storage.exists());
 
     // Fair launch: genesis grants nothing — seed a balance so the roundtrip is meaningful.
     state.credit_for_test(admin.clone(), Amount::from_vinx(500));
-    storage.save(&mut state, &chain).unwrap();
+    storage.save(&mut state, &mut chain).unwrap();
     assert!(storage.exists());
 
     let (loaded_state, loaded_chain) = storage.load().expect("should load");
@@ -105,7 +105,7 @@ fn test_storage_roundtrip_preserves_typed_tx_index() {
     chain.push(block);
 
     let storage = Storage::new(tmp.path());
-    storage.save(&mut state, &chain).unwrap();
+    storage.save(&mut state, &mut chain).unwrap();
 
     // Reload and confirm the raw-byte-keyed indexes survive the bincode round-trip
     // (Hash32 keys for tx_index, Address keys for account_tx_index).
@@ -130,17 +130,17 @@ fn test_incremental_persist_writes_only_dirty_rows() {
         admin_address: admin.clone(),
         validator_address: validator.clone(),
     });
-    let (chain, _) = Chain::new_with_genesis(validator.clone(), 0);
+    let (mut chain, _) = Chain::new_with_genesis(validator.clone(), 0);
     let storage = Storage::new(tmp.path());
 
     // Seed one account, then full-save so it is persisted and the dirty set cleared.
     state.credit_for_test(admin.clone(), Amount::from_vinx(1_000));
-    storage.save(&mut state, &chain).unwrap();
+    storage.save(&mut state, &mut chain).unwrap();
 
     // Touch a single new account, then persist incrementally.
     let (_, bob) = make_addr();
     state.credit_for_test(bob.clone(), Amount::from_vinx(500));
-    let write = Storage::serialize_incremental(&mut state, &chain).unwrap();
+    let write = Storage::serialize_incremental(&mut state, &mut chain).unwrap();
     // Only the changed account is written — not the whole account set.
     assert_eq!(write.account_rows.len(), 1);
     assert!(!write.replace_accounts);
