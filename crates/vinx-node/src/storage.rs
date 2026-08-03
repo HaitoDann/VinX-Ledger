@@ -220,7 +220,10 @@ impl Storage {
             .insert("chain_meta", meta_c.as_slice())
             .map_err(Self::io_err)?;
         state.remove("chain").map_err(Self::io_err)?;
-        tracing::info!(blocks = height, "Chain blob migrated to per-height rows (v10)");
+        tracing::info!(
+            blocks = height,
+            "Chain blob migrated to per-height rows (v10)"
+        );
         Ok(())
     }
 
@@ -295,7 +298,10 @@ impl Storage {
     /// and block rows changed since the last flush. Call while holding the state
     /// and chain write locks — `serialize_meta` moves the accounts map out and back,
     /// and the dirty sets are drained. Compression + I/O happen later in `write_state`.
-    pub fn serialize_incremental(state: &mut WorldState, chain: &mut Chain) -> io::Result<StateWrite> {
+    pub fn serialize_incremental(
+        state: &mut WorldState,
+        chain: &mut Chain,
+    ) -> io::Result<StateWrite> {
         let meta = state
             .serialize_meta()
             .map_err(|e| Self::io_err(format!("serialize meta: {e}")))?;

@@ -109,8 +109,7 @@ pub async fn sync_from_peer(
                 );
                 return applied;
             }
-            if block.header.timestamp
-                > now.saturating_add(vinx_core::amount::MAX_CLOCK_DRIFT_SECS)
+            if block.header.timestamp > now.saturating_add(vinx_core::amount::MAX_CLOCK_DRIFT_SECS)
             {
                 tracing::error!(
                     height = block.header.height,
@@ -147,9 +146,11 @@ pub async fn sync_from_peer(
             }
 
             // Apply the state transition against a snapshot so any failure below
-            // rolls back instead of leaving a half-applied world state.
+            // rolls back instead of leaving a half-applied world state. Protocol
+            // time = MTP including this block (ADR 0005), same as the producer.
+            let protocol_ts = chain.median_time_past_with(block.header.timestamp);
             let snapshot = state.clone();
-            state.set_block_context(block.header.timestamp);
+            state.set_block_context(protocol_ts);
             for tx in &block.transactions {
                 if let Err(e) = state.apply_transaction_trusted(tx) {
                     tracing::error!(error = %e, height = block.header.height, "Sync tx failed — aborting");
@@ -159,7 +160,7 @@ pub async fn sync_from_peer(
             }
             state.block_height = block.header.height;
             state.check_upgrade_activation();
-            let _ = state.settle_block(&block.header.validator, block.header.timestamp);
+            let _ = state.settle_block(&block.header.validator, protocol_ts);
             if !state.supply_invariant_holds() {
                 tracing::error!(
                     height = block.header.height,

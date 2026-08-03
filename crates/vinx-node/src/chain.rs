@@ -155,6 +155,25 @@ impl Chain {
         ts[ts.len() / 2]
     }
 
+    /// Median Time Past of the chain as it will be once a block carrying `next_ts`
+    /// is appended: the median over the last `MEDIAN_TIME_BLOCKS - 1` stored
+    /// timestamps plus `next_ts`. This is the **protocol clock** for the block being
+    /// applied (ADR 0005): emission, bond unbonding and upgrade activation compare
+    /// against this median, so a single producer cannot jump protocol time with a
+    /// bogus header timestamp. Every node computes it identically from the same
+    /// chain prefix + header, keeping the state transition deterministic.
+    pub fn median_time_past_with(&self, next_ts: u64) -> u64 {
+        let n = self.blocks.len();
+        let start = n.saturating_sub(vinx_core::amount::MEDIAN_TIME_BLOCKS - 1);
+        let mut ts: Vec<u64> = self.blocks[start..]
+            .iter()
+            .map(|(_, b)| b.header.timestamp)
+            .collect();
+        ts.push(next_ts);
+        ts.sort_unstable();
+        ts[ts.len() / 2]
+    }
+
     pub fn get_block(&self, height: u64) -> Option<&Block> {
         self.blocks.get(height as usize).map(|(_, b)| b)
     }
@@ -487,6 +506,22 @@ mod tests {
         }
         // timestamps {0,1,2,3,4,5} → median (index 3) = 3
         assert_eq!(chain.median_time_past(), 3);
+    }
+
+    #[test]
+    fn test_median_time_past_with_resists_timestamp_jump() {
+        let kp = KeyPair::generate();
+        let v = Address::from_public_key(&kp.public_key());
+        let (mut chain, _) = Chain::new_with_genesis(v, 0); // genesis ts = 0
+        for h in 1..=5 {
+            let b = signed_block(h, chain.tip_hash(), v, &[&kp]); // ts = h
+            chain.push(b);
+        }
+        // Honest next block (ts = 6): stored {0..=5} + 6 → median (index 3) = 3.
+        assert_eq!(chain.median_time_past_with(6), 3);
+        // A producer claiming ts = 1_000_000 moves the median not one second more:
+        // the protocol clock ignores the outlier (ADR 0005).
+        assert_eq!(chain.median_time_past_with(1_000_000), 3);
     }
 
     #[test]

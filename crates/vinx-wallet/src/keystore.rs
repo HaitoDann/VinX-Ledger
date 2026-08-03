@@ -178,7 +178,9 @@ pub fn prompt_new_passphrase() -> Result<Option<String>, WalletError> {
     let second = rpassword::prompt_password("Confirm passphrase: ")
         .map_err(|e| WalletError::Keystore(format!("passphrase read: {}", e)))?;
     if first != second {
-        return Err(WalletError::Keystore("passphrases do not match".to_string()));
+        return Err(WalletError::Keystore(
+            "passphrases do not match".to_string(),
+        ));
     }
     Ok(Some(first))
 }
@@ -307,10 +309,7 @@ mod tests {
         ks.save(&path, None).unwrap();
         let loaded = KeyStore::load(&path).unwrap();
         assert_eq!(ks.address, loaded.address);
-        assert_eq!(
-            kp.public_key(),
-            loaded.to_keypair().unwrap().public_key()
-        );
+        assert_eq!(kp.public_key(), loaded.to_keypair().unwrap().public_key());
         std::fs::remove_file(path).ok();
     }
 
@@ -319,7 +318,8 @@ mod tests {
         let _guard = ENV_LOCK.lock().unwrap_or_else(|p| p.into_inner());
         let (ks, kp) = KeyStore::generate();
         let path = tmp("test_wallet_enc.json");
-        ks.save(&path, Some("correct horse battery staple")).unwrap();
+        ks.save(&path, Some("correct horse battery staple"))
+            .unwrap();
 
         // The file must not contain the secret in clear.
         let raw = std::fs::read_to_string(&path).unwrap();
@@ -362,10 +362,7 @@ mod tests {
         std::fs::write(&path, serde_json::to_string_pretty(&legacy).unwrap()).unwrap();
         let loaded = KeyStore::load(&path).unwrap();
         assert_eq!(loaded.address, ks.address);
-        assert_eq!(
-            kp.public_key(),
-            loaded.to_keypair().unwrap().public_key()
-        );
+        assert_eq!(kp.public_key(), loaded.to_keypair().unwrap().public_key());
         std::fs::remove_file(path).ok();
     }
 

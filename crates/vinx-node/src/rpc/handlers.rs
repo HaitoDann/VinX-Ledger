@@ -32,19 +32,14 @@ fn check_admin_auth(headers: &axum::http::HeaderMap, expected: Option<&str>) -> 
         .and_then(|v| v.to_str().ok())
         .and_then(|s| s.strip_prefix("Bearer "));
     match provided {
-        Some(p) => {
-            vinx_crypto::sha256(p.as_bytes()) == vinx_crypto::sha256(token.as_bytes())
-        }
+        Some(p) => vinx_crypto::sha256(p.as_bytes()) == vinx_crypto::sha256(token.as_bytes()),
         None => false,
     }
 }
 
 /// `check_admin_auth` as a `Result`, with an error message that tells the operator
 /// *why* access is denied (missing configuration vs. bad token).
-fn require_admin(
-    headers: &axum::http::HeaderMap,
-    expected: Option<&str>,
-) -> Result<(), ApiError> {
+fn require_admin(headers: &axum::http::HeaderMap, expected: Option<&str>) -> Result<(), ApiError> {
     if expected.is_none() {
         return Err(ApiError::Unauthorized(
             "admin routes are disabled: no admin_token configured (set admin_token in config.toml)"

@@ -54,7 +54,7 @@ Rien ci-dessous n'est décidé — ce sont des propositions à instruire une par
   *Problème :* 0009 borne les unbonds *par compte* mais pas l'**agrégat** — une sortie massive simultanée (même honnête) fait chuter le set d'un coup → quorum inatteignable / sécurité effondrée.
   *Direction :* **file de sortie (et d'entrée) bornée** — au plus N sorties par fenêtre, ordre déterministe, bond retenu/slashable dans la file, **plancher de set** jamais franchi (partagé avec 0032). Généralise le délai d'unbonding (0009) au set entier ; distinct du jail temporaire (0027) ; s'articule avec l'admission permissionless (0033).
 
-- **0005 — Temps réseau robuste** 🟠 **— ✅ implémenté** (bornes de timestamp à la réception + helper Median Time Past ; câblage émission↔MTP à finir au banc n≥2)
+- **0005 — Temps réseau robuste** 🟠 **— ✅ implémenté** (bornes de timestamp à la réception — P2P **et** sync HTTP — et horloge protocole sur le Median Time Past : émission, déliaison et activation d'upgrade comparent au MTP incluant le bloc appliqué, sur les trois chemins production/P2P/sync ; à éprouver au banc n≥2)
   *Problème :* l'émission et la déliaison font confiance au `timestamp` du bloc, posé par un seul producteur. Bornes actuelles : monotonie + horloge locale à la production seulement.
   *Direction :* timestamp = médiane des horloges des validateurs (façon Bitcoin "median time past"), bornes strictes à la **réception** P2P (plafond futur, monotonie).
   *Compromis :* nécessite d'échanger/valider des horloges — pertinent surtout à n≥2.

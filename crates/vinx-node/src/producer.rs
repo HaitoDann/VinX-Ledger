@@ -32,15 +32,17 @@ pub fn produce_block(
         )));
     }
 
-    // Enforce timestamp monotonicity (block timestamps are the protocol clock: they
-    // drive emission and unbonding), then record it as the block context so unstakes
-    // in this block compute a real-time unlock.
+    // Enforce timestamp monotonicity on the header, then derive the protocol clock
+    // (ADR 0005): time-sensitive state transitions (emission, unbonding, upgrade
+    // activation) run on the Median Time Past including this block — a single
+    // producer cannot jump protocol time via its header timestamp.
     let prev_ts = chain
         .get_block(chain.tip_height())
         .map(|b| b.header.timestamp)
         .unwrap_or(0);
     let timestamp = timestamp.max(prev_ts.saturating_add(1));
-    state.set_block_context(timestamp);
+    let protocol_ts = chain.median_time_past_with(timestamp);
+    state.set_block_context(protocol_ts);
 
     // Flush staged (unverified) transactions via parallel sig verification pipeline
     let admitted = mempool.flush_staged();
@@ -101,8 +103,8 @@ pub fn produce_block(
     state.check_upgrade_activation();
 
     // Reward the producer for its work: collected fees + work emission forged from the
-    // Foundry. Also matures any unbonds due at this block's timestamp.
-    let (fees, emission) = state.settle_block(&config.validator_address, timestamp);
+    // Foundry. Also matures any unbonds due — both on the MTP protocol clock (ADR 0005).
+    let (fees, emission) = state.settle_block(&config.validator_address, protocol_ts);
     if fees > Amount::ZERO || emission > Amount::ZERO {
         tracing::debug!(fees = %fees, emission = %emission, height = next_height, "Producer rewarded");
     }
@@ -191,7 +193,9 @@ fn produce_block_inner(
         .map(|b| b.header.timestamp)
         .unwrap_or(0);
     let timestamp = timestamp.max(prev_ts.saturating_add(1));
-    state.set_block_context(timestamp);
+    // ADR 0005: protocol time is the MTP including this block, not the raw header.
+    let protocol_ts = chain.median_time_past_with(timestamp);
+    state.set_block_context(protocol_ts);
 
     let admitted = mempool.flush_staged();
     if admitted > 0 {
@@ -229,7 +233,7 @@ fn produce_block_inner(
     state.block_height = next_height;
     state.check_upgrade_activation();
 
-    let (fees, emission) = state.settle_block(&config.validator_address, timestamp);
+    let (fees, emission) = state.settle_block(&config.validator_address, protocol_ts);
     if !state.supply_invariant_holds() {
         return Err(NodeError::Consensus(format!(
             "supply invariant violated producing block {next_height} (backup) — block not sealed"

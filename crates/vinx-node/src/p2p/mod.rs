@@ -575,11 +575,16 @@ async fn dispatch_message(
                 return;
             }
 
-            // 4. State transition with rollback
+            // 4. State transition with rollback. Protocol time = MTP including this
+            // block (ADR 0005) — identical to what the producer computed.
+            let protocol_ts = chain
+                .read()
+                .await
+                .median_time_past_with(block.header.timestamp);
             let applied = {
                 let mut sg = state.write().await;
                 let snapshot = sg.clone();
-                sg.set_block_context(block.header.timestamp);
+                sg.set_block_context(protocol_ts);
                 let mut ok = true;
                 for tx in &block.transactions {
                     if let Err(e) = sg.apply_transaction_trusted(tx) {
@@ -592,7 +597,7 @@ async fn dispatch_message(
                 if ok {
                     sg.block_height = height;
                     sg.check_upgrade_activation();
-                    let _ = sg.settle_block(&block.header.validator, block.header.timestamp);
+                    let _ = sg.settle_block(&block.header.validator, protocol_ts);
                     let root = sg.compute_state_root();
                     // ADR 0004: the state_root only covers accounts, not the Foundry —
                     // check the supply invariant explicitly on received blocks too.
@@ -770,10 +775,16 @@ async fn dispatch_message(
                     );
                     break;
                 }
+                // ADR 0005: protocol time = MTP including this block, computed from
+                // the same chain prefix the producer used — deterministic on both sides.
+                let protocol_ts = chain
+                    .read()
+                    .await
+                    .median_time_past_with(block.header.timestamp);
                 let ok = {
                     let mut sg = state.write().await;
                     let snapshot = sg.clone();
-                    sg.set_block_context(block.header.timestamp);
+                    sg.set_block_context(protocol_ts);
                     let mut ok = true;
                     for tx in &block.transactions {
                         if let Err(e) = sg.apply_transaction_trusted(tx) {
@@ -786,7 +797,7 @@ async fn dispatch_message(
                     if ok {
                         sg.block_height = height;
                         sg.check_upgrade_activation();
-                        let _ = sg.settle_block(&block.header.validator, block.header.timestamp);
+                        let _ = sg.settle_block(&block.header.validator, protocol_ts);
                         let root = sg.compute_state_root();
                         if !sg.supply_invariant_holds() {
                             warn!(height, "SyncResponse block breaks supply invariant");
