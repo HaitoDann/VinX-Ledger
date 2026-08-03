@@ -5,9 +5,10 @@ use axum::{
     middleware::Next,
     response::{IntoResponse, Response},
 };
+use lru::LruCache;
 use std::{
-    collections::HashMap,
     net::IpAddr,
+    num::NonZeroUsize,
     sync::{Arc, Mutex},
     time::Instant,
 };
@@ -106,16 +107,25 @@ impl IpBuckets {
 
 // ── RateLimiter ───────────────────────────────────────────────────────────────
 
+/// Upper bound on tracked client IPs. Beyond it the least-recently-seen entry is
+/// evicted, so an address-spray (IPv6 especially: one /64 holds 2⁶⁴ addresses)
+/// cannot grow the map without bound. Eviction resets that IP's bucket state to
+/// "full", which is the same as a brand-new client — an acceptable trade against
+/// unbounded memory. ~65k entries ≈ a few MB.
+const MAX_TRACKED_IPS: usize = 65_536;
+
 #[derive(Clone)]
 pub struct RateLimiter {
-    buckets: Arc<Mutex<HashMap<IpAddr, IpBuckets>>>,
+    buckets: Arc<Mutex<LruCache<IpAddr, IpBuckets>>>,
     metrics: NodeMetrics,
 }
 
 impl RateLimiter {
     pub fn new(metrics: NodeMetrics) -> Self {
         Self {
-            buckets: Arc::new(Mutex::new(HashMap::new())),
+            buckets: Arc::new(Mutex::new(LruCache::new(
+                NonZeroUsize::new(MAX_TRACKED_IPS).unwrap(),
+            ))),
             metrics,
         }
     }
@@ -139,7 +149,7 @@ pub async fn rate_limit(
     let ip = addr.ip();
     let allowed = {
         let mut map = limiter.buckets.lock().unwrap();
-        let buckets = map.entry(ip).or_insert_with(IpBuckets::new);
+        let buckets = map.get_or_insert_mut(ip, IpBuckets::new);
         match class {
             RouteClass::Submit => buckets.submit.try_consume(),
             RouteClass::Faucet => buckets.faucet.try_consume(),
