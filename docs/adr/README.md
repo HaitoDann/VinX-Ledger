@@ -97,6 +97,10 @@ Rien ci-dessous n'est décidé — ce sont des propositions à instruire une par
   *Problème :* le halving (8 ans) et le total sont des constantes ; leur statut (gouvernable ou gravé) n'est pas décidé.
   *Direction :* graver l'émission comme **immuable** (argument de confiance : personne, pas même l'admin, ne change la politique monétaire). À acter explicitement.
 
+- **0038 — [Bloc heartbeat périodique](./0038-bloc-heartbeat-periodique.md)** 🟠 **— ✅ implémenté**
+  *Problème :* production à la demande + émission intégrée sur le temps + frais 100 % au producteur ⇒ le leader force un bloc **gratuitement** (self-tx) pour capturer l'accrual ; à l'équilibre, tous spamment → production continue de tx bidon (~2-3,5 Go/an) et prime jackpot au réveil ; MTP périmé au repos.
+  *Fait :* **au moins un bloc toutes les 10 min** (`HEARTBEAT_INTERVAL_SECS = 600`), même vide (~15-30 Mo/an) ; cadence à la demande conservée sous charge. L'accrual est forgé à heure fixe par le leader round-robin → l'incitation au spam disparaît, la distribution est lissée (complété par 0028). Pas de plafond d'accrual (courbe 0021 intacte — doctrine actée dans l'ADR).
+
 ### Données, état & scaling
 
 - **0026 — [Dépôt existentiel (anti-bloat de l'état)](./0026-depot-existentiel.md)** 🔴 **— ✅ implémenté** (consensus-breaking)

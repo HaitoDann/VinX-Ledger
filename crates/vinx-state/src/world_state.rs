@@ -577,11 +577,12 @@ impl WorldState {
         self.accounts.insert(account.address, account);
     }
 
-    /// Returns true when the chain must keep advancing even with an empty mempool.
+    /// Returns true when a time-triggered operation is waiting on the chain to
+    /// advance: a scheduled upgrade or a maturing unbond.
     ///
-    /// A periodic heartbeat block is only required when a protocol upgrade is
-    /// scheduled (its activation is triggered by reaching a block height). Otherwise
-    /// the node can sleep until the next transaction — no wasted storage.
+    /// Since ADR 0038 the block producer heartbeats unconditionally (at least one
+    /// block per `HEARTBEAT_INTERVAL_SECS`), so this is no longer what gates the
+    /// heartbeat — it remains useful for monitoring and tests.
     pub fn has_pending_time_sensitive_ops(&self) -> bool {
         // A scheduled upgrade (height-triggered) or a pending unbond (time-triggered)
         // both need the chain to keep advancing so their trigger can be reached.

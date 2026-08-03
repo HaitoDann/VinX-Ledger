@@ -102,9 +102,13 @@ pub const BLOCK_RETENTION_COUNT: u64 = 100_000;
 /// Pruning runs every N blocks to amortize the O(n) tx-index rebuild cost.
 pub const PRUNE_INTERVAL: u64 = 1_000;
 
-/// Heartbeat block interval when mempool is empty: 1 hour of real time.
-/// Guarantees liveness and keeps height-based timers advancing.
-pub const HEARTBEAT_INTERVAL_SECS: u64 = 3_600;
+/// Heartbeat block interval when the mempool is empty: at least one (possibly
+/// empty) block every 10 minutes of real time (ADR 0038). Kills the incentive to
+/// force blocks with junk self-transactions to capture accrued emission (it will
+/// be forged at the next heartbeat anyway), bounds the MTP protocol-clock lag,
+/// matures unbonds/upgrades on time, and keeps a permanent liveness signal —
+/// for ~15-30 MB/year of empty-block data.
+pub const HEARTBEAT_INTERVAL_SECS: u64 = 600;
 
 /// Batch window after the first transaction arrives before sealing a block.
 /// Allows concurrent submissions to be grouped into a single block.

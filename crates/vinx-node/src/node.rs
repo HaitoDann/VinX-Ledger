@@ -461,32 +461,29 @@ impl Node {
         let mut stalled = false;
 
         loop {
-            // Heartbeat only when something time-sensitive is pending (a scheduled
-            // upgrade). Otherwise we wait for a transaction — no empty blocks at rest.
-            let needs_heartbeat = self.state.read().await.has_pending_time_sensitive_ops();
-
             // Proceed straight to production when there's pending work and we aren't
             // stalled — the demand-scaled gap below paces us, and any leftover txs
-            // from a previous block keep draining. Otherwise wait for a signal
-            // (or the heartbeat timer).
+            // from a previous block keep draining. Otherwise wait for a signal or
+            // the unconditional heartbeat (ADR 0038): at least one block every
+            // HEARTBEAT_INTERVAL_SECS, even empty. Guaranteeing that the accrued
+            // emission is forged on schedule removes the incentive to force blocks
+            // with junk self-transactions, and keeps the MTP clock, unbond
+            // maturation and upgrade activation advancing at rest.
             let have_work = !stalled && self.mempool.read().await.size() > 0;
 
             let is_heartbeat_block = if have_work {
                 false
-            } else if needs_heartbeat {
+            } else {
                 tokio::select! {
                     _ = tx_ready.notified() => false,
                     _ = tokio::time::sleep(heartbeat) => true,
                 }
-            } else {
-                tx_ready.notified().await;
-                false
             };
             // Any fresh wake clears a prior stall — we retry the backlog.
             stalled = false;
 
             if is_heartbeat_block {
-                tracing::debug!("Heartbeat block — time-sensitive op pending");
+                tracing::debug!("Heartbeat block (ADR 0038)");
             } else {
                 // Demand-scaled pacing: the gap shrinks as the mempool fills — up to
                 // block_time under light load, down to zero (back-to-back) once a
