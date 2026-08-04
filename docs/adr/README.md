@@ -93,12 +93,17 @@ Rien ci-dessous n'est décidé — ce sont des propositions à instruire une par
   *Problème :* le whitepaper donne un poids `1` à stake/unstake, mais le code les **exempte** (fee ZERO). Incohérence + petit vecteur de spam.
   *Direction :* décider — soit facturer le forfait (aligne le whitepaper), soit assumer l'exemption et corriger le whitepaper. Traiter l'anti-spam.
 
-- **0021 — Immutabilité de la courbe d'émission** 🟠 **— ✅ implémenté** (règle immuable §9 + test constitutionnel épinglant halving/total/cap)
+- **0021 — Immutabilité de la courbe d'émission** 🟠 **— ✅ implémenté (halving) · amendé par 0040**
   *Problème :* le halving (8 ans) et le total sont des constantes ; leur statut (gouvernable ou gravé) n'est pas décidé.
-  *Direction :* graver l'émission comme **immuable** (argument de confiance : personne, pas même l'admin, ne change la politique monétaire). À acter explicitement.
+  *Direction :* graver l'émission comme **immuable** (argument de confiance : personne, pas même l'admin, ne change la politique monétaire). **Amendement (0040) :** l'objet immuable devient la **loi élastique `E = r·F`** (`r = 7 %`), plus le halving discret — on grave une *loi*, pas une *courbe*. Test constitutionnel à mettre à jour dans la tranche 0040.
 
-- **0040 — [Reprofilage de la courbe d'émission](./0040-reprofilage-courbe-emission.md)** 🟠 **— 🚧 brouillon de discussion**
-  *Problème :* (1) le whitepaper (exp continue à 8,66 Md/an) et le code (**halving discret plat par ère** à 6,25 Md/an + falaises) ne décrivent **pas la même courbe** ; (2) le front-loading (50 % en 8 ans) amorce les validateurs mais amplifie la concentration early (risque fair launch, 0033). *Fenêtre :* reprofiler n'est possible **qu'avant le mainnet** (0021 grave la courbe). *Direction (à trancher ensemble) :* axes forme/période/fraction/falaises/rampe de démarrage ; **méthode par simulation** avant de graver ; masse totale, plafond et invariant de masse **inchangés**. Aucun chiffre gravé — désaccord numérique ouvert.
+- **0040 — [Émission élastique à réservoir](./0040-emission-elastique-reservoir.md)** 🔴 **— Proposé** (constitutionnel, remplace le halving)
+  *Problème :* la courbe à halving (1) ne distribue qu'aux **validateurs** (le public n'a aucun moyen d'obtenir des jetons sans les leur acheter) et (2) est rigide/déconnectée de l'usage.
+  *Direction :* **débit `E = r · F`** — on émet une fraction `r` de la Fonderie restante ; le **melt** (VINX consommés) **recycle vers la Fonderie**. `dC/dt = r(MAX−C) − M` → **auto-régulation** vers `C* = MAX − M/r`, `E* = M` (l'émission égale l'usage). Circulation **hard-cappée ET élastique** ; **amorçage gratuit** (Fonderie pleine finance l'an 1 sans usage) ; **cas sans usage sûr** (dégénère en exponentielle). `r = 7 %/an` retenu (simulé, `scripts/emission_sim.py`). Alimente les reward pools des subnets (0039), réparti par l'usage (0041) ; les validateurs vivent des **frais**. **Amende 0021** (on grave une *loi*, plus une *courbe*).
+
+- **0041 — [Répartition de l'émission entre subnets par l'usage (melt)](./0041-repartition-emission-usage-melt.md)** 🔴 **— Proposé**
+  *Problème :* 0040 fixe **combien** on émet ; reste **vers quels subnets**, sans comité, sans tokens de subnet/AMM, sans scoring subjectif on-chain.
+  *Direction :* émission d'une fenêtre répartie **au prorata du VINX melté (usage réel)** par subnet, sous **plafond `CAP`** et **porte de bond** `MIN_SUBNET_BOND`. Le melt objective l'inter-subnet ; la distribution intra-subnet reste au `reward_root` + bond (0023). **Rejette le staking à la TAO** (spéculation/plutocratie). Sybil-résistant tant que melt réel ≫ émission (garde-fous à l'amorçage). Boucle fermée non-spéculative : *dépenser pour un service dirige l'émission vers ses fournisseurs.*
 
 - **0038 — [Bloc heartbeat périodique](./0038-bloc-heartbeat-periodique.md)** 🟠 **— ✅ implémenté**
   *Problème :* production à la demande + émission intégrée sur le temps + frais 100 % au producteur ⇒ le leader force un bloc **gratuitement** (self-tx) pour capturer l'accrual ; à l'équilibre, tous spamment → production continue de tx bidon (~2-3,5 Go/an) et prime jackpot au réveil ; MTP périmé au repos.

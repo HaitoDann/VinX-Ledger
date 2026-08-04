@@ -4,9 +4,10 @@
 - **Catégorie :** Modules (par-dessus l'ADR 0001) · **Priorité :** 🟠 moyenne
 - **Date :** Août 2026
 - **Lié :** généralise la primitive d'ancrage (ADR 0010) ; **prérequis durs** ADR 0034
-  (preuves d'inclusion) et ADR 0023 (adjudication de fraude) ; **ne touche pas** la courbe
-  d'émission (ADR 0021) ni l'invariant de masse (ADR 0004) ; réutilise Merkle (ADR 0014/0020) ;
-  synergie avec la sélection de comité par VRF (ADR 0029) ; anti-bloat cf. ADR 0026.
+  (preuves d'inclusion) et ADR 0023 (adjudication de fraude) ; **reward pool alimenté par**
+  l'émission élastique (ADR 0040) répartie par l'usage/melt (ADR 0041) ; préserve l'invariant de
+  masse (ADR 0004) ; réutilise Merkle (ADR 0014/0020) ; synergie avec la sélection de comité par
+  VRF (ADR 0029) ; anti-bloat cf. ADR 0026.
 
 ---
 
@@ -28,16 +29,19 @@ Aujourd'hui, un opérateur ne peut rémunérer ses participants qu'en leur envoy
 « à la main » — les participants doivent donc **lui faire confiance** pour payer honnêtement.
 C'est l'écart que cet ADR comble, **sans** que la L1 ne se mette à juger le travail.
 
-### Ce que cet ADR n'est PAS (doctrine, écartée explicitement)
+### Doctrine : ce que cet ADR fait et ne fait pas
 
-Cet ADR **rejette le modèle Bittensor** comme mécanisme de protocole :
+Cet ADR **rejette l'appareil spéculatif de Bittensor** mais **retient son insight** — distribuer
+les jetons neufs à ceux qui font le travail (les mineurs des subnets), via l'émission élastique
+(ADR 0040) répartie par l'usage réel (ADR 0041) :
 
-- **Pas d'émission dirigée vers les subnets.** L'émission reste immuable (0021) et coule aux
-  producteurs de blocs. Un « pool d'émission subnet » exigerait soit un comité qui choisit les
-  gagnants (tue la neutralité du fair launch), soit des tokens de subnet + AMM (tue « zéro
-  spéculation »). Les subnets de VinX vivent de **vrais clients payants**, pas d'une subvention.
-- **Pas de token par subnet, pas d'AMM, pas de scoring on-chain.** La L1 ne note jamais le
-  travail ; elle détient des VINX et les libère contre une preuve. Tout le reste est hors-chaîne.
+- **Émission dirigée vers les subnets : OUI — mais par l'usage réel (melt), jamais par un comité
+  ni par un marché de tokens.** Le reward pool d'un subnet a donc **deux sources** : les dépôts
+  clients (`Deposit`, §2.3) **et** l'émission protocolaire pondérée par le melt (ADR 0040/0041).
+- **Pas de token par subnet, pas d'AMM, pas de staking-pour-émission, pas de scoring on-chain.**
+  La L1 ne note jamais le *travail* ; elle mesure un flux **objectif** (le melt) et libère des
+  VINX contre une **preuve**. Tout jugement de la qualité du travail reste hors-chaîne
+  (`reward_root` + bond + ADR 0023).
 
 ## 2. Décision
 
@@ -97,6 +101,11 @@ enum ModuleOp {
   `amount_atoms` de son solde vers `escrow` du module. Débité du solde de l'émetteur + frais de
   base. **Circulation-neutre** : l'escrow fait partie de la circulation (il est dû aux
   participants), il change juste de détenteur. L'émetteur reste ≥ ED (ADR 0026).
+  - **Seconde source (émission).** Au règlement du bloc, l'escrow de chaque subnet est aussi
+    **crédité par l'émission** de la Fonderie (ADR 0040), répartie entre subnets au prorata du
+    melt (ADR 0041). Ce crédit est un flux `Fonderie → escrow` (l'escrow est de la circulation)
+    → l'invariant `circulation + Fonderie = MAX` (ADR 0004) tient. C'est la voie par laquelle les
+    jetons neufs atteignent les mineurs, sans passer par les validateurs.
 - **`SetRewardRoot`** — **opérateur uniquement**. Remplace `reward_root` par une nouvelle racine
   Merkle **cumulative** (feuille = `(adresse, total_gagné_à_vie_en_atomes)`). L'opérateur
   **engage son bond** sur l'honnêteté de cette racine (une racine frauduleuse est contestable →
@@ -204,9 +213,11 @@ plus évidente), à attaquer *après* avoir durci le chemin de fraude, car sa v�
 
 ## 8. Alternatives écartées
 
-- **Émission dirigée vers les subnets (modèle Bittensor / dTAO).** Rejeté : rouvre le fork
-  écarté, exige comité-choisit (tue la neutralité fair launch) ou tokens+AMM (tue « zéro
-  spéculation »), et se paie forcément sur l'émission des validateurs (0021/égalité). Doctrine.
+- **Émission dirigée vers les subnets par staking / tokens de subnet (dTAO).** Rejeté : comité
+  qui choisit (tue la neutralité) ou tokens+AMM+staking-pour-rendement (spéculation). **Retenu à
+  la place** (ADR 0040/0041) : émission élastique répartie par l'**usage réel (melt)** — objectif,
+  sans comité, sans token. On garde l'insight de Bittensor (distribuer aux travailleurs), pas son
+  appareil spéculatif.
 - **Paiement direct par l'opérateur, sans escrow (ancrage seul).** Rejeté : les participants
   doivent faire confiance à l'opérateur pour payer. L'escrow + `Claim` rend le paiement **sans
   confiance** pour un coût L1 minuscule — c'est tout l'intérêt.

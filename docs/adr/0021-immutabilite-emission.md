@@ -1,9 +1,17 @@
 # ADR 0021 — Immutabilité de la courbe d'émission
 
-- **Statut :** Proposé
+- **Statut :** ✅ Implémenté (halving) — **amendé par l'ADR 0040** : l'objet immuable devient la
+  loi élastique `E = r·F`, plus le halving discret. Porté en code dans la tranche 0040.
 - **Catégorie :** Cohérence · **Priorité :** 🟠 moyenne
-- **Date :** Juillet 2026
-- **Lié :** fair launch, whitepaper §3 & §9 (règles immuables).
+- **Date :** Juillet 2026 · **Amendé :** Août 2026 (ADR 0040)
+- **Lié :** fair launch, whitepaper §3 & §9 (règles immuables) ; **émission élastique (ADR 0040)**.
+
+> **Amendement (ADR 0040).** Ce que cet ADR grave comme immuable **n'est plus** la courbe à
+> halving discret (8 ans, total fixe), mais la **loi d'émission élastique à réservoir**
+> `E = r · F` avec `r = 7 %/an` (ADR 0040). Le principe est inchangé — *la politique monétaire
+> n'est pas gouvernable* — seul son *contenu* change : on grave une **loi** (débit ∝ Fonderie),
+> pas une **courbe** figée. Le reste de cet ADR (immutabilité, cap, pas de pre-mine) tient tel
+> quel ; lire « courbe d'émission » ci-dessous comme « loi d'émission `E = r·F` ».
 
 ## Contexte
 
