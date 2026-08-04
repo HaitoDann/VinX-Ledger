@@ -1,6 +1,7 @@
 # ADR 0027 — Fiabilité & jailing des validateurs
 
-- **Statut :** Proposé
+- **Statut :** ✅ Tranche 1 (cœur déterministe pur + tests : `vinx-core::reliability`) ;
+  **câblage état vivant + migration + règle co-signature différés** (tranche 2, banc multi-nœuds)
 - **Catégorie :** Consensus & finalité · **Priorité :** 🟠 moyenne
 - **Date :** Juillet 2026
 - **Liens :** complète la finalité (ADR 0002) et le slashing d'équivocation (ADR 0003) ;
