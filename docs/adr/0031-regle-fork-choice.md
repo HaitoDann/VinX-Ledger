@@ -1,6 +1,7 @@
 # ADR 0031 — Règle de fork-choice
 
-- **Statut :** Proposé
+- **Statut :** ✅ Tranche 1 implémentée (fonction pure `canonical_head` + tests) ; **wiring
+  reorg différé** (tranche 2, nécessite le stockage de candidats concurrents + banc multi-nœuds)
 - **Catégorie :** Consensus & finalité · **Priorité :** 🔴 haute (complétude de sûreté du
   consensus)
 - **Date :** Juillet 2026
@@ -97,6 +98,19 @@ plus de co-signatures, finalité plus haute). C'est la propriété clé.
   réseau) → divergence transitoire.
 - **Heaviest par bond des signataires** : écarté — pondérer par le stake contredit
   l'égalitarisme VinX (ADR 0028) ; le **nombre** de co-signatures est le signal, pas leur poids.
+
+## État d'implémentation
+
+- **Tranche 1 (✅ faite)** — `consensus::canonical_head(candidates, validator_set)` : fonction
+  **pure et totale** appliquant les règles 3 (poids de co-signatures) → 4 (leader prévu) → 5
+  (plus petit hash). Ordre total ⇒ élection **indépendante de l'ordre d'itération** (testé).
+  6 tests unitaires (leader vs backup à poids égal, poids > priorité leader, départage par hash,
+  cas simple/vide, déterminisme d'ordre).
+- **Tranche 2 (différée)** — **wiring dans le chemin d'acceptation** : stocker les candidats
+  concurrents à une hauteur contestée (aujourd'hui `chain.blocks` = 1 bloc/hauteur), appeler
+  `canonical_head` à chaque bloc/co-signature concurrent(e), appliquer la réorg bornée au
+  plancher `finalized_height`. Consensus-critique → à éprouver au **banc multi-nœuds** (leader+
+  backup simultanés, partitions, réordonnancements). Les règles 1–2 (finalité) s'y ancrent.
 
 ## Notes d'implémentation
 

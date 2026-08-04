@@ -57,6 +57,57 @@ pub fn sign_block(
     Ok(())
 }
 
+/// Fork-choice déterministe (ADR 0031) — élit le bloc **canonique** parmi des candidats
+/// valides **concurrents à la même hauteur contestée**, tous supposés étendre le préfixe
+/// finalisé.
+///
+/// Fonction **pure et totale** : deux nœuds avec la même vue élisent la même tête, sans
+/// dépendre de l'ordre d'arrivée réseau ni d'une horloge locale. Ordre de priorité :
+///
+/// 3. **Poids de co-signatures** — le bloc portant le plus de co-signatures valides gagne
+///    (le plus proche du quorum, le plus soutenu par le set).
+/// 4. **Priorité au leader prévu** — à poids égal, le bloc du leader round-robin
+///    (`leader_at(H)`) l'emporte sur celui d'un backup (cohérent avec le slot-skip, ADR 0027).
+/// 5. **Départage stable** — en dernier recours, le plus petit hash d'en-tête (ordre total).
+///
+/// Les règles 1–2 de l'ADR 0031 (ne jamais contredire la finalité ; préférer la finalité
+/// justifiée la plus haute) sont des propriétés de **branche**, garanties par l'appelant :
+/// tous les candidats doivent étendre `finalized_height` (réorg sous la finalité interdite).
+pub fn canonical_head<'a>(
+    candidates: &'a [Block],
+    validator_set: &ValidatorSet,
+) -> Option<&'a Block> {
+    candidates
+        .iter()
+        .reduce(|acc, b| more_canonical(acc, b, validator_set))
+}
+
+/// Vrai si `block` est proposé par le leader round-robin prévu pour sa hauteur.
+fn is_scheduled_leader(block: &Block, validator_set: &ValidatorSet) -> bool {
+    block.header.validator == *validator_set.leader_at(block.header.height)
+}
+
+/// Renvoie le plus canonique de deux candidats (règles 3 → 4 → 5 de l'ADR 0031).
+/// L'ordre induit est **total** → `reduce` est indépendant de l'ordre d'itération.
+fn more_canonical<'a>(a: &'a Block, b: &'a Block, vs: &ValidatorSet) -> &'a Block {
+    // 3. Poids de co-signatures (plus = mieux).
+    let (ca, cb) = (a.valid_signer_count(vs), b.valid_signer_count(vs));
+    if ca != cb {
+        return if ca > cb { a } else { b };
+    }
+    // 4. Priorité au leader prévu.
+    let (la, lb) = (is_scheduled_leader(a, vs), is_scheduled_leader(b, vs));
+    if la != lb {
+        return if la { a } else { b };
+    }
+    // 5. Départage déterministe : plus petit hash d'en-tête.
+    if a.hash() <= b.hash() {
+        a
+    } else {
+        b
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -220,5 +271,105 @@ mod tests {
             sign_block(&mut block, v, &vs).unwrap();
         }
         assert!(validate_block(&block, &vs).is_ok());
+    }
+
+    // ─── Fork-choice (ADR 0031) ───────────────────────────────────────────────
+
+    /// Construit un bloc à `height` proposé par `proposer`, co-signé par `signers`.
+    fn contested_block(
+        height: u64,
+        proposer: Address,
+        signers: &[&KeyPair],
+        vs: &ValidatorSet,
+    ) -> Block {
+        let mut b = make_block(height, proposer);
+        for kp in signers {
+            sign_block(&mut b, kp, vs).unwrap();
+        }
+        b
+    }
+
+    #[test]
+    fn test_fork_choice_leader_beats_backup_at_equal_weight() {
+        let v = kps(3);
+        let a: Vec<Address> = v.iter().map(addr_of).collect();
+        let vs = ValidatorSet::new(a.clone());
+        // height 1 → leader = a[1]. Backup = a[2]. Chacun 2 co-sigs (poids égal).
+        let leader = contested_block(1, a[1].clone(), &[&v[0], &v[1]], &vs);
+        let backup = contested_block(1, a[2].clone(), &[&v[0], &v[2]], &vs);
+
+        let cands = vec![backup, leader];
+        let head = canonical_head(&cands, &vs).unwrap();
+        assert_eq!(
+            head.header.validator, a[1],
+            "règle 4 : le leader prévu l'emporte"
+        );
+    }
+
+    #[test]
+    fn test_fork_choice_more_cosignatures_beats_leader_priority() {
+        let v = kps(3);
+        let a: Vec<Address> = v.iter().map(addr_of).collect();
+        let vs = ValidatorSet::new(a.clone());
+        // Leader (a[1]) avec 1 co-sig vs backup (a[2]) avec 2 co-sigs → le poids prime (règle 3).
+        let leader = contested_block(1, a[1].clone(), &[&v[1]], &vs);
+        let backup = contested_block(1, a[2].clone(), &[&v[0], &v[2]], &vs);
+
+        let cands = vec![leader, backup];
+        let head = canonical_head(&cands, &vs).unwrap();
+        assert_eq!(
+            head.header.validator, a[2],
+            "règle 3 > règle 4 : plus de co-signatures gagne"
+        );
+    }
+
+    #[test]
+    fn test_fork_choice_hash_tiebreak_between_non_leaders() {
+        let v = kps(3);
+        let a: Vec<Address> = v.iter().map(addr_of).collect();
+        let vs = ValidatorSet::new(a.clone());
+        // height 1 → leader = a[1]. Deux non-leaders (a[0], a[2]), poids égal → départage par hash.
+        let x = contested_block(1, a[0].clone(), &[&v[0], &v[1]], &vs);
+        let y = contested_block(1, a[2].clone(), &[&v[0], &v[2]], &vs);
+        let expected = if x.hash() <= y.hash() {
+            x.hash()
+        } else {
+            y.hash()
+        };
+
+        let cands = vec![x, y];
+        let head = canonical_head(&cands, &vs).unwrap();
+        assert_eq!(head.hash(), expected, "règle 5 : plus petit hash d'en-tête");
+    }
+
+    #[test]
+    fn test_fork_choice_single_and_empty() {
+        let v = kps(3);
+        let a: Vec<Address> = v.iter().map(addr_of).collect();
+        let vs = ValidatorSet::new(a.clone());
+        let only = contested_block(1, a[1].clone(), &[&v[0], &v[1]], &vs);
+        let only_hash = only.hash();
+
+        let one = vec![only];
+        assert_eq!(canonical_head(&one, &vs).unwrap().hash(), only_hash);
+        let none: Vec<Block> = vec![];
+        assert!(canonical_head(&none, &vs).is_none());
+    }
+
+    #[test]
+    fn test_fork_choice_is_order_independent() {
+        let v = kps(3);
+        let a: Vec<Address> = v.iter().map(addr_of).collect();
+        let vs = ValidatorSet::new(a.clone());
+        let leader = contested_block(1, a[1].clone(), &[&v[0], &v[1]], &vs);
+        let backup = contested_block(1, a[2].clone(), &[&v[0], &v[2]], &vs);
+
+        let fwd = vec![leader.clone(), backup.clone()];
+        let rev = vec![backup, leader];
+        assert_eq!(
+            canonical_head(&fwd, &vs).unwrap().hash(),
+            canonical_head(&rev, &vs).unwrap().hash(),
+            "l'élection est indépendante de l'ordre d'itération (ordre total)"
+        );
     }
 }
