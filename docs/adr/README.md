@@ -27,8 +27,8 @@ Rien ci-dessous n'est décidé — ce sont des propositions à instruire une par
 
 - **0002 — Finalité au quorum** 🔴 **— ✅ tranche 1 implémentée**
   *Problème :* le producteur commite le bloc avec sa **seule** signature ; le quorum n'est vérifié qu'*a posteriori*.
-  *Fait :* pointeur `finalized_height` explicite et **prefix-closed** (avance sur le préfixe contigu de blocs quorum-signés), mis à jour à la production et à chaque co-signature, exposé sur `/health`, avec `is_final(height)`. À n=1 la finalité est immédiate ; à n≥2 elle suit les co-signatures.
-  *Reste (nécessite le banc 3-validateurs) :* refuser de bâtir au-delà d'une profondeur non finalisée, view-change formel, latence de finalité = 1 aller-retour.
+  *Fait :* pointeur `finalized_height` explicite et **prefix-closed** (avance sur le préfixe contigu de blocs quorum-signés), mis à jour à la production et à chaque co-signature, exposé sur `/health`, avec `is_final(height)`. À n=1 la finalité est immédiate ; à n≥2 elle suit les co-signatures. **+ Refus de bâtir dans le vide** : le producteur (leader **et** backup) refuse de sceller au-delà de `MAX_UNFINALIZED_DEPTH` (64) blocs non finalisés au-dessus de la finalité → borne les forks concurrents et la fenêtre du fork-choice (0031). À n=1 jamais déclenché ; mord seulement si la finalité est réellement bloquée. Testé.
+  *Reste (nécessite le banc 3-validateurs) :* view-change formel, latence de finalité = 1 aller-retour.
 
 - **0027 — [Fiabilité & jailing des validateurs](./0027-fiabilite-jailing-validateurs.md)** 🟠 **— Proposé**
   *Problème :* aucun mécanisme pour écarter un validateur lent/hors-ligne (distinct du slashing d'équivocation) ; un leader mort dégrade la liveness à chaque tour.

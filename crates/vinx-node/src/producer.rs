@@ -4,9 +4,31 @@ use crate::{
     mempool::{is_future_nonce, Mempool},
     NodeError,
 };
-use vinx_core::{amount::Amount, Block, BlockHeader, BlockSignature, Transaction, ValidatorSet};
+use vinx_core::{
+    amount::{Amount, MAX_UNFINALIZED_DEPTH},
+    Block, BlockHeader, BlockSignature, Transaction, ValidatorSet,
+};
 use vinx_crypto::sha256;
 use vinx_state::WorldState;
+
+/// ADR 0002 — **refus de bâtir dans le vide.** Empêche un producteur d'empiler un bloc dont
+/// la hauteur dépasse la finalité de plus de [`MAX_UNFINALIZED_DEPTH`]. Quand la finalité est
+/// bloquée (quorum inatteignable), la production s'arrête au lieu d'allonger indéfiniment une
+/// branche non finalisée — ce qui borne les forks concurrents et la fenêtre du fork-choice
+/// (ADR 0031). À n=1 la finalité est immédiate → cette garde ne se déclenche jamais.
+fn enforce_finality_depth(chain: &Chain) -> Result<(), NodeError> {
+    let next_height = chain.tip_height() + 1;
+    let finalized = chain.finalized_height();
+    let depth = next_height.saturating_sub(finalized);
+    if depth > MAX_UNFINALIZED_DEPTH {
+        return Err(NodeError::Consensus(format!(
+            "refus de bâtir dans le vide : profondeur non finalisée {depth} > \
+             {MAX_UNFINALIZED_DEPTH} (finalité bloquée à {finalized}, tip {})",
+            chain.tip_height()
+        )));
+    }
+    Ok(())
+}
 
 /// Produces the next block: applies mempool transactions, rewards the producer
 /// (collected fees + work emission), commits to the chain, and updates the world state.
@@ -21,6 +43,9 @@ pub fn produce_block(
     validator_set: &ValidatorSet,
     timestamp: u64,
 ) -> Result<Block, NodeError> {
+    // ADR 0002 — ne pas bâtir au-delà de la profondeur non finalisée autorisée.
+    enforce_finality_depth(chain)?;
+
     let next_height = chain.tip_height() + 1;
     let prev_hash = chain.tip_hash();
 
@@ -174,6 +199,8 @@ pub fn produce_block_backup(
             "backup producer is not a registered validator".into(),
         ));
     }
+    // ADR 0002 — même garde de profondeur non finalisée pour le chemin backup.
+    enforce_finality_depth(chain)?;
     produce_block_inner(state, chain, mempool, config, validator_set, timestamp)
 }
 
@@ -364,6 +391,54 @@ mod tests {
         }
         assert_eq!(chain.tip_height(), 5);
         assert_eq!(state.block_height, 5);
+    }
+
+    #[test]
+    fn test_refuses_to_build_into_the_void_past_finality_depth() {
+        // ADR 0002 : on ne fait JAMAIS avancer la finalité (comme si le quorum était
+        // inatteignable) → `finalized` reste à 0 pendant que le tip grimpe.
+        let max = vinx_core::amount::MAX_UNFINALIZED_DEPTH;
+        let (mut state, mut chain, mut mempool, config) = setup();
+
+        // Autorisé jusqu'à la profondeur max : hauteurs 1..=max (depth atteint = max).
+        for h in 1..=max {
+            let b = produce_block(
+                &mut state,
+                &mut chain,
+                &mut mempool,
+                &config,
+                &config.validator_set,
+                h * 10,
+            )
+            .expect("production autorisée sous la profondeur max");
+            assert_eq!(b.header.height, h);
+        }
+        assert_eq!(chain.tip_height(), max);
+        assert_eq!(
+            chain.finalized_height(),
+            0,
+            "finalité volontairement bloquée"
+        );
+
+        // Le bloc suivant dépasserait la profondeur non finalisée → refus.
+        let err = produce_block(
+            &mut state,
+            &mut chain,
+            &mut mempool,
+            &config,
+            &config.validator_set,
+            1_000_000,
+        )
+        .unwrap_err();
+        assert!(
+            format!("{err:?}").contains("vide"),
+            "attendu un refus de bâtir dans le vide, obtenu : {err:?}"
+        );
+        assert_eq!(
+            chain.tip_height(),
+            max,
+            "aucun bloc supplémentaire n'a été produit"
+        );
     }
 
     #[test]

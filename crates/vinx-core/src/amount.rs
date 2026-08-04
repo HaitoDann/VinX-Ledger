@@ -108,6 +108,15 @@ pub const PRUNE_INTERVAL: u64 = 1_000;
 /// per-address mempool cap, so it never rejects a legitimately queued burst.
 pub const MAX_NONCE_AHEAD: u64 = 64;
 
+/// ADR 0002 — profondeur maximale de blocs **non finalisés** qu'un producteur empile
+/// au-dessus de `finalized_height`. Au-delà, la production **s'arrête** (« refus de bâtir
+/// dans le vide ») : borne la longueur des forks concurrents et la fenêtre où opère le
+/// fork-choice (ADR 0031). À n=1 la finalité est immédiate (chaque bloc finalise) → jamais
+/// atteint ; ne se déclenche que si la finalité est **réellement bloquée** (quorum
+/// inatteignable, p. ex. trop de validateurs hors-ligne). Généreux pour absorber des
+/// retards transitoires de co-signatures sans stopper une chaîne saine.
+pub const MAX_UNFINALIZED_DEPTH: u64 = 64;
+
 /// Heartbeat block interval when the mempool is empty: at least one (possibly
 /// empty) block every 10 minutes of real time (ADR 0038). Kills the incentive to
 /// force blocks with junk self-transactions to capture accrued emission (it will
