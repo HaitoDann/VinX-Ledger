@@ -97,6 +97,9 @@ Rien ci-dessous n'est décidé — ce sont des propositions à instruire une par
   *Problème :* le halving (8 ans) et le total sont des constantes ; leur statut (gouvernable ou gravé) n'est pas décidé.
   *Direction :* graver l'émission comme **immuable** (argument de confiance : personne, pas même l'admin, ne change la politique monétaire). À acter explicitement.
 
+- **0040 — [Reprofilage de la courbe d'émission](./0040-reprofilage-courbe-emission.md)** 🟠 **— 🚧 brouillon de discussion**
+  *Problème :* (1) le whitepaper (exp continue à 8,66 Md/an) et le code (**halving discret plat par ère** à 6,25 Md/an + falaises) ne décrivent **pas la même courbe** ; (2) le front-loading (50 % en 8 ans) amorce les validateurs mais amplifie la concentration early (risque fair launch, 0033). *Fenêtre :* reprofiler n'est possible **qu'avant le mainnet** (0021 grave la courbe). *Direction (à trancher ensemble) :* axes forme/période/fraction/falaises/rampe de démarrage ; **méthode par simulation** avant de graver ; masse totale, plafond et invariant de masse **inchangés**. Aucun chiffre gravé — désaccord numérique ouvert.
+
 - **0038 — [Bloc heartbeat périodique](./0038-bloc-heartbeat-periodique.md)** 🟠 **— ✅ implémenté**
   *Problème :* production à la demande + émission intégrée sur le temps + frais 100 % au producteur ⇒ le leader force un bloc **gratuitement** (self-tx) pour capturer l'accrual ; à l'équilibre, tous spamment → production continue de tx bidon (~2-3,5 Go/an) et prime jackpot au réveil ; MTP périmé au repos.
   *Fait :* **au moins un bloc toutes les 10 min** (`HEARTBEAT_INTERVAL_SECS = 600`), même vide (~15-30 Mo/an) ; cadence à la demande conservée sous charge. L'accrual est forgé à heure fixe par le leader round-robin → l'incitation au spam disparaît, la distribution est lissée (complété par 0028). Pas de plafond d'accrual (courbe 0021 intacte — doctrine actée dans l'ADR).
@@ -161,6 +164,10 @@ Rien ci-dessous n'est décidé — ce sont des propositions à instruire une par
 
 - **0023 — Adjudication du slashing de module** 🟢
   *Direction :* comment une fraude d'opérateur de module est prouvée et sanctionnée (bond → réputation → preuves de fraude → zk), sans jamais exécuter la logique du module sur la L1. **Dépend d'ADR 0034** (DA + preuve pour qu'une fraude soit prouvable).
+
+- **0039 — [Infrastructure de subnets : escrow bondé + racine de récompense](./0039-infrastructure-subnets-escrow-recompense.md)** 🟠 **— Proposé**
+  *Problème :* un module 0010 est **mono-opérateur** (il ancre un nombre) ; pour héberger un vrai subnet — plusieurs participants qui font un travail et **gagnent des VINX** — il manque le paiement **sans confiance** de participants multiples, jugé hors-chaîne.
+  *Direction :* un subnet = module bondé + **escrow VINX** + **racine de récompense cumulative** + **réclamation par preuve Merkle** (`Deposit`/`SetRewardRoot`/`Claim`, appendés à `ModuleOp`). La L1 ne juge jamais le travail ; dommage max borné par l'escrow ; aucune émission détournée (rejette le modèle Bittensor). Premier subnet de démo : **balise d'aléa VRF** (honnête par construction, synergie 0029). **Prérequis :** 0034 (preuves), 0023 (fraude), banc n≥3.
 
 ### Robustesse & exploitation
 
