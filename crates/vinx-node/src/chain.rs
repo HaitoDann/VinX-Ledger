@@ -306,6 +306,54 @@ impl Chain {
         ts[ts.len() / 2]
     }
 
+    /// MTP (ADR 0005) **indexé par hauteur** : médiane des timestamps des blocs
+    /// `[height-(MEDIAN_TIME_BLOCKS-1) .. height)` plus `next_ts`. Contrairement à
+    /// `median_time_past_with` (fenêtre au tip courant), cette variante calcule l'horloge
+    /// protocole telle qu'elle était **pour le bloc de hauteur `height`** — nécessaire pour
+    /// **rejouer** un bloc en milieu de chaîne lors d'une réorg (fork-choice, ADR 0031).
+    /// Cohérente avec `median_time_past_with` quand `height == tip+1` (production au tip).
+    pub fn median_time_past_ending_at(&self, height: u64, next_ts: u64) -> u64 {
+        let end = (height as usize).min(self.blocks.len());
+        let start = end.saturating_sub(vinx_core::amount::MEDIAN_TIME_BLOCKS - 1);
+        let mut ts: Vec<u64> = self.blocks[start..end]
+            .iter()
+            .map(|(_, b)| b.header.timestamp)
+            .collect();
+        ts.push(next_ts);
+        ts.sort_unstable();
+        ts[ts.len() / 2]
+    }
+
+    /// ADR 0031 — **réorganisation** : remplace le bloc retenu à `height` par `new_block` (élu
+    /// canonique) et **tronque** tout bloc au-dessus (ils bâtissaient sur la branche perdante).
+    /// Invariants garantis par l'appelant : `finalized_height < height <= tip` (réorg interdite
+    /// sous la finalité) et `new_block.header.height == height`. Reconstruit les index de tx et
+    /// purge les candidats de la hauteur (le choix est fait). Retourne les hachages des blocs
+    /// retirés (bloc remplacé + blocs tronqués) pour nettoyage éventuel par l'appelant.
+    pub fn reorg_replace(&mut self, height: u64, new_block: Block) -> Vec<Hash32> {
+        debug_assert!(
+            height > self.finalized_height,
+            "réorg sous la finalité interdite (ADR 0031)"
+        );
+        debug_assert_eq!(
+            new_block.header.height, height,
+            "hauteur du bloc incohérente"
+        );
+        let h = height as usize;
+        // Retire le bloc contesté et tout ce qui le surplombe (branche perdante).
+        let removed: Vec<Hash32> = self.blocks.drain(h..).map(|(hash, _)| hash).collect();
+        // Installe le bloc canonique à `height` (redevient le tip).
+        self.blocks.push((new_block.hash(), new_block));
+        // Les candidats à cette hauteur n'ont plus de raison d'être.
+        self.candidates.remove(&height);
+        // Index de tx : reconstruction complète (réorg rare → coût acceptable, cohérence sûre).
+        self.rebuild_tx_index();
+        // La persistance devra réécrire depuis `height` (et effacer les rangs tronqués) : le
+        // caller déclenche une sauvegarde complète après une réorg.
+        self.dirty_heights.insert(height);
+        removed
+    }
+
     pub fn get_block(&self, height: u64) -> Option<&Block> {
         self.blocks.get(height as usize).map(|(_, b)| b)
     }
@@ -718,6 +766,47 @@ mod tests {
             "à poids égal, le leader prévu l'emporte sur le backup (règle 4)"
         );
         assert!(chain.would_reorg_at(1, &vs));
+    }
+
+    #[test]
+    fn test_reorg_replace_truncates_above_and_swaps() {
+        let (kps, addrs, vs) = three_validators();
+        let (mut chain, _) = Chain::new_with_genesis(addrs[0], 0);
+        let g = chain.tip_hash();
+
+        // Chaîne linéaire h=1,2,3 (branche perdante).
+        let b1 = signed_block(1, g, *vs.leader_at(1), &[&kps[0]]);
+        let h1 = b1.hash();
+        chain.push(b1);
+        let b2 = signed_block(2, h1, *vs.leader_at(2), &[&kps[0]]);
+        let h2 = b2.hash();
+        chain.push(b2);
+        let b3 = signed_block(3, h2, *vs.leader_at(3), &[&kps[0]]);
+        chain.push(b3);
+        assert_eq!(chain.tip_height(), 3);
+
+        // Réorg à h=2 : remplace le bloc 2 par un concurrent → tronque le bloc 3.
+        let other = addrs
+            .iter()
+            .copied()
+            .find(|x| *x != *vs.leader_at(2))
+            .unwrap();
+        let b2_alt = signed_block(2, h1, other, &[&kps[0], &kps[1]]);
+        let alt_hash = b2_alt.hash();
+        let removed = chain.reorg_replace(2, b2_alt);
+
+        assert_eq!(
+            chain.tip_height(),
+            2,
+            "le bloc 3 (branche perdante) est tronqué"
+        );
+        assert_eq!(
+            chain.block_row(2).map(|(h, _)| *h),
+            Some(alt_hash),
+            "le bloc 2 est remplacé par le concurrent"
+        );
+        assert_eq!(removed.len(), 2, "bloc 2 remplacé + bloc 3 tronqué");
+        assert!(removed.contains(&h2));
     }
 
     #[test]

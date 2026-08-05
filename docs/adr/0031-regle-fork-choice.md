@@ -1,9 +1,10 @@
 # ADR 0031 — Règle de fork-choice
 
 - **Statut :** ✅ Tranche 1 (fonction pure `canonical_head` + tests) · ✅ Tranche 2a
-  (**fondation** : stockage de candidats concurrents dans `Chain` + choix canonique déterministe
-  + purge sous la finalité, unit-testé — **observation seulement, aucune réorg**) ; **wiring
-  réorg vivant différé** (tranche 2b, nécessite la reconstruction d'état + banc multi-nœuds)
+  (**fondation** : candidats concurrents + choix canonique + purge sous finalité, unit-testé) ·
+  ✅ Tranche 2b **mécanisme** (module `reorg` : reconstruction d'état par snapshot+rejeu,
+  `reorg_replace`, MTP par hauteur — unit-testé, dont test d'identité) ; **reste : le déclenchement
+  depuis le chemin d'acceptation vivant + maintenance du snapshot finalisé, à éprouver au banc n=3**
 - **Catégorie :** Consensus & finalité · **Priorité :** 🔴 haute (complétude de sûreté du
   consensus)
 - **Date :** Juillet 2026
@@ -115,12 +116,25 @@ plus de co-signatures, finalité plus haute). C'est la propriété clé.
   `would_reorg_at(height)` (décision pure : un concurrent gagnerait-il ?), et **purge** des
   candidats sous `finalized_height` à chaque `advance_finality`. **Aucun changement de
   comportement** — le store n'est pas encore alimenté par le chemin d'acceptation. 4 tests.
-- **Tranche 2b (différée)** — **wiring dans le chemin d'acceptation vivant** : alimenter
-  `record_candidate` depuis le gossip/sync (bloc concurrent valide à une hauteur non finalisée),
-  puis, quand `would_reorg_at` est vrai, **réorganiser** — reconstruire l'état à la hauteur
-  contestée (replay depuis un point sûr / snapshot) et ré-appliquer la branche canonique, borné
-  au plancher `finalized_height`. Consensus-critique → à éprouver au **banc multi-nœuds** (leader+
-  backup simultanés, partitions, réordonnancements). Les règles 1–2 (finalité) s'y ancrent.
+- **Tranche 2b — mécanisme (✅ fait)** — module `reorg` (**option A** : snapshot au point
+  finalisé + rejeu) : `rebuild_canonical_state(finalized_state, finalized_height, chain,
+  contested_height, canonical_block)` clone l'état finalisé, rejoue les blocs **partagés**
+  finalisé+1..contesté-1, applique le bloc canonique, et **re-vérifie supply + state_root à
+  chaque bloc** (refus si la branche reconstruite ≠ producteur → sûreté). `Chain::reorg_replace`
+  tronque la branche perdante et installe le bloc élu ; `Chain::median_time_past_ending_at`
+  fournit l'horloge protocole **indexée par hauteur** (nécessaire au rejeu en milieu de chaîne).
+  Testé, dont un **test d'identité** (rejouer la branche existante reproduit exactement l'état du
+  tip) et le refus d'un `state_root` falsifié / d'une réorg sous la finalité. **Non encore
+  déclenché par le chemin vivant.**
+- **Tranche 2b — wiring vivant (reste)** : alimenter `record_candidate` depuis le gossip/sync
+  (bloc concurrent valide à une hauteur non finalisée), **maintenir le snapshot finalisé**
+  (rejeu incrémental des blocs à mesure qu'ils finalisent), et quand `would_reorg_at` est vrai
+  appeler `rebuild_canonical_state` puis `reorg_replace` + installer l'état + persistance
+  (réécriture complète après réorg). Consensus-critique → à éprouver au **banc multi-nœuds**
+  (leader+backup simultanés, partitions, réordonnancements).
+- **Optimisation future (option B)** — journal d'annulation (undo log) par bloc pour éviter la
+  copie O(comptes) du snapshot sur gros état ; non nécessaire pré-mainnet (réorg rare et peu
+  profonde). Documentée ici comme chemin de mise à l'échelle.
 
 ## Notes d'implémentation
 
