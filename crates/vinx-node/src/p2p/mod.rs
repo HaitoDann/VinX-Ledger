@@ -835,7 +835,17 @@ async fn dispatch_message(
                     ok
                 };
                 if ok {
-                    chain.write().await.push(block);
+                    // ADR 0002 — observabilité de la finalité : les blocs servis par sync
+                    // portent déjà les co-signatures accumulées par le producteur, mais le
+                    // pointeur de finalité LOCAL ne bouge que si on le fait avancer. Sans ça,
+                    // un nœud qui rattrape par sync voit `finalized_height` figé (révélé par le
+                    // banc n=3 : hauteur qui monte, finalité à 0). Prefix-closed → ne finalise
+                    // que les blocs ayant réellement le quorum.
+                    let vs = validator_set.read().await.clone();
+                    let mut c = chain.write().await;
+                    c.push(block);
+                    c.advance_finality(&vs);
+                    drop(c);
                     info!(height, "Block applied via P2P sync");
                 } else {
                     break;

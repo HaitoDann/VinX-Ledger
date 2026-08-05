@@ -185,6 +185,11 @@ pub async fn sync_from_peer(
             applied += 1;
         }
 
+        // ADR 0002 — faire suivre le pointeur de finalité local : les blocs synchronisés
+        // portent déjà les co-signatures du pair ; sans cet appel, `finalized_height` reste
+        // figé après un rattrapage par sync (prefix-closed → seuls les blocs à quorum comptent).
+        chain.advance_finality(&state.validator_set);
+
         tracing::info!(applied, tip = chain.tip_height(), "Sync batch applied");
 
         if sync.count < batch {
