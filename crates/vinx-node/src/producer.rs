@@ -129,7 +129,7 @@ pub fn produce_block(
 
     // Reward the producer for its work: collected fees + work emission forged from the
     // Foundry. Also matures any unbonds due — both on the MTP protocol clock (ADR 0005).
-    let (fees, emission) = state.settle_block(&config.validator_address, protocol_ts);
+    let (fees, emission) = state.settle_block(&config.validator_address, next_height, protocol_ts);
     if fees > Amount::ZERO || emission > Amount::ZERO {
         tracing::debug!(fees = %fees, emission = %emission, height = next_height, "Producer rewarded");
     }
@@ -260,7 +260,7 @@ fn produce_block_inner(
     state.block_height = next_height;
     state.check_upgrade_activation();
 
-    let (fees, emission) = state.settle_block(&config.validator_address, protocol_ts);
+    let (fees, emission) = state.settle_block(&config.validator_address, next_height, protocol_ts);
     if !state.supply_invariant_holds() {
         return Err(NodeError::Consensus(format!(
             "supply invariant violated producing block {next_height} (backup) — block not sealed"

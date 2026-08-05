@@ -160,7 +160,7 @@ pub async fn sync_from_peer(
             }
             state.block_height = block.header.height;
             state.check_upgrade_activation();
-            let _ = state.settle_block(&block.header.validator, protocol_ts);
+            let _ = state.settle_block(&block.header.validator, block.header.height, protocol_ts);
             if !state.supply_invariant_holds() {
                 tracing::error!(
                     height = block.header.height,

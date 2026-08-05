@@ -33,7 +33,7 @@ use zstd;
 ///      since the last flush are written (new block, co-signature, prune), ending
 ///      the O(chain length) rewrite of a single monolithic chain blob per block.
 ///      The "chain" blob is replaced by a tiny "chain_meta" entry (finalized height).
-const STORAGE_VERSION: u64 = 10;
+const STORAGE_VERSION: u64 = 11;
 
 /// zstd compression level — level 3 is the sweet spot: ~60-70% size reduction,
 /// negligible latency compared to disk I/O.
@@ -172,6 +172,10 @@ impl Storage {
                 // the BLOCKS table plus a tiny "chain_meta" entry. Decode the old blob
                 // once, write each block as its own compressed row, drop the blob.
                 9 => Self::migrate_v9_chain_blob(tx)?,
+                // v10 → v11 (ADR 0027): the WorldState meta gained the `reliability` table,
+                // appended last — same prefix property, migrated by appending its empty-map
+                // encoding. Accounts and chain untouched.
+                10 => Self::append_meta_suffix(tx, &vinx_state::v11_meta_suffix())?,
                 unknown => {
                     return Err(Self::io_err(format!(
                         "no automatic migration from schema v{unknown} to v{STORAGE_VERSION}. \
@@ -638,9 +642,9 @@ mod tests {
         s.get(key).unwrap().is_some()
     }
 
-    /// Strips the appended v8 (governance) and v9 (module registry) suffixes from the
-    /// persisted meta blob, turning a current-format meta back into its v7 prefix so the
-    /// append migrations can be exercised on data that genuinely predates ADR 0010/0011.
+    /// Strips the appended v8 (governance), v9 (module registry) and v11 (reliability)
+    /// suffixes from the persisted meta blob, turning a current-format meta back into its v7
+    /// prefix so the append migrations can be exercised on data that predates ADR 0010/0011/0027.
     fn downgrade_meta_to_v7(dir: &Path) {
         let db = Database::create(dir.join("vinx.redb")).unwrap();
         let tx = db.begin_write().unwrap();
@@ -648,8 +652,9 @@ mod tests {
             let mut s = tx.open_table(STATE).unwrap();
             let compressed = s.get("world_state_meta").unwrap().unwrap().value().to_vec();
             let mut meta = zstd::decode_all(&compressed[..]).unwrap();
-            let suffix_len =
-                vinx_state::v8_meta_suffix().len() + vinx_state::v9_meta_suffix().len();
+            let suffix_len = vinx_state::v8_meta_suffix().len()
+                + vinx_state::v9_meta_suffix().len()
+                + vinx_state::v11_meta_suffix().len();
             meta.truncate(meta.len() - suffix_len);
             let recompressed = zstd::encode_all(&meta[..], ZSTD_LEVEL).unwrap();
             s.insert("world_state_meta", recompressed.as_slice())
@@ -765,6 +770,10 @@ mod tests {
         assert!(loaded_state.admin_policy.is_none());
         assert!(loaded_state.pending_governance.is_empty());
         assert!(loaded_state.modules.is_empty());
+        assert!(
+            loaded_state.reliability.is_empty(),
+            "ADR 0027 reliability loads empty (v11)"
+        );
         assert_eq!(loaded_chain.tip_height(), 1, "chain must survive migration");
         assert!(
             loaded_chain.get_tx_by_hash(&tx_hash).is_some(),

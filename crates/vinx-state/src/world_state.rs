@@ -12,6 +12,7 @@ use vinx_core::{
     governance::GovernanceAction,
     module::ModuleOp,
     protocol::{ProtocolVersion, ScheduledUpgrade},
+    reliability::{self, ReliabilityMap},
     Account, CoreError, Transaction, TransactionType, ValidatorSet,
 };
 use vinx_crypto::{sha256, Address, Hash32, IncrementalMerkleTree};
@@ -117,6 +118,12 @@ pub struct WorldState {
     /// (empty map). `serde(default)` for pre-0010 state.
     #[serde(default)]
     pub modules: BTreeMap<Hash32, ModuleEntry>,
+    /// Fiabilité des validateurs (ADR 0027) : manquements de proposition + jailing, dérivés
+    /// **déterministiquement** de la séquence de blocs (comme `pending_unbonds`, hors
+    /// `state_root`). **Dernier champ sérialisé** → la migration v10→v11 append sa valeur par
+    /// défaut (map vide), propriété de préfixe. `serde(default)` pour l'état pré-0027.
+    #[serde(default)]
+    pub reliability: ReliabilityMap,
 }
 
 /// A bond amount in its unbonding delay, waiting to return to `address`'s balance
@@ -218,6 +225,14 @@ pub fn v9_meta_suffix() -> Vec<u8> {
     bincode::serialize(&BTreeMap::<Hash32, ModuleEntry>::new()).expect("serialize empty map")
 }
 
+/// The bincode bytes appended to a v10 `WorldState` meta blob to bring it to v11 (ADR 0027):
+/// the default `reliability` table (empty map). Same append-only rationale as
+/// [`v9_meta_suffix`] — `reliability` is the last serialized field. Shared by the storage
+/// v10→v11 migration and its tests.
+pub fn v11_meta_suffix() -> Vec<u8> {
+    bincode::serialize(&ReliabilityMap::new()).expect("serialize empty map")
+}
+
 fn default_fee_floor() -> Amount {
     Amount::from_atoms(DEFAULT_FEE_FLOOR_ATOMS)
 }
@@ -262,6 +277,7 @@ impl WorldState {
             admin_policy: None,
             pending_governance: Vec::new(),
             modules: BTreeMap::new(),
+            reliability: ReliabilityMap::new(),
         }
     }
 
@@ -380,7 +396,12 @@ impl WorldState {
     /// the Foundry into circulation. Both are computed deterministically from the block
     /// (its transactions, its `producer`, its `block_ts`), so validators re-applying
     /// the block reach the identical state.
-    pub fn settle_block(&mut self, producer: &Address, block_ts: u64) -> (Amount, Amount) {
+    pub fn settle_block(
+        &mut self,
+        producer: &Address,
+        height: u64,
+        block_ts: u64,
+    ) -> (Amount, Amount) {
         // 1. Collected transaction fees → producer (circulation-neutral).
         let fees = std::mem::replace(&mut self.block_fees, Amount::ZERO);
         if fees > Amount::ZERO {
@@ -390,6 +411,26 @@ impl WorldState {
         self.mature_unbonds(block_ts);
         // 3. Work emission forged from the Foundry → producer.
         let emission = self.emit_work_reward(producer, block_ts);
+        // 4. Fiabilité des validateurs (ADR 0027, tranche 2a) : attribution déterministe des
+        //    manquements de proposition (proposeur effectif vs leader actif prévu) + jailing.
+        //    Hook UNIVERSEL — `settle_block` est appelé sur tous les chemins d'application
+        //    (production, backup, P2P, sync) avec le proposeur effectif, donc la table de
+        //    fiabilité évolue identiquement sur tous les nœuds. N'affecte PAS encore la
+        //    rotation ni le quorum (tranche 2b) — pour l'instant on ne fait que TRACER les faits.
+        if height > 0 {
+            let jailed = reliability::on_block_applied(
+                &mut self.reliability,
+                &self.validator_set,
+                height,
+                producer,
+            );
+            if jailed {
+                tracing::warn!(
+                    height,
+                    "ADR 0027 : validateur jailé (manquements de proposition consécutifs)"
+                );
+            }
+        }
         (fees, emission)
     }
 
@@ -1593,7 +1634,7 @@ mod tests {
         let mut s = WorldState::new();
         s.foundry = Amount::from_atoms(MAX_SUPPLY_ATOMS);
         let (_, producer) = kp_addr();
-        let (fees, emission) = s.settle_block(&producer, 1_000);
+        let (fees, emission) = s.settle_block(&producer, 1, 1_000);
         assert_eq!(fees, Amount::ZERO);
         assert_eq!(emission, Amount::ZERO);
         assert_eq!(s.emission_epoch_ts, 1_000);
@@ -1605,9 +1646,9 @@ mod tests {
         let mut s = WorldState::new();
         s.foundry = Amount::from_atoms(MAX_SUPPLY_ATOMS);
         let (_, producer) = kp_addr();
-        s.settle_block(&producer, 0); // establish epoch at t=0
-                                      // One full era later: half the supply is emitted to the producer.
-        let (_, emission) = s.settle_block(&producer, HALVING_PERIOD_SECS);
+        s.settle_block(&producer, 1, 0); // establish epoch at t=0
+                                         // One full era later: half the supply is emitted to the producer.
+        let (_, emission) = s.settle_block(&producer, 1, HALVING_PERIOD_SECS);
         let expected = cumulative_emission_atoms(HALVING_PERIOD_SECS);
         assert_eq!(emission.atoms(), expected);
         assert_eq!(s.accounts[&producer].balance.atoms(), expected);
@@ -1624,8 +1665,8 @@ mod tests {
         let mut s = WorldState::new();
         s.foundry = Amount::from_atoms(MAX_SUPPLY_ATOMS);
         let (_, producer) = kp_addr();
-        s.settle_block(&producer, 0);
-        let (_, emission) = s.settle_block(&producer, HALVING_PERIOD_SECS / 8); // ~1 year
+        s.settle_block(&producer, 1, 0);
+        let (_, emission) = s.settle_block(&producer, 1, HALVING_PERIOD_SECS / 8); // ~1 year
         assert!(emission > Amount::ZERO);
         assert_eq!(s.accounts[&producer].balance, emission);
     }
@@ -1646,7 +1687,7 @@ mod tests {
         // Fee is collected, not melted — the Foundry does not change.
         assert_eq!(s.foundry, foundry_before);
         // Settling credits the producer with the fee (epoch established, no emission).
-        s.settle_block(&producer, 100);
+        s.settle_block(&producer, 1, 100);
         assert_eq!(s.accounts[&producer].balance, fee);
         // The fee just changed hands: circulation is unchanged.
         assert_eq!(s.circulating_supply, Amount::from_vinx(1_000));
@@ -1703,10 +1744,10 @@ mod tests {
         assert_eq!(s.pending_unbonds.len(), 1);
 
         // Just before unlock: nothing matures.
-        s.settle_block(&addr, 1_000 + UNBONDING_SECS - 1);
+        s.settle_block(&addr, 1, 1_000 + UNBONDING_SECS - 1);
         assert_eq!(s.pending_unbonds.len(), 1);
         // At unlock: the bond returns to the balance.
-        s.settle_block(&addr, 1_000 + UNBONDING_SECS);
+        s.settle_block(&addr, 1, 1_000 + UNBONDING_SECS);
         assert!(s.pending_unbonds.is_empty());
         assert_eq!(s.accounts[&addr].balance, Amount::from_vinx(1_000));
     }
@@ -1851,7 +1892,7 @@ mod tests {
         assert_eq!(s.accounts[&addr].balance, Amount::ZERO);
         assert_eq!(s.accounts[&addr].staked, Amount::ZERO);
         // After maturation the funds return.
-        s.settle_block(&addr, 1_000 + UNBONDING_SECS);
+        s.settle_block(&addr, 1, 1_000 + UNBONDING_SECS);
         assert_eq!(s.accounts[&addr].balance, stake);
     }
 

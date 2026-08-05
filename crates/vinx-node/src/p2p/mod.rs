@@ -608,7 +608,8 @@ async fn dispatch_message(
                 if ok {
                     sg.block_height = height;
                     sg.check_upgrade_activation();
-                    let _ = sg.settle_block(&block.header.validator, protocol_ts);
+                    let _ =
+                        sg.settle_block(&block.header.validator, block.header.height, protocol_ts);
                     let root = sg.compute_state_root();
                     // ADR 0004: the state_root only covers accounts, not the Foundry —
                     // check the supply invariant explicitly on received blocks too.
@@ -811,7 +812,11 @@ async fn dispatch_message(
                     if ok {
                         sg.block_height = height;
                         sg.check_upgrade_activation();
-                        let _ = sg.settle_block(&block.header.validator, protocol_ts);
+                        let _ = sg.settle_block(
+                            &block.header.validator,
+                            block.header.height,
+                            protocol_ts,
+                        );
                         let root = sg.compute_state_root();
                         if !sg.supply_invariant_holds() {
                             warn!(height, "SyncResponse block breaks supply invariant");
