@@ -6,7 +6,7 @@ use crate::{
 };
 use vinx_core::{
     amount::{Amount, MAX_UNFINALIZED_DEPTH},
-    Block, BlockHeader, BlockSignature, Transaction, ValidatorSet,
+    reliability, Block, BlockHeader, BlockSignature, Transaction, ValidatorSet,
 };
 use vinx_crypto::sha256;
 use vinx_state::WorldState;
@@ -49,13 +49,28 @@ pub fn produce_block(
     let next_height = chain.tip_height() + 1;
     let prev_hash = chain.tip_hash();
 
-    // Verify this node is the round-robin leader for the upcoming block
-    let expected_leader = validator_set.leader_at(next_height);
-    if expected_leader != &config.validator_address {
+    // ADR 0027 — leader tournant sur le set ACTIF : les validateurs en prison (jailed)
+    // sont sautés dans la rotation round-robin. Le calcul est déterministe (dérivé de
+    // `state.reliability`, elle-même dérivée de faits on-chain), donc tous les nœuds
+    // s'accordent sur le leader attendu à chaque hauteur.
+    let expected_leader =
+        reliability::active_leader_at(validator_set, &state.reliability, next_height);
+    if expected_leader != config.validator_address {
         return Err(NodeError::Consensus(format!(
             "not the leader for block {next_height}: expected {expected_leader}"
         )));
     }
+
+    // ADR 0002/0027 — SÛRETÉ : le quorum de finalité reste sur le set **complet** bondé
+    // (⌈2n/3⌉), jamais sur le set actif. Le jailing est dérivé (meta, hors state_root) et
+    // *subjectif sous partition* : une minorité pourrait jailer la majorité dans sa propre
+    // vue, faire tomber son quorum à 1 et finaliser une branche rivale → double finalité.
+    // Seule la gouvernance (`RemoveValidator`, engagée on-chain et gated par le quorum
+    // courant) réduit le dénominateur. Le jailing n'agit que sur la ROTATION (ci-dessus).
+    // On capture le quorum du set complet *avant* les éventuels changements de set de ce
+    // bloc, pour la finalité par-hauteur (ADR 0002 quorum historique, changements de set
+    // par gouvernance).
+    let pre_quorum = validator_set.quorum();
 
     // Enforce timestamp monotonicity on the header, then derive the protocol clock
     // (ADR 0005): time-sensitive state transitions (emission, unbonding, upgrade
@@ -170,10 +185,10 @@ pub fn produce_block(
         signature: config.validator_keypair.sign(&header_hash),
     });
 
-    // ADR 0002/0027 — quorum historique : le bloc `next_height` est co-signé par le set ACTIF
-    // avant ses propres changements de set ; on enregistre ce quorum pré-bloc pour que la
-    // finalité l'évalue correctement même après un futur changement de set.
-    chain.note_quorum(next_height, validator_set.quorum());
+    // ADR 0002/0027 — enregistre le quorum du set COMPLET pré-bloc (capturé plus haut) pour
+    // que la finalité l'évalue correctement même après un futur changement de set par
+    // gouvernance. Le jailing ne réduit jamais ce seuil (voir note de sûreté ci-dessus).
+    chain.note_quorum(next_height, pre_quorum);
     chain.push(block.clone());
 
     tracing::info!(
@@ -218,6 +233,10 @@ fn produce_block_inner(
 ) -> Result<Block, NodeError> {
     let next_height = chain.tip_height() + 1;
     let prev_hash = chain.tip_hash();
+
+    // ADR 0002/0027 — quorum du set COMPLET pré-bloc (voir note de sûreté du chemin leader :
+    // la finalité n'utilise jamais le set actif).
+    let pre_quorum = validator_set.quorum();
 
     let prev_ts = chain
         .get_block(chain.tip_height())
@@ -297,8 +316,8 @@ fn produce_block_inner(
         pub_key: config.validator_keypair.public_key(),
         signature: config.validator_keypair.sign(&header_hash),
     });
-    // ADR 0002/0027 — quorum historique (même raison que le chemin leader).
-    chain.note_quorum(next_height, validator_set.quorum());
+    // ADR 0002/0027 — quorum du set COMPLET pré-bloc (même raison que le chemin leader).
+    chain.note_quorum(next_height, pre_quorum);
     chain.push(block.clone());
 
     tracing::info!(

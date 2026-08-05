@@ -457,8 +457,9 @@ async fn dispatch_message(
         P2pMessage::NewBlock(block) => {
             let height = block.header.height;
             let vs = validator_set.read().await.clone();
-            // ADR 0002/0027 — quorum historique : quorum du set ACTIF avant les changements
-            // de set de ce bloc (le set qui l'a co-signé), à enregistrer au commit.
+            // ADR 0002/0027 — SÛRETÉ : quorum de finalité sur le set COMPLET bondé (jamais le
+            // set actif — le jailing dérivé est subjectif sous partition et casserait la
+            // sûreté). Capturé avant les changements de set par gouvernance de ce bloc.
             let pre_quorum = vs.quorum();
 
             // 0. Equivocation detection (ADR 0003): a *different* block by the same
@@ -762,10 +763,11 @@ async fn dispatch_message(
                     break;
                 }
                 let vs = validator_set.read().await.clone();
-                let pre_quorum = vs.quorum(); // ADR 0002/0027 — quorum historique de ce bloc
-                                              // Tout validateur enregistré peut proposer (backup sur slot-skip, ADR 0027/0031) —
-                                              // même règle que consensus::validate_block. Le leader strict rejetait à tort les
-                                              // blocs backup et figeait la sync/finalité à n≥2 (révélé par le banc n=3).
+                // ADR 0002/0027 — quorum de finalité sur le set COMPLET (voir note de sûreté).
+                let pre_quorum = vs.quorum();
+                // Tout validateur enregistré peut proposer (backup sur slot-skip, ADR 0027/0031) —
+                // même règle que consensus::validate_block. Le leader strict rejetait à tort les
+                // blocs backup et figeait la sync/finalité à n≥2 (révélé par le banc n=3).
                 if !vs.contains(&block.header.validator) {
                     warn!(height, "SyncResponse block from non-validator proposer");
                     break;

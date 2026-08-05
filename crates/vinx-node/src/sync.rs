@@ -145,9 +145,9 @@ pub async fn sync_from_peer(
                 return applied;
             }
 
-            // ADR 0002/0027 — quorum historique : capturer le quorum du set ACTIF à cette
-            // hauteur (state.validator_set est le set pré-bloc, replay ordonné) avant que ce
-            // bloc ne le modifie éventuellement.
+            // ADR 0002/0027 — SÛRETÉ : quorum de finalité sur le set COMPLET bondé à cette
+            // hauteur (jamais le set actif) — state.validator_set est le set pré-bloc (replay
+            // ordonné), capturé avant les changements de set par gouvernance de ce bloc.
             let pre_quorum = state.validator_set.quorum();
             // Apply the state transition against a snapshot so any failure below
             // rolls back instead of leaving a half-applied world state. Protocol

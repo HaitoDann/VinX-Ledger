@@ -385,17 +385,31 @@ impl Node {
         }
 
         let vs = self.validator_set.read().await.clone();
-        let n = vs.len();
-        if n <= 1 {
+        if vs.len() <= 1 {
             return; // Single-validator chain — can't skip yourself
         }
 
         let height = self.chain.read().await.tip_height() + 1;
-        let leader_idx = vs.leader_idx_at(height);
 
-        let my_idx = match vs.index_of(&self.config.validator_address) {
+        // ADR 0027 — la rotation (leader et file de backup) porte sur le set ACTIF :
+        // les validateurs emprisonnés (jailed) sont sautés, exactement comme dans
+        // `produce_block`. Le calcul est déterministe (dérivé de `state.reliability`).
+        let active = {
+            let state = self.state.read().await;
+            vinx_core::reliability::active_validators(&vs, &state.reliability)
+        };
+        let n = active.len();
+        if n <= 1 {
+            return; // Un seul validateur actif — pas de backup possible.
+        }
+        let leader_idx = (height as usize) % n;
+
+        let my_idx = match active
+            .iter()
+            .position(|a| a == &self.config.validator_address)
+        {
             Some(i) => i,
-            None => return, // Not a validator
+            None => return, // Pas dans le set actif (non-validateur ou emprisonné).
         };
 
         if my_idx == leader_idx {
@@ -407,7 +421,7 @@ impl Node {
 
         // If the scheduled leader is already suspended (liveness-evicted), halve the
         // activation time so backup validators step in sooner.
-        let leader_addr = vs.leader_at(height);
+        let leader_addr = &active[leader_idx];
         let leader_suspended = self.suspended_validators.read().await.contains(leader_addr);
         let activation_secs = if leader_suspended {
             ((distance as u64 + 1) * block_time).max(block_time / 2)
