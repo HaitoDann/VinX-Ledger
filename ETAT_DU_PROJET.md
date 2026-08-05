@@ -470,7 +470,7 @@ sync_peer_rpc = "http://1.2.3.4:8545"  # Sync depuis un pair au démarrage
 
 | Priorité | Chantier | ADR |
 |----------|----------|-----|
-| 🔴 **Haute** | **Fork-choice — wiring reorg** : stocker les candidats concurrents + réorg bornée sous finalité (la fonction pure `canonical_head` est faite). À éprouver au banc n=3. | 0031 t2 |
+| 🔴 **Haute** | **Fork-choice — wiring reorg** : stocker les candidats concurrents + réorg bornée sous finalité (la fonction pure `canonical_head` est faite). À valider via le banc n=3 (déjà en place). | 0031 t2 |
 | 🔴 Haute | **Jailing — finir** : tx `Unjail` (opérateur, après cooldown) + règle 2 (co-signatures absentes) | 0027 |
 | 🔴 Haute | **Accountability co-sign** (détection des co-signatures conflictuelles → finalité *accountable*) ; reste de la finalité (view-change formel) | 0030, 0002 |
 | 🟣 **Pivot éco** | **Émission élastique** `E=r·F` (remplace le halving, amende 0021) → **répartition par usage/melt** entre subnets → **infrastructure de subnets** (escrow + reward root + Claim). La vraie proposition de valeur. | 0040 → 0041 → 0039 |
@@ -489,7 +489,7 @@ sync_peer_rpc = "http://1.2.3.4:8545"  # Sync depuis un pair au démarrage
 
 ### 🧭 Reprendre le travail (prochaine session)
 
-Le prochain chantier consensus est le **wiring reorg du fork-choice (ADR 0031 t2)** : aujourd'hui l'acceptation est « premier-vu » ; il faut stocker les blocs concurrents à une même hauteur et basculer sur `canonical_head` sous la finalité (borné par `MAX_UNFINALIZED_DEPTH`). Approche : incrémentale et **validée au banc n=3** à chaque étape (le consensus est fork-critique). Alternative si tu préfères avancer l'économie : démarrer l'implémentation de l'**émission élastique (0040)** — c'est constitutionnel (amende 0021, met à jour le test-tripwire) mais bien spécifié.
+Le prochain chantier consensus est le **wiring reorg du fork-choice (ADR 0031 t2)** : aujourd'hui l'acceptation est « premier-vu » ; il faut stocker les blocs concurrents à une même hauteur et basculer sur `canonical_head` sous la finalité (borné par `MAX_UNFINALIZED_DEPTH`). Approche : incrémentale et **re-validée via le banc n=3 (déjà en place)** à chaque étape (le consensus est fork-critique). Alternative si tu préfères avancer l'économie : démarrer l'implémentation de l'**émission élastique (0040)** — c'est constitutionnel (amende 0021, met à jour le test-tripwire) mais bien spécifié.
 
 ---
 
