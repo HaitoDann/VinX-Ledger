@@ -30,6 +30,16 @@ pub struct Chain {
     /// re-serializing the whole chain on every persist.
     #[serde(skip)]
     dirty_heights: AHashSet<u64>,
+    /// ADR 0002/0027 — **quorum historique**. Checkpoints `(from_height, quorum)` triés :
+    /// le bloc de hauteur `h` requiert `quorum_at(h)` signatures pour être final. Reconstruit
+    /// **déterministiquement** pendant l'application des blocs (le quorum du set **actif à la
+    /// hauteur de chaque bloc**, capturé avant les changements de set de ce bloc), donc
+    /// identique sur tous les nœuds. Sans lui, un bloc de genèse (peu de signataires, petit
+    /// quorum d'alors) échoue au quorum courant après un ajout de validateur → la finalité se
+    /// bloque pour les nœuds qui rejoignent. Non persisté : reconstruit à l'application ; après
+    /// un reload, `quorum_at` retombe sur le quorum courant pour le petit suffixe non finalisé.
+    #[serde(skip)]
+    quorum_schedule: Vec<(u64, usize)>,
 }
 
 impl Chain {
@@ -56,6 +66,7 @@ impl Chain {
             account_tx_index: AHashMap::new(),
             slash_evidence: AHashMap::new(),
             dirty_heights: AHashSet::from_iter([0]),
+            quorum_schedule: Vec::new(),
         };
         (chain, genesis)
     }
@@ -71,6 +82,7 @@ impl Chain {
             account_tx_index: AHashMap::new(),
             slash_evidence: AHashMap::new(),
             dirty_heights: AHashSet::new(),
+            quorum_schedule: Vec::new(),
         }
     }
 
@@ -106,14 +118,47 @@ impl Chain {
     /// has not yet reached quorum. Returns the new finalized height.
     pub fn advance_finality(&mut self, validator_set: &vinx_core::ValidatorSet) -> u64 {
         let tip = self.tip_height();
+        // Seuil courant, utilisé en repli quand le schedule n'a pas d'entrée pour la hauteur
+        // (ex. suffixe non finalisé après un reload : le schedule est reconstruit à
+        // l'application, pas persisté).
+        let fallback = validator_set.quorum();
         while self.finalized_height < tip {
             let next = self.finalized_height + 1;
-            match self.get_block(next) {
-                Some(b) if b.is_finalized(validator_set) => self.finalized_height = next,
+            // ADR 0002/0027 : seuil = quorum **historique** à la hauteur `next`, pas le quorum
+            // courant — sinon un bloc antérieur à un changement de set (moins de signataires)
+            // bloquerait le préfixe.
+            let threshold = self.quorum_at(next, fallback);
+            match self.block_row(next) {
+                Some((_, b)) if b.valid_signer_count(validator_set) >= threshold => {
+                    self.finalized_height = next
+                }
                 _ => break,
             }
         }
         self.finalized_height
+    }
+
+    /// ADR 0002/0027 — enregistre que les blocs à partir de `from_height` requièrent `quorum`
+    /// signatures (checkpoint du quorum historique). Appelé pendant l'application de chaque
+    /// bloc avec le quorum du set **actif à cette hauteur** (capturé avant les changements de
+    /// set du bloc). N'ajoute un checkpoint que lorsque la valeur change ; les hauteurs sont
+    /// notées dans l'ordre croissant.
+    pub fn note_quorum(&mut self, from_height: u64, quorum: usize) {
+        if self.quorum_schedule.last().map(|&(_, q)| q) != Some(quorum) {
+            self.quorum_schedule.push((from_height, quorum));
+        }
+    }
+
+    /// Quorum en vigueur à la hauteur `height` (dernier checkpoint `from_height <= height`).
+    /// Retombe sur `fallback` si aucun checkpoint ne couvre la hauteur (schedule non reconstruit,
+    /// ex. juste après un reload).
+    pub fn quorum_at(&self, height: u64, fallback: usize) -> usize {
+        self.quorum_schedule
+            .iter()
+            .rev()
+            .find(|&&(h, _)| h <= height)
+            .map(|&(_, q)| q)
+            .unwrap_or(fallback)
     }
 
     /// Height of the latest block (0 = only genesis exists).
@@ -522,6 +567,51 @@ mod tests {
         // A producer claiming ts = 1_000_000 moves the median not one second more:
         // the protocol clock ignores the outlier (ADR 0005).
         assert_eq!(chain.median_time_past_with(1_000_000), 3);
+    }
+
+    #[test]
+    fn test_finality_uses_historical_quorum() {
+        // ADR 0002/0027 : un bloc de l'ère « 1 validateur » (quorum 1, 1 signature) doit
+        // rester final même après que le set a grandi à 3 (quorum 2) — sinon il bloquerait
+        // le préfixe. C'est le bug révélé par le banc n=3.
+        let kp1 = KeyPair::generate();
+        let v1 = Address::from_public_key(&kp1.public_key());
+        let kp2 = KeyPair::generate();
+        let v2 = Address::from_public_key(&kp2.public_key());
+        let kp3 = KeyPair::generate();
+        let v3 = Address::from_public_key(&kp3.public_key());
+        let vs_now = vinx_core::ValidatorSet::new(vec![v1, v2, v3]); // set courant : quorum 2
+        let (mut chain, _) = Chain::new_with_genesis(v1, 0);
+
+        // Bloc 1 : ère 1-validateur → quorum historique 1, une seule signature.
+        chain.note_quorum(1, 1);
+        let b1 = signed_block(1, chain.tip_hash(), v1, &[&kp1]);
+        chain.push(b1);
+        // Bloc 2 : set passé à 3 → quorum 2, deux signatures.
+        chain.note_quorum(2, 2);
+        let b2 = signed_block(2, chain.tip_hash(), v2, &[&kp1, &kp2]);
+        chain.push(b2);
+
+        // Avancer avec le set COURANT (quorum 2). Sans quorum historique, le bloc 1 (1 sig)
+        // bloquerait le préfixe à 0 ; avec, il finalise sous quorum-1, puis le bloc 2.
+        chain.advance_finality(&vs_now);
+        assert_eq!(
+            chain.finalized_height(),
+            2,
+            "le quorum historique finalise le préfixe malgré le changement de set"
+        );
+
+        // Contrôle : sans checkpoint historique, quorum_at retombe sur le fallback (quorum
+        // courant) → le bloc 1 (1 sig) ne finaliserait pas.
+        let (mut chain2, _) = Chain::new_with_genesis(v1, 0);
+        let b1b = signed_block(1, chain2.tip_hash(), v1, &[&kp1]);
+        chain2.push(b1b);
+        chain2.advance_finality(&vs_now);
+        assert_eq!(
+            chain2.finalized_height(),
+            0,
+            "sans quorum historique, un bloc à 1 sig échoue au quorum courant (2)"
+        );
     }
 
     #[test]

@@ -145,6 +145,10 @@ pub async fn sync_from_peer(
                 return applied;
             }
 
+            // ADR 0002/0027 — quorum historique : capturer le quorum du set ACTIF à cette
+            // hauteur (state.validator_set est le set pré-bloc, replay ordonné) avant que ce
+            // bloc ne le modifie éventuellement.
+            let pre_quorum = state.validator_set.quorum();
             // Apply the state transition against a snapshot so any failure below
             // rolls back instead of leaving a half-applied world state. Protocol
             // time = MTP including this block (ADR 0005), same as the producer.
@@ -181,7 +185,9 @@ pub async fn sync_from_peer(
                 return applied;
             }
 
+            let bh = block.header.height;
             chain.push(block);
+            chain.note_quorum(bh, pre_quorum); // ADR 0002/0027 — quorum historique
             applied += 1;
         }
 

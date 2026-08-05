@@ -170,6 +170,10 @@ pub fn produce_block(
         signature: config.validator_keypair.sign(&header_hash),
     });
 
+    // ADR 0002/0027 — quorum historique : le bloc `next_height` est co-signé par le set ACTIF
+    // avant ses propres changements de set ; on enregistre ce quorum pré-bloc pour que la
+    // finalité l'évalue correctement même après un futur changement de set.
+    chain.note_quorum(next_height, validator_set.quorum());
     chain.push(block.clone());
 
     tracing::info!(
@@ -209,7 +213,7 @@ fn produce_block_inner(
     chain: &mut Chain,
     mempool: &mut Mempool,
     config: &NodeConfig,
-    _validator_set: &ValidatorSet,
+    validator_set: &ValidatorSet,
     timestamp: u64,
 ) -> Result<Block, NodeError> {
     let next_height = chain.tip_height() + 1;
@@ -293,6 +297,8 @@ fn produce_block_inner(
         pub_key: config.validator_keypair.public_key(),
         signature: config.validator_keypair.sign(&header_hash),
     });
+    // ADR 0002/0027 — quorum historique (même raison que le chemin leader).
+    chain.note_quorum(next_height, validator_set.quorum());
     chain.push(block.clone());
 
     tracing::info!(
