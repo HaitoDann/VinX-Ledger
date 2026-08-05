@@ -94,6 +94,8 @@ docs/
 - **Frais** : forfaitaires (indépendants du montant), **100 % au validateur producteur** (plus de *melt*).
 - **Invariant** vérifié à chaque bloc : `circulation + Fonderie = 100 000 000 000 VINX`.
 
+> **Évolution décidée (non encore implémentée) :** le halving discret sera remplacé par une **émission élastique à réservoir** `E = r·F` (r=7 %, le *melt* recyclant vers la Fonderie → auto-régulation) qui alimentera un **écosystème de subnets**, l'émission étant répartie **au prorata de l'usage réel (melt)** — ADR [0040](./docs/adr/0040-emission-elastique-reservoir.md)/[0041](./docs/adr/0041-repartition-emission-usage-melt.md)/[0039](./docs/adr/0039-infrastructure-subnets-escrow-recompense.md). Le modèle décrit ci-dessus (halving 8 ans) reste ce qui tourne aujourd'hui.
+
 > Détails complets : [whitepaper.md](./whitepaper.md)
 
 ---
@@ -115,11 +117,11 @@ Un détenteur lambda ne stake pas : il garde son VINX pour **l'utiliser comme ca
 
 > Feuille de route détaillée et priorisée : **[`docs/adr/README.md`](./docs/adr/README.md)** (index de tous les ADR avec statut).
 
-- **Fait** — protocole L1 Rust complet (PoA Threshold, *fair launch*, slashing prouvable, frais au producteur), plus une série de durcissements/extensions : vérif parallèle des signatures (ADR 0015), dépôt existentiel anti-bloat (0026), durcissement P2P anti-DoS (0022), gouvernance **K-of-M** (0011), **registre de modules bondés** (0010, 1ʳᵉ brique de l'ancrage), vecteurs dorés canoniques (0020). `cargo test --workspace` vert (281 tests).
-- **Chemin critique** — **banc 3 validateurs** puis finalité au quorum (0002), fork-choice (0031), jailing (0027), accountability co-sign (0030).
-- **Ensuite** — partage d'émission sur le quorum (0028), garde-fous de gouvernance (0032), DA & preuves d'ancre pour les modules (0034), premiers usages réels.
+- **Fait** — protocole L1 Rust complet (PoA Threshold, *fair launch*, slashing prouvable, frais au producteur) ; **consensus multi-validateur éprouvé au banc n=3** : finalité au quorum + quorum historique par hauteur (0002), jailing/rotation sur set actif (0027), fork-choice `canonical_head` pure (0031 t1), horloge protocole sur MTP (0005), heartbeat 10 min (0038). Plus les durcissements/extensions : vérif parallèle des signatures (0015), dépôt existentiel anti-bloat (0026), durcissement P2P anti-DoS (0022), gouvernance **K-of-M** (0011), **registre de modules bondés** (0010), vecteurs dorés canoniques (0020). `cargo test --workspace` vert (~309 tests), stockage schéma v11.
+- **En cours (consensus)** — wiring reorg du fork-choice (0031 t2), tx `Unjail` + règle co-signatures (0027), accountability co-sign (0030).
+- **Prochaine grande direction (décidée, à implémenter)** — **écosystème de subnets** : émission élastique à réservoir `E=r·F` (0040, remplace le halving), répartition de l'émission par l'usage/melt entre subnets (0041), infrastructure de subnets escrow + reward root + Claim (0039). But : des développeurs bâtissent des subnets à vraie boucle économique, les mineurs gagnent des VINX par un service réel.
 - **Plus tard** — décentralisation à l'échelle (BLS + comité VRF, 0029), light client (0014), réseau public. Vision d'ensemble : [ADR 0001](./docs/adr/0001-l1-monnaie-pure-modules-ancrage-bonde.md).
 
 ---
 
-*VinX Labs — juillet 2026*
+*VinX Labs — août 2026*

@@ -5,6 +5,64 @@ Format : `MAJEUR.MINEUR.CORRECTIF` — les versions `0.x.y` sont des versions de
 
 ---
 
+## [0.48.0] — 2026-08-05 — Consensus n=3 : rotation sur set actif + quorum de finalité sur set complet (ADR 0027 t2b)
+
+> Câble la rotation du jailing et **corrige une faille de sûreté révélée par le banc n=3**. Non-breaking (rotation dérivée déterministe ; le quorum de finalité reste inchangé).
+
+- **Rotation sur le set actif.** Le leader (`produce_block`) et la file de backup (`try_backup_production`) itèrent désormais sur le **set actif** (`reliability::active_leader_at`/`active_validators`) — les validateurs jailés sont sautés. Bénéfice liveness : un leader mort n'impose plus d'attente de timeout à chaque tour.
+- **⚠️ Sûreté — le quorum de finalité n'est jamais réduit par le jailing.** Le banc a montré qu'exclure les jailés du **dénominateur** casse la sûreté : sous partition 1│2, la minorité jaile la majorité dans sa vue, tombe à quorum 1 et finalise une branche rivale → **double-finalité**. Le seuil reste `⌈2n/3⌉` sur le **set complet bondé** ; seule la gouvernance (`RemoveValidator`, committée) réduit `n`. Les 5 chemins `note_quorum` (producer leader/backup, p2p NewBlock/SyncResponse, sync HTTP) enregistrent le quorum du set complet pré-bloc.
+- **Validé au banc n=3** : 3/3 sain → finalité en lockstep ; 2/3 (1 panne) → finalité avance ; 1/3 (2 pannes) → finalité **gelée**, tip continue. ADR 0027 mis à jour (règle 3 corrigée + section « Sûreté : quorum jamais réduit par le jailing »).
+
+## [0.47.0] — 2026-08-04 — Finalité : quorum historique par hauteur (ADR 0002)
+
+> Corrige le blocage du préfixe de finalité après un changement de set. Non-breaking (schedule reconstruit déterministiquement à l'application).
+
+- **Quorum par hauteur.** `advance_finality` évalue chaque bloc contre le **quorum du set bondé à sa hauteur** (schedule `(from_height, quorum)` via `Chain::note_quorum`/`quorum_at`), et non contre le seul quorum courant — sinon les blocs de l'ère genèse (1 signature) restaient sous le quorum courant (2+) et le préfixe se figeait à 0. Banc : les 3 nœuds finalisent en lockstep 7→10.
+- **advance_finality sur les chemins de sync** (P2P `SyncResponse` + sync HTTP) : sans cet appel, `finalized_height` restait figé après un rattrapage par sync.
+
+## [0.46.0] — 2026-08-03 — Banc n=3 multi-process + état de fiabilité câblé (ADR 0027 t2a)
+
+> Éprouve le consensus multi-validateur en réel et câble la table de fiabilité (tracking seulement, sans changer le comportement). Bump `STORAGE_VERSION 10 → 11` (migration in-place).
+
+- **Banc n=3 multi-process réel** (`scripts/bench-n3.sh`) : amorce 3 validateurs (genèse partagée déterministe via `VINX_GENESIS_SPEC` + pré-financement dev-only gated non-mainnet), puis démontre liveness / tolérance à 1 panne / sûreté à 1/3 avec de vraies co-signatures P2P.
+- **Fix révélé par le banc — blocs backup rejetés.** Le gossip **et** la sync HTTP rejetaient les blocs dont le proposeur ≠ leader strict `leader_at`, alors que la production autorise un backup sur slot-skip → finalité figée dès n≥2. Corrigé : tout validateur enregistré peut proposer (`vs.contains`), aligné sur `consensus::validate_block`.
+- **État de fiabilité (ADR 0027 t2a).** Nouveau champ `WorldState.reliability` (dernier champ sérialisé, `serde(default)`), migration meta **v10→v11** (append map vide, testée), mis à jour déterministiquement dans `settle_block` (hook universel production/backup/P2P/sync) avec le proposeur effectif → table identique sur tous les nœuds. Ne modifiait pas encore le comportement (tracking + log de jail).
+
+## [0.45.0] — 2026-08-02 — Tranches consensus pures : jailing, fork-choice, refus de bâtir dans le vide
+
+> Trois cœurs déterministes purs et testés, non encore branchés sur la transition vivante (câblage validé ensuite au banc). Non-breaking.
+
+- **Jailing — cœur pur (ADR 0027 t1).** `vinx-core::reliability` : attribution des manquements (proposeur effectif ≠ leader prévu sur le set actif), jailing au seuil `MAX_MISSED_PROPOSALS`, set actif, quorum ajusté, `Unjail` après cooldown, plancher de liveness (rotation jamais vide). Fonctions pures, 5 tests.
+- **Fork-choice — fonction pure (ADR 0031 t1).** `consensus::canonical_head` : élection **indépendante de l'ordre réseau** (poids de co-signatures → leader prévu → plus petit hash), pure et totale, 6 tests. *Wiring reorg différé (t2).*
+- **Refus de bâtir dans le vide (ADR 0002).** Le producteur (leader et backup) refuse de sceller au-delà de `MAX_UNFINALIZED_DEPTH = 64` blocs non finalisés au-dessus de la finalité → borne les forks concurrents et la fenêtre du fork-choice. À n=1 jamais déclenché.
+
+## [0.44.0] — 2026-08-01 — ADR économie : émission élastique, répartition par usage, infrastructure de subnets (docs)
+
+> **Documents de décision** (ADR rédigés) — aucun changement de code. Actent le pivot économique de VinX vers un écosystème de subnets.
+
+- **ADR 0040 — Émission élastique à réservoir** (🔴 constitutionnel, remplace le halving) : débit `E = r·F` (fraction `r = 7 %` de la Fonderie), le **melt** recycle vers la Fonderie → auto-régulation vers `C* = MAX − M/r`, `E* = M` (l'émission égale l'usage). Circulation hard-cappée **et** élastique ; amorçage gratuit ; cas sans usage sûr. Simulé (`scripts/emission_sim.py`). **Amende l'ADR 0021** (on grave une *loi*, plus une *courbe*).
+- **ADR 0041 — Répartition de l'émission par l'usage (melt)** : émission d'une fenêtre répartie **au prorata du VINX melté** par subnet, sous plafond `CAP` et porte de bond `MIN_SUBNET_BOND`. **Rejette le staking à la TAO** (spéculation/plutocratie). Boucle fermée : dépenser pour un service dirige l'émission vers ses fournisseurs.
+- **ADR 0039 — Infrastructure de subnets** : module bondé + **escrow VINX** + **racine de récompense cumulative** + **Claim par preuve Merkle** (`Deposit`/`SetRewardRoot`/`Claim` appendés à `ModuleOp`). La L1 ne juge jamais le travail ; dommage borné par l'escrow. Premier subnet de démo : balise d'aléa VRF.
+
+## [0.43.0] — 2026-07-31 — Horloge protocole sur MTP (ADR 0005) + heartbeat 10 min inconditionnel (ADR 0038)
+
+> Durcit l'horloge protocole et supprime l'incitation au spam de blocs. Consensus-sensible (le temps protocole change) — nouvelle genèse recommandée.
+
+- **Horloge protocole = Median Time Past (ADR 0005).** Émission, déliaison et activation d'upgrade comparent désormais au **MTP incluant le bloc appliqué**, sur les trois chemins (production/P2P/sync) — un producteur isolé ne peut plus faire avancer le temps protocole via son seul header. Bornes de timestamp (monotonie + plafond futur) à la réception.
+- **Heartbeat inconditionnel 10 min (ADR 0038).** Au moins un bloc toutes les `HEARTBEAT_INTERVAL_SECS = 600` s, même vide (~15-30 Mo/an). L'accrual d'émission est forgé à heure fixe par le leader round-robin → l'incitation à forcer des blocs par fausses tx disparaît, la distribution est lissée, le MTP ne périme plus au repos.
+
+## [0.42.0] — 2026-07-30 — Durcissement sécurité & robustesse (audit)
+
+> Lot de sécurité et de robustesse issu d'un audit interne. Non-breaking hors format keystore wallet.
+
+- **Routes admin fail-closed + comparaison constant-time.** `/snapshot` et `/admin/compact` refusent par défaut si aucun token n'est configuré (plus d'ouverture accidentelle) ; comparaison de token en temps constant (anti timing-attack).
+- **Sync HTTP vérifiée comme le P2P.** `sync_from_peer` valide proposeur/quorum/co-signatures, bornes de timestamp, signatures de tx en parallèle, `state_root` et invariant de supply, avec rollback sur snapshot — un pair n'est qu'une *source* de blocs, jamais de confiance.
+- **Keystore wallet chiffré (argon2 + AES-GCM).** Les clés du wallet peuvent être protégées par passphrase (dérivation argon2, chiffrement AES-GCM) ; le format plaintext legacy reste lu, avec avertissement.
+- **Rate-limiter RPC borné** (map par IP purgée, anti-fuite mémoire) ; **admission mempool avec état** (rejet des nonces périmés avant vérif de signature) et correction de la classe de rate-limit de `/tx/batch`.
+- **Persistance incrémentale de la chaîne** (table par hauteur, `STORAGE_VERSION → 10`) : coût de persistance d'un bloc en O(nouveaux blocs) au lieu de re-sérialiser la chaîne. **`[profile.release]`** (LTO, `codegen-units = 1`) pour les binaires de production.
+
+---
+
 ## [0.41.0] — Vecteurs dorés de sérialisation canonique (ADR 0020, tranche 2)
 
 > Ajout **non-breaking** (tests uniquement) : fige les octets exacts des encodages consensus-critiques.

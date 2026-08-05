@@ -18,12 +18,14 @@ Cohérent avec cette philosophie, VinX est développé sur un **protocole Rust e
 
 > **Ce qui change en v4.0 :** VinX abandonne le modèle *melt/forge* (frais fondus dans une réserve, récompensés à des stakers passifs) au profit d'un **fair launch** : aucun jeton n'est donné à la genèse, **tous les VINX entrent en circulation par le travail des validateurs**, et le staking redevient ce qu'il doit être dans un réseau permissionné — un **bond de sécurité**, pas un rendement.
 
+> **📍 Direction décidée (post-v4.0, en cours de spécification/implémentation) — l'écosystème de subnets.** Ce document décrit l'économie **implémentée aujourd'hui** (fair launch, halving 8 ans). La direction actée pour la suite : remplacer le halving par une **émission élastique à réservoir** `E = r·F` (le *melt* recycle vers la Fonderie → l'émission s'auto-régule pour égaler l'usage), et employer cette émission à **financer des subnets** — des surcouches où l'on rend un service réel payé en VINX, l'émission étant dirigée **au prorata de l'usage réel** vers les fournisseurs, sans staking spéculatif. C'est ce qui donne à VinX sa proposition de valeur au-delà du paiement pur. Détails : ADR [0040](docs/adr/0040-emission-elastique-reservoir.md), [0041](docs/adr/0041-repartition-emission-usage-melt.md), [0039](docs/adr/0039-infrastructure-subnets-escrow-recompense.md). Tant que ces ADR ne sont pas implémentés, **le modèle en vigueur reste celui décrit ci-dessous.**
+
 ---
 
 ## 2. Architecture Technique
 
 - **Langage** : Rust, implémentation propriétaire de bout en bout
-- **Vitesse** : Cadence de bloc **adaptative à la demande** — *repos* → aucun bloc ; *activité normale* → jusqu'à ~5 s (block time), les transactions s'agrègent ; *montée en charge* → l'écart se resserre à mesure que le mempool se remplit ; *saturation* → blocs **dos à dos**. Finalité déterministe immédiate via le consensus PoA Threshold
+- **Vitesse** : Cadence de bloc **adaptative à la demande** — *repos* → aucun bloc ; *activité normale* → jusqu'à ~5 s (block time), les transactions s'agrègent ; *montée en charge* → l'écart se resserre à mesure que le mempool se remplit ; *saturation* → blocs **dos à dos**. Finalité déterministe **au quorum** (prefix-closed) via le consensus PoA Threshold — immédiate à validateur unique, elle suit les co-signatures à n≥2
 - **Capacité** : jusqu'à **10 000 transactions par bloc** (réglable), mempool de **100 000** transactions
 - **Performance** : plusieurs milliers de TPS en configuration optimisée (dépend du matériel et des réglages ; l'exécution est séquentielle — une exécution parallèle serait requise au-delà)
 - **Précision** : 18 décimales internes, 2 décimales affichées à l'utilisateur
@@ -250,9 +252,10 @@ Un éventuel cadre de conformité pourra être étudié le jour où un usage pub
 
 Sans calendrier engagé, par étapes :
 
-- **Fait** : le protocole (L1 Rust, consensus PoA Threshold) et le modèle *fair launch* décrit ici (émission par le travail, bond de validateur avec slashing prouvable, frais au producteur) sont **implémentés et testés**, exploités en local.
-- **Ensuite** : redondance multi-validateurs (1 → 3), finalité au quorum, amorçage de la micro-économie par l'émission, premiers usages réels.
-- **Plus tard (optionnel)** : réseau public, et **surcouches / modules hors-nœud** reliés par ancrage bondé (ex. *token factory*) — architecture gravée dans [ADR 0001](docs/adr/0001-l1-monnaie-pure-modules-ancrage-bonde.md), la version présente en garde les portes ouvertes (bond, Merkle, payload générique).
+- **Fait** : le protocole (L1 Rust, consensus PoA Threshold) et le modèle *fair launch* décrit ici (émission par le travail, bond de validateur avec slashing prouvable, frais au producteur) sont **implémentés et testés**. Le **consensus multi-validateur est éprouvé au banc n=3** (`scripts/bench-n3.sh`) : finalité au quorum, tolérance à 1 panne, sûreté à 1/3 ; jailing/rotation sur set actif et fork-choice déterministe (fonction pure) en place.
+- **En cours (consensus)** : wiring reorg du fork-choice, tx d'unjail, accountability des co-signatures conflictuelles.
+- **Prochaine grande direction (décidée, à implémenter) — l'écosystème de subnets.** Le halving discret laisse place à une **émission élastique à réservoir** `E = r·F` (le *melt* recycle vers la Fonderie, auto-régulation vers un équilibre où l'émission égale l'usage) ; cette émission **finance des subnets** — des surcouches où des participants rendent un service réel (stockage, calcul, aléa…) payé en VINX — répartie **au prorata de l'usage réel (VINX melté)** par subnet, sans staking spéculatif à la TAO. Infrastructure : module bondé + **escrow** + **racine de récompense** + **Claim par preuve Merkle**. ADR [0040](docs/adr/0040-emission-elastique-reservoir.md) / [0041](docs/adr/0041-repartition-emission-usage-melt.md) / [0039](docs/adr/0039-infrastructure-subnets-escrow-recompense.md) ; s'appuie sur l'ancrage bondé de l'[ADR 0001](docs/adr/0001-l1-monnaie-pure-modules-ancrage-bonde.md).
+- **Plus tard** : réseau public, décentralisation à l'échelle (agrégation BLS + comité VRF).
 
 VinX Ledger n'a pas de pression d'agenda. Le projet avance à son rythme.
 
@@ -268,18 +271,18 @@ VinX Ledger n'a pas de pression d'agenda. Le projet avance à son rythme.
 | Cadence de bloc | Adaptative : repos→0 · normal→~5s · charge→écart suit le remplissage · saturation→dos à dos |
 | Référence de temps | Timestamp des blocs (temps réel), pas la hauteur |
 | Capacité | 10 000 tx/bloc (réglable) · mempool 100 000 |
-| Consensus | PoA Threshold, seuil 66 %, finalité déterministe |
-| Validateurs | 1 → 3 (redondance), permissionnés, **bond requis** |
+| Consensus | PoA Threshold, quorum `⌈2n/3⌉` sur le set complet, finalité prefix-closed déterministe (éprouvée au banc n=3) |
+| Validateurs | permissionnés, **bond requis** ; rotation leader/backup sur le set actif (jailing, ADR 0027) |
 | Full nodes | Ouverts à tous |
 | Supply totale | 100 milliards VinX (immuable, no burn) |
 | **Genèse** | **0 en circulation, 100 Md en Fonderie — aucun pre-mine** |
-| **Émission** | **par le travail des validateurs · décroissance expo., halving 8 ans → 100 Md · temps réel** |
+| **Émission** | **par le travail des validateurs · halving 8 ans → 100 Md · temps réel** *(évolution décidée : émission élastique `E=r·F`, ADR 0040)* |
 | Relais | Fonderie vidée → **fees-only** automatiquement |
 | Frais | **forfait 0,0001 VinX × poids × congestion (×1–3), 100 % au producteur** |
 | Staking | **bond de validateur (min 100k VinX), déliaison 3 j, slash équivocation 100 %, aucun rendement** |
-| Gouvernance | Clé admin unique rotatable (fondateur), pas de gel de compte |
+| Gouvernance | **Comité K-of-M** (multisig à seuil, ADR 0011) ou clé admin unique rotatable (legacy) ; pas de gel de compte |
 | Upgrades | Versioning on-chain, activation planifiée, 7/30/90 j **réels** |
 
 ---
 
-*VinX Labs, juillet 2026 — Document de référence v4.0*
+*VinX Labs, août 2026 — Document de référence v4.0 (économie implémentée : fair launch/halving ; évolution décidée : émission élastique + subnets, ADR 0039/0040/0041)*
