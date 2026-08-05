@@ -1,7 +1,7 @@
 pub mod genesis;
 pub mod world_state;
 
-pub use genesis::{create_genesis_state, GenesisConfig};
+pub use genesis::{create_genesis_state, create_genesis_state_with_dev_prefund, GenesisConfig};
 pub use world_state::{
     v8_meta_suffix, v9_meta_suffix, AdminPolicy, GovernanceProposal, ModuleEntry, WorldState,
 };

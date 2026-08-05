@@ -555,9 +555,13 @@ async fn dispatch_message(
                 }
             }
 
-            // 2. Proposer authority
-            if vs.leader_at(height) != &block.header.validator {
-                warn!(height, "P2P block wrong proposer");
+            // 2. Proposer authority — tout validateur enregistré peut proposer. Le leader
+            //    round-robin est indicatif : sur slot-skip, un backup produit légitimement
+            //    (ADR 0027/0031). On exige donc l'appartenance au set, pas le leader strict —
+            //    cohérent avec consensus::validate_block (sinon les blocs backup sont rejetés
+            //    et la finalité se fige à n≥2, cf. banc n=3).
+            if !vs.contains(&block.header.validator) {
+                warn!(height, "P2P block from non-validator proposer");
                 return;
             }
 
@@ -752,8 +756,11 @@ async fn dispatch_message(
                     break;
                 }
                 let vs = validator_set.read().await.clone();
-                if vs.leader_at(height) != &block.header.validator {
-                    warn!(height, "SyncResponse block wrong proposer");
+                // Tout validateur enregistré peut proposer (backup sur slot-skip, ADR 0027/0031) —
+                // même règle que consensus::validate_block. Le leader strict rejetait à tort les
+                // blocs backup et figeait la sync/finalité à n≥2 (révélé par le banc n=3).
+                if !vs.contains(&block.header.validator) {
+                    warn!(height, "SyncResponse block from non-validator proposer");
                     break;
                 }
                 if block.header.prev_hash != chain.read().await.tip_hash() {

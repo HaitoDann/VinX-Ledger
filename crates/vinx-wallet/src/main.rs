@@ -282,7 +282,6 @@ async fn cmd_balance(address: &str, node: &str) -> Result<(), WalletError> {
     println!("Balance : {}", acc.balance);
     println!("Staked  : {}", acc.staked);
     println!("Nonce   : {}", acc.nonce);
-    println!("Frozen  : {}", if acc.frozen { "YES" } else { "no" });
     Ok(())
 }
 

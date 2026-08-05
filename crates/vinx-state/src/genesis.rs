@@ -1,5 +1,5 @@
 use crate::WorldState;
-use vinx_core::{amount::FOUNDRY_GENESIS_ATOMS, Amount, ValidatorSet};
+use vinx_core::{amount::FOUNDRY_GENESIS_ATOMS, Account, Amount, ValidatorSet, CHAIN_ID_MAINNET};
 use vinx_crypto::Address;
 
 pub struct GenesisConfig {
@@ -35,6 +35,33 @@ pub fn create_genesis_state(config: &GenesisConfig) -> WorldState {
     state.validator_set = ValidatorSet::single(config.validator_address);
     state.chain_id = config.chain_id;
 
+    state
+}
+
+/// **DEV/OPS uniquement — jamais sur mainnet.** Construit la genèse puis pré-finance le
+/// validateur de genèse en déplaçant `prefund_atoms` de la Fonderie vers son compte. Sert à
+/// amorcer un testnet multi-validateurs sans attendre l'émission (les candidats doivent bonder
+/// 100k VINX ; le validateur de genèse les leur transfère).
+///
+/// **Garde-fou fair launch :** si `chain_id == CHAIN_ID_MAINNET`, le pré-financement est
+/// **ignoré** — la genèse mainnet reste à 0 en circulation, sans pre-mine. L'invariant de masse
+/// `circulation + Fonderie == MAX` est préservé (on déplace, on ne crée pas).
+pub fn create_genesis_state_with_dev_prefund(
+    config: &GenesisConfig,
+    prefund_atoms: u128,
+) -> WorldState {
+    let mut state = create_genesis_state(config);
+    if prefund_atoms == 0 || config.chain_id == CHAIN_ID_MAINNET {
+        return state; // no-op : mainnet ou pas de pré-financement demandé
+    }
+    let amount = Amount::from_atoms(prefund_atoms);
+    state.accounts.insert(
+        config.validator_address,
+        Account::new_with_balance(config.validator_address, amount),
+    );
+    // Déplacement Fonderie → circulation (invariant de masse préservé, ADR 0004).
+    state.foundry = Amount::from_atoms(FOUNDRY_GENESIS_ATOMS - prefund_atoms);
+    state.circulating_supply = amount;
     state
 }
 
