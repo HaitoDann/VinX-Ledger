@@ -40,6 +40,14 @@ pub struct Chain {
     /// un reload, `quorum_at` retombe sur le quorum courant pour le petit suffixe non finalisé.
     #[serde(skip)]
     quorum_schedule: Vec<(u64, usize)>,
+    /// ADR 0031 — **candidats de fork-choice**. Blocs valides **concurrents** (proposeur/hash
+    /// différent) observés à une hauteur **non finalisée**, en plus du bloc actuellement retenu
+    /// dans `blocks`. La règle `canonical_head` (poids de co-sigs → leader prévu → plus petit
+    /// hash) élit la tête déterministiquement parmi {bloc retenu} ∪ candidats. Non persisté
+    /// (reconstruit à la volée depuis le gossip) ; purgé sous la finalité (réorg interdite en
+    /// dessous). **Tranche 2a : stockage + choix canonique seulement — aucune réorg encore.**
+    #[serde(skip)]
+    candidates: AHashMap<u64, Vec<Block>>,
 }
 
 impl Chain {
@@ -67,6 +75,7 @@ impl Chain {
             slash_evidence: AHashMap::new(),
             dirty_heights: AHashSet::from_iter([0]),
             quorum_schedule: Vec::new(),
+            candidates: AHashMap::new(),
         };
         (chain, genesis)
     }
@@ -83,6 +92,7 @@ impl Chain {
             slash_evidence: AHashMap::new(),
             dirty_heights: AHashSet::new(),
             quorum_schedule: Vec::new(),
+            candidates: AHashMap::new(),
         }
     }
 
@@ -135,6 +145,8 @@ impl Chain {
                 _ => break,
             }
         }
+        // ADR 0031 — les candidats désormais sous la finalité ne peuvent plus gagner : purge.
+        self.prune_candidates_final();
         self.finalized_height
     }
 
@@ -159,6 +171,81 @@ impl Chain {
             .find(|&&(h, _)| h <= height)
             .map(|&(_, q)| q)
             .unwrap_or(fallback)
+    }
+
+    /// ADR 0031 — enregistre un **candidat de fork-choice** : un bloc valide concurrent (hash
+    /// différent) observé à une hauteur **non finalisée**. Le caller garantit la validité du
+    /// bloc (proposeur ∈ set, co-signatures vérifiées) ; cette méthode ne fait que le ranger.
+    ///
+    /// Ne stocke **pas** : un bloc au-dessous ou à la finalité (réorg interdite en dessous), ni
+    /// un doublon du bloc déjà retenu dans `blocks`, ni un candidat déjà connu (dédup par hash).
+    /// Retourne `true` si un nouveau candidat a réellement été enregistré.
+    ///
+    /// **Tranche 2a : observation seulement — n'entraîne aucune réorganisation.**
+    pub fn record_candidate(&mut self, block: Block) -> bool {
+        let h = block.header.height;
+        if h <= self.finalized_height {
+            return false; // sous la finalité : jamais un candidat valide
+        }
+        let hash = block.hash();
+        // Déjà le bloc retenu à cette hauteur ? alors ce n'est pas un *concurrent*.
+        if self.block_row(h).map(|(bh, _)| *bh) == Some(hash) {
+            return false;
+        }
+        let bucket = self.candidates.entry(h).or_default();
+        if bucket.iter().any(|b| b.hash() == hash) {
+            return false; // candidat déjà connu
+        }
+        bucket.push(block);
+        true
+    }
+
+    /// Candidats concurrents connus à `height` (hors bloc retenu dans `blocks`). Vide si aucun.
+    pub fn candidates_at(&self, height: u64) -> &[Block] {
+        self.candidates
+            .get(&height)
+            .map(|v| v.as_slice())
+            .unwrap_or(&[])
+    }
+
+    /// ADR 0031 — **choix canonique** à `height` : élit le hash de la tête parmi
+    /// {bloc retenu} ∪ {candidats}, via `canonical_head` (poids de co-sigs → leader prévu →
+    /// plus petit hash). Renvoie `None` si aucun bloc n'existe à cette hauteur.
+    ///
+    /// Fonction de **décision pure** (aucune mutation) : la tranche 2a l'utilise en observation
+    /// (log si le choix diffère du bloc retenu) ; la tranche 2b s'en servira pour réorganiser.
+    pub fn canonical_choice(
+        &self,
+        height: u64,
+        validator_set: &vinx_core::ValidatorSet,
+    ) -> Option<Hash32> {
+        let stored = self.block_row(height).map(|(_, b)| b);
+        let cands = self.candidates_at(height);
+        stored
+            .into_iter()
+            .chain(cands.iter())
+            .reduce(|a, b| crate::consensus::more_canonical(a, b, validator_set))
+            .map(|b| b.hash())
+    }
+
+    /// `true` si un candidat concurrent l'emporterait sur le bloc actuellement retenu à
+    /// `height` selon la règle de fork-choice — c.-à-d. si une réorganisation serait requise
+    /// (tranche 2b). En tranche 2a, sert uniquement à journaliser une divergence observée.
+    pub fn would_reorg_at(&self, height: u64, validator_set: &vinx_core::ValidatorSet) -> bool {
+        match (
+            self.block_row(height),
+            self.canonical_choice(height, validator_set),
+        ) {
+            (Some((stored_hash, _)), Some(canonical)) => *stored_hash != canonical,
+            _ => false,
+        }
+    }
+
+    /// Purge les candidats devenus inutiles parce que finalisés (réorg interdite sous la
+    /// finalité). Appelée après chaque avancée de `finalized_height`.
+    fn prune_candidates_final(&mut self) {
+        let f = self.finalized_height;
+        self.candidates.retain(|&h, _| h > f);
     }
 
     /// Height of the latest block (0 = only genesis exists).
@@ -538,6 +625,130 @@ mod tests {
         assert_eq!(chain.finalized_height(), 1);
         assert!(chain.is_final(1));
         assert!(!chain.is_final(2));
+    }
+
+    // ── ADR 0031 — fondation du fork-choice (tranche 2a : stockage + choix, sans réorg) ──
+
+    fn three_validators() -> (Vec<KeyPair>, Vec<Address>, vinx_core::ValidatorSet) {
+        let kps: Vec<KeyPair> = (0..3).map(|_| KeyPair::generate()).collect();
+        let addrs: Vec<Address> = kps
+            .iter()
+            .map(|k| Address::from_public_key(&k.public_key()))
+            .collect();
+        let vs = vinx_core::ValidatorSet::new(addrs.clone());
+        (kps, addrs, vs)
+    }
+
+    #[test]
+    fn test_record_candidate_dedup_and_below_finality() {
+        let (kps, addrs, vs) = three_validators();
+        let (mut chain, _) = Chain::new_with_genesis(addrs[0], 0);
+        let g = chain.tip_hash();
+
+        // Bloc retenu à h=1 (proposeur = leader prévu).
+        let leader = *vs.leader_at(1);
+        let a = signed_block(1, g, leader, &[&kps[0]]);
+        chain.push(a.clone());
+
+        // Un concurrent (proposeur différent, même prev) à h=1.
+        let other = addrs.iter().copied().find(|x| *x != leader).unwrap();
+        let b = signed_block(1, g, other, &[&kps[0], &kps[1]]);
+        assert!(
+            chain.record_candidate(b.clone()),
+            "nouveau candidat enregistré"
+        );
+        assert!(!chain.record_candidate(b), "dédup par hash");
+        assert!(
+            !chain.record_candidate(a),
+            "le bloc déjà retenu n'est pas un concurrent"
+        );
+        // Un bloc à/sous la finalité (genèse h=0 finalisée) : refusé.
+        let below = signed_block(0, GENESIS_PREV_HASH, addrs[0], &[&kps[0]]);
+        assert!(!chain.record_candidate(below), "sous la finalité : refusé");
+        assert_eq!(chain.candidates_at(1).len(), 1);
+    }
+
+    #[test]
+    fn test_canonical_choice_prefers_more_cosignatures() {
+        let (kps, addrs, vs) = three_validators();
+        let (mut chain, _) = Chain::new_with_genesis(addrs[0], 0);
+        let g = chain.tip_hash();
+
+        // Bloc retenu : leader prévu mais 1 seule co-signature.
+        let leader = *vs.leader_at(1);
+        let weak = signed_block(1, g, leader, &[&kps[0]]);
+        chain.push(weak);
+
+        // Candidat : backup mais 2 co-signatures (plus soutenu par le set).
+        let backup = addrs.iter().copied().find(|x| *x != leader).unwrap();
+        let strong = signed_block(1, g, backup, &[&kps[0], &kps[1]]);
+        let strong_hash = strong.hash();
+        chain.record_candidate(strong);
+
+        assert_eq!(
+            chain.canonical_choice(1, &vs),
+            Some(strong_hash),
+            "le poids de co-signatures supérieur gagne (règle 3)"
+        );
+        assert!(
+            chain.would_reorg_at(1, &vs),
+            "réorg requise vers le candidat plus soutenu"
+        );
+    }
+
+    #[test]
+    fn test_canonical_choice_breaks_tie_by_scheduled_leader() {
+        let (kps, addrs, vs) = three_validators();
+        let (mut chain, _) = Chain::new_with_genesis(addrs[0], 0);
+        let g = chain.tip_hash();
+
+        let leader = *vs.leader_at(1);
+        let backup = addrs.iter().copied().find(|x| *x != leader).unwrap();
+
+        // À poids de co-sigs ÉGAL (1 chacun), le bloc du leader prévu doit gagner (règle 4).
+        let backup_block = signed_block(1, g, backup, &[&kps[0]]);
+        chain.push(backup_block);
+        let leader_block = signed_block(1, g, leader, &[&kps[0]]);
+        let leader_hash = leader_block.hash();
+        chain.record_candidate(leader_block);
+
+        assert_eq!(
+            chain.canonical_choice(1, &vs),
+            Some(leader_hash),
+            "à poids égal, le leader prévu l'emporte sur le backup (règle 4)"
+        );
+        assert!(chain.would_reorg_at(1, &vs));
+    }
+
+    #[test]
+    fn test_candidates_pruned_below_finality() {
+        let (kps, addrs, _) = three_validators();
+        // Sous-ensemble à 2 validateurs pour un quorum de 2 atteignable ici.
+        let vs = vinx_core::ValidatorSet::new(vec![addrs[0], addrs[1]]);
+        let (mut chain, _) = Chain::new_with_genesis(addrs[0], 0);
+        let g = chain.tip_hash();
+
+        // Bloc retenu finalisable à h=1 (2 co-sigs = quorum).
+        let leader = *vs.leader_at(1);
+        let a = signed_block(1, g, leader, &[&kps[0], &kps[1]]);
+        chain.push(a);
+        // Un concurrent à h=1.
+        let other = if leader == addrs[0] {
+            addrs[1]
+        } else {
+            addrs[0]
+        };
+        let b = signed_block(1, g, other, &[&kps[0]]);
+        assert!(chain.record_candidate(b));
+        assert_eq!(chain.candidates_at(1).len(), 1);
+
+        // Finaliser h=1 → les candidats à h=1 sont purgés (réorg interdite sous finalité).
+        chain.advance_finality(&vs);
+        assert_eq!(chain.finalized_height(), 1);
+        assert!(
+            chain.candidates_at(1).is_empty(),
+            "candidats purgés une fois la hauteur finalisée"
+        );
     }
 
     #[test]

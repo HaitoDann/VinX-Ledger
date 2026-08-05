@@ -89,7 +89,8 @@ fn is_scheduled_leader(block: &Block, validator_set: &ValidatorSet) -> bool {
 
 /// Renvoie le plus canonique de deux candidats (règles 3 → 4 → 5 de l'ADR 0031).
 /// L'ordre induit est **total** → `reduce` est indépendant de l'ordre d'itération.
-fn more_canonical<'a>(a: &'a Block, b: &'a Block, vs: &ValidatorSet) -> &'a Block {
+/// `pub(crate)` pour que `Chain` élise la tête parmi des références sans cloner les blocs.
+pub(crate) fn more_canonical<'a>(a: &'a Block, b: &'a Block, vs: &ValidatorSet) -> &'a Block {
     // 3. Poids de co-signatures (plus = mieux).
     let (ca, cb) = (a.valid_signer_count(vs), b.valid_signer_count(vs));
     if ca != cb {
