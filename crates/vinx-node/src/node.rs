@@ -104,6 +104,16 @@ pub struct BlockEvent {
     pub state_root_hex: String,
 }
 
+/// ADR 0031 — contexte de fork-choice partagé avec la tâche P2P : le **snapshot d'état
+/// finalisé** (base de rejeu bornée pour les réorgs, cf. `reorg::advance_snapshot`) et le
+/// `storage` (pour une persistance **complète** après une réorg — la chaîne a pu être tronquée,
+/// ce que le persist incrémental ne saurait refléter).
+#[derive(Clone)]
+pub struct ForkChoiceCtx {
+    pub finalized_state: Arc<RwLock<(u64, WorldState)>>,
+    pub storage: Option<Arc<Storage>>,
+}
+
 pub struct Node {
     pub state: Arc<RwLock<WorldState>>,
     pub mempool: Arc<RwLock<Mempool>>,
@@ -134,6 +144,10 @@ pub struct Node {
     pub metrics: NodeMetrics,
     /// Validators temporarily suspended from the round-robin due to liveness eviction.
     pub suspended_validators: Arc<RwLock<HashSet<Address>>>,
+    /// ADR 0031 — snapshot d'état finalisé `(hauteur, état)` : base de rejeu bornée pour les
+    /// réorgs de fork-choice. Maintenu par `reorg::advance_snapshot` après chaque avancée de
+    /// finalité (tick + chemins P2P). Partagé avec la tâche P2P via `ForkChoiceCtx`.
+    pub finalized_state: Arc<RwLock<(u64, WorldState)>>,
 }
 
 impl Node {
@@ -144,6 +158,9 @@ impl Node {
             .map(|p| Arc::new(Storage::new(p.clone())));
         let initial_vs = state.validator_set.clone();
         let (block_events, _) = broadcast::channel(64);
+        // ADR 0031 — snapshot finalisé initialisé à (tip, état courant) : ≥ finalité, donc les
+        // réorgs sous ce tip sont sûrement ignorées jusqu'à ce que la finalité le dépasse.
+        let finalized_state = Arc::new(RwLock::new((chain.tip_height(), state.clone())));
         Arc::new(Self {
             state: Arc::new(RwLock::new(state)),
             mempool: Arc::new(RwLock::new(Mempool::new(config.max_mempool_size))),
@@ -165,6 +182,7 @@ impl Node {
             )),
             metrics: NodeMetrics::new(),
             suspended_validators: Arc::new(RwLock::new(HashSet::new())),
+            finalized_state,
         })
     }
 
@@ -175,6 +193,8 @@ impl Node {
             .as_ref()
             .map(|p| Arc::new(Storage::new(p.clone())));
         let initial_vs = state.validator_set.clone();
+        // ADR 0031 — snapshot finalisé initialisé à (tip, état courant) avant de déplacer l'état.
+        let finalized_state = Arc::new(RwLock::new((chain.tip_height(), state.clone())));
         let state_arc = Arc::new(RwLock::new(state));
         let chain_arc = Arc::new(RwLock::new(chain));
         let mempool_arc = Arc::new(RwLock::new(Mempool::new(config.max_mempool_size)));
@@ -182,6 +202,11 @@ impl Node {
         let (block_events, _) = broadcast::channel(64);
 
         let metrics = NodeMetrics::new();
+
+        let fork_choice = ForkChoiceCtx {
+            finalized_state: Arc::clone(&finalized_state),
+            storage: storage.clone(),
+        };
 
         let p2p = if config.p2p_listen.is_some() {
             match crate::p2p::start(
@@ -191,6 +216,7 @@ impl Node {
                 Arc::clone(&state_arc),
                 Arc::clone(&vs_arc),
                 metrics.clone(),
+                fork_choice,
             )
             .await
             {
@@ -228,6 +254,7 @@ impl Node {
             )),
             metrics,
             suspended_validators: Arc::new(RwLock::new(HashSet::new())),
+            finalized_state,
         })
     }
 
@@ -258,6 +285,13 @@ impl Node {
         // proposer's own signature already meets quorum, so the block is final at once;
         // with more validators it becomes final once quorum co-signs (via P2P).
         chain.advance_finality(&state.validator_set);
+
+        // ADR 0031 — maintenir le snapshot d'état finalisé (base de rejeu des réorgs). Verrous
+        // déjà tenus : state, chain ; finalized_state acquis en DERNIER (ordre global cohérent).
+        {
+            let mut snap = self.finalized_state.write().await;
+            crate::reorg::advance_snapshot(&mut snap, &chain);
+        }
 
         // Flush mempool entries whose nonce is now consumed by this block.
         {

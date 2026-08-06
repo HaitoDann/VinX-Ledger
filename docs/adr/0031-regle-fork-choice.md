@@ -1,10 +1,15 @@
 # ADR 0031 — Règle de fork-choice
 
 - **Statut :** ✅ Tranche 1 (fonction pure `canonical_head` + tests) · ✅ Tranche 2a
-  (**fondation** : candidats concurrents + choix canonique + purge sous finalité, unit-testé) ·
-  ✅ Tranche 2b **mécanisme** (module `reorg` : reconstruction d'état par snapshot+rejeu,
-  `reorg_replace`, MTP par hauteur — unit-testé, dont test d'identité) ; **reste : le déclenchement
-  depuis le chemin d'acceptation vivant + maintenance du snapshot finalisé, à éprouver au banc n=3**
+  (candidats concurrents + choix canonique + purge sous finalité) · ✅ Tranche 2b **mécanisme**
+  (module `reorg` : reconstruction d'état par snapshot+rejeu, `reorg_replace`, MTP par hauteur) ·
+  ✅ Tranche 2b **câblage vivant** (`consider_candidate` branché dans le handler P2P `NewBlock` :
+  un bloc concurrent valide à une hauteur non finalisée est enregistré et déclenche une réorg si
+  canonique ; snapshot finalisé maintenu à chaque avancée de finalité ; persistance complète
+  après réorg). **Convergence indépendante de l'ordre d'arrivée prouvée au banc n=3.**
+  **Reste : soak multi-nœuds réseau réel** (concurrence des verrous + persistance sous partition)
+  — non exécutable hors d'un déploiement à 3 nœuds ; et co-signatures sur candidats (raffinement,
+  cf. §Limites).
 - **Catégorie :** Consensus & finalité · **Priorité :** 🔴 haute (complétude de sûreté du
   consensus)
 - **Date :** Juillet 2026
@@ -126,15 +131,36 @@ plus de co-signatures, finalité plus haute). C'est la propriété clé.
   Testé, dont un **test d'identité** (rejouer la branche existante reproduit exactement l'état du
   tip) et le refus d'un `state_root` falsifié / d'une réorg sous la finalité. **Non encore
   déclenché par le chemin vivant.**
-- **Tranche 2b — wiring vivant (reste)** : alimenter `record_candidate` depuis le gossip/sync
-  (bloc concurrent valide à une hauteur non finalisée), **maintenir le snapshot finalisé**
-  (rejeu incrémental des blocs à mesure qu'ils finalisent), et quand `would_reorg_at` est vrai
-  appeler `rebuild_canonical_state` puis `reorg_replace` + installer l'état + persistance
-  (réécriture complète après réorg). Consensus-critique → à éprouver au **banc multi-nœuds**
-  (leader+backup simultanés, partitions, réordonnancements).
+- **Tranche 2b — câblage vivant (✅ fait)** — orchestration `reorg::consider_candidate`
+  (chemin **unique** partagé par le handler P2P et le banc n=3) : enregistre le candidat, et si
+  la règle le désigne canonique, reconstruit l'état depuis le snapshot + `reorg_replace` +
+  installe état/validator set + avance la finalité ; candidat invalide au rejeu → retiré (sûreté).
+  Branché dans le handler P2P `NewBlock` : le bloc jadis jeté comme « déjà vu » (hauteur ≤ tip)
+  est, s'il est un **concurrent valide au-dessus de la finalité bâti sur le même parent**, soumis
+  au fork-choice. Le **snapshot finalisé** (`ForkChoiceCtx`, base de rejeu) est initialisé à
+  `(tip, état)` et maintenu par `reorg::advance_snapshot` à chaque avancée de finalité (tick +
+  chemins P2P). **Persistance complète** (`serialize_full`, qui purge les rangs tronqués) après
+  une réorg. Verrous ordonnés state→chain→validator_set→finalized_state (cohérent avec `tick`,
+  pas d'AB-BA).
+- **Preuve (banc n=3)** : `n3_fork_choice_converges_regardless_of_arrival_order` — deux blocs
+  valides concurrents (leader vs backup) à la même hauteur ; deux nœuds les recevant dans des
+  ordres opposés convergent vers la **même tête et le même state_root**, via le vrai chemin de
+  production/fork-choice/réorg.
+- **Reste : soak multi-nœuds sur réseau réel** (concurrence des verrous + durabilité de la
+  persistance sous partition) — non exécutable hors d'un déploiement à 3 nœuds réseau.
 - **Optimisation future (option B)** — journal d'annulation (undo log) par bloc pour éviter la
   copie O(comptes) du snapshot sur gros état ; non nécessaire pré-mainnet (réorg rare et peu
   profonde). Documentée ici comme chemin de mise à l'échelle.
+
+## Limites connues
+
+- **Co-signatures sur candidats.** Les `BlockCoSignature` reçues ne sont routées que vers le bloc
+  **retenu** à chaque hauteur, pas vers les candidats concurrents. Le poids de co-signatures d'un
+  candidat (règle #3) ne croît donc pas après son arrivée : le départage repose alors sur le
+  **leader prévu (#4) puis le plus petit hash (#5)** — ce qui suffit à faire **converger
+  déterministiquement** les nœuds sur une collision leader/backup fraîche (le cas central).
+  Router les co-sigs vers les candidats (pour qu'un backup très soutenu batte le leader) est un
+  **raffinement** ultérieur, sans impact sur la convergence de base.
 
 ## Notes d'implémentation
 

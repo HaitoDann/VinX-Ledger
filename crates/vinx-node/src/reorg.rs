@@ -160,6 +160,32 @@ pub fn consider_candidate(
     }
 }
 
+/// ADR 0031 — maintient le **snapshot d'état finalisé** `(hauteur, état)` en rejouant les blocs
+/// devenus finaux depuis la dernière mise à jour. Coût O(tx des blocs rejoués), **pas** O(comptes)
+/// : c'est ce qui rend l'option A efficace en régime établi. Le snapshot est la base de rejeu
+/// (bornée) des réorgs. Défensif : s'arrête au premier rejeu qui échoue (ne devrait pas arriver
+/// sur des blocs finalisés déjà validés) plutôt que de paniquer.
+///
+/// Invariant visé : `snapshot.0 == chain.finalized_height()` en régime établi. Au démarrage le
+/// snapshot est initialisé à `(tip, état courant)` (≥ finalité) — les réorgs sous ce tip sont
+/// alors sûrement ignorées (rebuild refuse une base ≥ hauteur contestée) jusqu'à ce que la
+/// finalité dépasse le tip de démarrage et que le snapshot se remette à suivre la finalité.
+pub fn advance_snapshot(snapshot: &mut (u64, WorldState), chain: &Chain) {
+    let finalized = chain.finalized_height();
+    while snapshot.0 < finalized {
+        let next = snapshot.0 + 1;
+        match chain.get_block(next) {
+            Some(block) => {
+                if replay_block(&mut snapshot.1, chain, block).is_err() {
+                    break;
+                }
+                snapshot.0 = next;
+            }
+            None => break,
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
