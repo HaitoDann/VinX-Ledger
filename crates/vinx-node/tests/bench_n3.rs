@@ -17,7 +17,12 @@
 use vinx_core::{Block, BlockHeader, BlockSignature, ValidatorSet};
 use vinx_crypto::{Address, Hash32, KeyPair};
 use vinx_node::chain::Chain;
+use vinx_node::config::NodeConfig;
 use vinx_node::consensus;
+use vinx_node::mempool::Mempool;
+use vinx_node::producer::{produce_block, produce_block_backup};
+use vinx_node::reorg::{consider_candidate, rebuild_canonical_state, ReorgOutcome};
+use vinx_state::{create_genesis_state, GenesisConfig, WorldState};
 
 fn addr(kp: &KeyPair) -> Address {
     Address::from_public_key(&kp.public_key())
@@ -201,5 +206,95 @@ fn n3_prefix_closed_finality_and_recovery() {
         chain.finalized_height(),
         3,
         "la finalité rattrape tout le préfixe contigu d'un coup"
+    );
+}
+
+// ─── 6. Fork-choice (ADR 0031) : convergence indépendante de l'ordre d'arrivée ─────
+
+/// Genèse mono-compte + set des 3 validateurs injecté dans l'état (round-robin réel).
+fn genesis_state_n3(addrs: &[Address], vs: &ValidatorSet) -> WorldState {
+    let mut s = create_genesis_state(&GenesisConfig {
+        admin_address: addrs[0],
+        validator_address: addrs[0],
+        chain_id: vinx_core::CHAIN_ID_DEVNET,
+    });
+    s.validator_set = vs.clone();
+    s
+}
+
+#[test]
+fn n3_fork_choice_converges_regardless_of_arrival_order() {
+    // Deux validateurs produisent chacun un bloc VALIDE à la même hauteur (leader vs backup :
+    // le cas de collision que l'ADR 0031 doit résoudre). On vérifie que deux nœuds qui les
+    // reçoivent dans des ordres OPPOSÉS convergent vers la même tête et le même état — via le
+    // VRAI chemin de production, de fork-choice et de réorg (aucune simulation).
+    let (kps, addrs, vs) = three_validators();
+
+    let leader_addr = *vs.leader_at(1);
+    let backup_addr = *addrs.iter().find(|a| **a != leader_addr).unwrap();
+    let leader_kp = kps.iter().find(|k| addr(k) == leader_addr).unwrap().clone();
+    let backup_kp = kps.iter().find(|k| addr(k) == backup_addr).unwrap().clone();
+    let cfg_leader = NodeConfig::new(leader_kp);
+    let cfg_backup = NodeConfig::new(backup_kp);
+
+    // Bloc A — le leader prévu produit à h=1 (chemin leader normal).
+    let block_a = {
+        let mut s = genesis_state_n3(&addrs, &vs);
+        let (mut c, _g) = Chain::new_with_genesis(addrs[0], 0);
+        let mut mp = Mempool::default();
+        produce_block(&mut s, &mut c, &mut mp, &cfg_leader, &vs, 100).expect("bloc leader valide")
+    };
+    // Bloc B — un backup produit à la MÊME hauteur depuis un état pré-bloc identique.
+    let block_b = {
+        let mut s = genesis_state_n3(&addrs, &vs);
+        let (mut c, _g) = Chain::new_with_genesis(addrs[0], 0);
+        let mut mp = Mempool::default();
+        produce_block_backup(&mut s, &mut c, &mut mp, &cfg_backup, &vs, 100)
+            .expect("bloc backup valide")
+    };
+    assert_ne!(
+        block_a.hash(),
+        block_b.hash(),
+        "deux blocs concurrents distincts"
+    );
+    assert_eq!(block_a.header.height, 1);
+    assert_eq!(block_b.header.height, 1);
+
+    // Tête canonique selon la règle pure (identique sur tout nœud).
+    let canonical = consensus::canonical_head(&[block_a.clone(), block_b.clone()], &vs)
+        .expect("une tête canonique")
+        .hash();
+
+    // Un nœud qui applique `first`, puis reçoit `second` via le chemin de fork-choice réel.
+    let run_node = |first: &Block, second: &Block| -> (Hash32, [u8; 32]) {
+        let genesis = genesis_state_n3(&addrs, &vs);
+        let (mut c, _g) = Chain::new_with_genesis(addrs[0], 0);
+        // Applique `first` (état reconstruit depuis la genèse = snapshot finalisé à h=0).
+        let mut st = rebuild_canonical_state(&genesis, 0, &c, 1, first).expect("first valide");
+        c.push(first.clone());
+        let mut vs_mut = vs.clone();
+        // Reçoit `second` : MÊME orchestration que le handler P2P.
+        let outcome = consider_candidate(&mut c, &mut st, &mut vs_mut, &genesis, 0, second.clone());
+        // Selon l'ordre, ce sera Reorged (si `second` est canonique) ou NoChange.
+        let expect_reorg = second.hash() == canonical && first.hash() != canonical;
+        assert_eq!(
+            outcome == ReorgOutcome::Reorged,
+            expect_reorg,
+            "réorg ssi le second reçu est le bloc canonique"
+        );
+        (c.tip_hash(), st.compute_state_root())
+    };
+
+    let (tip_ab, root_ab) = run_node(&block_a, &block_b); // reçoit A puis B
+    let (tip_ba, root_ba) = run_node(&block_b, &block_a); // reçoit B puis A
+
+    assert_eq!(
+        tip_ab, tip_ba,
+        "convergence : même tête quel que soit l'ordre d'arrivée"
+    );
+    assert_eq!(root_ab, root_ba, "convergence : même état (state_root)");
+    assert_eq!(
+        tip_ab, canonical,
+        "la tête retenue est bien le bloc canonique"
     );
 }

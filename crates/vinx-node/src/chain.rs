@@ -200,6 +200,22 @@ impl Chain {
         true
     }
 
+    /// Retire un candidat (par hash) à `height` — p.ex. lorsqu'il s'avère invalide au rejeu
+    /// (state_root/supply incohérents) et ne doit donc plus peser au fork-choice. Retourne
+    /// `true` si un candidat a été retiré. Purge l'entrée de hauteur devenue vide.
+    pub fn remove_candidate(&mut self, height: u64, hash: Hash32) -> bool {
+        if let Some(bucket) = self.candidates.get_mut(&height) {
+            let before = bucket.len();
+            bucket.retain(|b| b.hash() != hash);
+            let removed = bucket.len() != before;
+            if bucket.is_empty() {
+                self.candidates.remove(&height);
+            }
+            return removed;
+        }
+        false
+    }
+
     /// Candidats concurrents connus à `height` (hors bloc retenu dans `blocks`). Vide si aucun.
     pub fn candidates_at(&self, height: u64) -> &[Block] {
         self.candidates

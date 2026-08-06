@@ -13,10 +13,22 @@
 //! d'acceptation vivant (gossip/sync) + la maintenance du snapshot finalisé sont câblés par
 //! l'appelant (node/p2p) et éprouvés au banc n=3.
 
-use vinx_core::Block;
+use vinx_core::{Block, ValidatorSet};
 use vinx_state::WorldState;
 
 use crate::chain::Chain;
+
+/// Issue d'une tentative de fork-choice sur un bloc concurrent (`consider_candidate`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ReorgOutcome {
+    /// Rien n'a changé : doublon, sous la finalité, déjà retenu, non canonique, ou candidat
+    /// rejeté au rejeu (invalide). L'état et la chaîne courants sont intacts.
+    NoChange,
+    /// Une réorganisation a eu lieu : le bloc contesté a été remplacé par `candidate`, l'état
+    /// et le validator set ont été reconstruits. L'appelant doit **persister en entier**
+    /// (la chaîne a pu être tronquée) et re-diffuser/co-signer selon sa politique.
+    Reorged,
+}
 
 /// Rejoue **un** bloc sur `state` via le chemin trusted (les signatures ne sont pas re-vérifiées
 /// ici — le caller a déjà validé le bloc). L'horloge protocole (ADR 0005) est le MTP **indexé
@@ -94,6 +106,58 @@ pub fn rebuild_canonical_state(
     // 3. Bloc canonique à la hauteur contestée.
     replay_block(&mut state, chain, canonical_block)?;
     Ok(state)
+}
+
+/// ADR 0031 — **orchestration du fork-choice vivant.** Considère un bloc `candidate` concurrent,
+/// **déjà validé par l'appelant** (proposeur ∈ set, signatures cryptographiques vérifiées, lien
+/// de parent `prev_hash` correct), arrivé à une hauteur non finalisée. Chemin unique partagé
+/// par le handler P2P **et** le banc n=3, pour que la logique éprouvée soit exactement celle qui
+/// tourne en production.
+///
+/// 1. Enregistre le candidat (`record_candidate` refuse doublon / sous-finalité / bloc déjà
+///    retenu). 2. Si la règle de fork-choice ne le désigne pas canonique → aucun changement.
+/// 3. Sinon **réorganise** : reconstruit l'état canonique depuis le snapshot finalisé
+///    (`rebuild_canonical_state`, qui re-vérifie supply + state_root de chaque bloc), remplace
+///    le bloc dans la chaîne (`reorg_replace`, tronque la branche perdante), installe l'état et
+///    le validator set, puis fait avancer la finalité.
+///
+/// Si le rejeu échoue (branche reconstruite ≠ producteur → candidat invalide), le candidat est
+/// **retiré** et rien n'est modifié (sûreté : on ne bascule que sur une branche entièrement
+/// re-vérifiée). `finalized_state` est l'état au snapshot `snapshot_height` (≤ finalité) ; la
+/// garde de non-réorg-sous-finalité est assurée par `record_candidate`.
+///
+/// Purement synchrone sur des `&mut` : l'appelant gère verrous, persistance (**complète** après
+/// une réorg — la chaîne a pu être tronquée) et re-diffusion.
+pub fn consider_candidate(
+    chain: &mut Chain,
+    state: &mut WorldState,
+    validator_set: &mut ValidatorSet,
+    finalized_state: &WorldState,
+    snapshot_height: u64,
+    candidate: Block,
+) -> ReorgOutcome {
+    let height = candidate.header.height;
+    let hash = candidate.hash();
+    if !chain.record_candidate(candidate.clone()) {
+        return ReorgOutcome::NoChange; // doublon / sous la finalité / déjà retenu
+    }
+    if !chain.would_reorg_at(height, validator_set) {
+        return ReorgOutcome::NoChange; // le bloc retenu reste canonique
+    }
+    match rebuild_canonical_state(finalized_state, snapshot_height, chain, height, &candidate) {
+        Ok(new_state) => {
+            chain.reorg_replace(height, candidate);
+            *state = new_state;
+            *validator_set = state.validator_set.clone();
+            chain.advance_finality(validator_set);
+            ReorgOutcome::Reorged
+        }
+        Err(_) => {
+            // Candidat invalide au rejeu : le retirer pour qu'il ne pèse plus au fork-choice.
+            chain.remove_candidate(height, hash);
+            ReorgOutcome::NoChange
+        }
+    }
 }
 
 #[cfg(test)]
