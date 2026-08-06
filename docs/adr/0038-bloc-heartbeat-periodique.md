@@ -35,8 +35,11 @@ morte ; les déliaisons et upgrades ne mûrissent qu'à la faveur d'un bloc. (Un
 ## Décision
 
 **Heartbeat inconditionnel : au moins un bloc toutes les `HEARTBEAT_INTERVAL_SECS =
-600` (10 min), même vide.** La cadence à la demande est conservée sous charge — le
-heartbeat n'est que le plancher de cadence au repos.
+600` (10 min), même vide.** Le heartbeat n'est que le plancher de cadence au repos.
+
+> **Amendement (ADR 0043) :** l'*accélération* à la demande sous charge (écart → 0, blocs
+> dos-à-dos) a depuis été **retirée** au profit d'un plancher fixe `block_time` (anti-fork).
+> Le skip-empty au repos et le heartbeat décrits ici restent en vigueur.
 
 Effet économique : l'accrual sera de toute façon forgé au prochain heartbeat par le
 leader round-robin du moment. Forcer un bloc plus tôt ne déplace que ≤ 10 min d'accrual

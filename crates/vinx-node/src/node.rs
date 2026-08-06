@@ -3,7 +3,7 @@ use std::collections::{HashMap, HashSet};
 use std::num::NonZeroUsize;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
-use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
+use std::time::{Instant, SystemTime, UNIX_EPOCH};
 use tokio::sync::{broadcast, Mutex, RwLock};
 use vinx_crypto::{Address, Hash32};
 
@@ -499,17 +499,13 @@ impl Node {
             if is_heartbeat_block {
                 tracing::debug!("Heartbeat block (ADR 0038)");
             } else {
-                // Demand-scaled pacing: the gap shrinks as the mempool fills — up to
-                // block_time under light load, down to zero (back-to-back) once a
-                // full block is queued. Applied uniformly, whether this is the first
-                // block after idle or a leftover being drained.
-                let pending = self.mempool.read().await.size();
-                let gap = dynamic_gap(pending, self.config.max_block_txs, block_time);
-                if !gap.is_zero() {
-                    tokio::time::sleep(gap).await;
-                }
-                // Nothing to seal (spurious wake or already drained) → don't produce
-                // an empty block; loop back to waiting.
+                // ADR 0043 — cadence à plancher fixe : au plus un bloc toutes les `block_time`,
+                // même en saturation. L'ancienne accélération à la demande (écart → 0, blocs
+                // dos-à-dos sous charge) était le générateur #1 de forks ; on la retire. La
+                // congestion est absorbée par le base-fee, pas par des blocs plus rapprochés.
+                tokio::time::sleep(block_time).await;
+                // Skip-empty conservé : rien à sceller (réveil spurious ou déjà drainé) → on ne
+                // produit pas de bloc vide, on repart attendre.
                 if self.mempool.read().await.size() == 0 {
                     continue;
                 }
@@ -707,57 +703,7 @@ impl Node {
     }
 }
 
-/// Demand-scaled gap before sealing the next block, factored out for testing.
-///
-/// Full `block_time` when the mempool is nearly empty (light-activity cadence),
-/// shrinking linearly toward zero as `pending` approaches one block's worth
-/// (`max_block_txs`), and exactly zero — back-to-back — once a full block is
-/// already queued (saturation). Combined with block-on-demand (no work → no
-/// block), this yields the three regimes in a single curve:
-/// idle → no block; light traffic → ~`block_time`; rising load → tighter gaps;
-/// saturation → back-to-back.
-fn dynamic_gap(pending: usize, max_block_txs: usize, block_time: Duration) -> Duration {
-    let max = max_block_txs.max(1);
-    if pending >= max {
-        return Duration::ZERO;
-    }
-    let fill = pending as f64 / max as f64; // 0.0 ..= 1.0
-    block_time.mul_f64(1.0 - fill)
-}
-
-#[cfg(test)]
-mod tests {
-    use super::dynamic_gap;
-    use std::time::Duration;
-
-    const BT: Duration = Duration::from_secs(10);
-    const MAX: usize = 10_000;
-
-    #[test]
-    fn test_gap_full_when_nearly_empty() {
-        // Empty / a few txs → ~full block_time (light-activity regime).
-        assert_eq!(dynamic_gap(0, MAX, BT), BT);
-        let g = dynamic_gap(50, MAX, BT);
-        assert!(g > Duration::from_millis(9_900) && g <= BT);
-    }
-
-    #[test]
-    fn test_gap_shrinks_as_mempool_fills() {
-        // Half a block queued → half the gap; nearly a full block → nearly zero.
-        assert_eq!(dynamic_gap(MAX / 2, MAX, BT), BT.mul_f64(0.5));
-        assert_eq!(dynamic_gap(MAX * 9 / 10, MAX, BT), BT.mul_f64(0.1));
-    }
-
-    #[test]
-    fn test_gap_zero_under_full_backlog() {
-        // A full block (or more) queued → back-to-back, no wait.
-        assert_eq!(dynamic_gap(MAX, MAX, BT), Duration::ZERO);
-        assert_eq!(dynamic_gap(MAX * 5, MAX, BT), Duration::ZERO);
-    }
-
-    #[test]
-    fn test_gap_never_divides_by_zero() {
-        // max_block_txs = 0 is clamped to 1 — no panic; empty mempool → full gap.
-        assert_eq!(dynamic_gap(0, 0, BT), BT);
-    }
-}
+// ADR 0043 — la cadence est désormais un plancher fixe `block_time` (plus d'accélération à la
+// demande). L'ancienne `dynamic_gap` (écart décroissant → blocs dos-à-dos en saturation) a été
+// retirée : elle maximisait la fenêtre de fork sous charge. La boucle de production espace
+// simplement les blocs de `block_time` (voir `run_block_producer`).

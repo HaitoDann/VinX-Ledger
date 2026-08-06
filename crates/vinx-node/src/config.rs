@@ -52,7 +52,8 @@ impl NodeConfig {
             validator_keypair,
             validator_address,
             validator_set,
-            block_time_secs: 5,
+            // ADR 0043 — 12 s : marge large propagation+validation « slot → forks rares.
+            block_time_secs: 12,
             max_block_txs: 10_000,
             max_mempool_size: 100_000,
             rpc_listen: "127.0.0.1:8545".to_string(),
