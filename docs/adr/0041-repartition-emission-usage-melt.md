@@ -6,6 +6,8 @@
 - **Lié :** émission élastique (ADR 0040, fournit le total à répartir) ; infrastructure de
   subnets (ADR 0039, consomme le résultat dans les reward pools) ; bond de module (ADR 0010) ;
   adjudication de fraude (ADR 0023) ; invariant de masse (ADR 0004).
+- **Amendé par :** ADR 0044 (canal d'émission unique = melt ; « valeur = ce qui est payé, jamais
+  jugé » ; deux rails ; CAP + bond proportionnel à l'émission captée) — **à lire avec cet ADR**.
 
 ---
 

@@ -7,6 +7,8 @@
 - **Lié :** immutabilité de l'émission (ADR 0021, amendée) ; répartition inter-subnet par
   l'usage (ADR 0041) ; infrastructure de subnets (ADR 0039) ; invariant de masse (ADR 0004) ;
   heartbeat/distribution (ADR 0038) ; genèse fair launch (ADR 0033).
+- **Amendé par :** ADR 0044 (émission plafonnée par l'usage `min(r·F·Δt, k·M)`, deux rails,
+  canal unique demand-pull, anti-self-dealing, amorçage) — **à lire avec cet ADR**.
 
 > ⚠️ **Décision constitutionnelle, fenêtre unique.** La loi d'émission est **immuable** après
 > lancement (ADR 0021). Ce document remplace la courbe à halving discret *avant* le mainnet.

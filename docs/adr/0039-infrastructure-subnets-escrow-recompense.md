@@ -8,6 +8,8 @@
   l'émission élastique (ADR 0040) répartie par l'usage/melt (ADR 0041) ; préserve l'invariant de
   masse (ADR 0004) ; réutilise Merkle (ADR 0014/0020) ; synergie avec la sélection de comité par
   VRF (ADR 0029) ; anti-bloat cf. ADR 0026.
+- **Amendé par :** ADR 0044 (deux rails deposit/émission ; **pont valeur-externe « Qubic »** —
+  Montage 2 ; le protocole ne frappe jamais de VINX pour du travail externe) — **à lire avec**.
 
 ---
 

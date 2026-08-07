@@ -1,7 +1,7 @@
 # VinX Ledger — État du Projet
 
 > Document de référence interne — mis à jour à chaque sprint.
-> Dernière mise à jour : **août 2026** (**tranche consensus multi-validateur : banc n=3 réel, finalité au quorum, jailing/rotation, fork-choice**). Base économique implémentée : fair launch v5 (halving 8 ans, whitepaper v4.0). **Direction économique décidée mais non implémentée :** émission élastique à réservoir + écosystème de subnets (ADR 0039/0040/0041).
+> Dernière mise à jour : **août 2026** (**consensus multi-validateur éprouvé : banc n=3 réel, finalité au quorum, jailing/rotation, fork-choice câblé de bout en bout**). Base économique implémentée : fair launch v5 (halving 8 ans, whitepaper v4.0). **Direction économique décidée mais non implémentée :** émission élastique à réservoir + garde-fous d'équité + écosystème de subnets (ADR 0039/0040/0041/**0042 époque**/**0044 équité & amorçage**). **Cadence de consensus révisée** (ADR 0043 : block time 12 s fixe, sans accélération — anti-fork).
 
 ---
 
@@ -14,7 +14,7 @@
 > ### Implémenté dans la tranche consensus (avec ADR dédié)
 > - **ADR 0002 — Finalité au quorum** : pointeur `finalized_height` explicite, **prefix-closed**, évalué contre le **quorum historique à chaque hauteur** (`Chain::note_quorum`/`quorum_at`, corrige le blocage du préfixe après changement de set) ; avancé aussi sur les chemins de sync (P2P + HTTP). **+ Refus de bâtir dans le vide** (`MAX_UNFINALIZED_DEPTH = 64`).
 > - **ADR 0027 — Jailing (t1+t2a+t2b)** : cœur pur déterministe (`vinx-core::reliability`), état câblé dans `settle_block` (`WorldState.reliability`, migration meta **v10→v11**), et **rotation** leader/backup sur le **set actif** (jailés sautés). ⚠️ **Sûreté :** le quorum de finalité **reste sur le set complet bondé** — jamais réduit par le jailing (le banc a montré que le réduire casse la sûreté sous partition ; seule la gouvernance réduit `n`).
-> - **ADR 0031 — Fork-choice (t1)** : `consensus::canonical_head`, fonction pure et totale (poids co-sigs → leader prévu → plus petit hash), indépendante de l'ordre réseau.
+> - **ADR 0031 — Fork-choice (t1 + t2a + t2b)** : `consensus::canonical_head` (fonction pure) **câblé de bout en bout** — candidats concurrents, mécanisme de réorg par snapshot+rejeu (`reorg`), et déclenchement vivant dans le handler P2P. **Convergence indépendante de l'ordre d'arrivée prouvée au banc n=3.** Reste : soak multi-nœuds réseau réel.
 > - **ADR 0005 — Horloge protocole sur MTP** : émission/déliaison/upgrade comparent au Median Time Past incluant le bloc, sur les 3 chemins (prod/P2P/sync).
 > - **ADR 0038 — Heartbeat 10 min** : au moins un bloc toutes les 600 s, supprime l'incitation à forcer des blocs par fausses tx.
 >
@@ -22,13 +22,13 @@
 > **0015** (vérif parallèle des signatures) · **0026** (dépôt existentiel + reaping) · **0022** (durcissement P2P anti-DoS) · **0011** (gouvernance K-of-M) · **0010** (registre de modules bondés) · **0020** (vecteurs dorés canoniques). Plus un lot sécurité : routes admin fail-closed + comparaison constant-time, sync HTTP vérifiée (proposeur/quorum/state_root), keystore wallet chiffré (argon2 + AES-GCM), rate-limiter borné, persistance incrémentale de la chaîne par hauteur.
 >
 > ### Décidé mais NON implémenté — la prochaine grande direction
-> **Pivot économique & écosystème** (ADR rédigés, à implémenter) : **0040** émission élastique `E = r·F` (r=7 %, melt→Fonderie, remplace le halving — amende 0021), **0041** répartition de l'émission entre subnets par l'usage/melt (rejette le staking à la TAO), **0039** infrastructure de subnets (escrow bondé + racine de récompense + Claim). Objectif : des développeurs créent des subnets à vraie boucle économique, les mineurs gagnent des VINX par un service réel. Le simulateur `scripts/emission_sim.py` a servi à choisir r=7 %.
+> **Pivot économique & écosystème** (ADR rédigés, à implémenter) : **0040** émission élastique `E = r·F` (r=7 %, melt→Fonderie, remplace le halving — amende 0021), **0041** répartition de l'émission entre subnets par l'usage/melt (rejette le staking à la TAO), **0039** infrastructure de subnets (escrow bondé + racine de récompense + Claim), **0042** l'époque de règlement (fenêtre MTP, robuste au bloc-on-demand), **0044** garde-fous d'équité & amorçage (émission plafonnée par l'usage `min(r·F·Δt, k·M)` → tue le jackpot de démarrage à froid ; canal unique demand-pull « valeur = ce qui est payé » ; deux rails paiement/melt ; pont valeur-externe « Qubic » Montage 2 ; seed float genesis). Objectif : des développeurs créent des subnets à vraie boucle économique, les mineurs gagnent des VINX par un service réel. Idées de subnets : [`docs/subnets/CATALOGUE.md`](docs/subnets/CATALOGUE.md) (4 retenus : monitoring, stockage, calcul/build+Qubic, annotation IA). Le simulateur `scripts/emission_sim.py` a servi à choisir r=7 % (à réutiliser pour caler `k`/CAP/bond).
 >
 > ### Autres propositions ouvertes — voir l'index ADR
 > Consensus/sûreté : **0030** (accountability co-sign), **0036** (churn validateurs), reste de **0002** (view-change) et **0031** (wiring reorg). Économie/lancement : **0028** (partage d'émission), **0033** (bootstrap fair-launch). Modules : **0034** (DA & preuve d'ancre), **0023** (slashing de fraude). Gouvernance : **0032** (garde-fous, 🚧). Scaling : **0029** (BLS + comité VRF), **0035** (bornes ressources), **0037** (blocs compacts). Divers : **0012** (clés HSM), **0013** (rent d'état), **0014** (light client), **0016** (post-quantique), **0017** (halt), **0018** (SLO), **0019** (TLS).
 >
 > ### ⚠️ Le chemin critique
-> Le banc n=3 (ex-chemin critique) est **fait**. Prochaines priorités consensus : **wiring reorg du fork-choice (0031 t2)** — stocker les candidats concurrents + réorg bornée sous finalité —, tx `Unjail` (0027) et règle 2 (co-signatures absentes), puis **0030** (accountability, sûreté, faible risque). Ensuite le **pivot économique** (0040 → 0041 → 0039) qui débloque la vraie proposition de valeur.
+> Le banc n=3 et le **wiring reorg du fork-choice (0031 t2b)** sont **faits** (convergence prouvée au banc n=3). **Chemin critique désormais : le pivot économique constitutionnel** — figer puis implémenter 0040 (+ garde-fous 0044) → 0041 → 0042 (époque) → 0039 (subnets), gated par des décisions **immuables** à trancher avant mainnet. En parallèle (faible risque) : tx `Unjail` (0027), règle 2 (co-signatures absentes), **0030** (accountability), et le **soak fork-choice n=3 sur réseau réel**.
 
 ---
 
@@ -59,11 +59,11 @@ VinX Ledger est une blockchain L1 de paiement écrite intégralement en Rust, sa
 - [x] Consensus PoA Threshold — quorum `⌈2n/3⌉` sur le **set complet bondé**, leader round-robin sur le **set actif** (jailés sautés, ADR 0027)
 - [x] **Finalité au quorum** (ADR 0002) — pointeur `finalized_height` explicite, **prefix-closed**, évalué contre le **quorum historique à chaque hauteur** ; à n=1 immédiate, à n≥2 suit les co-signatures. Éprouvée au **banc n=3** (liveness / tolérance 1 panne / sûreté à 1/3)
 - [x] **Refus de bâtir dans le vide** — le producteur (leader et backup) ne scelle pas au-delà de `MAX_UNFINALIZED_DEPTH` (64) blocs non finalisés (ADR 0002)
-- [x] **Fork-choice déterministe** (ADR 0031 t1) — `canonical_head` pure (poids co-sigs → leader prévu → plus petit hash) ; *wiring reorg à venir (t2)*
+- [x] **Fork-choice déterministe câblé** (ADR 0031 t1+t2a+t2b) — `canonical_head` pure + candidats concurrents + réorg par snapshot+rejeu (`reorg`) déclenchée dans le handler P2P ; convergence indépendante de l'ordre **prouvée au banc n=3** ; *reste : soak réseau réel*
 - [x] **Jailing / fiabilité des validateurs** (ADR 0027) — set actif dérivé de faits on-chain (proposeur effectif ≠ leader prévu), rotation sur le set actif ; le quorum de finalité n'est **jamais** réduit par le jailing (sûreté)
 
 ### Production de blocs
-- [x] Producteur **à la demande, cadence adaptative** : activité légère → ~`block_time` (5 s) ; charge → l'écart se resserre avec le remplissage ; saturation → blocs dos-à-dos. Garde anti-spin (pas de blocs vides en boucle sur backlog inapplicable)
+- [x] Producteur **à plancher de cadence fixe** (ADR 0043) : au plus un bloc toutes les **12 s**, même en saturation (l'ancienne accélération dos-à-dos, génératrice de forks, a été retirée — la congestion passe par le base-fee). Skip-empty au repos conservé. Garde anti-spin (pas de blocs vides en boucle sur backlog inapplicable)
 - [x] **Heartbeat 10 min** (ADR 0038) : au repos, au moins un bloc (même vide) toutes les 600 s — forge l'émission accumulée à heure fixe (supprime l'incitation à forcer des blocs par fausses tx), borne le retard du MTP, fait mûrir déliaisons/upgrades. Coût : ~15-30 Mo/an
 - [x] Capacités : **10 000 tx/bloc**, mempool **100 000** (réglables `max_block_txs` / `max_mempool_size`)
 - [x] Frais dynamiques style EIP-1559 (×1 à ×3 selon la charge mémoire)
@@ -259,6 +259,8 @@ Actions disponibles :
 > La Fonderie se vide **uniquement** pour rémunérer la production de blocs, selon une décroissance par **halving tous les 8 ans** (`débit(t) = R₀·2^(−t/8 ans)`), **intégrée sur les timestamps** — une chaîne inactive ne produit aucun bloc (donc rien n'est forgé), et le premier bloc après une période d'activité forge l'émission accumulée depuis le précédent. La Fonderie ne se recharge jamais (aucun melt) — elle décroît de façon monotone jusqu'à la poussière, puis c'est **fees-only**. L'invariant `circulation + Fonderie = 100 Md` reste vrai trivialement.
 >
 > *Note d'incitation (voir ADR 0028) :* l'émission va aujourd'hui **100 % au producteur** ; l'ADR 0028 (proposé) la partagerait entre le proposeur et les co-signataires du quorum, pour rémunérer la finalité et lisser la distribution.
+>
+> *Direction actée (non implémentée) :* le halving ci-dessus est **remplacé** par l'émission élastique à réservoir (0040, `E=r·F`) **plafonnée par l'usage** (`min(r·F·Δt, k·M)`, 0044) ; les validateurs vivent alors des **frais**, l'émission finance les **subnets** par l'usage/melt (0041/0039), réglée par **époque** (0042). Voir 0044 pour les garde-fous d'équité (jackpot à froid, canal unique, deux rails, amorçage).
 >
 > **⚠️ Évolution décidée (non implémentée) — ADR 0040/0041/0039 :** le halving discret sera remplacé par une **émission élastique à réservoir** `E = r · F` (fraction `r = 7 %` de la Fonderie, le **melt** recyclant vers la Fonderie → auto-régulation vers `C* = MAX − M/r`). Cette émission alimentera des **reward pools de subnets**, répartis **au prorata du VINX melté (usage réel)** par subnet, et les subnets seront hébergés par une infrastructure d'**escrow bondé + racine de récompense + Claim par preuve Merkle** (0039). Les validateurs vivront alors des **frais**. Le code décrit ci-dessus (halving 8 ans) reste ce qui tourne aujourd'hui.
 
