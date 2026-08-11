@@ -47,7 +47,9 @@ emission_i = part_i · E_fenêtre
 - **Porte de bond** : un subnet dont le bond est sous `MIN_SUBNET_BOND` ne pèse pas — l'entrée
   reste anti-Sybil (réutilise le bond de l'ADR 0010).
 - **Plafond `CAP`** : aucun subnet ne peut capter plus de `CAP` (ex. 25 %) de l'émission d'une
-  fenêtre, quel que soit son melt — borne l'auto-dealing et la centralisation.
+  fenêtre, quel que soit son melt — borne l'auto-dealing et la centralisation. **Invariant gravé
+  (ADR 0044) : `CAP · k < 1`** (avec `k` le multiplicateur d'amorçage de 0044) → l'auto-dealing est
+  une perte sèche. Avec `CAP = 25 %`, cela impose `k < 4`.
 
 `emission_i` **abonde le reward pool** du subnet `i` (ADR 0039), en plus des dépôts clients
 (`Deposit`). La répartition **intra**-subnet (quel mineur touche quoi) reste gérée par le

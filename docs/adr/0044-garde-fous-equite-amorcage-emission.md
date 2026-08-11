@@ -66,9 +66,23 @@
 
 ### 2.4 Anti-self-dealing — *renforce 0041*
 
-- **CAP par subnet** (ex. 25 %) conservé (0041) ; le surplus non capté **retourne à la Fonderie**.
+> **Invariant gravé : `CAP · k < 1`.** C'est la condition de sûreté qui rend l'auto-dealing
+> **structurellement non rentable**.
+
+- **Preuve.** Un acteur qui melte `M` pour tirer l'émission vers son propre subnet reçoit au plus
+  `CAP · E_fenêtre = CAP · k · M` (plafond par subnet appliqué sur l'émission de la fenêtre, elle-
+  même plafonnée à `k·M` par §2.1). Si `CAP · k < 1`, il **récupère moins que `M`** → **perte
+  sèche**. « Melter tout pour tout récupérer via l'émission » est donc impossible à rentabiliser.
+  En pratique il récupère encore moins (l'émission est partagée avec les vrais subnets).
+- **Multiplier les subnets ne contourne pas** : chaque subnet reste plafonné à `CAP` et perd
+  (`CAP·k<1`), et chacun exige son propre bond → l'attaque coûte plus cher à mesure qu'on la
+  duplique. Avec `CAP = 25 %`, l'invariant impose **`k < 4`**.
+- **Le burn (melt) est le coût anti-Sybil, pas du gaspillage.** Mesurer la demande *sans* brûler
+  (simple volume de paiement) serait **wash-tradeable** (s'auto-payer en boucle, gratuitement).
+  Le burn rend coûteux de **simuler** de la demande — c'est le cœur du mécanisme.
+- **CAP par subnet** (ex. 25 %) : le surplus non capté **retourne à la Fonderie**.
 - **Bond proportionnel à l'émission captée** : capter une grosse part exige un bond conséquent au
-  risque → un acteur seul ne peut pas rafler à bas coût (l'auto-dealing devient cher).
+  risque (défense complémentaire à `CAP·k<1`).
 
 ### 2.5 Pont valeur-externe (modèle « Qubic ») — *amende 0039*
 
@@ -85,10 +99,43 @@ Monero à vide). Deux montages **propres** :
 
 ### 2.6 Amorçage œuf/poule — *renvoie à 0033*
 
-L'émission ne crée **pas** le premier VINX. Un **seed float** en circulation au genesis
-(distribution large, transparente, sans premine d'initiés + **faucet** au lancement, ADR 0033)
-amorce le côté demande. L'émission distribue la Fonderie **ensuite**, gated par l'usage (§2.1).
-Le pont valeur-externe (§2.5) peut aussi amorcer la demande avant qu'elle soit organique.
+En **fee-only** (§2.7, Q1), les validateurs ne frappent rien → une chaîne partie de zéro est en
+**deadlock** (pas de token → pas de tx → pas de frais → rien n'existe). **Une circulation
+initiale au genesis est donc obligatoire** ; la formule « zéro jeton à la genèse » est
+**impossible** et abandonnée.
+
+> **Amorçage par le travail (« subnet 0 »).** Plutôt qu'une *allocation*, le **seed float** est
+> **gagné** : une phase de bootstrap **plafonnée et temporaire** émet le seed contre un **travail
+> objectif et utile** (ex. stockage : Go prouvés — lance un vrai subnet dès le jour 1), en
+> **supply-push assumé** (la seule fenêtre sanctionnée, bornée par le plafond), puis **bascule en
+> demand-pull**. C'est le modèle Bitcoin/Bittensor (« pas d'allocation, tout gagné »), plus
+> aligné que l'allocation. Garde-fous : plafond = taille du seed, **plafond par participant**,
+> bond anti-Sybil, transition nette. Le bootstrap joue **double rôle : amorçage *et* filet de
+> distribution** si l'écosystème subnet tarde. Paramètres (taille du seed, service, durée) →
+> **ADR 0033**. Une **petite trésorerie Labs vestée** (0033) finance le dev à côté (le seed
+> gagné va aux travailleurs, pas à Labs).
+
+### 2.7 Modèle d'émission retenu (Q1) — *cadre l'ensemble*
+
+> **Décision : l'émission se fait par les subnets (demand-pull / melt) ; les validateurs vivent
+> des frais (fee-only PoA).** C'est le modèle le mieux aligné — quasiment l'**unique** satisfaisant
+> toutes les contraintes (cap dur · pas de plutocratie · fair/large · demande réelle · sans oracle
+> · anti-Sybil · onboarding permissionless).
+
+- **Rejet des alternatives :** PoW (gaspillage + capture matérielle), PoS/émission-aux-stakers
+  (**plutocratie**), émission-aux-validateurs-PoA (concentration au set curé), usage-mining
+  générique (Sybil/farming), style Bittensor **sans** melt = **stake + notation Yuma** (plutocratie
+  + oracle — exactement ce que le melt évite).
+- **Le melt est porteur de 3 rôles** qu'aucune alternative ne cumule : (1) **dénominateur commun**
+  (comparer 1 Go vs 1 h-GPU vs 1 annotation en « VINX payés », sans oracle) ; (2) **résistance
+  Sybil** (fausser la demande brûle de vrais tokens) ; (3) **onboarding permissionless** (un
+  nouveau subnet touche sa part par son melt, sans comité).
+- **Deux couches (Q1) :** **sécurité = PoA permissionné** (décentralisation progressive) ;
+  **économie = permissionless** (n'importe qui lance un subnet ou mine). La décentralisation est là
+  où elle compte : *qui peut gagner/participer = tout le monde*.
+- **Le pari assumé :** la distribution des ~90 % de la Fonderie **dépend du succès des subnets**
+  (pas d'usage → émission inerte). Mitigations : ≥ 1 subnet réel **au lancement**, et le bootstrap
+  §2.6 comme **filet**.
 
 ## 3. Conséquences
 

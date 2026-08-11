@@ -5,6 +5,15 @@ Format : `MAJEUR.MINEUR.CORRECTIF` — les versions `0.x.y` sont des versions de
 
 ---
 
+## [0.49.0] — 2026-08-11 — Fork-choice câblé de bout en bout + cadence 12 s fixe + direction tokenomics gravée
+
+> Termine le fork-choice (ADR 0031 t2b) et révise la cadence de consensus (ADR 0043). Grave la direction économique (émission par les subnets / melt) dans les ADR. Non-breaking côté consensus (réorg additive, bornée sous finalité) ; change le défaut de cadence.
+
+- **Fork-choice câblé (ADR 0031 t2a+t2b).** Module `reorg` : reconstruction d'état par **snapshot finalisé + rejeu** (`rebuild_canonical_state`), `Chain::reorg_replace` (troncature de la branche perdante), `median_time_past_ending_at` (MTP indexé par hauteur). Orchestration `reorg::consider_candidate` **branchée dans le handler P2P `NewBlock`** : un bloc concurrent valide à une hauteur non finalisée déclenche une réorg s'il est canonique ; snapshot maintenu à chaque avancée de finalité ; persistance complète après réorg ; verrous ordonnés (pas d'AB-BA). **Convergence indépendante de l'ordre d'arrivée prouvée au banc n=3** (`n3_fork_choice_converges_regardless_of_arrival_order`). Reste : soak multi-nœuds réseau réel.
+- **Cadence de consensus (ADR 0043).** Block time défaut **5 → 12 s** ; **`dynamic_gap` retirée** → plancher fixe (plus de blocs dos-à-dos en saturation, générateur #1 de forks) ; la congestion passe par le base-fee. Skip-empty + heartbeat 10 min conservés. Neutre pour l'émission (intégrée sur le temps). Débit crête ≈ 833 TPS.
+- **Direction tokenomics gravée (ADR 0042, 0044 + catalogue).** **0042** l'époque de règlement (fenêtre MTP, robuste au bloc-on-demand). **0044** garde-fous d'équité & amorçage : émission plafonnée par l'usage `min(r·F·Δt, k·M)`, **invariant `CAP·k < 1`** (anti auto-dealing), canal unique demand-pull, deux rails, pont « Qubic » Montage 2, **modèle retenu (Q1)** : émission par les subnets + validateurs **fee-only PoA**, **amorçage par le travail** (« subnet 0 »). Catalogue de 4 subnets (`docs/subnets/CATALOGUE.md`). Whitepaper + ADR 0039/0040/0041 amendés en cohérence. *Décisions de conception (constitutionnelles) — implémentation à venir.*
+- Suite `vinx-node` verte (119 tests, dont 6 au banc n=3), clippy `-D warnings` & fmt propres.
+
 ## [0.48.0] — 2026-08-05 — Consensus n=3 : rotation sur set actif + quorum de finalité sur set complet (ADR 0027 t2b)
 
 > Câble la rotation du jailing et **corrige une faille de sûreté révélée par le banc n=3**. Non-breaking (rotation dérivée déterministe ; le quorum de finalité reste inchangé).
