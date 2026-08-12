@@ -93,35 +93,50 @@ non_emis(t) = MAX_SUPPLY_ATOMS − emitted_atoms(t)
 Elle est calculable à la demande depuis `emitted_atoms` (déjà présent). L'API `/network/stats`
 et la métrique `vinx_foundry` sont renommées : `vinx_not_yet_emitted` / `remaining_supply`.
 
-### 2.3 Slashing : destruction au lieu du melt
+### 2.3 Slashing : redistribution aux validateurs actifs (via le pot d'époque)
 
-Le bond slashé est **détruit** (soustrait définitivement de la circulation) :
+Le bond slashé ne quitte pas la circulation. Les fonds changent de main :
 
-| Bénéficiaire | Avant (melt) | Après (destruction) |
+| Bénéficiaire | Avant (melt) | Après |
 |---|---|---|
-| 10 % — rapporteur | Crédité au rapporteur | Inchangé |
-| 90 % — reste du bond | Fondu dans La Fonderie | **Détruit** (soustrait sans contrepartie) |
+| 10 % — rapporteur | Crédité au rapporteur | **Inchangé** |
+| 90 % — reste du bond | Fondu dans La Fonderie | **Versé dans `epoch_dist_emission_pot`** |
 
-Un champ `destroyed_atoms: u128` est ajouté à `WorldState` pour le suivi comptable
-(transparence, métriques Prometheus).
+Les 90 % rejoignent le pot d'époque en cours, exactement comme l'émission. Ils sont
+distribués aux proposeurs et co-signataires à la clôture de l'époque (ADR 0028) —
+proportionnellement à leur participation effective. Cela :
+- **Récompense les validateurs honnêtes** qui maintiennent la sécurité du réseau.
+- **Ne détruit aucun jeton** — la supply totale en circulation reste constante (hors relais
+  normal émission → circulation).
+- **Préserve le principe « aucun burn »** de VinX.
+- **Unifie le mécanisme** : slash et émission passent par le même pot, le même algorithme.
 
 #### Comportement du reaping (ADR 0026)
 
-Le dust des comptes reaped (solde < plancher existentiel) était fondu dans La Fonderie.
-Il est désormais **détruit** (même traitement que le slash). `destroyed_atoms += dust`.
+Le dust des comptes reaped (solde < plancher existentiel) est **détruit** — c'est la seule
+source de destruction de tokens dans VinX. Les montants sont infimes (≤ 0,001 VINX par
+compte). `destroyed_atoms += dust` (pour le suivi comptable).
 
 ### 2.4 Nouvel invariant de conservation
 
 L'invariant **ADR 0004 est remplacé** par :
 
 ```
-circulating_supply + destroyed_atoms = emitted_atoms
+circulating_supply + epoch_dist_emission_pot + pending_escrows_total + destroyed_atoms
+    = emitted_atoms
 emitted_atoms ≤ MAX_SUPPLY_ATOMS
 ```
 
-où `circulating_supply` = Σ balances comptes (incluant bonds stakés, unbonds en cours).
+où :
+- `circulating_supply` = Σ balances comptes (incluant bonds stakés, unbonds en cours)
+- `epoch_dist_emission_pot` = émission + slash 90 % en attente de distribution (ADR 0028)
+- `pending_escrows_total` = Σ montants bloqués dans les escrows de modules (ADR 0039)
+- `destroyed_atoms` = dust reaped uniquement (ADR 0026) — jamais du slash
 
 Cet invariant est **vérifié à chaque bloc** (garde dure, même rigueur qu'avant).
+
+> **Forme simplifiée pour la communication** : « circulation + détruits ≤ émis ≤ 100 Md »
+> (le pot et les escrows sont de la circulation temporairement différée — pas une perte).
 
 ### 2.5 Comportement à la transition (migration)
 
@@ -150,15 +165,17 @@ Lors de l'application de cet ADR sur une chaîne existante :
 **Positif**
 - **Fin de l'apparence de pre-mine** : à la genèse, `emitted_atoms = 0`, `circulating = 0`.
   Il n'y a rien — les tokens n'existent pas encore. Beaucoup plus propre à communiquer.
-- **Slashing net** : les VINX slashés sont vraiment détruits — le taux de slashing n'impacte
-  plus la courbe d'émission. La politique monétaire est indépendante du comportement des
-  validateurs.
+- **Principe « aucun burn » préservé** : le slash redistribue vers les validateurs honnêtes
+  via le pot d'époque — aucun token ne disparaît, ils changent de main. Seul le dust de
+  reaping est détruit (infimes montants, par construction ≤ 0,001 VINX par compte reapé).
+- **Slash renforce l'incitation à valider** : les 90 % du bond slashé vont aux validateurs
+  actifs — récompense collective pour maintenir un set sûr.
 - **Émission plus équitable** : avec `T_half = 20 ans`, les premiers validateurs gagnent
   beaucoup moins que dans le modèle 8 ans, réduisant la concentration early.
 - **Modèle plus lisible** : minting progressif, un seul concept (`emitted_atoms`), une
   métrique simple (`remaining_supply = MAX − emitted`).
-- **Invariant plus fidèle** : `circ + destroyed = emitted` est une identité comptable
-  honnête — chaque atome est soit en circulation soit détruit.
+- **Unification du pot d'époque** : émission + slash 90 % passent par le même pot et le
+  même algorithme de distribution — cohérence maximale, aucune logique dupliquée.
 
 **Coûts / pièges**
 - **Changement consensus-critique** : touche `WorldState`, `settle_block`, l'invariant et le
@@ -176,9 +193,12 @@ Lors de l'application de cet ADR sur une chaîne existante :
 
 - **Garder La Fonderie avec le melt** : rejeté — les deux problèmes (apparence pre-mine,
   émission dépendante du slashing) persistent.
-- **Garder La Fonderie, supprimer le melt** (slash = destroy mais foundry reste) :
+- **Garder La Fonderie, supprimer le melt** (slash → epoch pot mais foundry reste) :
   partiellement adressé mais l'invariant reste `circ + foundry = MAX` — La Fonderie est
   toujours un pre-mine visible. Rejeté.
+- **Slash vers destruction** (90 % détruits) : contredit le principe « aucun burn » de VinX
+  et prive les validateurs honnêtes d'une récompense juste. Rejeté au profit de la
+  redistribution via epoch pot.
 - **Changer la forme de la courbe** (non-exponentielle) : rejeté — l'exponentielle est
   l'unique fonction ayant la propriété `intégrale = MAX` avec un paramètre simple et une
   arithmétique entière raisonnable. Une courbe quadratique ou hypergéométrique serait plus

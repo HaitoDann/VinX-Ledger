@@ -1,7 +1,7 @@
 # VinX Ledger — Livre Blanc
 
-**Version :** 4.0
-**Date :** Juillet 2026
+**Version :** 5.0
+**Date :** Août 2026
 **Éditeur :** VinX Labs
 
 ---
@@ -16,7 +16,7 @@ Construit en solo, sans investisseurs, **sans pre-mine**, sans promesses spécul
 
 Cohérent avec cette philosophie, VinX est développé sur un **protocole Rust entièrement maîtrisé**, sans framework tiers imposant sa vision. Chaque ligne de code correspond exactement à ce que VinX veut être — rien de plus.
 
-> **Ce qui change en v4.0 :** VinX abandonne le modèle *melt/forge* (frais fondus dans une réserve, récompensés à des stakers passifs) au profit d'un **fair launch** : aucun jeton n'est donné à la genèse, **tous les VINX entrent en circulation par le travail des validateurs**, et le staking redevient ce qu'il doit être dans un réseau permissionné — un **bond de sécurité**, pas un rendement.
+> **Ce qui change en v5.0 :** VinX abandonne le modèle « La Fonderie » (pré-allocation de 100 Md à la genèse, melt/forge) au profit d'un **minting progressif pur** : les tokens n'existent pas avant d'être produits. La courbe d'émission est allongée (~20 ans de demi-vie au lieu de 8) pour réduire le front-loading. Le slash est **redistribué aux validateurs honnêtes** via le pot d'époque — les tokens ne quittent jamais la circulation. Les modules gagnent un mécanisme de **rémunération par escrow on-chain** (ADR 0039). L'émission reste entièrement par le travail du consensus, sans pre-mine, sans robinet discrétionnaire.
 
 ---
 
@@ -46,40 +46,43 @@ Les briques P2P (libp2p Rust), consensus PoA Threshold et mises à jour forkless
 
 ## 3. Tokenomics — Fair launch & émission par le travail
 
-La supply totale est fixée à **100 000 000 000 VinX** (100 milliards), **immuable et sans burn**. Aucun jeton n'est jamais créé au-delà de ce plafond ni détruit en dessous : la valeur ne fait que **passer de la réserve à la circulation**, une fois, dans un seul sens — par le travail.
+La supply totale est fixée à **100 000 000 000 VinX** (100 milliards), **immuable**. Les tokens ne sont **jamais créés au-delà** de ce plafond. Le slash et le reaping ne détruisent pas les tokens (seul le dust de reaping, infime, est retiré) — la supply totale en circulation approche 100 Md de façon monotone.
 
-### 3.1 Aucun pre-mine
+### 3.1 Aucun pre-mine, aucune réserve pré-allouée
 
 À la genèse :
 
 ```
-La Fonderie (réserve d'émission) = 100 000 000 000 VinX   (100 %)
-Circulation                       = 0 VinX                 (0 %)
+Tokens émis       = 0 VinX   (0 %)
+Circulation       = 0 VinX   (0 %)
 ```
 
-**Personne ne détient de VINX au démarrage** — pas même le fondateur. Il n'y a **aucune allocation fondateur**, aucune vente privée, aucun jeton distribué à l'avance. Le fondateur obtiendra des VINX exactement comme tout le monde : **en faisant tourner des validateurs**.
+**Rien n'existe au démarrage.** Pas de réserve, pas de Fonderie, pas d'allocation — même latente. Les VINX n'existent que lorsqu'ils sont mintés par le travail du consensus. Personne ne détient de VINX au bloc 0, pas même le fondateur : il obtiendra ses jetons exactement comme tout le monde, **en faisant tourner des validateurs**.
 
-C'est le sens profond du choix. Faire fonctionner les premiers validateurs est un travail réel et risqué (infra, disponibilité, maintenance) ; ce travail est rémunéré par l'émission. Un « don » au fondateur serait redondant — il gagne ses jetons en portant le réseau, pas en se les attribuant.
+C'est le sens profond du choix. Faire tourner les premiers validateurs est un travail réel et risqué (infra, disponibilité, maintenance) ; ce travail est rémunéré par l'émission. Un « don » au fondateur serait redondant — il gagne ses jetons en portant le réseau, pas en se les attribuant.
 
-### 3.2 L'émission : décroissance exponentielle, halving tous les 8 ans
+### 3.2 L'émission : décroissance exponentielle continue, demi-vie ~20 ans
 
-Les VINX sortent de La Fonderie **uniquement** pour rémunérer la production de blocs. Le débit d'émission décroît dans le temps et est **divisé par deux tous les 8 ans** :
+Les VINX sont **mintés progressivement** pour rémunérer la production de blocs. Le débit d'émission décroît de façon **continue et régulière** depuis le premier bloc :
 
 ```
-débit(t) = R₀ · 2^(−t / 8 ans)          avec R₀ ≈ 8,66 milliards VinX / an
+R(t) = R₀ · e^(−λt)     avec  λ = ln(2) / T_half
+                               T_half ≈ 20 ans (demi-vie)
+                               R₀ ≈ 3,47 milliards VinX / an
 ```
 
-L'intégrale sur l'infini vaut exactement **100 milliards** : toute la supply finit par être émise, de plus en plus lentement. La courbe est **lisse** (pas de marche d'escalier au moment du halving) et **calculée sur le temps réel** (timestamps des blocs), de sorte qu'un réseau qui dort ou qui sature n'accélère ni ne fige l'émission.
+L'intégrale sur l'infini vaut exactement **100 milliards** : toute la supply finit par être mintée, de plus en plus lentement, jusqu'à la poussière. Il n'y a **aucun événement discret** (pas de « halving-day » comme Bitcoin) — la courbe décroît en permanence, imperceptiblement à l'échelle humaine. Elle est **calculée sur le temps réel** (timestamps des blocs) : un réseau au repos ne minte rien, et le bloc qui le réveille encaisse l'émission accumulée pendant toute la période creuse.
 
-| Échéance | Cumul émis | Restant dans La Fonderie |
+| Échéance | Cumul émis | Restant à minter |
 |---|---|---|
 | Genèse | 0 | 100 Md |
-| 8 ans | 50 Md | 50 Md |
-| 16 ans | 75 Md | 25 Md |
-| 24 ans | 87,5 Md | 12,5 Md |
-| … | → 100 Md | → poussière |
+| 20 ans | 50 Md | 50 Md |
+| 40 ans | 75 Md | 25 Md |
+| 66 ans | 90 Md | 10 Md |
+| ~133 ans | 99 Md | ~1 Md |
+| ∞ | → 100 Md | → poussière |
 
-**L'émission est front-loadée à dessein** : elle est forte au début, quand l'économie est minuscule et que les frais ne suffisent pas à rémunérer les validateurs, puis elle s'efface à mesure que l'usage — et donc les frais — grandit.
+Avec une demi-vie de 20 ans, l'émission démarre plus basse (R₀ ≈ 3,47 Md/an contre 8,66 dans la v4) et se répartit sur une période bien plus longue — **réduisant structurellement la concentration early** sans toucher la masse totale.
 
 ### 3.3 Deux propriétés clés de l'émission
 
@@ -88,19 +91,27 @@ L'intégrale sur l'infini vaut exactement **100 milliards** : toute la supply fi
 
 ### 3.4 Le relais automatique vers les frais
 
-Le revenu d'un validateur est la somme de deux flux : l'**émission** (dominante au début) et les **frais de transaction** (croissants avec l'usage). À mesure que La Fonderie se vide, l'émission s'efface et les frais deviennent la source de revenu dominante. Quand La Fonderie passe sous un seuil de poussière, l'émission s'arrête définitivement : le réseau bascule en **fees-only**, pour toujours.
+Le revenu d'un validateur est la somme de deux flux : l'**émission** (dominante au début) et les **frais de transaction** (croissants avec l'usage). La courbe d'émission décroît continûment ; les frais croissent avec l'adoption. Quand l'émission atteint la poussière, les frais deviennent la source de revenu dominante et le réseau bascule en **fees-only**, pour toujours.
 
-Ce relais se fait **tout seul**, sans intervention ni décision. C'est la propriété la plus élégante du modèle : l'incitation à sécuriser la chaîne existe dès le premier jour et ne dépend jamais d'un robinet à couper à la main.
+Ce relais se fait **tout seul**, sans intervention ni décision. L'incitation à sécuriser la chaîne existe dès le premier bloc et ne dépend jamais d'un robinet à couper à la main.
 
 ### 3.5 L'invariant fondateur
 
 À **chaque bloc**, sans exception :
 
 ```
-circulation + Fonderie = 100 000 000 000 VinX   (constant, pour toujours)
+circulation + pot_époque + escrows_en_cours + poussière_détruite
+    = émis_total  ≤  100 000 000 000 VinX
 ```
 
-La Fonderie ne fait que décroître, la circulation ne fait que croître, leur somme est constante. L'invariant est vérifié à l'exécution (arithmétique *checked*, échec du bloc en cas de rupture), pas seulement en test.
+- `émis_total` croît continûment selon la courbe, jamais au-delà du cap.
+- `pot_époque` = émission + slash redistribué, en attente de distribution à la clôture de l'époque.
+- `escrows_en_cours` = paiements de modules bloqués en attente de preuve de livraison.
+- `poussière_détruite` = dust des comptes reaped (≤ 0,001 VINX par compte, infime).
+
+Forme simplifiée pour la communication : **la supply en circulation ne peut qu'augmenter** (jusqu'au cap), car le slash redistribue sans détruire.
+
+L'invariant est vérifié à l'exécution (arithmétique *checked*, échec du bloc en cas de rupture), pas seulement en test.
 
 ---
 
@@ -150,7 +161,10 @@ Dans un réseau **PoA permissionné**, la sécurité vient de l'identité légal
 ### Slashing
 
 - **Équivocation (double-signature)** : preuve cryptographiquement vérifiée — deux en-têtes de blocs distincts, à la même hauteur, portant deux signatures Ed25519 valides du même validateur. Sanction : **100 % du bond** (gouvernable), le validateur est exclu du set.
-- **Répartition du slash** : **10 %** de prime au rapporteur (pour rendre la surveillance rentable), le reste **fondu dans La Fonderie**.
+- **Répartition du slash** :
+  - **10 %** → prime au **rapporteur** (pour rendre la surveillance rentable et inciter la vigilance).
+  - **90 %** → versés dans le **pot d'époque** (ADR 0028), distribués aux validateurs honnêtes actifs à la clôture de l'époque, proportionnellement à leur participation. Le slash récompense collectivement ceux qui maintiennent le réseau sûr.
+  - **Aucun token détruit** — le slash est une redistribution, pas une destruction. La supply en circulation reste inchangée à court terme.
 - **Downtime** : un validateur hors-ligne au-delà d'un seuil est **suspendu** du round-robin (il ne produit plus, donc ne gagne plus) — mais **sans slash économique**, car l'absence n'est pas prouvablement malveillante.
 
 ---
@@ -176,7 +190,49 @@ Nœuds qui produisent et co-signent les blocs, responsables de la sécurité du 
 
 **Score S_perf** : l'attribution des slots suit un score basé sur le taux de co-signature et de proposition réussie, 100 % déterministe et on-chain. Pas de délégation DPoS, pas de pondération par le bond.
 
-### 6.2 Full Nodes Communautaires
+### 6.2 Modules — Services hors-nœud ancrés et rémunérés
+
+Un **module** est un service off-chain (stockage décentralisé, oracle, calcul, relai…) dont
+l'opérateur poste un **bond VINX** pour s'enregistrer sur la L1. La L1 n'exécute jamais la
+logique du module — elle ancre des **racines Merkle** prouvant l'état du service, et route
+les **paiements** de façon déterministe.
+
+**Cycle de vie d'un paiement de module :**
+
+```
+1. Client → ModuleEscrow (tx 0x0A) : bloque N VINX on-chain pour une commande de service.
+2. Module livre le service off-chain.
+3. Module ancre une preuve (AnchorState + EscrowRelease) : preuve Merkle de livraison.
+4. L1 détecte la preuve → distribue atomiquement selon le fee_schedule du module :
+      - Bénéficiaires enregistrés  (ex. 3 providers × 30 %)
+      - Résidu à l'opérateur       (ex. 10 %)
+5. Si pas de preuve avant timeout → client réclame le remboursement (ModuleEscrowRefund, tx 0x0B).
+```
+
+**Exemple concret** — module de stockage décentralisé, 100 Go, 100 VINX :
+
+| Bénéficiaire | Part | Montant |
+|---|---|---|
+| Provider A | 30 % | 30 VINX |
+| Provider B | 30 % | 30 VINX |
+| Provider C | 30 % | 30 VINX |
+| Opérateur (coordinateur) | 10 % | 10 VINX |
+
+La structure interne du module (qui sont les providers, comment le coordinateur les rémunère)
+est **entièrement off-chain** — la L1 ne voit que des adresses et des pourcentages. C'est un
+**marché libre** : chaque module fixe son prix et sa structure de partage dans son
+enregistrement. La concurrence entre modules régule naturellement les prix.
+
+Le bond de l'opérateur est sa caution : un module qui ne livre pas répétitivement risque le
+slashing (ADR 0023, à venir). Un timeout simple rembourse le client sans slash (distinction
+entre défaut intentionnel prouvable et simple incident).
+
+> **Aucune émission secondaire pour les modules.** Les modules sont rémunérés par leurs
+> utilisateurs, pas par le protocole. VinX refuse les systèmes qui « force à transacter »
+> pour capturer de l'émission — toute récompense protocolaire reste réservée au travail
+> du consensus.
+
+### 6.3 Full Nodes Communautaires
 
 **N'importe qui peut faire tourner un nœud complet** sans permission et sans rémunération directe en Phase 1.
 
@@ -226,15 +282,15 @@ Ces préavis **visent des jours réels** afin que tous les opérateurs aient le 
 Les éléments suivants sont les **piliers de conception** de VinX :
 
 1. **Cap de 100 milliards** de VinX (jamais augmenté)
-2. **Aucun burn** — la supply est conservée pour toujours
-3. **Aucun pre-mine** — 100 % de la supply émise par le travail des validateurs
-4. **Invariant** : `circulation + Fonderie = 100 Md` à chaque bloc
-5. **Émission décroissante puis relais aux frais** — jamais un robinet discrétionnaire
-6. **Le bond sécurise, le travail rémunère** — le stake ne produit aucun rendement
+2. **Quasi-absence de burn** — le slash redistribue aux validateurs honnêtes (ne détruit pas) ; seule la poussière des comptes reaped est détruite (≤ 0,001 VINX par compte, par construction)
+3. **Aucun pre-mine, aucune réserve pré-allouée** — à la genèse, émis = 0 ; 100 % de la supply mintée par le travail des validateurs
+4. **Invariant** : `circulation + pot_époque + escrows + poussière_détruite = émis ≤ 100 Md` à chaque bloc
+5. **Émission décroissante continue puis relais aux frais** — jamais un robinet discrétionnaire ; jamais d'événement discret
+6. **Le bond sécurise, le travail rémunère** — le stake ne produit aucun rendement ; le slash punit et récompense collectivement les honnêtes
 7. **Consensus permissionné** (pas de switch vers PoW anonyme ou PoS ouvert)
 8. **Propriété inconditionnelle des comptes** (aucun gel)
-9. **La L1 n'exécute jamais de logique applicative** — les fonctionnalités complexes vivent dans des surcouches **hors-nœud**, reliées à VinX par ancrage bondé (un hash + un bond + des transferts VINX). Voir [ADR 0001](docs/adr/0001-l1-monnaie-pure-modules-ancrage-bonde.md).
-10. **Courbe d'émission immuable** — le total (100 Md), la période de halving (8 ans) et la forme de la courbe ne sont gouvernables par **personne** (ni admin, ni action de gouvernance). Nul ne décide de la création monétaire. Voir [ADR 0021](docs/adr/0021-immutabilite-emission.md).
+9. **La L1 n'exécute jamais de logique applicative** — les fonctionnalités complexes vivent dans des surcouches **hors-nœud**, reliées à VinX par ancrage bondé et rémunérées par escrow on-chain. Voir [ADR 0001](docs/adr/0001-l1-monnaie-pure-modules-ancrage-bonde.md) et [ADR 0039](docs/adr/0039-remuneration-operateurs-modules.md).
+10. **Courbe d'émission immuable après la genèse** — le total (100 Md), la demi-vie (~20 ans) et la forme exponentielle continue ne sont gouvernables par **personne** (ni admin, ni action de gouvernance). Nul ne décide de la création monétaire. Voir [ADR 0021](docs/adr/0021-immutabilite-emission.md) et [ADR 0040](docs/adr/0040-emission-progressive-sans-fonderie.md).
 
 La conservation de la supply repose sur une **arithmétique entièrement *checked*** (aucun overflow/underflow silencieux) et une **finalité au quorum** (un bloc co-signé par le quorum n'est pas réorganisé), couvertes par des tests de propriété (`proptest`).
 
@@ -279,14 +335,14 @@ VinX Ledger n'a pas de pression d'agenda. Le projet avance à son rythme.
 | Validateurs | 1 → 3 (redondance), permissionnés, **bond requis** |
 | Full nodes | Ouverts à tous |
 | Supply totale | 100 milliards VinX (immuable, no burn) |
-| **Genèse** | **0 en circulation, 100 Md en Fonderie — aucun pre-mine** |
-| **Émission** | **par le travail des validateurs · décroissance expo., halving 8 ans → 100 Md · temps réel** |
-| Relais | Fonderie vidée → **fees-only** automatiquement |
+| **Genèse** | **0 émis, 0 en circulation — aucun pre-mine, aucune réserve pré-allouée** |
+| **Émission** | **minting progressif par le travail · décroissance expo. continue, demi-vie ~20 ans → 100 Md · temps réel** |
+| Relais | Émission → poussière → **fees-only** automatiquement |
 | Frais | **forfait 0,0001 VinX × poids × congestion (×1–3), 100 % au producteur** |
-| Staking | **bond de validateur (min 100k VinX), déliaison 3 j, slash équivocation 100 %, aucun rendement** |
+| Staking | **bond de validateur (min 100k VinX), déliaison 3 j, slash équivocation 100 % (10 % rapporteur + 90 % redistribués aux validateurs honnêtes), aucun rendement** |
 | Gouvernance | Clé admin unique rotatable (fondateur), pas de gel de compte |
 | Upgrades | Versioning on-chain, activation planifiée, 7/30/90 j **réels** |
 
 ---
 
-*VinX Labs, juillet 2026 — Document de référence v4.0*
+*VinX Labs, août 2026 — Document de référence v5.0*
