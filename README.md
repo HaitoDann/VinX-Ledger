@@ -26,7 +26,7 @@ Implémenté intégralement en Rust, sans framework blockchain tiers.
 | **Frais** | Forfait 0,0001 VINX × poids × congestion (×1–3) · **100 % au validateur producteur** (immédiat) |
 | **Cryptographie** | Ed25519 · SHA-256 · Bech32 (`vinx1`) |
 | **Supply** | 100 milliards VINX (immuable, sans burn, **sans pre-mine**) |
-| **Émission** | Par le travail des validateurs · décroissance expo., **halving 8 ans** → 100 Md · distribuée par **époque** (proposeurs + co-signataires) · puis fees-only |
+| **Émission** | Par le travail des validateurs · **décroissance exponentielle continue**, demi-vie ~20 ans → 100 Md · distribuée par **époque** (proposeurs + co-signataires) · puis fees-only |
 | **Admission validateur** | **Open PoA** — bond → file automatique · veto collectif >66 % · admin fixe seulement le bond · expansion phasée immuable |
 | **Staking** | **Bond de validateur** (min 100k VINX) · déliaison 3 jours · slash équivocation 100 % · **aucun rendement** |
 | **Exploitation** | Console d'admin web (`/admin`) · mises à jour **sans wipe** (migration de schéma) |
@@ -87,14 +87,15 @@ docs/
 ## Tokenomics — Fair launch & émission par le travail
 
 - **100 milliards VINX**, supply fixe et **immuable**.
-- **Genèse** : **0 en circulation, 100 Md scellés dans La Fonderie** (la réserve d'émission). **Aucun pre-mine, aucune allocation fondateur** — le fondateur gagne ses VINX comme tout le monde, en faisant tourner des validateurs.
-- **Émission** : les VINX sortent de La Fonderie **uniquement pour rémunérer la production de blocs**. Le débit décroît de façon exponentielle et est **divisé par deux tous les 8 ans** (`débit(t) = R₀ · 2^(−t/8 ans)`, R₀ ≈ 8,66 Md/an) — l'intégrale totale vaut exactement 100 Md.
+- **Genèse** : **0 en circulation, 0 émis** — les tokens n'existent pas avant d'être produits par le travail. **Aucun pre-mine, aucune réserve pré-allouée, aucune allocation fondateur.**
+- **Émission** : les VINX sont **mintés progressivement** en rémunération des blocs produits. Le débit suit une **décroissance exponentielle continue**, sans événement discret, avec une demi-vie de ~20 ans (`R(t) = R₀ · e^(−λt)`, R₀ ≈ 3,47 Md/an) — l'intégrale totale vaut exactement 100 Md. L'émission démarre basse et diminue régulièrement jusqu'à la poussière, puis les frais de transaction prennent le relais.
 - **Temps réel** : l'émission est calculée sur les **timestamps** des blocs, jamais sur la hauteur (la cadence est variable).
 - **Égalité entre validateurs** : l'émission est distribuée par **époque** (fenêtre temporelle) entre proposeurs et co-signataires, **non pondérée par le bond** — chaque co-signature a le même poids. Le montant du bond ne multiplie pas les gains ; seul le travail effectif compte.
 - **Open PoA** : n'importe qui peut candidater au set en postant le bond — pas de sélection individuelle par l'admin. Le set s'élargit par phases automatiques et immuables (gravées à la genèse).
-- **Relais automatique** : quand La Fonderie se vide, l'émission s'efface et les **frais de transaction** deviennent la rémunération — bascule en **fees-only**, sans intervention.
-- **Frais** : forfaitaires (indépendants du montant), **100 % au validateur producteur immédiatement** (plus de *melt*). Les frais ne passent pas par l'époque — seule l'émission est époquée.
-- **Invariant** vérifié à chaque bloc : `circulation + Fonderie = 100 000 000 000 VINX`.
+- **Relais automatique** : quand l'émission atteint la poussière, les **frais de transaction** deviennent la rémunération principale — bascule en **fees-only**, sans intervention.
+- **Frais** : forfaitaires (indépendants du montant), **100 % au validateur producteur immédiatement**. Les frais ne passent pas par l'époque — seule l'émission est époquée.
+- **Slashing** : tokens slashés **détruits** (90 % du bond) + 10 % au rapporteur — jamais réinjectés dans l'émission.
+- **Invariant** vérifié à chaque bloc : `circulation + détruits = émis ≤ 100 000 000 000 VINX`.
 
 > Détails complets : [whitepaper.md](./whitepaper.md)
 
@@ -119,8 +120,8 @@ Un détenteur lambda ne stake pas : il garde son VINX pour **l'utiliser comme ca
 
 - **Fait** — protocole L1 Rust complet (PoA Threshold, *fair launch*, slashing prouvable, frais au producteur), plus une série de durcissements/extensions : vérif parallèle des signatures (ADR 0015), dépôt existentiel anti-bloat (0026), durcissement P2P anti-DoS (0022), gouvernance **K-of-M** (0011), **registre de modules bondés** (0010, 1ʳᵉ brique de l'ancrage), vecteurs dorés canoniques (0020). `cargo test --workspace` vert (281 tests).
 - **Chemin critique** — **banc 3 validateurs** puis finalité au quorum (0002), fork-choice (0031), jailing (0027), accountability co-sign (0030).
-- **Ensuite** — **récompenses par époque** (0028 : proposeurs + co-signataires, une passe par heure), **Open PoA** (0038 : bond → file automatique, veto collectif, S_perf), garde-fous de gouvernance (0032), DA & preuves d'ancre pour les modules (0034).
-- **Plus tard** — décentralisation à l'échelle (BLS + comité VRF, 0029), light client (0014), réseau public, rémunération des opérateurs de modules (ADR à définir). Vision d'ensemble : [ADR 0001](./docs/adr/0001-l1-monnaie-pure-modules-ancrage-bonde.md).
+- **Ensuite** — **émission progressive sans La Fonderie** (0040 : minting pur, T_half ~20 ans, slashing destructif), **récompenses par époque** (0028), **Open PoA** (0038), **rémunération modules par escrow** (0039), DA & preuves d'ancre (0034).
+- **Plus tard** — décentralisation à l'échelle (BLS + comité VRF, 0029), light client (0014), réseau public. Vision d'ensemble : [ADR 0001](./docs/adr/0001-l1-monnaie-pure-modules-ancrage-bonde.md).
 
 ---
 

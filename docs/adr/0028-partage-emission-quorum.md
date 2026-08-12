@@ -48,7 +48,7 @@ en **une seule passe** à la clôture.
 Pour chaque bloc `B` dont les co-signatures atteignent le quorum dans l'époque courante :
 
 ```
-block_emission_B  = curve(ts_B) − emitted_avant_B     (forgé depuis la Fonderie, inchangé)
+block_emission_B  = curve(ts_B) − emitted_avant_B     (nouvellement émis, ADR 0040)
 part_proposeur_B  = block_emission_B × PROPOSER_SHARE_BPS / 10_000
 pot_cosignataires += block_emission_B − part_proposeur_B
 
@@ -70,8 +70,8 @@ Quand `timestamp_bloc_courant ≥ epoch_start_ts + EPOCH_DURATION_SECS` :
 5. Réinitialiser : `pot_cosignataires = 0`, `proposer_credits = {}`, `cosign_count = {}`,
    `epoch_start_ts += EPOCH_DURATION_SECS`.
 
-L'invariant de masse (ADR 0004) tient : Fonderie −x, Σ comptes +x, avec x = émission totale
-de l'époque. La Fonderie décroît de façon monotone sur chaque époque.
+L'invariant de masse (ADR 0040) tient : `emitted_atoms +x`, `circulating +x`, avec x = émission
+totale de l'époque. `remaining_supply` décroît de façon monotone sur chaque époque.
 
 ### 2.2 Frais — inchangés, immédiats
 

@@ -86,20 +86,28 @@ Rien ci-dessous n'est décidé — ce sont des propositions à instruire une par
   *Problème :* l'admission gouvernance-gatée crée une contradiction avec le fair launch — l'admin choisit les individus → l'admin choisit qui gagne l'émission.
   *Direction :* **Open PoA** — le bond suffit à entrer dans la file (pas d'approbation admin individuelle) ; veto collectif des validateurs existants (>66 %, fenêtre 7 jours) ; l'admin ne fixe que le montant du bond. Score `S_perf` uniquement (taux de co-signature et de proposition, 100 % déterministe on-chain, pas de DPoS/W_stake). Expansion phasée **automatique et immuable depuis la genèse** : Phase 1 (3–5, gouvernance-gated pendant le bootstrap) → Phase 2 (10–21, Open PoA) → Phase 3 (50–101, Open PoA). **Prérequis** : ADR 0002/0027/0031 éprouvés avant Phase 2.
 
-- **0033 — [Genèse & bootstrap de fair-launch](./0033-genese-bootstrap-fair-launch.md)** 🟠 **— Proposé**
-  *Problème :* le lancement n'est pas cadré (`GenesisConfig` = 1 validateur + 1 clé admin) ; si le set de départ est petit et gated pendant la fenêtre de forte émission, une poignée d'acteurs capte le front-loading → contredit le fair-launch (le vrai risque du Q4 : *peu* gagnent beaucoup).
-  *Direction :* genèse **multi-validateurs** + comité K-of-M + `genesis_hash` empreinté ; surtout **ouverture permissionless par bond dès le départ** (le marché concourt pour les récompenses early → le set grossit quand l'émission est la plus riche). Optionnel/à débattre : plafond de forge par bloc + rampe de bond. **Ne touche pas la courbe** (0021) — agit sur *distribution/admission*. Dépend du consensus n≥3 éprouvé.
+- **0040 — [Émission progressive sans La Fonderie](./0040-emission-progressive-sans-fonderie.md)** 🔴 **— Accepté (design, non implémenté)**
+  *Problème :* « La Fonderie » (100 Md pré-alloués à la genèse) ressemble à un pre-mine visible ; le « melt » réintroduit une émission dépendante du taux de slashing ; la demi-vie de 8 ans front-load 50 % de la supply trop tôt.
+  *Direction :* **minting progressif** — les tokens n'existent pas avant d'être émis (`foundry` supprimé, `emitted_atoms` seul état tracké) ; `remaining_supply = MAX_SUPPLY − emitted` est dérivé, pas stocké. Slashing : 10 % → rapporteur, 90 % **détruit** (`destroyed_atoms +=`). `T_half` allongé à ~20 ans (R₀ ≈ 3,47 Md/an au lieu de 8,66). Nouvel invariant : `circulating + destroyed = emitted ≤ MAX_SUPPLY`. **Remplace ADR 0004.** Bump `STORAGE_VERSION`.
 
-- **0004 — Invariant exécutable** 🔴 **— ✅ implémenté**
-  *Fait :* `supply_invariant_holds()` (`circulation + Fonderie == MAX`) appliqué comme **garde dure** sur tous les chemins de bloc (producer → refus de sceller ; P2P/sync → rollback), car le state_root ne couvre pas la Fonderie. Ajout de `credit_from_foundry_for_test` pour les setups de test.
+- **0039 — [Rémunération des opérateurs de modules](./0039-remuneration-operateurs-modules.md)** 🟠 **— Accepté (design, non implémenté)**
+  *Problème :* ADR 0010 crée le registre de modules bondés mais ne définit aucune rémunération — sans revenu, les opérateurs n'ont aucune raison économique de bonger.
+  *Direction :* **escrow on-chain + partage automatique** — le client crée un `ModuleEscrow` (tx `0x0A`) qui bloque N VINX ; le module livre le service off-chain et ancre une preuve via `AnchorState` (`EscrowRelease`) ; le L1 distribue atomiquement selon le `fee_schedule` du module (tableau `recipients: Vec<(Address, bps)>`, résidu à l'opérateur). Timeout → `ModuleEscrowRefund` (tx `0x0B`). **Aucune émission secondaire** — revenu 100 % issu des utilisateurs. Prérequis : ADR 0034 pour les preuves vérifiables (phase 2 du durcissement).
+
+- **0033 — [Genèse & bootstrap de fair-launch](./0033-genese-bootstrap-fair-launch.md)** 🟠 **— Partiellement supersédé**
+  *Statut :* §1 (genèse multi-validateurs + `genesis_hash`) reste valide et à implémenter ; §2 (admission permissionless) → ADR 0038 ; §3 (lissage émission early) → ADR 0040.
+  *Direction restante :* `GenesisConfig` **multi-validateurs** + comité K-of-M initial + `genesis_hash` empreinté (engagement vérifiable par tout nœud, anti-split réseau). Dépend du consensus n≥3 éprouvé.
+
+- **0004 — Invariant exécutable** 🔴 **— ✅ implémenté — ⚠️ remplacé par ADR 0040**
+  *Fait (v4) :* `supply_invariant_holds()` (`circulation + Fonderie == MAX`) appliqué comme **garde dure** sur tous les chemins de bloc.
+  *Remplacement (ADR 0040) :* La Fonderie disparaît. Nouvel invariant : `circulating + destroyed = emitted ≤ MAX_SUPPLY`. La garde dure est maintenue, la formule change.
 
 - **0009 — Frais des transactions stake/unstake** 🟠 **— ✅ implémenté** (option retenue : exemption assumée + **plafond de déliaisons par compte** contre le spam — plus robuste qu'un micro-frais ; whitepaper réconcilié)
   *Problème :* le whitepaper donne un poids `1` à stake/unstake, mais le code les **exempte** (fee ZERO). Incohérence + petit vecteur de spam.
   *Direction :* décider — soit facturer le forfait (aligne le whitepaper), soit assumer l'exemption et corriger le whitepaper. Traiter l'anti-spam.
 
-- **0021 — Immutabilité de la courbe d'émission** 🟠 **— ✅ implémenté** (règle immuable §9 + test constitutionnel épinglant halving/total/cap)
-  *Problème :* le halving (8 ans) et le total sont des constantes ; leur statut (gouvernable ou gravé) n'est pas décidé.
-  *Direction :* graver l'émission comme **immuable** (argument de confiance : personne, pas même l'admin, ne change la politique monétaire). À acter explicitement.
+- **0021 — Immutabilité de la courbe d'émission** 🟠 **— Accepté — révisé (ADR 0040)**
+  *Principe :* la courbe est **immuable après la genèse** — ni l'admin, ni une `GovernanceAction` ne peut la modifier. Le `T_half` a été mis à jour avant le lancement (8 ans → ~20 ans, ADR 0040) ; cela respecte l'esprit (le changement précède la genèse). Graver dans le `GenesisConfig` + test constitutionnel.
 
 ### Données, état & scaling
 

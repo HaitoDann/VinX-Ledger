@@ -103,12 +103,12 @@ supprimable que si `balance == 0 && staked == 0 && aucun pending_unbond`.
 - **UX wallet.** Envoyer un montant qui laisserait l'expéditeur ou le destinataire
   sous ED doit être refusé côté client avec un message clair, pas seulement rejeté
   par le nœud.
-- **Réconciliation de l'invariant de masse.** Le reap ne *détruit* pas de VINX
-  (un compte reapé a `balance == 0`), donc `circulating_supply` est inchangé et
-  l'ADR 0004 tient sans modification. À vérifier explicitement dans les tests.
-- **Genesis / Fonderie.** La Fonderie n'est pas un compte de la map (`foundry` est
-  un champ scalaire) — non concernée. Le validateur genesis est staké — exempté du
-  plancher.
+- **Réconciliation de l'invariant de masse.** Le dust d'un compte reapé est
+  **détruit** (ADR 0040) : `circulating_supply −= dust` et `destroyed_atoms += dust`.
+  L'invariant `circulating + destroyed = emitted` (ADR 0040) tient. À vérifier
+  explicitement dans les tests.
+- **Genesis / La Fonderie.** La Fonderie est supprimée (ADR 0040) — non concernée.
+  Le validateur genesis est staké — exempté du plancher.
 
 ## Alternatives écartées
 

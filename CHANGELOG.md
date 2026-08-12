@@ -5,6 +5,42 @@ Format : `MAJEUR.MINEUR.CORRECTIF` — les versions `0.x.y` sont des versions de
 
 ---
 
+## [0.43.0] — Décisions architecturales : émission progressive sans La Fonderie, rémunération modules (ADR 0039, 0040)
+
+> **Décisions de design uniquement** (aucun code modifié).
+
+- **ADR 0040 — Émission progressive sans La Fonderie.** Suppression du concept « La Fonderie »
+  (pré-allocation de 100 Md à la genèse) et du mécanisme « melt » (slash → Fonderie).
+  Passage à un **minting progressif** pur : les tokens n'existent pas avant d'être émis ;
+  `foundry` disparaît de `WorldState` et est remplacé par `remaining_supply = MAX − emitted`
+  (valeur dérivée, pas stockée). Les tokens slashés sont **détruits** (`destroyed_atoms +=`
+  au lieu de retourner dans La Fonderie). Nouvel invariant : `circulating + destroyed = emitted
+  ≤ MAX_SUPPLY`. La courbe reste exponentielle continue, avec `T_half` allongé à **~20 ans**
+  (R₀ ≈ 3,47 Md/an au lieu de 8,66), ce qui réduit le front-loading et distribue l'émission
+  plus équitablement dans le temps. Le dust des comptes reaped (ADR 0026) est également détruit.
+  Remplace l'invariant ADR 0004. Statut : Accepté (design, non impl.). Priorité : 🔴 haute.
+
+- **ADR 0021 révisé — `T_half` mis à jour avant lancement.** Le principe d'immuabilité
+  (après la genèse) est maintenu. La valeur indicative change de 8 ans à ~20 ans avant le
+  bloc 0 — conforme à l'esprit de l'ADR. La terminologie « halving » est remplacée par
+  « demi-vie de la courbe continue » (pas d'event discret).
+
+- **ADR 0039 — Rémunération des opérateurs de modules (escrow + partage on-chain).** Les
+  services des modules sont payés par leurs clients via un **escrow on-chain** libéré à la
+  preuve de livraison. Le module définit son `fee_schedule` à la registration : liste de
+  bénéficiaires (`recipients: Vec<(Address, bps)>`) + résidu à l'opérateur. Deux nouveaux
+  types de tx : `ModuleEscrow` (0x0A, client bloque N VINX) et `ModuleEscrowRefund` (0x0B,
+  remboursement après timeout). La libération est un effet de bord déterministe d'un
+  `AnchorState` contenant une feuille `EscrowRelease`. **Aucune émission secondaire** — les
+  modules sont rémunérés par la valeur créée, pas par le protocole. Marché libre : chaque
+  module fixe son prix. Statut : Accepté (design, non impl.).
+
+- **ADR 0033 marqué partiellement supersédé.** §1 (genèse multi-validateurs + `genesis_hash`)
+  reste à implémenter. §2 (admission permissionless) → ADR 0038. §3 (lissage émission early)
+  → ADR 0040 (`T_half` allongé).
+
+---
+
 ## [0.42.0] — Décisions architecturales : Open PoA, récompenses par époque (ADR 0038, 0028 révisé)
 
 > **Décisions de design uniquement** (aucun code modifié). Consolide les choix stratégiques
