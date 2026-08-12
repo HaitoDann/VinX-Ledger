@@ -1,17 +1,18 @@
 # VinX Ledger — État du Projet
 
 > Document de référence interne — mis à jour à chaque sprint.
-> Dernière mise à jour : août 2026 (**décisions de design : émission progressive sans La Fonderie ADR 0040, rémunération modules ADR 0039, Open PoA ADR 0038, récompenses par époque ADR 0028**). Base économique : fair launch v6 (whitepaper v5.0 — à mettre à jour).
+> Dernière mise à jour : août 2026 (**ADR 0040 implémenté** : émission progressive sans La Fonderie, minting progressif, T_half ~20 ans, slash 90 % → pot d'époque — whitepaper v5.0).
 
 ---
 
 > ## 🧭 Où en est le projet (lis ceci en premier)
 >
-> **Le socle est solide et éprouvé en mono-validateur** : fair launch v5 (émission par le travail, halving 8 ans), état anti-bloat, P2P durci, gouvernance K-of-M, primitive de modules bondés. `cargo test --workspace` **vert**, clippy `-D warnings` & fmt propres.
+> **Le socle est solide et éprouvé en mono-validateur** : fair launch v6 (émission progressive, T_half ~20 ans, ADR 0040 ✅), état anti-bloat, P2P durci, gouvernance K-of-M, primitive de modules bondés. `cargo test --workspace` **vert**, clippy `-D warnings` & fmt propres.
 >
 > **La source de vérité de la feuille de route, c'est [`docs/adr/README.md`](./docs/adr/README.md)** — l'index de tous les ADR (Décisions d'Architecture), avec pour chacun son statut (✅ implémenté / Proposé / 🚧 brouillon). Ce document-ci décrit le **code tel qu'il tourne** ; l'index ADR décrit **ce qui est décidé et ce qui reste**.
 >
 > ### Implémenté dans cette série (avec ADR dédié)
+> - **ADR 0040** — **émission progressive sans La Fonderie** : minting pur (`emitted_atoms`), `T_half` ~20 ans, slash 90 % → pot d'époque, invariant `circ + pot + détruits = émis ≤ MAX` garanti à chaque bloc. `STORAGE_VERSION` 10.
 > - **ADR 0015** — vérification **parallèle** des signatures (rayon) sur tous les chemins de validation de bloc.
 > - **ADR 0026** — **dépôt existentiel + reaping** : plancher de solde gravé (0,001 VINX), comptes vidés supprimés de l'état (anti-bloat ; le seul terme non borné du stockage).
 > - **ADR 0022** — **durcissement P2P** : garde anti-bombe de décompression (fermait un OOM à un seul message), bornes de taille/sync, rate-limiting par pair (`p2p::guard`).
@@ -20,7 +21,7 @@
 > - **ADR 0020** — **vecteurs dorés** de sérialisation canonique (octets exacts figés).
 >
 > ### Proposé / à faire (design rédigé, non implémenté) — voir l'index ADR
-> Consensus & sûreté : **0002** (finir la finalité), **0027** (jailing), **0030** (accountability co-sign), **0031** (fork-choice), **0036** (churn validateurs). Économie : **0040** (émission progressive sans La Fonderie — Accepté 🔴), **0028** (récompenses par époque — Accepté), **0033** (bootstrap §1 : genèse multi-validateurs). Admission validateur : **0038** (Open PoA — Accepté). Modules : **0039** (rémunération par escrow — Accepté), **0034** (DA & preuve d'ancre), **0023** (slashing de fraude). Gouvernance : **0032** (garde-fous, 🚧 à discuter). Scaling : **0029** (BLS + comité VRF), **0035** (bornes de ressources), **0037** (blocs compacts). Divers : **0012** (clés HSM), **0013** (rent d'état), **0014** (light client), **0016** (post-quantique), **0017** (halt), **0018** (SLO), **0019** (TLS).
+> Consensus & sûreté : **0002** (finir la finalité), **0027** (jailing), **0030** (accountability co-sign), **0031** (fork-choice), **0036** (churn validateurs). Économie : **0028** (récompenses par époque — Accepté), **0033** (bootstrap §1 : genèse multi-validateurs). Admission validateur : **0038** (Open PoA — Accepté). Modules : **0039** (rémunération par escrow — Accepté), **0034** (DA & preuve d'ancre), **0023** (slashing de fraude). Gouvernance : **0032** (garde-fous, 🚧 à discuter). Scaling : **0029** (BLS + comité VRF), **0035** (bornes de ressources), **0037** (blocs compacts). Divers : **0012** (clés HSM), **0013** (rent d'état), **0014** (light client), **0016** (post-quantique), **0017** (halt), **0018** (SLO), **0019** (TLS).
 >
 > ### ⚠️ Le chemin critique
 > Rien du backlog n'a de valeur tant que le **consensus multi-validateur (n≥3) n'est pas éprouvé au banc**. Priorité : monter un **banc 3-validateurs** → il débloque d'un coup 0002 (finalité), 0027 (jailing) et 0031 (fork-choice). Ensuite : **0040** (refonte émission — changement consensus-critique, à faire tôt avant tout autre état), puis 0030, 0028, 0038, 0039.
@@ -70,12 +71,12 @@ VinX Ledger est une blockchain L1 de paiement écrite intégralement en Rust, sa
 - [x] Synchronisation de blocs par P2P (`SyncRequest` / `SyncResponse`)
 - [x] Synchronisation au démarrage depuis un pair de confiance (HTTP)
 
-### Économie — fair launch v5 (implémenté)
-- [x] Supply totale : 100 milliards de VinX, **immuable, sans burn** (18 décimales) — courbe d'émission **gravée immuable** (ADR 0021)
-- [x] **Genèse sans pre-mine** : 0 en circulation, 100 Md scellés dans **La Fonderie**
-- [x] **Invariant vérifié à chaque bloc** (garde dure) : `circulating_supply + foundry == 100 Md` (ADR 0004 — **sera remplacé par** `circ + destroyed = emitted ≤ 100 Md` via ADR 0040)
-- [x] **Émission par le travail** : décroissance exponentielle continue (arithmétique entière déterministe), intégrée sur les **timestamps**. Actuellement 100 % au producteur + `foundry`-based — **ADR 0040 (Accepté, non implémenté)** supprime La Fonderie, change `T_half` à ~20 ans, détruit le slash ; **ADR 0028 (Accepté)** ajoutera la distribution par époque
-- [x] **Frais forfaitaires** (indépendants du montant), **100 % au producteur** (plus de melt) ; multiplicateur de congestion ×1–3
+### Économie — fair launch v6 (implémenté)
+- [x] Supply totale : 100 milliards de VinX, **immuable, sans burn** (18 décimales) — courbe d'émission **gravée immuable** (ADR 0021, révisé ADR 0040)
+- [x] **Genèse sans pre-mine** : 0 en circulation, 0 émis — les tokens n'existent pas avant d'être produits par le travail (**ADR 0040 ✅**)
+- [x] **Invariant vérifié à chaque bloc** (garde dure) : `circulating_supply + epoch_dist_emission_pot + destroyed_atoms == emitted_atoms ≤ 100 Md` (ADR 0040)
+- [x] **Émission par le travail** : minting progressif (`mint_emission()`), décroissance exponentielle continue (`T_half` ~20 ans, R₀ ≈ 3,47 Md/an), intégrée sur les **timestamps**. 100 % au producteur actuellement ; **ADR 0028 (Accepté, non implémenté)** ajoutera la distribution par époque entre proposeurs et co-signataires
+- [x] **Frais forfaitaires** (indépendants du montant), **100 % au producteur** (immédiatement, hors époque) ; multiplicateur de congestion ×1–3
 - [x] **Dépôt existentiel + reaping** (ADR 0026) : plancher 0,001 VINX, comptes vidés supprimés de l'état
 
 ### Gouvernance — clé admin OU comité K-of-M (ADR 0011)
@@ -86,7 +87,7 @@ VinX Ledger est une blockchain L1 de paiement écrite intégralement en Rust, sa
 - [ ] *Différé* : garde-fous de gouvernance (ADR 0032, 🚧 à discuter), gouvernance par les validateurs (ADR 0011 t2)
 
 ### Sécurité
-- [x] Slashing : preuve d'équivocation → 10 % bounty au rapporteur, 90 % **fondu dans La Fonderie**, validateur exclu
+- [x] Slashing : preuve d'équivocation → 10 % bounty au rapporteur, 90 % **versés dans le pot d'époque** (`epoch_dist_emission_pot`, redistribués aux validateurs honnêtes via ADR 0028), validateur exclu
 - [x] Rate limiting : 100 requêtes/minute par IP (middleware axum)
 - [x] Auth token Bearer sur les routes `/snapshot` et `/admin/compact`
 - [x] Compaction de chaîne (`compact_old_txs`) — supprime les tx anciennes, conserve les headers
@@ -95,7 +96,7 @@ VinX Ledger est une blockchain L1 de paiement écrite intégralement en Rust, sa
 - [x] Endpoints HTTP/REST (voir section 4)
 - [x] Server-Sent Events `/events` — push en temps réel à chaque bloc
 - [x] WebSocket `/ws` — identique aux SSE, protocole bidirectionnel
-- [x] Métriques Prometheus sur `/metrics` (dont `vinx_foundry`)
+- [x] Métriques Prometheus sur `/metrics` (dont `vinx_remaining_supply`, `vinx_emitted_atoms`, `vinx_epoch_emission_pot`)
 - [x] Interface web embarquée sur `/` (explorateur + wallet, signature locale)
 - [x] **Console d'administration `/admin`** — dashboard, validateurs (ajout/retrait/approbation), upgrades, maintenance ; actions signées localement avec la clé admin, lecture seule sinon
 - [x] Preuves Merkle via `/account/:address/proof`
@@ -177,10 +178,10 @@ Le `WorldState` est l'état complet de la chaîne. Il est sérialisé sur disque
 | Champ | Type | Description |
 |-------|------|-------------|
 | `accounts` | `BTreeMap<Address, Account>` | Tous les comptes (clé = adresse 20 octets, itération triée) |
-| `circulating_supply` | `Amount` | Tokens détenus par les comptes (= `MAX_SUPPLY - foundry`) |
+| `circulating_supply` | `Amount` | Tokens détenus par les comptes (hors `epoch_dist_emission_pot`) |
 | `block_height` | `u64` | Hauteur actuelle |
-| `foundry` | `Amount` | **La Fonderie** — réserve d'émission (fair launch). `circulation + foundry == 100 Md`, gardé à chaque bloc |
-| `emission_epoch_ts` / `emitted_atoms` | `u64` / `u128` | Époque d'émission + cumul émis (suivi de la courbe halving) |
+| `emitted_atoms` | `u128` | Cumul des atomes mintés depuis la genèse (seul traceur d'émission — ADR 0040) |
+| `emission_epoch_ts` | `u64` | Timestamp du début de l'époque d'émission courante (référence de la courbe) |
 | `pending_unbonds` | `Vec<PendingUnbond>` | Déliaisons en cours (bond, `unlock_ts`) — slashable jusqu'à maturation |
 | `fee_floor` / `base_fee` | `Amount` | Plancher de frais gouvernable / frais dynamiques (congestion ×1–3) |
 | `admin_address` | `Option<Address>` | Clé admin legacy (1-de-1, si aucun comité) |
@@ -189,11 +190,11 @@ Le `WorldState` est l'état complet de la chaîne. Il est sérialisé sur disque
 | `modules` | `BTreeMap<Hash32, ModuleEntry>` | **Registre de modules bondés** (ADR 0010) |
 | `current_version` / `pending_upgrade` | | Version protocole + upgrade planifié (activation par timestamp, ADR 0006) |
 | `validator_set` | `ValidatorSet` | Validateurs actifs (quorum `⌈2n/3⌉`, round-robin) |
+| `epoch_dist_emission_pot` | `Amount` | **✅ ADR 0040** — atomes reçus du slash 90 %, accumulés jusqu'à distribution (ADR 0028) |
+| `destroyed_atoms` | `u128` | **✅ ADR 0040** — atomes définitivement perdus (reaping de comptes poussière) ; avec `epoch_pot` ferme l'invariant |
 | `epoch_dist_start_ts` | `u64` | *(à venir — ADR 0028)* Timestamp de début de l'époque de distribution en cours |
-| `epoch_dist_emission_pot` | `u128` | *(à venir — ADR 0028)* Émission accumulée dans l'époque, part co-signataires |
 | `epoch_dist_proposer_credits` | `BTreeMap<Address, u128>` | *(à venir — ADR 0028)* Crédits proposeur accumulés dans l'époque |
 | `epoch_dist_cosign_counts` | `BTreeMap<Address, u32>` | *(à venir — ADR 0028)* Nombre de co-signatures par validateur dans l'époque |
-| `destroyed_atoms` | `u128` | *(à venir — ADR 0040)* Cumul des atomes détruits (slash 90 % + reaping) — remplace `foundry` |
 | `pending_escrows` | `BTreeMap<Hash32, EscrowEntry>` | *(à venir — ADR 0039)* Escrows de paiement de modules ouverts |
 
 ### `vinx-node` — Nœud complet
@@ -250,11 +251,13 @@ Actions disponibles :
 | `RotateAdmin(addr)` | Change la clé admin legacy |
 | `SetAdminPolicy { signers, threshold }` | Installe/remplace le comité K-of-M (ADR 0011) |
 
-### Émission par le travail (fair launch)
+### Émission par le travail (fair launch v6 — ADR 0040 ✅)
 
-> La Fonderie se vide **uniquement** pour rémunérer la production de blocs, selon une décroissance par **halving tous les 8 ans** (`débit(t) = R₀·2^(−t/8 ans)`), **intégrée sur les timestamps** — une chaîne inactive ne produit aucun bloc (donc rien n'est forgé), et le premier bloc après une période d'activité forge l'émission accumulée depuis le précédent. La Fonderie ne se recharge jamais (aucun melt) — elle décroît de façon monotone jusqu'à la poussière, puis c'est **fees-only**. L'invariant `circulation + Fonderie = 100 Md` reste vrai trivialement.
+> Les tokens **n'existent pas avant d'être produits**. À chaque bloc, le nœud appelle `mint_emission()` qui calcule l'émission accumulée depuis le dernier bloc (formule continue `R₀·e^(−λΔt)`, `T_half` ~20 ans), incrémente `emitted_atoms`, crédite le producteur et met à jour `circulating_supply`. Aucune réserve pré-allouée — le cumul `emitted_atoms` est la seule source de vérité. `remaining_supply = MAX_SUPPLY − emitted_atoms` est dérivé à la demande.
 >
-> *Note d'incitation (voir ADR 0028 — Accepté, non implémenté) :* l'émission va aujourd'hui **100 % au producteur**. ADR 0028 la distribuera **par époque** (1 h par défaut) : une fraction `PROPOSER_SHARE_BPS` (20 % indicatif) revient au proposeur de chaque bloc, le reste va dans un pot partagé entre co-signataires proportionnellement à leur nombre de co-signatures dans l'époque. Les **frais** restent crédités au producteur **immédiatement** à chaque bloc, hors époque. À `n=1`, le comportement est identique (aucune régression).
+> L'invariant **garanti à chaque bloc** : `circulating_supply + epoch_dist_emission_pot + destroyed_atoms == emitted_atoms ≤ MAX_SUPPLY`.
+>
+> *ADR 0028 (Accepté, non implémenté) :* l'émission va aujourd'hui **100 % au producteur**. ADR 0028 la distribuera **par époque** (1 h par défaut) : `PROPOSER_SHARE_BPS` (20 % indicatif) revient aux proposeurs, le reste est partagé entre co-signataires proportionnellement à leurs co-signatures dans l'époque. Le **slash 90 %** dort dans `epoch_dist_emission_pot` jusqu'à ce qu'ADR 0028 distribue. Les **frais** restent au producteur immédiatement, hors époque. À `n=1`, comportement identique.
 
 ---
 
@@ -278,7 +281,7 @@ Le nœud expose un serveur HTTP sur `0.0.0.0:8545` par défaut.
 | GET | `/mempool/size` | Nombre de transactions en attente |
 | GET | `/validators` | Ensemble des validateurs actifs + quorum |
 | GET | `/protocol/version` | Version courante + upgrade planifiée |
-| GET | `/network/stats` | Statistiques économiques (base_fee, foundry, supply, admin) |
+| GET | `/network/stats` | Statistiques économiques (base_fee, remaining_supply, emitted_atoms, epoch_pot, admin) |
 | GET | `/metrics` | Métriques Prometheus |
 | GET | `/events` | Server-Sent Events — push par bloc |
 | GET | `/ws` | WebSocket — push par bloc |
@@ -466,8 +469,7 @@ sync_peer_rpc = "http://1.2.3.4:8545"  # Sync depuis un pair au démarrage
 |----------|----------|-----|
 | 🔴 **Critique** | **Banc 3-validateurs** — éprouver co-signing / quorum / finalité / tolérance de panne en réel. Débloque tout le reste du consensus. | (prérequis de 0002/0027/0031) |
 | 🔴 Haute | **Finir la finalité** (view-change, refus de bâtir trop loin), **fork-choice**, **jailing**, **accountability co-sign** | 0002, 0031, 0027, 0030 |
-| 🔴 Haute | **Émission progressive sans La Fonderie** — supprimer `foundry`, `T_half`→20 ans, slash→destroy, invariant `circ+destroyed=emitted` | 0040 (Accepté) |
-| 🟠 Moyenne | **Récompenses par époque** — distribuer l'émission entre proposeurs + co-signataires (1 h, `PROPOSER_SHARE_BPS=20 %`) ; frais restent immédiats au producteur | 0028 (Accepté) |
+| 🟠 Moyenne | **Récompenses par époque** — distribuer `epoch_dist_emission_pot` + émission entre proposeurs + co-signataires (1 h, `PROPOSER_SHARE_BPS=20 %`) ; frais restent immédiats au producteur | 0028 (Accepté) |
 | 🟠 Moyenne | **Open PoA** — admission permissionless par bond, veto collectif >66 % (7 j), S_perf scoring, expansion phasée immuable (3-5 → 10-21 → 50-101) | 0038 (Accepté) |
 | 🟠 Moyenne | **Rémunération des modules par escrow** — `ModuleEscrow`/`ModuleEscrowRefund`, partage via `fee_schedule`, preuve de livraison via `AnchorState` | 0039 (Accepté) |
 | 🟠 Moyenne | **Bootstrap §1** (genèse multi-validateurs + `genesis_hash`), **garde-fous de gouvernance** (🚧 à discuter), **bornes de churn** & **de ressources par tx** | 0033§1, 0032, 0036, 0035 |
@@ -477,10 +479,11 @@ sync_peer_rpc = "http://1.2.3.4:8545"  # Sync depuis un pair au démarrage
 
 ### Déjà fait (historique)
 
-- **Décisions de design — août 2026 (lot 2)** : ADR 0040 créé (**émission progressive sans La Fonderie** — minting pur, T_half ~20 ans, slash destructif, invariant révisé) ; ADR 0039 créé (**rémunération modules par escrow** — partage on-chain, marché libre) ; ADR 0021 révisé (T_half mis à jour) ; ADR 0033 partiellement supersédé ; ADR 0033 §1 reste à implémenter.
+- **ADR 0040 implémenté — août 2026** : émission progressive sans La Fonderie — `mint_emission()`, `emitted_atoms`, `epoch_dist_emission_pot`, `destroyed_atoms`, `EMISSION_T_HALF_SECS` (~20 ans), migration `STORAGE_VERSION` v9→v10. Nouvel invariant garanti. 279 tests ✅.
+- **Décisions de design — août 2026 (lot 2)** : ADR 0040 rédigé et accepté (**émission progressive sans La Fonderie**) ; ADR 0039 créé (**rémunération modules par escrow**) ; ADR 0021 révisé (T_half mis à jour) ; ADR 0033 partiellement supersédé.
 - **Décisions de design — août 2026 (lot 1)** : ADR 0028 révisé (récompenses par **époque** plutôt que par bloc) ; ADR 0038 créé (**Open PoA** — admission permissionless par bond, veto collectif, S_perf, expansion phasée immuable) ; **Commerce Pool supprimé** (design rejeté — gameable, incite aux transactions artificielles, valeur insuffisante).
 - **Cette série (durcissement & extensions)** : vérif parallèle des signatures (0015), dépôt existentiel + reaping (0026), durcissement P2P anti-DoS (0022), gouvernance K-of-M (0011), registre de modules bondés (0010), vecteurs dorés canoniques (0020). *Plus* un lot antérieur « cohérence & robustesse » : chain_id sûr (0008), immutabilité d'émission (0021), temps réseau (0005), frais stake/unstake (0009), unification gouvernance (0007), préavis upgrade temps réel (0006).
-- **Refonte économique fair launch v5** : genèse sans pre-mine, émission par le travail (halving 8 ans), frais forfaitaires au producteur, bond de validateur + déliaison temps réel, slashing réparé (vérification cryptographique réelle).
+- **Refonte économique fair launch v5→v6** : genèse sans pre-mine, émission par le travail (demi-vie initiale 8 ans → portée à ~20 ans par ADR 0040), frais forfaitaires au producteur, bond de validateur + déliaison temps réel, slashing réparé (vérification cryptographique réelle).
 - **Itérations plus anciennes** : console admin `/admin`, robustesse au démarrage, clés typées + ahash, capacités relevées (10k tx/bloc, mempool 100k), cadence de bloc adaptative, migration de schéma sans wipe.
 
 ---

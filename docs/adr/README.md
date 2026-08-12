@@ -86,9 +86,9 @@ Rien ci-dessous n'est décidé — ce sont des propositions à instruire une par
   *Problème :* l'admission gouvernance-gatée crée une contradiction avec le fair launch — l'admin choisit les individus → l'admin choisit qui gagne l'émission.
   *Direction :* **Open PoA** — le bond suffit à entrer dans la file (pas d'approbation admin individuelle) ; veto collectif des validateurs existants (>66 %, fenêtre 7 jours) ; l'admin ne fixe que le montant du bond. Score `S_perf` uniquement (taux de co-signature et de proposition, 100 % déterministe on-chain, pas de DPoS/W_stake). Expansion phasée **automatique et immuable depuis la genèse** : Phase 1 (3–5, gouvernance-gated pendant le bootstrap) → Phase 2 (10–21, Open PoA) → Phase 3 (50–101, Open PoA). **Prérequis** : ADR 0002/0027/0031 éprouvés avant Phase 2.
 
-- **0040 — [Émission progressive sans La Fonderie](./0040-emission-progressive-sans-fonderie.md)** 🔴 **— Accepté (design, non implémenté)**
+- **0040 — [Émission progressive sans La Fonderie](./0040-emission-progressive-sans-fonderie.md)** 🔴 **— ✅ implémenté** (`STORAGE_VERSION` 10, commit `f044bc4`)
   *Problème :* « La Fonderie » (100 Md pré-alloués à la genèse) ressemble à un pre-mine visible ; le « melt » réintroduit une émission dépendante du taux de slashing ; la demi-vie de 8 ans front-load 50 % de la supply trop tôt.
-  *Direction :* **minting progressif** — les tokens n'existent pas avant d'être émis (`foundry` supprimé, `emitted_atoms` seul état tracké) ; `remaining_supply = MAX_SUPPLY − emitted` est dérivé, pas stocké. Slashing : 10 % → rapporteur, 90 % **détruit** (`destroyed_atoms +=`). `T_half` allongé à ~20 ans (R₀ ≈ 3,47 Md/an au lieu de 8,66). Nouvel invariant : `circulating + destroyed = emitted ≤ MAX_SUPPLY`. **Remplace ADR 0004.** Bump `STORAGE_VERSION`.
+  *Fait :* **minting progressif** — les tokens n'existent pas avant d'être émis (`foundry` inerte en bincode, `emitted_atoms` seul état tracké). `T_half` allongé à ~20 ans (`EMISSION_T_HALF_SECS = 630_720_000`, R₀ ≈ 3,47 Md/an). Slashing : 10 % → rapporteur, 90 % → `epoch_dist_emission_pot` (redistribués aux validateurs honnêtes, inerte jusqu'à ADR 0028). `destroyed_atoms` cumule les atomes perdus (reaping de comptes poussière). Nouvel invariant garanti à chaque bloc : `circulating + epoch_pot + destroyed = emitted ≤ MAX_SUPPLY`. **Remplace ADR 0004.**
 
 - **0039 — [Rémunération des opérateurs de modules](./0039-remuneration-operateurs-modules.md)** 🟠 **— Accepté (design, non implémenté)**
   *Problème :* ADR 0010 crée le registre de modules bondés mais ne définit aucune rémunération — sans revenu, les opérateurs n'ont aucune raison économique de bonger.
@@ -98,9 +98,9 @@ Rien ci-dessous n'est décidé — ce sont des propositions à instruire une par
   *Statut :* §1 (genèse multi-validateurs + `genesis_hash`) reste valide et à implémenter ; §2 (admission permissionless) → ADR 0038 ; §3 (lissage émission early) → ADR 0040.
   *Direction restante :* `GenesisConfig` **multi-validateurs** + comité K-of-M initial + `genesis_hash` empreinté (engagement vérifiable par tout nœud, anti-split réseau). Dépend du consensus n≥3 éprouvé.
 
-- **0004 — Invariant exécutable** 🔴 **— ✅ implémenté — ⚠️ remplacé par ADR 0040**
-  *Fait (v4) :* `supply_invariant_holds()` (`circulation + Fonderie == MAX`) appliqué comme **garde dure** sur tous les chemins de bloc.
-  *Remplacement (ADR 0040) :* La Fonderie disparaît. Nouvel invariant : `circulating + destroyed = emitted ≤ MAX_SUPPLY`. La garde dure est maintenue, la formule change.
+- **0004 — Invariant exécutable** 🔴 **— ✅ remplacé par ADR 0040 (implémenté)**
+  *Fait (v4) :* `supply_invariant_holds()` appliqué comme **garde dure** sur tous les chemins de bloc.
+  *Remplacé (ADR 0040 — ✅) :* La Fonderie disparaît. Nouvel invariant : `circulating + epoch_pot + destroyed = emitted ≤ MAX_SUPPLY`. La garde dure est maintenue, la formule change.
 
 - **0009 — Frais des transactions stake/unstake** 🟠 **— ✅ implémenté** (option retenue : exemption assumée + **plafond de déliaisons par compte** contre le spam — plus robuste qu'un micro-frais ; whitepaper réconcilié)
   *Problème :* le whitepaper donne un poids `1` à stake/unstake, mais le code les **exempte** (fee ZERO). Incohérence + petit vecteur de spam.

@@ -95,7 +95,7 @@ docs/
 - **Relais automatique** : quand l'émission atteint la poussière, les **frais de transaction** deviennent la rémunération principale — bascule en **fees-only**, sans intervention.
 - **Frais** : forfaitaires (indépendants du montant), **100 % au validateur producteur immédiatement**. Les frais ne passent pas par l'époque — seule l'émission est époquée.
 - **Slashing** : équivocation prouvée → 100 % du bond (10 % au rapporteur, 90 % redistribués aux validateurs honnêtes via le pot d'époque) — aucun token détruit, aucune réinjection dans l'émission.
-- **Invariant** vérifié à chaque bloc : `circulation + détruits = émis ≤ 100 000 000 000 VINX`.
+- **Invariant** vérifié à chaque bloc : `circulation + pot_époque + détruits = émis ≤ 100 000 000 000 VINX`.
 
 > Détails complets : [whitepaper.md](./whitepaper.md)
 
@@ -118,9 +118,9 @@ Un détenteur lambda ne stake pas : il garde son VINX pour **l'utiliser comme ca
 
 > Feuille de route détaillée et priorisée : **[`docs/adr/README.md`](./docs/adr/README.md)** (index de tous les ADR avec statut).
 
-- **Fait** — protocole L1 Rust complet (PoA Threshold, *fair launch*, slashing prouvable, frais au producteur), plus une série de durcissements/extensions : vérif parallèle des signatures (ADR 0015), dépôt existentiel anti-bloat (0026), durcissement P2P anti-DoS (0022), gouvernance **K-of-M** (0011), **registre de modules bondés** (0010, 1ʳᵉ brique de l'ancrage), vecteurs dorés canoniques (0020). `cargo test --workspace` vert (281 tests).
+- **Fait** — protocole L1 Rust complet (PoA Threshold, fair launch, slashing prouvable, frais au producteur) + durcissements : vérif parallèle des signatures (ADR 0015), dépôt existentiel anti-bloat (0026), P2P anti-DoS (0022), gouvernance **K-of-M** (0011), **registre de modules bondés** (0010), vecteurs dorés canoniques (0020), **émission progressive sans La Fonderie** (0040 : minting pur, T_half ~20 ans, slash → pot d'époque, invariant `circ + pot + détruits = émis`). `cargo test --workspace` vert.
 - **Chemin critique** — **banc 3 validateurs** puis finalité au quorum (0002), fork-choice (0031), jailing (0027), accountability co-sign (0030).
-- **Ensuite** — **émission progressive sans La Fonderie** (0040 : minting pur, T_half ~20 ans, slash → redistribution aux validateurs), **récompenses par époque** (0028), **Open PoA** (0038), **rémunération modules par escrow** (0039), DA & preuves d'ancre (0034).
+- **Ensuite** — **récompenses par époque** (0028 : distribuer l'émission + slash entre proposeurs et co-signataires), **Open PoA** (0038), **rémunération modules par escrow** (0039), DA & preuves d'ancre (0034).
 - **Plus tard** — décentralisation à l'échelle (BLS + comité VRF, 0029), light client (0014), réseau public. Vision d'ensemble : [ADR 0001](./docs/adr/0001-l1-monnaie-pure-modules-ancrage-bonde.md).
 
 ---
