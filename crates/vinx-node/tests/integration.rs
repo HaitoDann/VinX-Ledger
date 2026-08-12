@@ -48,7 +48,10 @@ async fn start_test_node() -> (Arc<Node>, String) {
     let config = NodeConfig::new(validator_kp)
         // Very long block time so auto-ticking never fires during tests
         .with_block_time(9_999)
-        .with_rpc_listen(local_addr.to_string());
+        .with_rpc_listen(local_addr.to_string())
+        // Admin routes are fail-closed: without a token they refuse everything,
+        // so tests exercising them need one configured.
+        .with_admin_token("test-admin-token");
 
     let node = Node::new(state, chain, config);
 
@@ -846,4 +849,153 @@ async fn test_add_validator_updates_set() {
         .unwrap();
     assert_eq!(after["count"], 2, "should now have 2 validators");
     assert_eq!(after["quorum"], 2, "quorum for n=2 is ceil(4/3)=2");
+}
+
+// ─── Stateful mempool admission (anti-spam) ──────────────────────────────────
+
+/// An unfunded (nonexistent) account cannot park transactions in the mempool,
+/// no matter how high a fee it claims — the fee-priority queue only admits
+/// funded transactions.
+#[tokio::test]
+async fn test_admission_rejects_unfunded_sender() {
+    let (node, base_url) = start_test_node().await;
+    let client = reqwest::Client::new();
+
+    let sender_kp = KeyPair::generate(); // never credited
+    let receiver = Address::from_public_key(&KeyPair::generate().public_key());
+    // Huge claimed fee: without stateful admission this would jump the queue.
+    let tx = Transaction::new_transfer(
+        &sender_kp,
+        receiver,
+        Amount::from_vinx(1),
+        Amount::from_vinx(1_000_000),
+        0,
+    );
+
+    let resp = client
+        .post(format!("{}/tx/submit", base_url))
+        .json(&tx)
+        .send()
+        .await
+        .expect("POST /tx/submit");
+    assert_eq!(resp.status(), 400, "unfunded sender must be rejected");
+    assert_eq!(
+        node.mempool.read().await.size(),
+        0,
+        "mempool must stay empty"
+    );
+}
+
+/// A transaction signed for another network (wrong chain_id) is rejected at
+/// admission instead of wasting a mempool slot until block production.
+#[tokio::test]
+async fn test_admission_rejects_wrong_chain_id() {
+    let (node, base_url) = start_test_node().await;
+    let client = reqwest::Client::new();
+
+    let sender_kp = KeyPair::generate();
+    let sender_addr = Address::from_public_key(&sender_kp.public_key());
+    let receiver = Address::from_public_key(&KeyPair::generate().public_key());
+    {
+        let mut state = node.state.write().await;
+        state.credit_for_test(sender_addr.clone(), Amount::from_vinx(1_000));
+    }
+
+    let amount = Amount::from_vinx(1);
+    let fee = amount.calculate_fee(Amount::from_atoms(DEFAULT_FEE_FLOOR_ATOMS));
+    let mut tx = Transaction::new_transfer(&sender_kp, receiver, amount, fee, 0);
+    tx.chain_id = 999; // not this network
+    tx.sign(&sender_kp); // re-sign so the signature commits to the bogus chain id
+
+    let resp = client
+        .post(format!("{}/tx/submit", base_url))
+        .json(&tx)
+        .send()
+        .await
+        .expect("POST /tx/submit");
+    assert_eq!(resp.status(), 400, "wrong chain_id must be rejected");
+    assert_eq!(node.mempool.read().await.size(), 0);
+}
+
+/// A nonce absurdly far ahead of the account nonce is rejected (bounds
+/// nonce-gap parking); a nonce within the window is accepted.
+#[tokio::test]
+async fn test_admission_bounds_nonce_window() {
+    let (node, base_url) = start_test_node().await;
+    let client = reqwest::Client::new();
+
+    let sender_kp = KeyPair::generate();
+    let sender_addr = Address::from_public_key(&sender_kp.public_key());
+    let receiver = Address::from_public_key(&KeyPair::generate().public_key());
+    {
+        let mut state = node.state.write().await;
+        state.credit_for_test(sender_addr.clone(), Amount::from_vinx(1_000));
+    }
+
+    let amount = Amount::from_vinx(1);
+    let fee = amount.calculate_fee(Amount::from_atoms(DEFAULT_FEE_FLOOR_ATOMS));
+
+    // Way beyond MAX_NONCE_AHEAD (64) → rejected.
+    let far = Transaction::new_transfer(&sender_kp, receiver.clone(), amount, fee, 1_000);
+    let resp = client
+        .post(format!("{}/tx/submit", base_url))
+        .json(&far)
+        .send()
+        .await
+        .expect("POST /tx/submit");
+    assert_eq!(resp.status(), 400, "far-future nonce must be rejected");
+
+    // A small gap (future nonce within the window) is fine — it waits in the
+    // per-account queue for the missing nonce.
+    let near = Transaction::new_transfer(&sender_kp, receiver, amount, fee, 3);
+    let resp = client
+        .post(format!("{}/tx/submit", base_url))
+        .json(&near)
+        .send()
+        .await
+        .expect("POST /tx/submit");
+    assert_eq!(resp.status(), 200, "nonce within the window is admitted");
+}
+
+/// The cumulative funding rule: a sender cannot queue more total spend than its
+/// balance, even if each transaction individually fits.
+#[tokio::test]
+async fn test_admission_enforces_cumulative_funding() {
+    let (node, base_url) = start_test_node().await;
+    let client = reqwest::Client::new();
+
+    let sender_kp = KeyPair::generate();
+    let sender_addr = Address::from_public_key(&sender_kp.public_key());
+    let receiver = Address::from_public_key(&KeyPair::generate().public_key());
+
+    let amount = Amount::from_vinx(60);
+    let fee = amount.calculate_fee(Amount::from_atoms(DEFAULT_FEE_FLOOR_ATOMS));
+    // Fund exactly one transfer (amount + fee) — not two.
+    {
+        let mut state = node.state.write().await;
+        state.credit_for_test(sender_addr.clone(), amount.checked_add(fee).unwrap());
+    }
+
+    let tx0 = Transaction::new_transfer(&sender_kp, receiver.clone(), amount, fee, 0);
+    let resp = client
+        .post(format!("{}/tx/submit", base_url))
+        .json(&tx0)
+        .send()
+        .await
+        .expect("POST /tx/submit");
+    assert_eq!(resp.status(), 200, "first transfer fits the balance");
+
+    let tx1 = Transaction::new_transfer(&sender_kp, receiver, amount, fee, 1);
+    let resp = client
+        .post(format!("{}/tx/submit", base_url))
+        .json(&tx1)
+        .send()
+        .await
+        .expect("POST /tx/submit");
+    assert_eq!(
+        resp.status(),
+        400,
+        "second transfer exceeds the balance once the queued one is counted"
+    );
+    assert_eq!(node.mempool.read().await.size(), 1);
 }

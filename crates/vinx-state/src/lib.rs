@@ -1,9 +1,10 @@
 pub mod genesis;
 pub mod world_state;
 
-pub use genesis::{create_genesis_state, GenesisConfig};
+pub use genesis::{create_genesis_state, create_genesis_state_with_dev_prefund, GenesisConfig};
 pub use world_state::{
-    v8_meta_suffix, v9_meta_suffix, v10_meta_suffix, AdminPolicy, GovernanceProposal, ModuleEntry, WorldState,
+    v8_meta_suffix, v9_meta_suffix, v10_meta_suffix, v11_meta_suffix, AdminPolicy,
+    GovernanceProposal, ModuleEntry, WorldState,
 };
 
 #[cfg(test)]
@@ -180,7 +181,7 @@ mod tests {
         let pot_before = state.epoch_dist_emission_pot;
         let tx = Transaction::new_transfer(&sender_kp, receiver, amount, fee, 0);
         state.apply_transaction(&tx).unwrap();
-        state.settle_block(&producer, 1);
+        state.settle_block(&producer, 1, 1);
 
         // 100% of the fee goes to the block producer; the epoch pot is untouched.
         assert_eq!(state.account_balance(&producer), fee);
@@ -266,7 +267,7 @@ mod tests {
         assert_eq!(state.account_balance(&sender_addr), balance_after_stake); // not yet back
 
         // After the unbonding delay, settling matures it back to the balance.
-        state.settle_block(&sender_addr, 1_000 + UNBONDING_SECS);
+        state.settle_block(&sender_addr, 1, 1_000 + UNBONDING_SECS);
         assert_eq!(
             state.account_balance(&sender_addr),
             balance_after_stake.checked_add(stake_amount).unwrap()

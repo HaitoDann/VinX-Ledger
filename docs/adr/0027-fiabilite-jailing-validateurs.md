@@ -1,6 +1,12 @@
 # ADR 0027 — Fiabilité & jailing des validateurs
 
-- **Statut :** Proposé
+- **Statut :** ✅ Tranche 1 (cœur déterministe pur + tests : `vinx-core::reliability`) ·
+  ✅ Tranche 2a (câblage état vivant + migration meta v11 : `on_block_applied` dans
+  `settle_block`, `reliability` persistée) · ✅ Tranche 2b (**rotation** leader/backup sur le
+  set actif, validée au banc n=3). **Correction de sûreté (banc n=3) :** le quorum de finalité
+  **reste sur le set complet bondé** — le jailing n'agit **que** sur la rotation (voir « Sûreté :
+  quorum jamais réduit par le jailing » ci-dessous). **Différés :** tx `Unjail`, règle 2
+  (co-signatures absentes).
 - **Catégorie :** Consensus & finalité · **Priorité :** 🟠 moyenne
 - **Date :** Juillet 2026
 - **Liens :** complète la finalité (ADR 0002) et le slashing d'équivocation (ADR 0003) ;
@@ -67,10 +73,39 @@ l'existant).
    la fenêtre glissante.
 3. **Jailing** : quand `missed_proposals ≥ MAX_MISSED_PROPOSALS` **ou** le taux de
    participation sur la fenêtre `< MIN_COSIGN_PARTICIPATION_BPS`, le validateur est **jailé** :
-   - retiré de la **rotation active** (`leader_at` itère sur les validateurs non jailés) ;
-   - **exclu du numérateur ET du dénominateur du quorum** pendant l'emprisonnement (sinon un
-     jailé bloquerait la finalité) ;
+   - retiré de la **rotation active** (`active_leader_at` itère sur les validateurs non jailés,
+     idem file de backup) ;
+   - **le quorum de finalité reste inchangé, sur le set complet bondé** (⌈2n/3⌉) — voir la note
+     de sûreté ci-dessous : réduire le dénominateur sur un fait *dérivé/subjectif* casse la
+     sûreté sous partition. Un jailé compte donc toujours dans le dénominateur ; s'il est
+     durablement mort, c'est la **gouvernance** (`RemoveValidator`, engagée on-chain) qui réduit
+     `n`, pas le jailing ;
    - son **bond reste verrouillé et slashable** — le jailing n'est pas une sortie.
+
+### Sûreté : le quorum n'est **jamais** réduit par le jailing
+
+La tranche 1 envisageait d'exclure les jailés du **dénominateur** du quorum (« sinon un jailé
+bloque la finalité »). **Le banc n=3 a montré que c'est une faille de sûreté.** La table
+`reliability` est *dérivée* (meta, hors `state_root`) et **subjective sous partition** : chaque
+nœud jaile selon ce qu'il observe localement. Scénario d'attaque, partition 1│2 sur n=3 :
+
+- côté **minorité** (1 nœud) : il produit en backup à chaque hauteur, voit les 2 autres « rater »
+  leur tour, les jaile dans **sa** vue → set actif `{lui}` → `active_quorum = ⌈2/3⌉ = 1` → il
+  **finalise seul** sa branche ;
+- côté **majorité** (2 nœuds) : ils jailent le nœud manquant → set actif `{eux}` → quorum 2 → ils
+  finalisent **leur** branche.
+
+À la guérison de la partition : **deux préfixes finalisés en conflit** = violation de sûreté
+(exactement l'anti-fork que VinX doit garantir). La règle correcte de BFT PoA :
+
+| Fonction | Portée | Justification |
+|---|---|---|
+| **Rotation** (qui propose) | set **actif** (jailés sautés) | liveness/latence uniquement ; les backups couvrent — aucun impact sûreté |
+| **Quorum** (seuil de finalité) | set **complet** bondé, `⌈2n/3⌉` | deux partitions ne peuvent jamais atteindre 2/3 chacune → pas de double finalité |
+| **Réduction de `n`** | **gouvernance** `RemoveValidator` (committée, gated par le quorum courant) | seule mutation autorisée à baisser le dénominateur, car elle est elle-même finalisée par l'ancien quorum |
+
+Preuve au banc : à 1/3 vivant (2 nœuds tués), la finalité **gèle** au dernier bloc à quorum
+pendant que le tip continue — comportement de sûreté attendu. À 2/3 elle avance normalement.
 4. **Unjail** : après un `cooldown` (hauteur/ts), le validateur soumet une tx `Unjail`
    (opérateur uniquement) qui remet les compteurs à 0 et le réintègre à la rotation. Le
    cooldown empêche le battement (jail↔unjail).
@@ -101,11 +136,12 @@ côté état.
 - Réutilise le slot-skip existant ; complément non destructif du slashing (ADR 0003).
 
 **Coûts / pièges**
-- Consensus-critique : l'état de fiabilité et l'exclusion du quorum entrent dans la transition.
-  Exige le **banc 3-validateurs** pour être validé (comme le view-change 0002).
-- L'ajustement dynamique du **dénominateur de quorum** est délicat (un jail/unjail change le
-  seuil de finalité) — à spécifier et tester rigoureusement.
-- Nouveaux champs meta → **bump de version + migration append** (technique ADR 0010/0011).
+- Consensus-critique : l'état de fiabilité et la rotation active entrent dans la transition.
+  Validé au **banc 3-validateurs** (comme le view-change 0002) — c'est lui qui a révélé la faille
+  de sûreté du dénominateur dynamique.
+- ⚠️ **Ne jamais réduire le dénominateur du quorum sur le jailing** (fait dérivé/subjectif) :
+  cf. la note de sûreté. La réduction de `n` passe exclusivement par la gouvernance committée.
+- Nouveaux champs meta → **bump de version + migration append** (v11, technique ADR 0010/0011).
 
 ## Alternatives écartées
 
@@ -120,8 +156,9 @@ côté état.
 - `vinx-core` : constantes `MAX_MISSED_PROPOSALS`, `MIN_COSIGN_PARTICIPATION_BPS`,
   `UNJAIL_COOLDOWN`, fenêtre de participation ; tx `Unjail` (nouveau `TransactionType` appendé,
   ou `GovernanceAction`/`ModuleOp`-like).
-- `vinx-state` : `ValidatorReliability` par validateur, mise à jour à l'application et à la
-  finalisation des blocs ; `leader_at`/quorum sur le set actif ; migration meta.
+- `vinx-state` : `ValidatorReliability` par validateur, mise à jour à l'application des blocs
+  (`on_block_applied` dans `settle_block`) ; **rotation** (`active_leader_at`) sur le set actif,
+  **quorum de finalité sur le set complet** (jamais réduit par le jailing) ; migration meta v11.
 - Tests : attribution déterministe des manquements, non-comptage des créneaux inactifs, jail au
   seuil, quorum recalculé, unjail après cooldown, non-grief sur retard de co-signature.
 - Dépendance : s'appuie sur la finalité prefix-closed de l'ADR 0002 pour définir « bloc

@@ -153,7 +153,7 @@ proptest! {
                 // The fee is collected into the block pool; settling credits it to the
                 // producer, so accounts and circulating_supply line up again.
                 let producer = Address::from_public_key(&KeyPair::generate().public_key());
-                state.settle_block(&producer, 1);
+                state.settle_block(&producer, 1, 1);
                 prop_assert_eq!(
                     total_in_accounts(&state),
                     state.circulating_supply.atoms(),
@@ -208,7 +208,7 @@ proptest! {
 
         let tx = Transaction::new_transfer(&sender_kp, receiver_addr, amount, fee, 0);
         state.apply_transaction(&tx).unwrap();
-        state.settle_block(&producer, 1);
+        state.settle_block(&producer, 1, 1);
 
         prop_assert_eq!(
             state.account_balance(&producer).atoms(),

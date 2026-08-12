@@ -20,13 +20,36 @@ use vinx_state::WorldState;
 
 pub type ApiResult<T> = Result<Json<T>, ApiError>;
 
+/// Admin routes are **fail-closed**: with no `admin_token` configured they refuse
+/// every request instead of accepting all of them (the RPC listens on 0.0.0.0 by
+/// default — an open `POST /snapshot` would let anyone replace the node's state).
+/// Tokens are compared via their SHA-256 digests so the comparison cost is
+/// independent of how many leading bytes match (no timing side channel).
 fn check_admin_auth(headers: &axum::http::HeaderMap, expected: Option<&str>) -> bool {
-    let Some(token) = expected else { return true }; // auth disabled
-    headers
+    let Some(token) = expected else { return false };
+    let provided = headers
         .get(axum::http::header::AUTHORIZATION)
         .and_then(|v| v.to_str().ok())
-        .and_then(|s| s.strip_prefix("Bearer "))
-        == Some(token)
+        .and_then(|s| s.strip_prefix("Bearer "));
+    match provided {
+        Some(p) => vinx_crypto::sha256(p.as_bytes()) == vinx_crypto::sha256(token.as_bytes()),
+        None => false,
+    }
+}
+
+/// `check_admin_auth` as a `Result`, with an error message that tells the operator
+/// *why* access is denied (missing configuration vs. bad token).
+fn require_admin(headers: &axum::http::HeaderMap, expected: Option<&str>) -> Result<(), ApiError> {
+    if expected.is_none() {
+        return Err(ApiError::Unauthorized(
+            "admin routes are disabled: no admin_token configured (set admin_token in config.toml)"
+                .to_string(),
+        ));
+    }
+    if !check_admin_auth(headers, expected) {
+        return Err(ApiError::Unauthorized("invalid admin token".to_string()));
+    }
+    Ok(())
 }
 
 // ─── Error type ─────────────────────────────────────────────────────────────
@@ -111,7 +134,7 @@ pub async fn submit_tx(
     }
 
     let tx_hash = hex::encode(tx.hash());
-    match node.mempool.write().await.add(tx) {
+    match admit_to_mempool(&node, tx).await {
         Ok(()) => {
             node.metrics.tx_submitted_ok.fetch_add(1, Ordering::Relaxed);
             Ok(Json(TxSubmitResponse {
@@ -123,9 +146,36 @@ pub async fn submit_tx(
             node.metrics
                 .tx_submitted_err
                 .fetch_add(1, Ordering::Relaxed);
-            Err(ApiError::BadRequest(e.to_string()))
+            Err(ApiError::BadRequest(e))
         }
     }
+}
+
+/// Stateful admission (anti-spam) + mempool insertion, shared by `/tx/submit`
+/// and `/tx/batch`. The signature must already be verified by the caller.
+///
+/// On top of `WorldState::admission_check` (chain_id, fee floor, funded sender,
+/// nonce window), this enforces the **cumulative** funding rule: the sender's
+/// balance must cover every transaction already queued for it plus this one —
+/// otherwise one funded fee could back a whole queue of unpayable high-priority
+/// entries. State is read-locked before the mempool write lock (same order as
+/// the persist path) so the check and the insert are atomic with respect to
+/// competing submissions.
+async fn admit_to_mempool(node: &Arc<Node>, tx: Transaction) -> Result<(), String> {
+    let state = node.state.read().await;
+    state.admission_check(&tx).map_err(|e| e.to_string())?;
+
+    let mut mempool = node.mempool.write().await;
+    let queued = mempool.queued_cost_atoms(&tx.from);
+    let needed = queued.saturating_add(tx.admission_cost_atoms());
+    if state.account_balance(&tx.from).atoms() < needed {
+        return Err(format!(
+            "sender balance does not cover already-queued transactions plus this one \
+             (queued cost {queued} atoms)"
+        ));
+    }
+    drop(state);
+    mempool.add(tx).map_err(|e| e.to_string())
 }
 
 pub async fn get_block(
@@ -196,9 +246,7 @@ pub async fn get_validator_requests(
     State(node): State<Arc<Node>>,
     headers: axum::http::HeaderMap,
 ) -> ApiResult<ValidatorJoinListResponse> {
-    if !check_admin_auth(&headers, node.config.admin_token.as_deref()) {
-        return Err(ApiError::Unauthorized("Admin token required".to_string()));
-    }
+    require_admin(&headers, node.config.admin_token.as_deref())?;
     let requests = node.validator_requests.lock().await;
     Ok(Json(ValidatorJoinListResponse {
         count: requests.len(),
@@ -415,14 +463,8 @@ pub async fn get_snapshot(
     headers: axum::http::HeaderMap,
     State(node): State<Arc<Node>>,
 ) -> impl IntoResponse {
-    if !check_admin_auth(&headers, node.config.admin_token.as_deref()) {
-        return (
-            StatusCode::UNAUTHORIZED,
-            Json(ErrorResponse {
-                error: "unauthorized".to_string(),
-            }),
-        )
-            .into_response();
+    if let Err(e) = require_admin(&headers, node.config.admin_token.as_deref()) {
+        return e.into_response();
     }
     let state_guard = node.state.read().await;
     let chain_guard = node.chain.read().await;
@@ -548,9 +590,7 @@ pub async fn post_compact(
     State(node): State<Arc<Node>>,
     axum::extract::Query(params): axum::extract::Query<CompactParams>,
 ) -> ApiResult<CompactResponse> {
-    if !check_admin_auth(&headers, node.config.admin_token.as_deref()) {
-        return Err(ApiError::Unauthorized("unauthorized".to_string()));
-    }
+    require_admin(&headers, node.config.admin_token.as_deref())?;
     let keep_last = params.keep_last.unwrap_or(1000);
     let mut chain = node.chain.write().await;
     let tip = chain.tip_height();
@@ -647,14 +687,8 @@ pub async fn post_snapshot(
     State(node): State<Arc<Node>>,
     Json(body): Json<SnapshotResponse>,
 ) -> impl IntoResponse {
-    if !check_admin_auth(&headers, node.config.admin_token.as_deref()) {
-        return (
-            StatusCode::UNAUTHORIZED,
-            Json(ErrorResponse {
-                error: "unauthorized".to_string(),
-            }),
-        )
-            .into_response();
+    if let Err(e) = require_admin(&headers, node.config.admin_token.as_deref()) {
+        return e.into_response();
     }
     match serde_json::from_value::<WorldState>(body.state) {
         Ok(new_state) => {
@@ -741,10 +775,37 @@ pub async fn submit_tx_batch(
     let total = txs.len();
     let mut results = Vec::with_capacity(total);
     let mut accepted = 0usize;
+    // Same lock order as the persist path and admit_to_mempool: state before
+    // mempool. Held across the batch so admission + insertion stay atomic; the
+    // cumulative funding rule then naturally accounts for earlier transactions
+    // of the same batch (they are already in the mempool when the next one is
+    // checked).
+    let state = node.state.read().await;
     let mut mempool = node.mempool.write().await;
 
     for (tx, (hash, sig_result)) in txs.into_iter().zip(verifications) {
-        match sig_result {
+        let admit = sig_result.and_then(|()| {
+            state.admission_check(&tx).map_err(|e| e.to_string())?;
+            let queued = mempool.queued_cost_atoms(&tx.from);
+            let needed = queued.saturating_add(tx.admission_cost_atoms());
+            if state.account_balance(&tx.from).atoms() < needed {
+                return Err(format!(
+                    "sender balance does not cover already-queued transactions plus this one \
+                     (queued cost {queued} atoms)"
+                ));
+            }
+            mempool.add(tx).map_err(|e| e.to_string())
+        });
+        match admit {
+            Ok(()) => {
+                node.metrics.tx_submitted_ok.fetch_add(1, Ordering::Relaxed);
+                accepted += 1;
+                results.push(BatchTxResult {
+                    tx_hash: hash,
+                    accepted: true,
+                    error: None,
+                });
+            }
             Err(e) => {
                 node.metrics
                     .tx_submitted_err
@@ -755,27 +816,6 @@ pub async fn submit_tx_batch(
                     error: Some(e),
                 });
             }
-            Ok(()) => match mempool.add(tx) {
-                Ok(()) => {
-                    node.metrics.tx_submitted_ok.fetch_add(1, Ordering::Relaxed);
-                    accepted += 1;
-                    results.push(BatchTxResult {
-                        tx_hash: hash,
-                        accepted: true,
-                        error: None,
-                    });
-                }
-                Err(e) => {
-                    node.metrics
-                        .tx_submitted_err
-                        .fetch_add(1, Ordering::Relaxed);
-                    results.push(BatchTxResult {
-                        tx_hash: hash,
-                        accepted: false,
-                        error: Some(e.to_string()),
-                    });
-                }
-            },
         }
     }
 

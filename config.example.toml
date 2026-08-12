@@ -13,17 +13,15 @@
 # admin_key_file     = "devnet/admin.json"
 
 # ─── Paramètres de bloc ───────────────────────────────────────────────────────
-# Écart entre deux blocs sous activité légère, en secondes. La cadence est
-# adaptative : aucun bloc au repos, ~block_time_secs sous activité légère,
-# l'écart se resserre à la montée en charge, dos-à-dos à saturation.
-# NB : c'est un écart de production, pas une horloge — la référence de temps du
-# protocole (émission, déliaison de bond, préavis d'upgrade) est le timestamp des blocs.
-# Défaut : 5
-# block_time_secs = 5
+# Plancher de cadence fixe (ADR 0041) : au plus un bloc toutes les block_time_secs.
+# Aucune accélération dos-à-dos — la congestion passe par le base-fee.
+# Référence de temps du protocole (émission, déliaison, upgrade) = timestamp des blocs.
+# Défaut : 12
+# block_time_secs = 12
 
 # Nombre maximum de transactions par bloc.
-# Défaut : 10000
-# max_block_txs = 10000
+# Défaut : 3000 (~250 TPS) — sera relevé progressivement selon l'usage.
+# max_block_txs = 3000
 
 # Taille maximale du mempool (transactions en attente).
 # Défaut : 100000
@@ -33,6 +31,13 @@
 # Adresse d'écoute du serveur RPC + interface web.
 # Défaut : "0.0.0.0:8545"
 # rpc_listen = "0.0.0.0:8545"
+
+# Token Bearer protégeant les routes d'administration : GET/POST /snapshot,
+# POST /admin/compact, GET /validators/pending.
+# ⚠ Sans token configuré, ces routes sont DÉSACTIVÉES (fail-closed) — elles
+# répondent 401 à toute requête. Utilisez une valeur longue et aléatoire :
+#   openssl rand -hex 32
+# admin_token = "changez-moi"
 
 # ─── P2P (réseau entre nœuds) ────────────────────────────────────────────────
 # Décommentez pour activer la couche P2P gossipsub.

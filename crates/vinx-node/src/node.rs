@@ -3,7 +3,7 @@ use std::collections::{HashMap, HashSet};
 use std::num::NonZeroUsize;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
-use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
+use std::time::{Instant, SystemTime, UNIX_EPOCH};
 use tokio::sync::{broadcast, Mutex, RwLock};
 use vinx_crypto::{Address, Hash32};
 
@@ -104,6 +104,16 @@ pub struct BlockEvent {
     pub state_root_hex: String,
 }
 
+/// ADR 0031 — contexte de fork-choice partagé avec la tâche P2P : le **snapshot d'état
+/// finalisé** (base de rejeu bornée pour les réorgs, cf. `reorg::advance_snapshot`) et le
+/// `storage` (pour une persistance **complète** après une réorg — la chaîne a pu être tronquée,
+/// ce que le persist incrémental ne saurait refléter).
+#[derive(Clone)]
+pub struct ForkChoiceCtx {
+    pub finalized_state: Arc<RwLock<(u64, WorldState)>>,
+    pub storage: Option<Arc<Storage>>,
+}
+
 pub struct Node {
     pub state: Arc<RwLock<WorldState>>,
     pub mempool: Arc<RwLock<Mempool>>,
@@ -134,6 +144,10 @@ pub struct Node {
     pub metrics: NodeMetrics,
     /// Validators temporarily suspended from the round-robin due to liveness eviction.
     pub suspended_validators: Arc<RwLock<HashSet<Address>>>,
+    /// ADR 0031 — snapshot d'état finalisé `(hauteur, état)` : base de rejeu bornée pour les
+    /// réorgs de fork-choice. Maintenu par `reorg::advance_snapshot` après chaque avancée de
+    /// finalité (tick + chemins P2P). Partagé avec la tâche P2P via `ForkChoiceCtx`.
+    pub finalized_state: Arc<RwLock<(u64, WorldState)>>,
 }
 
 impl Node {
@@ -144,6 +158,9 @@ impl Node {
             .map(|p| Arc::new(Storage::new(p.clone())));
         let initial_vs = state.validator_set.clone();
         let (block_events, _) = broadcast::channel(64);
+        // ADR 0031 — snapshot finalisé initialisé à (tip, état courant) : ≥ finalité, donc les
+        // réorgs sous ce tip sont sûrement ignorées jusqu'à ce que la finalité le dépasse.
+        let finalized_state = Arc::new(RwLock::new((chain.tip_height(), state.clone())));
         Arc::new(Self {
             state: Arc::new(RwLock::new(state)),
             mempool: Arc::new(RwLock::new(Mempool::new(config.max_mempool_size))),
@@ -165,6 +182,7 @@ impl Node {
             )),
             metrics: NodeMetrics::new(),
             suspended_validators: Arc::new(RwLock::new(HashSet::new())),
+            finalized_state,
         })
     }
 
@@ -175,6 +193,8 @@ impl Node {
             .as_ref()
             .map(|p| Arc::new(Storage::new(p.clone())));
         let initial_vs = state.validator_set.clone();
+        // ADR 0031 — snapshot finalisé initialisé à (tip, état courant) avant de déplacer l'état.
+        let finalized_state = Arc::new(RwLock::new((chain.tip_height(), state.clone())));
         let state_arc = Arc::new(RwLock::new(state));
         let chain_arc = Arc::new(RwLock::new(chain));
         let mempool_arc = Arc::new(RwLock::new(Mempool::new(config.max_mempool_size)));
@@ -182,6 +202,11 @@ impl Node {
         let (block_events, _) = broadcast::channel(64);
 
         let metrics = NodeMetrics::new();
+
+        let fork_choice = ForkChoiceCtx {
+            finalized_state: Arc::clone(&finalized_state),
+            storage: storage.clone(),
+        };
 
         let p2p = if config.p2p_listen.is_some() {
             match crate::p2p::start(
@@ -191,6 +216,7 @@ impl Node {
                 Arc::clone(&state_arc),
                 Arc::clone(&vs_arc),
                 metrics.clone(),
+                fork_choice,
             )
             .await
             {
@@ -228,6 +254,7 @@ impl Node {
             )),
             metrics,
             suspended_validators: Arc::new(RwLock::new(HashSet::new())),
+            finalized_state,
         })
     }
 
@@ -258,6 +285,13 @@ impl Node {
         // proposer's own signature already meets quorum, so the block is final at once;
         // with more validators it becomes final once quorum co-signs (via P2P).
         chain.advance_finality(&state.validator_set);
+
+        // ADR 0031 — maintenir le snapshot d'état finalisé (base de rejeu des réorgs). Verrous
+        // déjà tenus : state, chain ; finalized_state acquis en DERNIER (ordre global cohérent).
+        {
+            let mut snap = self.finalized_state.write().await;
+            crate::reorg::advance_snapshot(&mut snap, &chain);
+        }
 
         // Flush mempool entries whose nonce is now consumed by this block.
         {
@@ -385,17 +419,31 @@ impl Node {
         }
 
         let vs = self.validator_set.read().await.clone();
-        let n = vs.len();
-        if n <= 1 {
+        if vs.len() <= 1 {
             return; // Single-validator chain — can't skip yourself
         }
 
         let height = self.chain.read().await.tip_height() + 1;
-        let leader_idx = vs.leader_idx_at(height);
 
-        let my_idx = match vs.index_of(&self.config.validator_address) {
+        // ADR 0027 — la rotation (leader et file de backup) porte sur le set ACTIF :
+        // les validateurs emprisonnés (jailed) sont sautés, exactement comme dans
+        // `produce_block`. Le calcul est déterministe (dérivé de `state.reliability`).
+        let active = {
+            let state = self.state.read().await;
+            vinx_core::reliability::active_validators(&vs, &state.reliability)
+        };
+        let n = active.len();
+        if n <= 1 {
+            return; // Un seul validateur actif — pas de backup possible.
+        }
+        let leader_idx = (height as usize) % n;
+
+        let my_idx = match active
+            .iter()
+            .position(|a| a == &self.config.validator_address)
+        {
             Some(i) => i,
-            None => return, // Not a validator
+            None => return, // Pas dans le set actif (non-validateur ou emprisonné).
         };
 
         if my_idx == leader_idx {
@@ -407,7 +455,7 @@ impl Node {
 
         // If the scheduled leader is already suspended (liveness-evicted), halve the
         // activation time so backup validators step in sooner.
-        let leader_addr = vs.leader_at(height);
+        let leader_addr = &active[leader_idx];
         let leader_suspended = self.suspended_validators.read().await.contains(leader_addr);
         let activation_secs = if leader_suspended {
             ((distance as u64 + 1) * block_time).max(block_time / 2)
@@ -461,44 +509,37 @@ impl Node {
         let mut stalled = false;
 
         loop {
-            // Heartbeat only when something time-sensitive is pending (a scheduled
-            // upgrade). Otherwise we wait for a transaction — no empty blocks at rest.
-            let needs_heartbeat = self.state.read().await.has_pending_time_sensitive_ops();
-
             // Proceed straight to production when there's pending work and we aren't
             // stalled — the demand-scaled gap below paces us, and any leftover txs
-            // from a previous block keep draining. Otherwise wait for a signal
-            // (or the heartbeat timer).
+            // from a previous block keep draining. Otherwise wait for a signal or
+            // the unconditional heartbeat (ADR 0038): at least one block every
+            // HEARTBEAT_INTERVAL_SECS, even empty. Guaranteeing that the accrued
+            // emission is forged on schedule removes the incentive to force blocks
+            // with junk self-transactions, and keeps the MTP clock, unbond
+            // maturation and upgrade activation advancing at rest.
             let have_work = !stalled && self.mempool.read().await.size() > 0;
 
             let is_heartbeat_block = if have_work {
                 false
-            } else if needs_heartbeat {
+            } else {
                 tokio::select! {
                     _ = tx_ready.notified() => false,
                     _ = tokio::time::sleep(heartbeat) => true,
                 }
-            } else {
-                tx_ready.notified().await;
-                false
             };
             // Any fresh wake clears a prior stall — we retry the backlog.
             stalled = false;
 
             if is_heartbeat_block {
-                tracing::debug!("Heartbeat block — time-sensitive op pending");
+                tracing::debug!("Heartbeat block (ADR 0038)");
             } else {
-                // Demand-scaled pacing: the gap shrinks as the mempool fills — up to
-                // block_time under light load, down to zero (back-to-back) once a
-                // full block is queued. Applied uniformly, whether this is the first
-                // block after idle or a leftover being drained.
-                let pending = self.mempool.read().await.size();
-                let gap = dynamic_gap(pending, self.config.max_block_txs, block_time);
-                if !gap.is_zero() {
-                    tokio::time::sleep(gap).await;
-                }
-                // Nothing to seal (spurious wake or already drained) → don't produce
-                // an empty block; loop back to waiting.
+                // ADR 0043 — cadence à plancher fixe : au plus un bloc toutes les `block_time`,
+                // même en saturation. L'ancienne accélération à la demande (écart → 0, blocs
+                // dos-à-dos sous charge) était le générateur #1 de forks ; on la retire. La
+                // congestion est absorbée par le base-fee, pas par des blocs plus rapprochés.
+                tokio::time::sleep(block_time).await;
+                // Skip-empty conservé : rien à sceller (réveil spurious ou déjà drainé) → on ne
+                // produit pas de bloc vide, on repart attendre.
                 if self.mempool.read().await.size() == 0 {
                     continue;
                 }
@@ -587,8 +628,8 @@ impl Node {
         };
         let state_write = {
             let mut state = self.state.write().await;
-            let chain = self.chain.read().await;
-            Storage::serialize_full(&mut state, &chain)
+            let mut chain = self.chain.write().await;
+            Storage::serialize_full(&mut state, &mut chain)
         };
         match state_write {
             Err(e) => tracing::warn!(error = %e, "Failed to serialize state for full persist"),
@@ -603,8 +644,9 @@ impl Node {
         }
     }
 
-    /// Serializes to bytes while holding read locks (fast, pure in-memory), releases
-    /// the locks, then offloads zstd compression + redb write to a blocking thread.
+    /// Serializes to bytes while holding short write locks (fast, pure in-memory —
+    /// draining the state/chain dirty sets requires `&mut`), releases the locks,
+    /// then offloads zstd compression + redb write to a blocking thread.
     /// The JoinHandle is awaited so the persist completes before the caller proceeds,
     /// but locks are never held during I/O.
     pub async fn persist(&self) {
@@ -617,10 +659,10 @@ impl Node {
         // accounts changed since the last flush are serialized here (O(dirty)).
         let (state_write, mempool_blob) = {
             let mut state = self.state.write().await;
-            let chain = self.chain.read().await;
+            let mut chain = self.chain.write().await;
             let mempool = self.mempool.read().await;
             let txs = mempool.pending_txs();
-            let sw = Storage::serialize_incremental(&mut state, &chain);
+            let sw = Storage::serialize_incremental(&mut state, &mut chain);
             let mp_blob = Storage::serialize_mempool(&txs);
             (sw, mp_blob)
         }; // all locks dropped here
@@ -695,57 +737,7 @@ impl Node {
     }
 }
 
-/// Demand-scaled gap before sealing the next block, factored out for testing.
-///
-/// Full `block_time` when the mempool is nearly empty (light-activity cadence),
-/// shrinking linearly toward zero as `pending` approaches one block's worth
-/// (`max_block_txs`), and exactly zero — back-to-back — once a full block is
-/// already queued (saturation). Combined with block-on-demand (no work → no
-/// block), this yields the three regimes in a single curve:
-/// idle → no block; light traffic → ~`block_time`; rising load → tighter gaps;
-/// saturation → back-to-back.
-fn dynamic_gap(pending: usize, max_block_txs: usize, block_time: Duration) -> Duration {
-    let max = max_block_txs.max(1);
-    if pending >= max {
-        return Duration::ZERO;
-    }
-    let fill = pending as f64 / max as f64; // 0.0 ..= 1.0
-    block_time.mul_f64(1.0 - fill)
-}
-
-#[cfg(test)]
-mod tests {
-    use super::dynamic_gap;
-    use std::time::Duration;
-
-    const BT: Duration = Duration::from_secs(10);
-    const MAX: usize = 10_000;
-
-    #[test]
-    fn test_gap_full_when_nearly_empty() {
-        // Empty / a few txs → ~full block_time (light-activity regime).
-        assert_eq!(dynamic_gap(0, MAX, BT), BT);
-        let g = dynamic_gap(50, MAX, BT);
-        assert!(g > Duration::from_millis(9_900) && g <= BT);
-    }
-
-    #[test]
-    fn test_gap_shrinks_as_mempool_fills() {
-        // Half a block queued → half the gap; nearly a full block → nearly zero.
-        assert_eq!(dynamic_gap(MAX / 2, MAX, BT), BT.mul_f64(0.5));
-        assert_eq!(dynamic_gap(MAX * 9 / 10, MAX, BT), BT.mul_f64(0.1));
-    }
-
-    #[test]
-    fn test_gap_zero_under_full_backlog() {
-        // A full block (or more) queued → back-to-back, no wait.
-        assert_eq!(dynamic_gap(MAX, MAX, BT), Duration::ZERO);
-        assert_eq!(dynamic_gap(MAX * 5, MAX, BT), Duration::ZERO);
-    }
-
-    #[test]
-    fn test_gap_never_divides_by_zero() {
-        // max_block_txs = 0 is clamped to 1 — no panic; empty mempool → full gap.
-        assert_eq!(dynamic_gap(0, 0, BT), BT);
-    }
-}
+// ADR 0043 — la cadence est désormais un plancher fixe `block_time` (plus d'accélération à la
+// demande). L'ancienne `dynamic_gap` (écart décroissant → blocs dos-à-dos en saturation) a été
+// retirée : elle maximisait la fenêtre de fork sous charge. La boucle de production espace
+// simplement les blocs de `block_time` (voir `run_block_producer`).

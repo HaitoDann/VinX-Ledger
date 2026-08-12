@@ -5,6 +5,7 @@ pub mod mempool;
 pub mod node;
 pub mod p2p;
 pub mod producer;
+pub mod reorg;
 pub mod rpc;
 pub mod storage;
 pub mod sync;

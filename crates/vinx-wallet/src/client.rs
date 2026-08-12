@@ -14,7 +14,6 @@ pub struct AccountInfo {
     pub staked: String,
     #[allow(dead_code)]
     pub staked_atoms: String,
-    pub frozen: bool,
 }
 
 #[derive(Deserialize)]

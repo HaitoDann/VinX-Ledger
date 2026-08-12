@@ -24,6 +24,30 @@ pub struct Chain {
     /// Maps validator addr -> height -> set of block hashes signed (equivocation detection).
     #[serde(skip)]
     slash_evidence: AHashMap<Address, AHashMap<u64, AHashSet<Hash32>>>,
+    /// Heights whose stored block changed since the last persistence flush (new
+    /// block, co-signature landed, tx/sig data pruned). Drained by
+    /// `take_dirty_heights` so Storage writes only those rows instead of
+    /// re-serializing the whole chain on every persist.
+    #[serde(skip)]
+    dirty_heights: AHashSet<u64>,
+    /// ADR 0002/0027 — **quorum historique**. Checkpoints `(from_height, quorum)` triés :
+    /// le bloc de hauteur `h` requiert `quorum_at(h)` signatures pour être final. Reconstruit
+    /// **déterministiquement** pendant l'application des blocs (le quorum du set **actif à la
+    /// hauteur de chaque bloc**, capturé avant les changements de set de ce bloc), donc
+    /// identique sur tous les nœuds. Sans lui, un bloc de genèse (peu de signataires, petit
+    /// quorum d'alors) échoue au quorum courant après un ajout de validateur → la finalité se
+    /// bloque pour les nœuds qui rejoignent. Non persisté : reconstruit à l'application ; après
+    /// un reload, `quorum_at` retombe sur le quorum courant pour le petit suffixe non finalisé.
+    #[serde(skip)]
+    quorum_schedule: Vec<(u64, usize)>,
+    /// ADR 0031 — **candidats de fork-choice**. Blocs valides **concurrents** (proposeur/hash
+    /// différent) observés à une hauteur **non finalisée**, en plus du bloc actuellement retenu
+    /// dans `blocks`. La règle `canonical_head` (poids de co-sigs → leader prévu → plus petit
+    /// hash) élit la tête déterministiquement parmi {bloc retenu} ∪ candidats. Non persisté
+    /// (reconstruit à la volée depuis le gossip) ; purgé sous la finalité (réorg interdite en
+    /// dessous). **Tranche 2a : stockage + choix canonique seulement — aucune réorg encore.**
+    #[serde(skip)]
+    candidates: AHashMap<u64, Vec<Block>>,
 }
 
 impl Chain {
@@ -49,8 +73,43 @@ impl Chain {
             tx_index: AHashMap::new(),
             account_tx_index: AHashMap::new(),
             slash_evidence: AHashMap::new(),
+            dirty_heights: AHashSet::from_iter([0]),
+            quorum_schedule: Vec::new(),
+            candidates: AHashMap::new(),
         };
         (chain, genesis)
+    }
+
+    /// Rebuilds a chain from persisted parts: the per-height block rows (dense,
+    /// starting at genesis) and the finalized-height watermark. Tx indexes are
+    /// restored or rebuilt separately by the caller.
+    pub fn from_parts(blocks: Vec<(Hash32, Block)>, finalized_height: u64) -> Self {
+        Self {
+            blocks,
+            finalized_height,
+            tx_index: AHashMap::new(),
+            account_tx_index: AHashMap::new(),
+            slash_evidence: AHashMap::new(),
+            dirty_heights: AHashSet::new(),
+            quorum_schedule: Vec::new(),
+            candidates: AHashMap::new(),
+        }
+    }
+
+    /// Drains and returns the set of heights whose block row must be rewritten.
+    pub fn take_dirty_heights(&mut self) -> Vec<u64> {
+        self.dirty_heights.drain().collect()
+    }
+
+    /// Marks every stored block dirty — used by full saves (genesis bootstrap,
+    /// snapshot import) so the whole blocks table is rewritten.
+    pub fn mark_all_dirty(&mut self) {
+        self.dirty_heights = (0..self.blocks.len() as u64).collect();
+    }
+
+    /// Borrow of the stored `(hash, block)` row at `height`, for persistence.
+    pub fn block_row(&self, height: u64) -> Option<&(Hash32, Block)> {
+        self.blocks.get(height as usize)
     }
 
     /// Highest final (quorum-signed) height. Everything at or below is irreversible.
@@ -69,14 +128,140 @@ impl Chain {
     /// has not yet reached quorum. Returns the new finalized height.
     pub fn advance_finality(&mut self, validator_set: &vinx_core::ValidatorSet) -> u64 {
         let tip = self.tip_height();
+        // Seuil courant, utilisé en repli quand le schedule n'a pas d'entrée pour la hauteur
+        // (ex. suffixe non finalisé après un reload : le schedule est reconstruit à
+        // l'application, pas persisté).
+        let fallback = validator_set.quorum();
         while self.finalized_height < tip {
             let next = self.finalized_height + 1;
-            match self.get_block(next) {
-                Some(b) if b.is_finalized(validator_set) => self.finalized_height = next,
+            // ADR 0002/0027 : seuil = quorum **historique** à la hauteur `next`, pas le quorum
+            // courant — sinon un bloc antérieur à un changement de set (moins de signataires)
+            // bloquerait le préfixe.
+            let threshold = self.quorum_at(next, fallback);
+            match self.block_row(next) {
+                Some((_, b)) if b.valid_signer_count(validator_set) >= threshold => {
+                    self.finalized_height = next
+                }
                 _ => break,
             }
         }
+        // ADR 0031 — les candidats désormais sous la finalité ne peuvent plus gagner : purge.
+        self.prune_candidates_final();
         self.finalized_height
+    }
+
+    /// ADR 0002/0027 — enregistre que les blocs à partir de `from_height` requièrent `quorum`
+    /// signatures (checkpoint du quorum historique). Appelé pendant l'application de chaque
+    /// bloc avec le quorum du set **actif à cette hauteur** (capturé avant les changements de
+    /// set du bloc). N'ajoute un checkpoint que lorsque la valeur change ; les hauteurs sont
+    /// notées dans l'ordre croissant.
+    pub fn note_quorum(&mut self, from_height: u64, quorum: usize) {
+        if self.quorum_schedule.last().map(|&(_, q)| q) != Some(quorum) {
+            self.quorum_schedule.push((from_height, quorum));
+        }
+    }
+
+    /// Quorum en vigueur à la hauteur `height` (dernier checkpoint `from_height <= height`).
+    /// Retombe sur `fallback` si aucun checkpoint ne couvre la hauteur (schedule non reconstruit,
+    /// ex. juste après un reload).
+    pub fn quorum_at(&self, height: u64, fallback: usize) -> usize {
+        self.quorum_schedule
+            .iter()
+            .rev()
+            .find(|&&(h, _)| h <= height)
+            .map(|&(_, q)| q)
+            .unwrap_or(fallback)
+    }
+
+    /// ADR 0031 — enregistre un **candidat de fork-choice** : un bloc valide concurrent (hash
+    /// différent) observé à une hauteur **non finalisée**. Le caller garantit la validité du
+    /// bloc (proposeur ∈ set, co-signatures vérifiées) ; cette méthode ne fait que le ranger.
+    ///
+    /// Ne stocke **pas** : un bloc au-dessous ou à la finalité (réorg interdite en dessous), ni
+    /// un doublon du bloc déjà retenu dans `blocks`, ni un candidat déjà connu (dédup par hash).
+    /// Retourne `true` si un nouveau candidat a réellement été enregistré.
+    ///
+    /// **Tranche 2a : observation seulement — n'entraîne aucune réorganisation.**
+    pub fn record_candidate(&mut self, block: Block) -> bool {
+        let h = block.header.height;
+        if h <= self.finalized_height {
+            return false; // sous la finalité : jamais un candidat valide
+        }
+        let hash = block.hash();
+        // Déjà le bloc retenu à cette hauteur ? alors ce n'est pas un *concurrent*.
+        if self.block_row(h).map(|(bh, _)| *bh) == Some(hash) {
+            return false;
+        }
+        let bucket = self.candidates.entry(h).or_default();
+        if bucket.iter().any(|b| b.hash() == hash) {
+            return false; // candidat déjà connu
+        }
+        bucket.push(block);
+        true
+    }
+
+    /// Retire un candidat (par hash) à `height` — p.ex. lorsqu'il s'avère invalide au rejeu
+    /// (state_root/supply incohérents) et ne doit donc plus peser au fork-choice. Retourne
+    /// `true` si un candidat a été retiré. Purge l'entrée de hauteur devenue vide.
+    pub fn remove_candidate(&mut self, height: u64, hash: Hash32) -> bool {
+        if let Some(bucket) = self.candidates.get_mut(&height) {
+            let before = bucket.len();
+            bucket.retain(|b| b.hash() != hash);
+            let removed = bucket.len() != before;
+            if bucket.is_empty() {
+                self.candidates.remove(&height);
+            }
+            return removed;
+        }
+        false
+    }
+
+    /// Candidats concurrents connus à `height` (hors bloc retenu dans `blocks`). Vide si aucun.
+    pub fn candidates_at(&self, height: u64) -> &[Block] {
+        self.candidates
+            .get(&height)
+            .map(|v| v.as_slice())
+            .unwrap_or(&[])
+    }
+
+    /// ADR 0031 — **choix canonique** à `height` : élit le hash de la tête parmi
+    /// {bloc retenu} ∪ {candidats}, via `canonical_head` (poids de co-sigs → leader prévu →
+    /// plus petit hash). Renvoie `None` si aucun bloc n'existe à cette hauteur.
+    ///
+    /// Fonction de **décision pure** (aucune mutation) : la tranche 2a l'utilise en observation
+    /// (log si le choix diffère du bloc retenu) ; la tranche 2b s'en servira pour réorganiser.
+    pub fn canonical_choice(
+        &self,
+        height: u64,
+        validator_set: &vinx_core::ValidatorSet,
+    ) -> Option<Hash32> {
+        let stored = self.block_row(height).map(|(_, b)| b);
+        let cands = self.candidates_at(height);
+        stored
+            .into_iter()
+            .chain(cands.iter())
+            .reduce(|a, b| crate::consensus::more_canonical(a, b, validator_set))
+            .map(|b| b.hash())
+    }
+
+    /// `true` si un candidat concurrent l'emporterait sur le bloc actuellement retenu à
+    /// `height` selon la règle de fork-choice — c.-à-d. si une réorganisation serait requise
+    /// (tranche 2b). En tranche 2a, sert uniquement à journaliser une divergence observée.
+    pub fn would_reorg_at(&self, height: u64, validator_set: &vinx_core::ValidatorSet) -> bool {
+        match (
+            self.block_row(height),
+            self.canonical_choice(height, validator_set),
+        ) {
+            (Some((stored_hash, _)), Some(canonical)) => *stored_hash != canonical,
+            _ => false,
+        }
+    }
+
+    /// Purge les candidats devenus inutiles parce que finalisés (réorg interdite sous la
+    /// finalité). Appelée après chaque avancée de `finalized_height`.
+    fn prune_candidates_final(&mut self) {
+        let f = self.finalized_height;
+        self.candidates.retain(|&h, _| h > f);
     }
 
     /// Height of the latest block (0 = only genesis exists).
@@ -118,6 +303,73 @@ impl Chain {
         ts[ts.len() / 2]
     }
 
+    /// Median Time Past of the chain as it will be once a block carrying `next_ts`
+    /// is appended: the median over the last `MEDIAN_TIME_BLOCKS - 1` stored
+    /// timestamps plus `next_ts`. This is the **protocol clock** for the block being
+    /// applied (ADR 0005): emission, bond unbonding and upgrade activation compare
+    /// against this median, so a single producer cannot jump protocol time with a
+    /// bogus header timestamp. Every node computes it identically from the same
+    /// chain prefix + header, keeping the state transition deterministic.
+    pub fn median_time_past_with(&self, next_ts: u64) -> u64 {
+        let n = self.blocks.len();
+        let start = n.saturating_sub(vinx_core::amount::MEDIAN_TIME_BLOCKS - 1);
+        let mut ts: Vec<u64> = self.blocks[start..]
+            .iter()
+            .map(|(_, b)| b.header.timestamp)
+            .collect();
+        ts.push(next_ts);
+        ts.sort_unstable();
+        ts[ts.len() / 2]
+    }
+
+    /// MTP (ADR 0005) **indexé par hauteur** : médiane des timestamps des blocs
+    /// `[height-(MEDIAN_TIME_BLOCKS-1) .. height)` plus `next_ts`. Contrairement à
+    /// `median_time_past_with` (fenêtre au tip courant), cette variante calcule l'horloge
+    /// protocole telle qu'elle était **pour le bloc de hauteur `height`** — nécessaire pour
+    /// **rejouer** un bloc en milieu de chaîne lors d'une réorg (fork-choice, ADR 0031).
+    /// Cohérente avec `median_time_past_with` quand `height == tip+1` (production au tip).
+    pub fn median_time_past_ending_at(&self, height: u64, next_ts: u64) -> u64 {
+        let end = (height as usize).min(self.blocks.len());
+        let start = end.saturating_sub(vinx_core::amount::MEDIAN_TIME_BLOCKS - 1);
+        let mut ts: Vec<u64> = self.blocks[start..end]
+            .iter()
+            .map(|(_, b)| b.header.timestamp)
+            .collect();
+        ts.push(next_ts);
+        ts.sort_unstable();
+        ts[ts.len() / 2]
+    }
+
+    /// ADR 0031 — **réorganisation** : remplace le bloc retenu à `height` par `new_block` (élu
+    /// canonique) et **tronque** tout bloc au-dessus (ils bâtissaient sur la branche perdante).
+    /// Invariants garantis par l'appelant : `finalized_height < height <= tip` (réorg interdite
+    /// sous la finalité) et `new_block.header.height == height`. Reconstruit les index de tx et
+    /// purge les candidats de la hauteur (le choix est fait). Retourne les hachages des blocs
+    /// retirés (bloc remplacé + blocs tronqués) pour nettoyage éventuel par l'appelant.
+    pub fn reorg_replace(&mut self, height: u64, new_block: Block) -> Vec<Hash32> {
+        debug_assert!(
+            height > self.finalized_height,
+            "réorg sous la finalité interdite (ADR 0031)"
+        );
+        debug_assert_eq!(
+            new_block.header.height, height,
+            "hauteur du bloc incohérente"
+        );
+        let h = height as usize;
+        // Retire le bloc contesté et tout ce qui le surplombe (branche perdante).
+        let removed: Vec<Hash32> = self.blocks.drain(h..).map(|(hash, _)| hash).collect();
+        // Installe le bloc canonique à `height` (redevient le tip).
+        self.blocks.push((new_block.hash(), new_block));
+        // Les candidats à cette hauteur n'ont plus de raison d'être.
+        self.candidates.remove(&height);
+        // Index de tx : reconstruction complète (réorg rare → coût acceptable, cohérence sûre).
+        self.rebuild_tx_index();
+        // La persistance devra réécrire depuis `height` (et effacer les rangs tronqués) : le
+        // caller déclenche une sauvegarde complète après une réorg.
+        self.dirty_heights.insert(height);
+        removed
+    }
+
     pub fn get_block(&self, height: u64) -> Option<&Block> {
         self.blocks.get(height as usize).map(|(_, b)| b)
     }
@@ -141,6 +393,7 @@ impl Chain {
         }
         let hash = block.hash();
         self.blocks.push((hash, block));
+        self.dirty_heights.insert(height);
         hash
     }
 
@@ -242,6 +495,7 @@ impl Chain {
     ) -> bool {
         if let Some((_, block)) = self.blocks.get_mut(height as usize) {
             block.signatures.push(signature);
+            self.dirty_heights.insert(height);
             return block.is_finalized(validator_set);
         }
         false
@@ -276,7 +530,12 @@ impl Chain {
         let compact_up_to = (tip - keep_last) as usize;
         for i in 0..compact_up_to {
             if let Some((_, block)) = self.blocks.get_mut(i) {
-                block.transactions.clear();
+                // Only touch (and re-persist) blocks that still had data — repeated
+                // compaction passes must not mark the whole history dirty again.
+                if !block.transactions.is_empty() {
+                    block.transactions.clear();
+                    self.dirty_heights.insert(i as u64);
+                }
             }
         }
         // Rebuild index to remove entries from pruned blocks
@@ -308,10 +567,15 @@ impl Chain {
 
         for i in 0..prune_up_to {
             if let Some((_, block)) = self.blocks.get_mut(i) {
-                tx_pruned += block.transactions.len();
-                block.transactions.clear();
-                sig_pruned += block.signatures.len();
-                block.signatures.clear();
+                // Same rule as compaction: already-empty blocks stay untouched so
+                // periodic prune passes only re-persist the newly pruned window.
+                if !block.transactions.is_empty() || !block.signatures.is_empty() {
+                    tx_pruned += block.transactions.len();
+                    block.transactions.clear();
+                    sig_pruned += block.signatures.len();
+                    block.signatures.clear();
+                    self.dirty_heights.insert(i as u64);
+                }
             }
         }
 
@@ -371,13 +635,7 @@ mod tests {
 
     #[test]
     fn test_equivocation_detection() {
-        let mut chain = Chain {
-            blocks: vec![],
-            finalized_height: 0,
-            tx_index: AHashMap::new(),
-            account_tx_index: AHashMap::new(),
-            slash_evidence: AHashMap::new(),
-        };
+        let mut chain = Chain::from_parts(vec![], 0);
         let addr = Address::from_public_key(&KeyPair::generate().public_key());
         let hash_a = [1u8; 32];
         let hash_b = [2u8; 32];
@@ -433,6 +691,171 @@ mod tests {
         assert!(!chain.is_final(2));
     }
 
+    // ── ADR 0031 — fondation du fork-choice (tranche 2a : stockage + choix, sans réorg) ──
+
+    fn three_validators() -> (Vec<KeyPair>, Vec<Address>, vinx_core::ValidatorSet) {
+        let kps: Vec<KeyPair> = (0..3).map(|_| KeyPair::generate()).collect();
+        let addrs: Vec<Address> = kps
+            .iter()
+            .map(|k| Address::from_public_key(&k.public_key()))
+            .collect();
+        let vs = vinx_core::ValidatorSet::new(addrs.clone());
+        (kps, addrs, vs)
+    }
+
+    #[test]
+    fn test_record_candidate_dedup_and_below_finality() {
+        let (kps, addrs, vs) = three_validators();
+        let (mut chain, _) = Chain::new_with_genesis(addrs[0], 0);
+        let g = chain.tip_hash();
+
+        // Bloc retenu à h=1 (proposeur = leader prévu).
+        let leader = *vs.leader_at(1);
+        let a = signed_block(1, g, leader, &[&kps[0]]);
+        chain.push(a.clone());
+
+        // Un concurrent (proposeur différent, même prev) à h=1.
+        let other = addrs.iter().copied().find(|x| *x != leader).unwrap();
+        let b = signed_block(1, g, other, &[&kps[0], &kps[1]]);
+        assert!(
+            chain.record_candidate(b.clone()),
+            "nouveau candidat enregistré"
+        );
+        assert!(!chain.record_candidate(b), "dédup par hash");
+        assert!(
+            !chain.record_candidate(a),
+            "le bloc déjà retenu n'est pas un concurrent"
+        );
+        // Un bloc à/sous la finalité (genèse h=0 finalisée) : refusé.
+        let below = signed_block(0, GENESIS_PREV_HASH, addrs[0], &[&kps[0]]);
+        assert!(!chain.record_candidate(below), "sous la finalité : refusé");
+        assert_eq!(chain.candidates_at(1).len(), 1);
+    }
+
+    #[test]
+    fn test_canonical_choice_prefers_more_cosignatures() {
+        let (kps, addrs, vs) = three_validators();
+        let (mut chain, _) = Chain::new_with_genesis(addrs[0], 0);
+        let g = chain.tip_hash();
+
+        // Bloc retenu : leader prévu mais 1 seule co-signature.
+        let leader = *vs.leader_at(1);
+        let weak = signed_block(1, g, leader, &[&kps[0]]);
+        chain.push(weak);
+
+        // Candidat : backup mais 2 co-signatures (plus soutenu par le set).
+        let backup = addrs.iter().copied().find(|x| *x != leader).unwrap();
+        let strong = signed_block(1, g, backup, &[&kps[0], &kps[1]]);
+        let strong_hash = strong.hash();
+        chain.record_candidate(strong);
+
+        assert_eq!(
+            chain.canonical_choice(1, &vs),
+            Some(strong_hash),
+            "le poids de co-signatures supérieur gagne (règle 3)"
+        );
+        assert!(
+            chain.would_reorg_at(1, &vs),
+            "réorg requise vers le candidat plus soutenu"
+        );
+    }
+
+    #[test]
+    fn test_canonical_choice_breaks_tie_by_scheduled_leader() {
+        let (kps, addrs, vs) = three_validators();
+        let (mut chain, _) = Chain::new_with_genesis(addrs[0], 0);
+        let g = chain.tip_hash();
+
+        let leader = *vs.leader_at(1);
+        let backup = addrs.iter().copied().find(|x| *x != leader).unwrap();
+
+        // À poids de co-sigs ÉGAL (1 chacun), le bloc du leader prévu doit gagner (règle 4).
+        let backup_block = signed_block(1, g, backup, &[&kps[0]]);
+        chain.push(backup_block);
+        let leader_block = signed_block(1, g, leader, &[&kps[0]]);
+        let leader_hash = leader_block.hash();
+        chain.record_candidate(leader_block);
+
+        assert_eq!(
+            chain.canonical_choice(1, &vs),
+            Some(leader_hash),
+            "à poids égal, le leader prévu l'emporte sur le backup (règle 4)"
+        );
+        assert!(chain.would_reorg_at(1, &vs));
+    }
+
+    #[test]
+    fn test_reorg_replace_truncates_above_and_swaps() {
+        let (kps, addrs, vs) = three_validators();
+        let (mut chain, _) = Chain::new_with_genesis(addrs[0], 0);
+        let g = chain.tip_hash();
+
+        // Chaîne linéaire h=1,2,3 (branche perdante).
+        let b1 = signed_block(1, g, *vs.leader_at(1), &[&kps[0]]);
+        let h1 = b1.hash();
+        chain.push(b1);
+        let b2 = signed_block(2, h1, *vs.leader_at(2), &[&kps[0]]);
+        let h2 = b2.hash();
+        chain.push(b2);
+        let b3 = signed_block(3, h2, *vs.leader_at(3), &[&kps[0]]);
+        chain.push(b3);
+        assert_eq!(chain.tip_height(), 3);
+
+        // Réorg à h=2 : remplace le bloc 2 par un concurrent → tronque le bloc 3.
+        let other = addrs
+            .iter()
+            .copied()
+            .find(|x| *x != *vs.leader_at(2))
+            .unwrap();
+        let b2_alt = signed_block(2, h1, other, &[&kps[0], &kps[1]]);
+        let alt_hash = b2_alt.hash();
+        let removed = chain.reorg_replace(2, b2_alt);
+
+        assert_eq!(
+            chain.tip_height(),
+            2,
+            "le bloc 3 (branche perdante) est tronqué"
+        );
+        assert_eq!(
+            chain.block_row(2).map(|(h, _)| *h),
+            Some(alt_hash),
+            "le bloc 2 est remplacé par le concurrent"
+        );
+        assert_eq!(removed.len(), 2, "bloc 2 remplacé + bloc 3 tronqué");
+        assert!(removed.contains(&h2));
+    }
+
+    #[test]
+    fn test_candidates_pruned_below_finality() {
+        let (kps, addrs, _) = three_validators();
+        // Sous-ensemble à 2 validateurs pour un quorum de 2 atteignable ici.
+        let vs = vinx_core::ValidatorSet::new(vec![addrs[0], addrs[1]]);
+        let (mut chain, _) = Chain::new_with_genesis(addrs[0], 0);
+        let g = chain.tip_hash();
+
+        // Bloc retenu finalisable à h=1 (2 co-sigs = quorum).
+        let leader = *vs.leader_at(1);
+        let a = signed_block(1, g, leader, &[&kps[0], &kps[1]]);
+        chain.push(a);
+        // Un concurrent à h=1.
+        let other = if leader == addrs[0] {
+            addrs[1]
+        } else {
+            addrs[0]
+        };
+        let b = signed_block(1, g, other, &[&kps[0]]);
+        assert!(chain.record_candidate(b));
+        assert_eq!(chain.candidates_at(1).len(), 1);
+
+        // Finaliser h=1 → les candidats à h=1 sont purgés (réorg interdite sous finalité).
+        chain.advance_finality(&vs);
+        assert_eq!(chain.finalized_height(), 1);
+        assert!(
+            chain.candidates_at(1).is_empty(),
+            "candidats purgés une fois la hauteur finalisée"
+        );
+    }
+
     #[test]
     fn test_median_time_past_is_the_median() {
         let kp = KeyPair::generate();
@@ -444,6 +867,67 @@ mod tests {
         }
         // timestamps {0,1,2,3,4,5} → median (index 3) = 3
         assert_eq!(chain.median_time_past(), 3);
+    }
+
+    #[test]
+    fn test_median_time_past_with_resists_timestamp_jump() {
+        let kp = KeyPair::generate();
+        let v = Address::from_public_key(&kp.public_key());
+        let (mut chain, _) = Chain::new_with_genesis(v, 0); // genesis ts = 0
+        for h in 1..=5 {
+            let b = signed_block(h, chain.tip_hash(), v, &[&kp]); // ts = h
+            chain.push(b);
+        }
+        // Honest next block (ts = 6): stored {0..=5} + 6 → median (index 3) = 3.
+        assert_eq!(chain.median_time_past_with(6), 3);
+        // A producer claiming ts = 1_000_000 moves the median not one second more:
+        // the protocol clock ignores the outlier (ADR 0005).
+        assert_eq!(chain.median_time_past_with(1_000_000), 3);
+    }
+
+    #[test]
+    fn test_finality_uses_historical_quorum() {
+        // ADR 0002/0027 : un bloc de l'ère « 1 validateur » (quorum 1, 1 signature) doit
+        // rester final même après que le set a grandi à 3 (quorum 2) — sinon il bloquerait
+        // le préfixe. C'est le bug révélé par le banc n=3.
+        let kp1 = KeyPair::generate();
+        let v1 = Address::from_public_key(&kp1.public_key());
+        let kp2 = KeyPair::generate();
+        let v2 = Address::from_public_key(&kp2.public_key());
+        let kp3 = KeyPair::generate();
+        let v3 = Address::from_public_key(&kp3.public_key());
+        let vs_now = vinx_core::ValidatorSet::new(vec![v1, v2, v3]); // set courant : quorum 2
+        let (mut chain, _) = Chain::new_with_genesis(v1, 0);
+
+        // Bloc 1 : ère 1-validateur → quorum historique 1, une seule signature.
+        chain.note_quorum(1, 1);
+        let b1 = signed_block(1, chain.tip_hash(), v1, &[&kp1]);
+        chain.push(b1);
+        // Bloc 2 : set passé à 3 → quorum 2, deux signatures.
+        chain.note_quorum(2, 2);
+        let b2 = signed_block(2, chain.tip_hash(), v2, &[&kp1, &kp2]);
+        chain.push(b2);
+
+        // Avancer avec le set COURANT (quorum 2). Sans quorum historique, le bloc 1 (1 sig)
+        // bloquerait le préfixe à 0 ; avec, il finalise sous quorum-1, puis le bloc 2.
+        chain.advance_finality(&vs_now);
+        assert_eq!(
+            chain.finalized_height(),
+            2,
+            "le quorum historique finalise le préfixe malgré le changement de set"
+        );
+
+        // Contrôle : sans checkpoint historique, quorum_at retombe sur le fallback (quorum
+        // courant) → le bloc 1 (1 sig) ne finaliserait pas.
+        let (mut chain2, _) = Chain::new_with_genesis(v1, 0);
+        let b1b = signed_block(1, chain2.tip_hash(), v1, &[&kp1]);
+        chain2.push(b1b);
+        chain2.advance_finality(&vs_now);
+        assert_eq!(
+            chain2.finalized_height(),
+            0,
+            "sans quorum historique, un bloc à 1 sig échoue au quorum courant (2)"
+        );
     }
 
     #[test]

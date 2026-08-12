@@ -97,9 +97,28 @@ pub const BLOCK_RETENTION_COUNT: u64 = 100_000;
 /// Pruning runs every N blocks to amortize the O(n) tx-index rebuild cost.
 pub const PRUNE_INTERVAL: u64 = 1_000;
 
-/// Heartbeat block interval when mempool is empty: 1 hour of real time.
-/// Guarantees liveness and keeps height-based timers advancing.
-pub const HEARTBEAT_INTERVAL_SECS: u64 = 3_600;
+/// Maximum distance a transaction's nonce may run ahead of the sender's account
+/// nonce to be admitted into the mempool. Bounds nonce-gap parking (filling the
+/// mempool with far-future nonces that can never apply). Larger than the
+/// per-address mempool cap, so it never rejects a legitimately queued burst.
+pub const MAX_NONCE_AHEAD: u64 = 64;
+
+/// ADR 0002 — profondeur maximale de blocs **non finalisés** qu'un producteur empile
+/// au-dessus de `finalized_height`. Au-delà, la production **s'arrête** (« refus de bâtir
+/// dans le vide ») : borne la longueur des forks concurrents et la fenêtre où opère le
+/// fork-choice (ADR 0031). À n=1 la finalité est immédiate (chaque bloc finalise) → jamais
+/// atteint ; ne se déclenche que si la finalité est **réellement bloquée** (quorum
+/// inatteignable, p. ex. trop de validateurs hors-ligne). Généreux pour absorber des
+/// retards transitoires de co-signatures sans stopper une chaîne saine.
+pub const MAX_UNFINALIZED_DEPTH: u64 = 64;
+
+/// Heartbeat block interval when the mempool is empty: at least one (possibly
+/// empty) block every 10 minutes of real time (ADR 0038). Kills the incentive to
+/// force blocks with junk self-transactions to capture accrued emission (it will
+/// be forged at the next heartbeat anyway), bounds the MTP protocol-clock lag,
+/// matures unbonds/upgrades on time, and keeps a permanent liveness signal —
+/// for ~15-30 MB/year of empty-block data.
+pub const HEARTBEAT_INTERVAL_SECS: u64 = 600;
 
 /// Batch window after the first transaction arrives before sealing a block.
 /// Allows concurrent submissions to be grouped into a single block.
