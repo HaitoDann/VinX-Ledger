@@ -18,12 +18,14 @@ Cohérent avec cette philosophie, VinX est développé sur un **protocole Rust e
 
 > **Ce qui change en v5.0 :** VinX abandonne le modèle « La Fonderie » (pré-allocation de 100 Md à la genèse, melt/forge) au profit d'un **minting progressif pur** : les tokens n'existent pas avant d'être produits. La courbe d'émission est allongée (~20 ans de demi-vie au lieu de 8) pour réduire le front-loading. Le slash est **redistribué aux validateurs honnêtes** via le pot d'époque — les tokens ne quittent jamais la circulation. Les modules gagnent un mécanisme de **rémunération par escrow on-chain** (ADR 0039). L'émission reste entièrement par le travail du consensus, sans pre-mine, sans robinet discrétionnaire.
 
+> **📍 Direction décidée (post-v4.0, en cours de spécification/implémentation) — l'écosystème de subnets.** Ce document décrit l'économie **implémentée aujourd'hui** (fair launch, halving 8 ans). La direction actée pour la suite : remplacer le halving par une **émission élastique à réservoir** `E = r·F` (le *melt* recycle vers la Fonderie → l'émission s'auto-régule pour égaler l'usage), et employer cette émission à **financer des subnets** — des surcouches où l'on rend un service réel payé en VINX, l'émission étant dirigée **au prorata de l'usage réel** vers les fournisseurs, sans staking spéculatif. C'est ce qui donne à VinX sa proposition de valeur au-delà du paiement pur. Cette émission est **plafonnée par l'usage réel** (`min(r·F·Δt, k·M)`) pour empêcher un jackpot de démarrage à froid, suit un **canal unique demand-pull** (la valeur = ce que le client paie, jamais jugée par la chaîne), et combine **deux rails** (paiement direct prévisible + subvention-melt décroissante), avec l'invariant gravé **`CAP·k < 1`** qui rend l'auto-dealing non rentable. Dans cette direction, **les validateurs vivent des frais (fee-only PoA)** et l'émission va aux **subnets**, pas aux validateurs ; et comme des jetons doivent exister pour amorcer, **la formule « aucun jeton à la genèse » est remplacée par un *seed float modeste gagné par le travail*** (phase de bootstrap « subnet 0 », puis demand-pull) — l'immense majorité restant distribuée par le travail via les subnets. Détails : ADR [0040](docs/adr/0040-emission-elastique-reservoir.md), [0041](docs/adr/0041-repartition-emission-usage-melt.md), [0039](docs/adr/0039-infrastructure-subnets-escrow-recompense.md), [0042](docs/adr/0042-epoque-reglement-emission.md) (époque de règlement), [0044](docs/adr/0044-garde-fous-equite-amorcage-emission.md) (garde-fous d'équité, modèle & amorçage) ; idées de subnets : [catalogue](docs/subnets/CATALOGUE.md). Tant que ces ADR ne sont pas implémentés, **le modèle en vigueur reste celui décrit ci-dessous.**
+
 ---
 
 ## 2. Architecture Technique
 
 - **Langage** : Rust, implémentation propriétaire de bout en bout
-- **Vitesse** : Cadence de bloc **adaptative à la demande** — *repos* → aucun bloc ; *activité normale* → jusqu'à ~5 s (block time), les transactions s'agrègent ; *montée en charge* → l'écart se resserre à mesure que le mempool se remplit ; *saturation* → blocs **dos à dos**. Finalité déterministe immédiate via le consensus PoA Threshold
+- **Vitesse** : Cadence de bloc à **plancher fixe de 12 s** (ADR 0043) — au repos, aucun bloc (skip-empty + heartbeat) ; sous charge, au plus un bloc toutes les 12 s (pas de blocs dos-à-dos : la congestion est absorbée par le base-fee, ce qui réduit la fenêtre de fork). Finalité déterministe **au quorum** (prefix-closed) via le consensus PoA Threshold — immédiate à validateur unique, elle suit les co-signatures à n≥2
 - **Capacité** : jusqu'à **10 000 transactions par bloc** (réglable), mempool de **100 000** transactions
 - **Performance** : plusieurs milliers de TPS en configuration optimisée (dépend du matériel et des réglages ; l'exécution est séquentielle — une exécution parallèle serait requise au-delà)
 - **Précision** : 18 décimales internes, 2 décimales affichées à l'utilisateur
@@ -247,7 +249,7 @@ Les full nodes sont **la couche de redondance** du réseau. Si VinX Labs dispara
 
 ## 7. Le temps dans VinX : timestamps, pas hauteur de bloc
 
-La cadence de VinX étant **adaptative à la demande**, la hauteur de bloc **n'est pas une horloge** : le même nombre de blocs peut représenter quelques minutes en saturation ou un temps indéfini au repos. Toute garantie qui doit s'exprimer en temps réel s'appuie donc sur le **`timestamp` des en-têtes de blocs** :
+La cadence de VinX étant **variable** (aucun bloc au repos, un plancher de 12 s sous charge), la hauteur de bloc **n'est pas une horloge** : le même nombre de blocs peut représenter quelques minutes d'activité ou un temps indéfini au repos. Toute garantie qui doit s'exprimer en temps réel s'appuie donc sur le **`timestamp` des en-têtes de blocs** :
 
 - **L'émission** décroît selon le temps réel écoulé (§3.2). *(implémenté)*
 - **La déliaison de bond** mûrit après 3 jours réels (§5). *(implémenté)*
@@ -313,9 +315,10 @@ Un éventuel cadre de conformité pourra être étudié le jour où un usage pub
 
 Sans calendrier engagé, par étapes :
 
-- **Fait** : le protocole (L1 Rust, consensus PoA Threshold) et le modèle *fair launch* décrit ici (émission par le travail, bond de validateur avec slashing prouvable, frais au producteur) sont **implémentés et testés**, exploités en local.
-- **Ensuite** : redondance multi-validateurs (1 → 3), finalité au quorum, amorçage de la micro-économie par l'émission, premiers usages réels.
-- **Plus tard (optionnel)** : réseau public, et **surcouches / modules hors-nœud** reliés par ancrage bondé (ex. *token factory*) — architecture gravée dans [ADR 0001](docs/adr/0001-l1-monnaie-pure-modules-ancrage-bonde.md), la version présente en garde les portes ouvertes (bond, Merkle, payload générique).
+- **Fait** : le protocole (L1 Rust, consensus PoA Threshold) et le modèle *fair launch* décrit ici (émission par le travail, bond de validateur avec slashing prouvable, frais au producteur) sont **implémentés et testés**. Le **consensus multi-validateur est éprouvé au banc n=3** (`scripts/bench-n3.sh`) : finalité au quorum, tolérance à 1 panne, sûreté à 1/3 ; jailing/rotation sur set actif et fork-choice déterministe (fonction pure) en place.
+- **En cours (consensus)** : wiring reorg du fork-choice, tx d'unjail, accountability des co-signatures conflictuelles.
+- **Prochaine grande direction (décidée, à implémenter) — l'écosystème de subnets.** Le halving discret laisse place à une **émission élastique à réservoir** `E = r·F` (le *melt* recycle vers la Fonderie, auto-régulation vers un équilibre où l'émission égale l'usage) ; cette émission **finance des subnets** — des surcouches où des participants rendent un service réel (stockage, calcul, aléa…) payé en VINX — répartie **au prorata de l'usage réel (VINX melté)** par subnet, sans staking spéculatif à la TAO. Infrastructure : module bondé + **escrow** + **racine de récompense** + **Claim par preuve Merkle**. ADR [0040](docs/adr/0040-emission-elastique-reservoir.md) / [0041](docs/adr/0041-repartition-emission-usage-melt.md) / [0039](docs/adr/0039-infrastructure-subnets-escrow-recompense.md) ; s'appuie sur l'ancrage bondé de l'[ADR 0001](docs/adr/0001-l1-monnaie-pure-modules-ancrage-bonde.md).
+- **Plus tard** : réseau public, décentralisation à l'échelle (agrégation BLS + comité VRF).
 
 VinX Ledger n'a pas de pression d'agenda. Le projet avance à son rythme.
 
@@ -328,11 +331,11 @@ VinX Ledger n'a pas de pression d'agenda. Le projet avance à son rythme.
 | Type | L1 indépendante, non-EVM, account-based |
 | Stack | Rust, implémentation propriétaire |
 | Cryptographie | Ed25519, SHA-256, Bech32 (`vinx1`) |
-| Cadence de bloc | Adaptative : repos→0 · normal→~5s · charge→écart suit le remplissage · saturation→dos à dos |
+| Cadence de bloc | Plancher fixe **12 s** (ADR 0043) : repos→0 (skip-empty + heartbeat) · sous charge→≤ 1 bloc / 12 s (pas de dos-à-dos, congestion via base-fee) |
 | Référence de temps | Timestamp des blocs (temps réel), pas la hauteur |
 | Capacité | 10 000 tx/bloc (réglable) · mempool 100 000 |
-| Consensus | PoA Threshold, seuil 66 %, finalité déterministe |
-| Validateurs | 1 → 3 (redondance), permissionnés, **bond requis** |
+| Consensus | PoA Threshold, quorum `⌈2n/3⌉` sur le set complet, finalité prefix-closed déterministe (éprouvée au banc n=3) |
+| Validateurs | permissionnés, **bond requis** ; rotation leader/backup sur le set actif (jailing, ADR 0027) |
 | Full nodes | Ouverts à tous |
 | Supply totale | 100 milliards VinX (immuable, no burn) |
 | **Genèse** | **0 émis, 0 en circulation — aucun pre-mine, aucune réserve pré-allouée** |
@@ -340,7 +343,7 @@ VinX Ledger n'a pas de pression d'agenda. Le projet avance à son rythme.
 | Relais | Émission → poussière → **fees-only** automatiquement |
 | Frais | **forfait 0,0001 VinX × poids × congestion (×1–3), 100 % au producteur** |
 | Staking | **bond de validateur (min 100k VinX), déliaison 3 j, slash équivocation 100 % (10 % rapporteur + 90 % redistribués aux validateurs honnêtes), aucun rendement** |
-| Gouvernance | Clé admin unique rotatable (fondateur), pas de gel de compte |
+| Gouvernance | **Comité K-of-M** (multisig à seuil, ADR 0011) ou clé admin unique rotatable (legacy) ; pas de gel de compte |
 | Upgrades | Versioning on-chain, activation planifiée, 7/30/90 j **réels** |
 
 ---

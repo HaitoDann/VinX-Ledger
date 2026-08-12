@@ -6,6 +6,7 @@ pub mod error;
 pub mod governance;
 pub mod module;
 pub mod protocol;
+pub mod reliability;
 pub mod transaction;
 pub mod validator_set;
 
@@ -17,5 +18,6 @@ pub use error::CoreError;
 pub use governance::GovernanceAction;
 pub use module::ModuleOp;
 pub use protocol::{ProtocolVersion, ScheduledUpgrade};
+pub use reliability::ValidatorReliability;
 pub use transaction::{Transaction, TransactionType};
 pub use validator_set::ValidatorSet;

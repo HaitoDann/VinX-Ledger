@@ -14,7 +14,10 @@ use libp2p::{
 use tokio::sync::{mpsc, RwLock};
 use tracing::{debug, info, warn};
 
-use crate::{chain::Chain, config::NodeConfig, mempool::Mempool, node::NodeMetrics, NodeError};
+use crate::{
+    chain::Chain, config::NodeConfig, mempool::Mempool, node::ForkChoiceCtx, node::NodeMetrics,
+    storage::Storage, NodeError,
+};
 use messages::P2pMessage;
 use rayon::prelude::*;
 use std::sync::atomic::Ordering;
@@ -126,6 +129,7 @@ pub async fn start(
     state: Arc<RwLock<WorldState>>,
     validator_set: Arc<RwLock<ValidatorSet>>,
     metrics: NodeMetrics,
+    fork_choice: ForkChoiceCtx,
 ) -> Result<P2pHandle, NodeError> {
     let (cmd_tx, cmd_rx) = mpsc::unbounded_channel::<P2pCommand>();
 
@@ -250,6 +254,7 @@ pub async fn start(
             local_kp,
             local_addr,
             metrics,
+            fork_choice,
         )
         .await;
     });
@@ -271,6 +276,7 @@ async fn run_event_loop(
     local_kp: vinx_crypto::KeyPair,
     local_addr: Address,
     metrics: NodeMetrics,
+    fork_choice: ForkChoiceCtx,
 ) {
     let mut guard = guard::PeerGuard::new();
 
@@ -292,7 +298,7 @@ async fn run_event_loop(
             }
             event = swarm.next() => {
                 if let Some(event) = event {
-                    handle_swarm_event(event, &chain, &mempool, &state, &validator_set, &local_kp, &local_addr, &mut swarm, &mut guard, &metrics).await;
+                    handle_swarm_event(event, &chain, &mempool, &state, &validator_set, &local_kp, &local_addr, &mut swarm, &mut guard, &metrics, &fork_choice).await;
                 }
             }
         }
@@ -311,6 +317,7 @@ async fn handle_swarm_event(
     swarm: &mut libp2p::Swarm<VinxBehaviour>,
     guard: &mut guard::PeerGuard,
     metrics: &NodeMetrics,
+    fork_choice: &ForkChoiceCtx,
 ) {
     match event {
         SwarmEvent::NewListenAddr { address, .. } => {
@@ -383,6 +390,7 @@ async fn handle_swarm_event(
                 local_addr,
                 swarm,
                 metrics,
+                fork_choice,
             )
             .await;
         }
@@ -428,6 +436,101 @@ fn verify_block_signatures_parallel(sigs: &[BlockSignature], block_hash: &Hash32
     })
 }
 
+/// ADR 0031 — traite un bloc **concurrent** (collision leader/backup) à une hauteur non
+/// finalisée : le valide (proposeur ∈ set + signatures, comme le chemin normal), puis lance
+/// l'orchestration de fork-choice **partagée** avec le banc n=3 (`reorg::consider_candidate`).
+/// En cas de réorg : maintient le snapshot finalisé et **persiste en entier** (la chaîne a pu
+/// être tronquée — le persist incrémental ne le refléterait pas). Verrous acquis dans l'ordre
+/// state → chain → validator_set → finalized_state (cohérent avec `tick`, évite tout AB-BA) ;
+/// l'écriture disque se fait hors verrous.
+#[allow(clippy::too_many_arguments)]
+async fn consider_competing_block(
+    block: Block,
+    chain: &Arc<RwLock<Chain>>,
+    state: &Arc<RwLock<WorldState>>,
+    validator_set: &Arc<RwLock<ValidatorSet>>,
+    vs: &ValidatorSet,
+    fork_choice: &ForkChoiceCtx,
+    metrics: &NodeMetrics,
+) {
+    let height = block.header.height;
+    // Validité de base — identique au chemin normal.
+    if !vs.contains(&block.header.validator) {
+        debug!(
+            height,
+            "Fork-choice: bloc concurrent d'un non-validateur, ignoré"
+        );
+        return;
+    }
+    let block_hash = block.hash();
+    if !block
+        .signatures
+        .iter()
+        .any(|s| s.validator == block.header.validator)
+    {
+        debug!(
+            height,
+            "Fork-choice: bloc concurrent sans signature de proposeur"
+        );
+        return;
+    }
+    if !verify_block_signatures_parallel(&block.signatures, &block_hash) {
+        warn!(
+            height,
+            "Fork-choice: bloc concurrent à signature(s) invalide(s)"
+        );
+        return;
+    }
+    if !verify_block_tx_signatures_parallel(&block.transactions) {
+        warn!(
+            height,
+            "Fork-choice: bloc concurrent à transaction(s) invalide(s)"
+        );
+        return;
+    }
+
+    // Orchestration sous verrous ordonnés. serialize_full est calculé DANS le scope (sous
+    // verrous) mais l'écriture disque est faite APRÈS (jamais d'I/O en tenant un verrou).
+    let (outcome, state_write) = {
+        let mut sg = state.write().await;
+        let mut cg = chain.write().await;
+        let mut vg = validator_set.write().await;
+        let mut fg = fork_choice.finalized_state.write().await;
+        let snap_h = fg.0;
+        let outcome =
+            crate::reorg::consider_candidate(&mut cg, &mut sg, &mut vg, &fg.1, snap_h, block);
+        let sw = if outcome == crate::reorg::ReorgOutcome::Reorged {
+            crate::reorg::advance_snapshot(&mut fg, &cg);
+            fork_choice
+                .storage
+                .as_ref()
+                .and_then(|_| Storage::serialize_full(&mut sg, &mut cg).ok())
+        } else {
+            None
+        };
+        (outcome, sw)
+    };
+
+    if outcome == crate::reorg::ReorgOutcome::Reorged {
+        warn!(
+            height,
+            "ADR 0031 — RÉORG : bascule sur le bloc canonique concurrent"
+        );
+        metrics.p2p_blocks_recv.fetch_add(1, Ordering::Relaxed);
+        // Persistance complète (chaîne potentiellement tronquée), hors verrous.
+        if let (Some(storage), Some(sw)) =
+            (fork_choice.storage.as_ref().map(Arc::clone), state_write)
+        {
+            let _ = tokio::task::spawn_blocking(move || {
+                if let Err(e) = storage.write_state(sw) {
+                    warn!(error = %e, "Échec de la persistance complète après réorg");
+                }
+            })
+            .await;
+        }
+    }
+}
+
 #[allow(clippy::too_many_arguments)]
 async fn dispatch_message(
     msg: P2pMessage,
@@ -439,17 +542,29 @@ async fn dispatch_message(
     local_addr: &Address,
     swarm: &mut libp2p::Swarm<VinxBehaviour>,
     metrics: &NodeMetrics,
+    fork_choice: &ForkChoiceCtx,
 ) {
     match msg {
         P2pMessage::NewTransaction(tx) => {
             metrics.p2p_tx_recv.fetch_add(1, Ordering::Relaxed);
-            // Stage for deferred parallel verification (flush_staged() called at block production)
+            // Stateful admission before staging (anti-spam): a gossiping peer must
+            // not get unfunded/wrong-chain transactions parked in our mempool any
+            // more than an RPC client would. Signatures are still verified later,
+            // in parallel, by flush_staged() at block production.
+            if let Err(e) = state.read().await.admission_check(&tx) {
+                debug!(error = %e, "P2P transaction rejected at admission");
+                return;
+            }
             mempool.write().await.stage(tx);
         }
 
         P2pMessage::NewBlock(block) => {
             let height = block.header.height;
             let vs = validator_set.read().await.clone();
+            // ADR 0002/0027 — SÛRETÉ : quorum de finalité sur le set COMPLET bondé (jamais le
+            // set actif — le jailing dérivé est subjectif sous partition et casserait la
+            // sûreté). Capturé avant les changements de set par gouvernance de ce bloc.
+            let pre_quorum = vs.quorum();
 
             // 0. Equivocation detection (ADR 0003): a *different* block by the same
             //    proposer at a height we already hold — with a valid proposer signature
@@ -502,7 +617,30 @@ async fn dispatch_message(
                 let chain_guard = chain.read().await;
                 let expected = chain_guard.tip_height() + 1;
                 if height < expected {
-                    debug!(height, "P2P block already seen");
+                    // ADR 0031 — un bloc à une hauteur déjà tenue n'est pas forcément un doublon :
+                    // c'est peut-être un CONCURRENT valide (collision leader/backup) à une
+                    // hauteur non finalisée, bâti sur le même parent. Le fork-choice tranche.
+                    let is_competitor = height > chain_guard.finalized_height()
+                        && chain_guard.get_block(height).map(|b| b.hash()) != Some(block.hash())
+                        && chain_guard
+                            .get_block(height.saturating_sub(1))
+                            .map(|b| b.hash())
+                            == Some(block.header.prev_hash);
+                    drop(chain_guard); // libérer le verrou lecture avant l'orchestration (écriture)
+                    if is_competitor {
+                        consider_competing_block(
+                            block,
+                            chain,
+                            state,
+                            validator_set,
+                            &vs,
+                            fork_choice,
+                            metrics,
+                        )
+                        .await;
+                    } else {
+                        debug!(height, "P2P block already seen");
+                    }
                     return;
                 }
                 if height > expected {
@@ -548,9 +686,13 @@ async fn dispatch_message(
                 }
             }
 
-            // 2. Proposer authority
-            if vs.leader_at(height) != &block.header.validator {
-                warn!(height, "P2P block wrong proposer");
+            // 2. Proposer authority — tout validateur enregistré peut proposer. Le leader
+            //    round-robin est indicatif : sur slot-skip, un backup produit légitimement
+            //    (ADR 0027/0031). On exige donc l'appartenance au set, pas le leader strict —
+            //    cohérent avec consensus::validate_block (sinon les blocs backup sont rejetés
+            //    et la finalité se fige à n≥2, cf. banc n=3).
+            if !vs.contains(&block.header.validator) {
+                warn!(height, "P2P block from non-validator proposer");
                 return;
             }
 
@@ -575,11 +717,16 @@ async fn dispatch_message(
                 return;
             }
 
-            // 4. State transition with rollback
+            // 4. State transition with rollback. Protocol time = MTP including this
+            // block (ADR 0005) — identical to what the producer computed.
+            let protocol_ts = chain
+                .read()
+                .await
+                .median_time_past_with(block.header.timestamp);
             let applied = {
                 let mut sg = state.write().await;
                 let snapshot = sg.clone();
-                sg.set_block_context(block.header.timestamp);
+                sg.set_block_context(protocol_ts);
                 let mut ok = true;
                 for tx in &block.transactions {
                     if let Err(e) = sg.apply_transaction_trusted(tx) {
@@ -592,7 +739,8 @@ async fn dispatch_message(
                 if ok {
                     sg.block_height = height;
                     sg.check_upgrade_activation();
-                    let _ = sg.settle_block(&block.header.validator, block.header.timestamp);
+                    let _ =
+                        sg.settle_block(&block.header.validator, block.header.height, protocol_ts);
                     let root = sg.compute_state_root();
                     // ADR 0004: the state_root only covers accounts, not the Foundry —
                     // check the supply invariant explicitly on received blocks too.
@@ -618,7 +766,9 @@ async fn dispatch_message(
 
             // 5. Commit
             {
-                chain.write().await.push(block.clone());
+                let mut c = chain.write().await;
+                c.note_quorum(height, pre_quorum); // ADR 0002/0027 — quorum historique
+                c.push(block.clone());
             }
             info!(height, "P2P: block validated and applied");
             metrics.p2p_blocks_recv.fetch_add(1, Ordering::Relaxed);
@@ -647,6 +797,9 @@ async fn dispatch_message(
                 let finalized = c.add_co_signature(height, sig, &vs);
                 if finalized {
                     c.advance_finality(&vs); // ADR 0002
+                                             // ADR 0031 — le snapshot finalisé suit la finalité (base de rejeu des réorgs).
+                    let mut snap = fork_choice.finalized_state.write().await;
+                    crate::reorg::advance_snapshot(&mut snap, &c);
                     info!(height, "Block finalized after co-signing");
                 }
             }
@@ -691,6 +844,9 @@ async fn dispatch_message(
             let finalized = c.add_co_signature(height, signature, &vs);
             if finalized {
                 c.advance_finality(&vs); // ADR 0002
+                                         // ADR 0031 — maintenir le snapshot finalisé (base de rejeu des réorgs).
+                let mut snap = fork_choice.finalized_state.write().await;
+                crate::reorg::advance_snapshot(&mut snap, &c);
                 info!(height, "Block finalized via co-signatures");
             }
         }
@@ -740,8 +896,13 @@ async fn dispatch_message(
                     break;
                 }
                 let vs = validator_set.read().await.clone();
-                if vs.leader_at(height) != &block.header.validator {
-                    warn!(height, "SyncResponse block wrong proposer");
+                // ADR 0002/0027 — quorum de finalité sur le set COMPLET (voir note de sûreté).
+                let pre_quorum = vs.quorum();
+                // Tout validateur enregistré peut proposer (backup sur slot-skip, ADR 0027/0031) —
+                // même règle que consensus::validate_block. Le leader strict rejetait à tort les
+                // blocs backup et figeait la sync/finalité à n≥2 (révélé par le banc n=3).
+                if !vs.contains(&block.header.validator) {
+                    warn!(height, "SyncResponse block from non-validator proposer");
                     break;
                 }
                 if block.header.prev_hash != chain.read().await.tip_hash() {
@@ -770,10 +931,16 @@ async fn dispatch_message(
                     );
                     break;
                 }
+                // ADR 0005: protocol time = MTP including this block, computed from
+                // the same chain prefix the producer used — deterministic on both sides.
+                let protocol_ts = chain
+                    .read()
+                    .await
+                    .median_time_past_with(block.header.timestamp);
                 let ok = {
                     let mut sg = state.write().await;
                     let snapshot = sg.clone();
-                    sg.set_block_context(block.header.timestamp);
+                    sg.set_block_context(protocol_ts);
                     let mut ok = true;
                     for tx in &block.transactions {
                         if let Err(e) = sg.apply_transaction_trusted(tx) {
@@ -786,7 +953,11 @@ async fn dispatch_message(
                     if ok {
                         sg.block_height = height;
                         sg.check_upgrade_activation();
-                        let _ = sg.settle_block(&block.header.validator, block.header.timestamp);
+                        let _ = sg.settle_block(
+                            &block.header.validator,
+                            block.header.height,
+                            protocol_ts,
+                        );
                         let root = sg.compute_state_root();
                         if !sg.supply_invariant_holds() {
                             warn!(height, "SyncResponse block breaks supply invariant");
@@ -805,7 +976,18 @@ async fn dispatch_message(
                     ok
                 };
                 if ok {
-                    chain.write().await.push(block);
+                    // ADR 0002 — observabilité de la finalité : les blocs servis par sync
+                    // portent déjà les co-signatures accumulées par le producteur, mais le
+                    // pointeur de finalité LOCAL ne bouge que si on le fait avancer. Sans ça,
+                    // un nœud qui rattrape par sync voit `finalized_height` figé (révélé par le
+                    // banc n=3 : hauteur qui monte, finalité à 0). Prefix-closed → ne finalise
+                    // que les blocs ayant réellement le quorum.
+                    let vs = validator_set.read().await.clone();
+                    let mut c = chain.write().await;
+                    c.note_quorum(height, pre_quorum); // ADR 0002/0027 — quorum historique
+                    c.push(block);
+                    c.advance_finality(&vs);
+                    drop(c);
                     info!(height, "Block applied via P2P sync");
                 } else {
                     break;

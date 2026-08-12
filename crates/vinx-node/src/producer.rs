@@ -4,9 +4,31 @@ use crate::{
     mempool::{is_future_nonce, Mempool},
     NodeError,
 };
-use vinx_core::{amount::Amount, Block, BlockHeader, BlockSignature, Transaction, ValidatorSet};
+use vinx_core::{
+    amount::{Amount, MAX_UNFINALIZED_DEPTH},
+    reliability, Block, BlockHeader, BlockSignature, Transaction, ValidatorSet,
+};
 use vinx_crypto::sha256;
 use vinx_state::WorldState;
+
+/// ADR 0002 — **refus de bâtir dans le vide.** Empêche un producteur d'empiler un bloc dont
+/// la hauteur dépasse la finalité de plus de [`MAX_UNFINALIZED_DEPTH`]. Quand la finalité est
+/// bloquée (quorum inatteignable), la production s'arrête au lieu d'allonger indéfiniment une
+/// branche non finalisée — ce qui borne les forks concurrents et la fenêtre du fork-choice
+/// (ADR 0031). À n=1 la finalité est immédiate → cette garde ne se déclenche jamais.
+fn enforce_finality_depth(chain: &Chain) -> Result<(), NodeError> {
+    let next_height = chain.tip_height() + 1;
+    let finalized = chain.finalized_height();
+    let depth = next_height.saturating_sub(finalized);
+    if depth > MAX_UNFINALIZED_DEPTH {
+        return Err(NodeError::Consensus(format!(
+            "refus de bâtir dans le vide : profondeur non finalisée {depth} > \
+             {MAX_UNFINALIZED_DEPTH} (finalité bloquée à {finalized}, tip {})",
+            chain.tip_height()
+        )));
+    }
+    Ok(())
+}
 
 /// Produces the next block: applies mempool transactions, rewards the producer
 /// (collected fees + work emission), commits to the chain, and updates the world state.
@@ -21,26 +43,46 @@ pub fn produce_block(
     validator_set: &ValidatorSet,
     timestamp: u64,
 ) -> Result<Block, NodeError> {
+    // ADR 0002 — ne pas bâtir au-delà de la profondeur non finalisée autorisée.
+    enforce_finality_depth(chain)?;
+
     let next_height = chain.tip_height() + 1;
     let prev_hash = chain.tip_hash();
 
-    // Verify this node is the round-robin leader for the upcoming block
-    let expected_leader = validator_set.leader_at(next_height);
-    if expected_leader != &config.validator_address {
+    // ADR 0027 — leader tournant sur le set ACTIF : les validateurs en prison (jailed)
+    // sont sautés dans la rotation round-robin. Le calcul est déterministe (dérivé de
+    // `state.reliability`, elle-même dérivée de faits on-chain), donc tous les nœuds
+    // s'accordent sur le leader attendu à chaque hauteur.
+    let expected_leader =
+        reliability::active_leader_at(validator_set, &state.reliability, next_height);
+    if expected_leader != config.validator_address {
         return Err(NodeError::Consensus(format!(
             "not the leader for block {next_height}: expected {expected_leader}"
         )));
     }
 
-    // Enforce timestamp monotonicity (block timestamps are the protocol clock: they
-    // drive emission and unbonding), then record it as the block context so unstakes
-    // in this block compute a real-time unlock.
+    // ADR 0002/0027 — SÛRETÉ : le quorum de finalité reste sur le set **complet** bondé
+    // (⌈2n/3⌉), jamais sur le set actif. Le jailing est dérivé (meta, hors state_root) et
+    // *subjectif sous partition* : une minorité pourrait jailer la majorité dans sa propre
+    // vue, faire tomber son quorum à 1 et finaliser une branche rivale → double finalité.
+    // Seule la gouvernance (`RemoveValidator`, engagée on-chain et gated par le quorum
+    // courant) réduit le dénominateur. Le jailing n'agit que sur la ROTATION (ci-dessus).
+    // On capture le quorum du set complet *avant* les éventuels changements de set de ce
+    // bloc, pour la finalité par-hauteur (ADR 0002 quorum historique, changements de set
+    // par gouvernance).
+    let pre_quorum = validator_set.quorum();
+
+    // Enforce timestamp monotonicity on the header, then derive the protocol clock
+    // (ADR 0005): time-sensitive state transitions (emission, unbonding, upgrade
+    // activation) run on the Median Time Past including this block — a single
+    // producer cannot jump protocol time via its header timestamp.
     let prev_ts = chain
         .get_block(chain.tip_height())
         .map(|b| b.header.timestamp)
         .unwrap_or(0);
     let timestamp = timestamp.max(prev_ts.saturating_add(1));
-    state.set_block_context(timestamp);
+    let protocol_ts = chain.median_time_past_with(timestamp);
+    state.set_block_context(protocol_ts);
 
     // Flush staged (unverified) transactions via parallel sig verification pipeline
     let admitted = mempool.flush_staged();
@@ -101,8 +143,8 @@ pub fn produce_block(
     state.check_upgrade_activation();
 
     // Reward the producer for its work: collected fees + work emission forged from the
-    // Foundry. Also matures any unbonds due at this block's timestamp.
-    let (fees, emission) = state.settle_block(&config.validator_address, timestamp);
+    // Foundry. Also matures any unbonds due — both on the MTP protocol clock (ADR 0005).
+    let (fees, emission) = state.settle_block(&config.validator_address, next_height, protocol_ts);
     if fees > Amount::ZERO || emission > Amount::ZERO {
         tracing::debug!(fees = %fees, emission = %emission, height = next_height, "Producer rewarded");
     }
@@ -143,6 +185,10 @@ pub fn produce_block(
         signature: config.validator_keypair.sign(&header_hash),
     });
 
+    // ADR 0002/0027 — enregistre le quorum du set COMPLET pré-bloc (capturé plus haut) pour
+    // que la finalité l'évalue correctement même après un futur changement de set par
+    // gouvernance. Le jailing ne réduit jamais ce seuil (voir note de sûreté ci-dessus).
+    chain.note_quorum(next_height, pre_quorum);
     chain.push(block.clone());
 
     tracing::info!(
@@ -172,6 +218,8 @@ pub fn produce_block_backup(
             "backup producer is not a registered validator".into(),
         ));
     }
+    // ADR 0002 — même garde de profondeur non finalisée pour le chemin backup.
+    enforce_finality_depth(chain)?;
     produce_block_inner(state, chain, mempool, config, validator_set, timestamp)
 }
 
@@ -180,18 +228,24 @@ fn produce_block_inner(
     chain: &mut Chain,
     mempool: &mut Mempool,
     config: &NodeConfig,
-    _validator_set: &ValidatorSet,
+    validator_set: &ValidatorSet,
     timestamp: u64,
 ) -> Result<Block, NodeError> {
     let next_height = chain.tip_height() + 1;
     let prev_hash = chain.tip_hash();
+
+    // ADR 0002/0027 — quorum du set COMPLET pré-bloc (voir note de sûreté du chemin leader :
+    // la finalité n'utilise jamais le set actif).
+    let pre_quorum = validator_set.quorum();
 
     let prev_ts = chain
         .get_block(chain.tip_height())
         .map(|b| b.header.timestamp)
         .unwrap_or(0);
     let timestamp = timestamp.max(prev_ts.saturating_add(1));
-    state.set_block_context(timestamp);
+    // ADR 0005: protocol time is the MTP including this block, not the raw header.
+    let protocol_ts = chain.median_time_past_with(timestamp);
+    state.set_block_context(protocol_ts);
 
     let admitted = mempool.flush_staged();
     if admitted > 0 {
@@ -229,7 +283,7 @@ fn produce_block_inner(
     state.block_height = next_height;
     state.check_upgrade_activation();
 
-    let (fees, emission) = state.settle_block(&config.validator_address, timestamp);
+    let (fees, emission) = state.settle_block(&config.validator_address, next_height, protocol_ts);
     if !state.supply_invariant_holds() {
         return Err(NodeError::Consensus(format!(
             "supply invariant violated producing block {next_height} (backup) — block not sealed"
@@ -262,6 +316,8 @@ fn produce_block_inner(
         pub_key: config.validator_keypair.public_key(),
         signature: config.validator_keypair.sign(&header_hash),
     });
+    // ADR 0002/0027 — quorum du set COMPLET pré-bloc (même raison que le chemin leader).
+    chain.note_quorum(next_height, pre_quorum);
     chain.push(block.clone());
 
     tracing::info!(
@@ -360,6 +416,54 @@ mod tests {
         }
         assert_eq!(chain.tip_height(), 5);
         assert_eq!(state.block_height, 5);
+    }
+
+    #[test]
+    fn test_refuses_to_build_into_the_void_past_finality_depth() {
+        // ADR 0002 : on ne fait JAMAIS avancer la finalité (comme si le quorum était
+        // inatteignable) → `finalized` reste à 0 pendant que le tip grimpe.
+        let max = vinx_core::amount::MAX_UNFINALIZED_DEPTH;
+        let (mut state, mut chain, mut mempool, config) = setup();
+
+        // Autorisé jusqu'à la profondeur max : hauteurs 1..=max (depth atteint = max).
+        for h in 1..=max {
+            let b = produce_block(
+                &mut state,
+                &mut chain,
+                &mut mempool,
+                &config,
+                &config.validator_set,
+                h * 10,
+            )
+            .expect("production autorisée sous la profondeur max");
+            assert_eq!(b.header.height, h);
+        }
+        assert_eq!(chain.tip_height(), max);
+        assert_eq!(
+            chain.finalized_height(),
+            0,
+            "finalité volontairement bloquée"
+        );
+
+        // Le bloc suivant dépasserait la profondeur non finalisée → refus.
+        let err = produce_block(
+            &mut state,
+            &mut chain,
+            &mut mempool,
+            &config,
+            &config.validator_set,
+            1_000_000,
+        )
+        .unwrap_err();
+        assert!(
+            format!("{err:?}").contains("vide"),
+            "attendu un refus de bâtir dans le vide, obtenu : {err:?}"
+        );
+        assert_eq!(
+            chain.tip_height(),
+            max,
+            "aucun bloc supplémentaire n'a été produit"
+        );
     }
 
     #[test]

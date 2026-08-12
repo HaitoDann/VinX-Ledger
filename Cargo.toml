@@ -17,6 +17,14 @@ version = "0.1.0-alpha.1"
 edition = "2021"
 authors = ["VinX Labs"]
 
+# Optimized release binaries: thin LTO + a single codegen unit typically buy
+# 10-20% on the hot paths (Ed25519 verification, hashing, serialization) for
+# slower-but-rare release builds. Debug info stays on for usable backtraces.
+[profile.release]
+lto = "thin"
+codegen-units = 1
+debug = 1
+
 [workspace.dependencies]
 ed25519-dalek = { version = "2", features = ["rand_core"] }
 rand = "0.8"

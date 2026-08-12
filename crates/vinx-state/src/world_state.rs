@@ -3,14 +3,16 @@ use std::collections::{BTreeMap, HashMap, HashSet};
 use vinx_core::{
     amount::{
         cumulative_emission_atoms, Amount, BPS_DENOM, DEFAULT_FEE_FLOOR_ATOMS,
-        EXISTENTIAL_DEPOSIT_ATOMS, MAX_MODULES, MIN_MODULE_BOND_ATOMS, MIN_STAKE_ATOMS,
-        MIN_VALIDATOR_BOND_ATOMS, SLASH_BOUNTY_BPS, SLASH_EQUIVOCATION_BPS, UNBONDING_SECS,
+        EXISTENTIAL_DEPOSIT_ATOMS, MAX_MODULES, MAX_NONCE_AHEAD, MIN_MODULE_BOND_ATOMS,
+        MIN_STAKE_ATOMS, MIN_VALIDATOR_BOND_ATOMS, SLASH_BOUNTY_BPS, SLASH_EQUIVOCATION_BPS,
+        UNBONDING_SECS,
     },
     block::SlashEvidence,
     chain_id::CHAIN_ID_DEVNET,
     governance::GovernanceAction,
     module::ModuleOp,
     protocol::{ProtocolVersion, ScheduledUpgrade},
+    reliability::{self, ReliabilityMap},
     Account, CoreError, Transaction, TransactionType, ValidatorSet,
 };
 use vinx_crypto::{sha256, Address, Hash32, IncrementalMerkleTree};
@@ -125,6 +127,12 @@ pub struct WorldState {
     /// Appended after `epoch_dist_emission_pot` — same append-only migration strategy.
     #[serde(default)]
     pub destroyed_atoms: u128,
+    /// Fiabilité des validateurs (ADR 0027) : manquements de proposition + jailing, dérivés
+    /// **déterministiquement** de la séquence de blocs (comme `pending_unbonds`, hors
+    /// `state_root`). **Dernier champ sérialisé** → la migration v10→v11 append sa valeur par
+    /// défaut (map vide), propriété de préfixe. `serde(default)` pour l'état pré-0027.
+    #[serde(default)]
+    pub reliability: ReliabilityMap,
 }
 
 /// A bond amount in its unbonding delay, waiting to return to `address`'s balance
@@ -235,6 +243,14 @@ pub fn v10_meta_suffix() -> Vec<u8> {
     out
 }
 
+/// The bincode bytes appended to a v10 `WorldState` meta blob to bring it to v11 (ADR 0027):
+/// the default `reliability` table (empty map). Same append-only rationale as
+/// [`v9_meta_suffix`] — `reliability` is the last serialized field. Shared by the storage
+/// v10→v11 migration and its tests.
+pub fn v11_meta_suffix() -> Vec<u8> {
+    bincode::serialize(&ReliabilityMap::new()).expect("serialize empty map")
+}
+
 fn default_fee_floor() -> Amount {
     Amount::from_atoms(DEFAULT_FEE_FLOOR_ATOMS)
 }
@@ -281,6 +297,7 @@ impl WorldState {
             modules: BTreeMap::new(),
             epoch_dist_emission_pot: Amount::ZERO,
             destroyed_atoms: 0,
+            reliability: ReliabilityMap::new(),
         }
     }
 
@@ -401,7 +418,12 @@ impl WorldState {
     /// Fees stay in circulation (they move sender → producer). Emission is newly minted
     /// (progressive minting, ADR 0040). Both are computed deterministically from the
     /// block so validators re-applying it reach the identical state.
-    pub fn settle_block(&mut self, producer: &Address, block_ts: u64) -> (Amount, Amount) {
+    pub fn settle_block(
+        &mut self,
+        producer: &Address,
+        height: u64,
+        block_ts: u64,
+    ) -> (Amount, Amount) {
         // 1. Collected transaction fees → producer (circulation-neutral).
         let fees = std::mem::replace(&mut self.block_fees, Amount::ZERO);
         if fees > Amount::ZERO {
@@ -411,6 +433,26 @@ impl WorldState {
         self.mature_unbonds(block_ts);
         // 3. Work emission — mint new tokens → producer (ADR 0040).
         let emission = self.emit_work_reward(producer, block_ts);
+        // 4. Fiabilité des validateurs (ADR 0027, tranche 2a) : attribution déterministe des
+        //    manquements de proposition (proposeur effectif vs leader actif prévu) + jailing.
+        //    Hook UNIVERSEL — `settle_block` est appelé sur tous les chemins d'application
+        //    (production, backup, P2P, sync) avec le proposeur effectif, donc la table de
+        //    fiabilité évolue identiquement sur tous les nœuds. N'affecte PAS encore la
+        //    rotation ni le quorum (tranche 2b) — pour l'instant on ne fait que TRACER les faits.
+        if height > 0 {
+            let jailed = reliability::on_block_applied(
+                &mut self.reliability,
+                &self.validator_set,
+                height,
+                producer,
+            );
+            if jailed {
+                tracing::warn!(
+                    height,
+                    "ADR 0027 : validateur jailé (manquements de proposition consécutifs)"
+                );
+            }
+        }
         (fees, emission)
     }
 
@@ -616,11 +658,93 @@ impl WorldState {
         self.accounts.insert(account.address, account);
     }
 
-    /// Returns true when the chain must keep advancing even with an empty mempool.
+    /// Stateful mempool-admission checks (anti-spam). The signature must already be
+    /// verified by the caller; this validates everything an attacker could otherwise
+    /// claim for free:
     ///
-    /// A periodic heartbeat block is only required when a protocol upgrade is
-    /// scheduled (its activation is triggered by reaching a block height). Otherwise
-    /// the node can sleep until the next transaction — no wasted storage.
+    /// - `chain_id` matches (no cross-network replay filling the mempool),
+    /// - the fee meets the current `base_fee` for fee-bearing types (Transfer,
+    ///   AnchorState — stake/unstake/slash are exempt per ADR 0009),
+    /// - the sender account **exists** and its balance covers the transaction's
+    ///   worst-case debit (`admission_cost_atoms`) — so the fee used for mempool
+    ///   priority is actually funded, not just declared,
+    /// - a sponsored transaction's sponsor exists and covers the fee,
+    /// - the nonce is not consumed and not absurdly far ahead
+    ///   ([`MAX_NONCE_AHEAD`]) — bounds per-account nonce-gap parking,
+    /// - an unstake does not exceed the sender's staked amount.
+    ///
+    /// Deliberately **conservative**: it must never reject a transaction the apply
+    /// path would accept. Anything admitted can still fail at inclusion (state moved
+    /// on) — this is a cheap gate, not a simulation.
+    pub fn admission_check(&self, tx: &Transaction) -> Result<(), CoreError> {
+        if tx.chain_id != self.chain_id {
+            return Err(CoreError::InvalidTransaction(format!(
+                "chain_id {} does not match this network ({})",
+                tx.chain_id, self.chain_id
+            )));
+        }
+
+        // Fee floor for the fee-bearing types (mirrors apply_transfer / apply_anchor_state).
+        if matches!(
+            tx.tx_type,
+            TransactionType::Transfer | TransactionType::AnchorState
+        ) && tx.fee < self.base_fee
+        {
+            return Err(CoreError::InvalidTransaction(format!(
+                "fee {} is below the current base fee {}",
+                tx.fee, self.base_fee
+            )));
+        }
+
+        let Some(account) = self.accounts.get(&tx.from) else {
+            return Err(CoreError::InvalidTransaction(
+                "sender account does not exist (zero balance)".to_string(),
+            ));
+        };
+
+        if tx.nonce < account.nonce {
+            return Err(CoreError::InvalidNonce {
+                expected: account.nonce,
+                got: tx.nonce,
+            });
+        }
+        if tx.nonce - account.nonce >= MAX_NONCE_AHEAD {
+            return Err(CoreError::InvalidTransaction(format!(
+                "nonce {} is too far ahead of account nonce {}",
+                tx.nonce, account.nonce
+            )));
+        }
+
+        if account.balance.atoms() < tx.admission_cost_atoms() {
+            return Err(CoreError::InsufficientBalance);
+        }
+        if tx.tx_type == TransactionType::Unstake && account.staked < tx.amount {
+            return Err(CoreError::InvalidTransaction(
+                "unstake amount exceeds staked balance".to_string(),
+            ));
+        }
+
+        // Sponsored fee: the sponsor must exist and cover the fee it signed for.
+        if let Some(ref sponsor) = tx.sponsor {
+            let Some(sponsor_acc) = self.accounts.get(sponsor) else {
+                return Err(CoreError::InvalidTransaction(
+                    "sponsor account does not exist".to_string(),
+                ));
+            };
+            if sponsor_acc.balance < tx.fee {
+                return Err(CoreError::InsufficientBalance);
+            }
+        }
+
+        Ok(())
+    }
+
+    /// Returns true when a time-triggered operation is waiting on the chain to
+    /// advance: a scheduled upgrade or a maturing unbond.
+    ///
+    /// Since ADR 0038 the block producer heartbeats unconditionally (at least one
+    /// block per `HEARTBEAT_INTERVAL_SECS`), so this is no longer what gates the
+    /// heartbeat — it remains useful for monitoring and tests.
     pub fn has_pending_time_sensitive_ops(&self) -> bool {
         // A scheduled upgrade (height-triggered) or a pending unbond (time-triggered)
         // both need the chain to keep advancing so their trigger can be reached.
@@ -1550,7 +1674,7 @@ mod tests {
     fn test_first_block_sets_emission_epoch_and_emits_nothing() {
         let mut s = WorldState::new();
         let (_, producer) = kp_addr();
-        let (fees, emission) = s.settle_block(&producer, 1_000);
+        let (fees, emission) = s.settle_block(&producer, 1, 1_000);
         assert_eq!(fees, Amount::ZERO);
         assert_eq!(emission, Amount::ZERO);
         assert_eq!(s.emission_epoch_ts, 1_000);
@@ -1561,9 +1685,9 @@ mod tests {
     fn test_emission_rewards_producer_and_conserves_supply() {
         let mut s = WorldState::new();
         let (_, producer) = kp_addr();
-        s.settle_block(&producer, 0); // establish epoch at t=0
+        s.settle_block(&producer, 1, 0); // establish epoch at t=0
         // One full half-life later: ~50% of the supply has been minted.
-        let (_, emission) = s.settle_block(&producer, EMISSION_T_HALF_SECS);
+        let (_, emission) = s.settle_block(&producer, 2, EMISSION_T_HALF_SECS);
         let expected = cumulative_emission_atoms(EMISSION_T_HALF_SECS);
         assert_eq!(emission.atoms(), expected);
         assert_eq!(s.accounts[&producer].balance.atoms(), expected);
@@ -1578,8 +1702,8 @@ mod tests {
         // A producer with zero stake still earns the full block emission.
         let mut s = WorldState::new();
         let (_, producer) = kp_addr();
-        s.settle_block(&producer, 0);
-        let (_, emission) = s.settle_block(&producer, EMISSION_T_HALF_SECS / 20); // ~1 year
+        s.settle_block(&producer, 1, 0);
+        let (_, emission) = s.settle_block(&producer, 2, EMISSION_T_HALF_SECS / 20); // ~1 year
         assert!(emission > Amount::ZERO);
         assert_eq!(s.accounts[&producer].balance, emission);
     }
@@ -1599,7 +1723,7 @@ mod tests {
         // Fee is collected, not routed to the epoch pot.
         assert_eq!(s.epoch_dist_emission_pot, pot_before);
         // Settling credits the producer with the fee (epoch established, no emission).
-        s.settle_block(&producer, 100);
+        s.settle_block(&producer, 1, 100);
         assert_eq!(s.accounts[&producer].balance, fee);
         // The fee just changed hands: circulation is unchanged.
         assert_eq!(s.circulating_supply, Amount::from_vinx(1_000));
@@ -1657,10 +1781,10 @@ mod tests {
         assert_eq!(s.pending_unbonds.len(), 1);
 
         // Just before unlock: nothing matures. Use a separate producer so addr stays clean.
-        s.settle_block(&producer, 1_000 + UNBONDING_SECS - 1);
+        s.settle_block(&producer, 1, 1_000 + UNBONDING_SECS - 1);
         assert_eq!(s.pending_unbonds.len(), 1);
         // At unlock: the bond returns to addr's balance.
-        s.settle_block(&producer, 1_000 + UNBONDING_SECS);
+        s.settle_block(&producer, 2, 1_000 + UNBONDING_SECS);
         assert!(s.pending_unbonds.is_empty());
         assert_eq!(s.accounts[&addr].balance, Amount::from_vinx(1_000));
     }
@@ -1805,7 +1929,7 @@ mod tests {
         assert_eq!(s.accounts[&addr].balance, Amount::ZERO);
         assert_eq!(s.accounts[&addr].staked, Amount::ZERO);
         // After maturation the funds return.
-        s.settle_block(&addr, 1_000 + UNBONDING_SECS);
+        s.settle_block(&addr, 1, 1_000 + UNBONDING_SECS);
         assert_eq!(s.accounts[&addr].balance, stake);
     }
 

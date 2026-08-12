@@ -5,74 +5,69 @@ Format : `MAJEUR.MINEUR.CORRECTIF` — les versions `0.x.y` sont des versions de
 
 ---
 
-## [0.43.0] — Décisions architecturales : émission progressive sans La Fonderie, rémunération modules (ADR 0039, 0040)
+## [0.50.0] — 2026-08-12 — Fusion consensus audit + émission progressive sans La Fonderie (ADR 0040 implémenté)
 
-> **Décisions de design uniquement** (aucun code modifié).
+> Intègre toutes les améliorations consensus/sécurité de la branche d'audit avec l'implémentation ADR 0040 (émission progressive pure). `STORAGE_VERSION → 11` ; `cargo test --workspace` vert. Décisions : cadence 12 s fixe, 3 000 tx/bloc (250 TPS), escrow modules simple, pas d'émission subnet.
 
-- **ADR 0040 — Émission progressive sans La Fonderie.** Suppression du concept « La Fonderie »
-  (pré-allocation de 100 Md à la genèse) et du mécanisme « melt » (slash → Fonderie).
-  Passage à un **minting progressif** pur : les tokens n'existent pas avant d'être émis ;
-  `foundry` disparaît de `WorldState` et est remplacé par `remaining_supply = MAX − emitted`
-  (valeur dérivée, pas stockée). Les tokens slashés sont **détruits** (`destroyed_atoms +=`
-  au lieu de retourner dans La Fonderie). Nouvel invariant : `circulating + destroyed = emitted
-  ≤ MAX_SUPPLY`. La courbe reste exponentielle continue, avec `T_half` allongé à **~20 ans**
-  (R₀ ≈ 3,47 Md/an au lieu de 8,66), ce qui réduit le front-loading et distribue l'émission
-  plus équitablement dans le temps. Le dust des comptes reaped (ADR 0026) est également détruit.
-  Remplace l'invariant ADR 0004. Statut : Accepté (design, non impl.). Priorité : 🔴 haute.
+- **ADR 0040 — Émission progressive sans La Fonderie (implémenté).** `mint_emission()` + `emitted_atoms`, `epoch_dist_emission_pot`, `destroyed_atoms`. Invariant `circ + pot + détruits = émis ≤ MAX`. Demi-vie ~20 ans (T_half = 630 720 000 s). Slash 90 % → pot d'époque (redistribué aux validateurs honnêtes). `STORAGE_VERSION 9 → 10` (migration in-place, append-only).
+- **Cadence 12 s fixe (ADR 0041) + débit 3 000 tx/bloc (250 TPS).** `MIN_BLOCK_INTERVAL_SECS = 12` élimine les forks dos-à-dos ; `dynamic_gap` retirée. `max_block_txs = 3 000` pour démarrer conservativement. Heartbeat inconditionnel 10 min conservé. Congestion via base-fee uniquement.
+- **État de fiabilité (ADR 0027 t2a) + `reliability: ReliabilityMap` fusionné.** `STORAGE_VERSION 10 → 11` (chain blob → per-height rows + append reliability map). Mise à jour déterministe dans `settle_block` (hook universel). Ne change pas encore le comportement de rotation.
+- Tous les composants consensus audit intégrés (fork-choice ADR 0031, finalité ADR 0002, jailing, banc n=3, sécurité, persistance incrémentale).
 
-- **ADR 0021 révisé — `T_half` mis à jour avant lancement.** Le principe d'immuabilité
-  (après la genèse) est maintenu. La valeur indicative change de 8 ans à ~20 ans avant le
-  bloc 0 — conforme à l'esprit de l'ADR. La terminologie « halving » est remplacée par
-  « demi-vie de la courbe continue » (pas d'event discret).
+## [0.49.0] — 2026-08-11 — Fork-choice câblé de bout en bout + cadence 12 s (ADR 0031 t2b, ADR 0041)
 
-- **ADR 0039 — Rémunération des opérateurs de modules (escrow + partage on-chain).** Les
-  services des modules sont payés par leurs clients via un **escrow on-chain** libéré à la
-  preuve de livraison. Le module définit son `fee_schedule` à la registration : liste de
-  bénéficiaires (`recipients: Vec<(Address, bps)>`) + résidu à l'opérateur. Deux nouveaux
-  types de tx : `ModuleEscrow` (0x0A, client bloque N VINX) et `ModuleEscrowRefund` (0x0B,
-  remboursement après timeout). La libération est un effet de bord déterministe d'un
-  `AnchorState` contenant une feuille `EscrowRelease`. **Aucune émission secondaire** — les
-  modules sont rémunérés par la valeur créée, pas par le protocole. Marché libre : chaque
-  module fixe son prix. Statut : Accepté (design, non impl.).
+> Termine le fork-choice (ADR 0031 t2b) et révise la cadence de consensus (ADR 0041). Non-breaking côté consensus (réorg additive, bornée sous finalité) ; change le défaut de cadence.
 
-- **ADR 0033 marqué partiellement supersédé.** §1 (genèse multi-validateurs + `genesis_hash`)
-  reste à implémenter. §2 (admission permissionless) → ADR 0038. §3 (lissage émission early)
-  → ADR 0040 (`T_half` allongé).
+- **Fork-choice câblé (ADR 0031 t2a+t2b).** Module `reorg` : reconstruction d'état par **snapshot finalisé + rejeu** (`rebuild_canonical_state`), `Chain::reorg_replace` (troncature de la branche perdante), `median_time_past_ending_at` (MTP indexé par hauteur). Orchestration `reorg::consider_candidate` **branchée dans le handler P2P `NewBlock`** : un bloc concurrent valide à une hauteur non finalisée déclenche une réorg s'il est canonique ; snapshot maintenu à chaque avancée de finalité ; persistance complète après réorg ; verrous ordonnés (pas d'AB-BA). **Convergence indépendante de l'ordre d'arrivée prouvée au banc n=3**.
+- **Cadence de consensus (ADR 0041).** Block time défaut **5 → 12 s** ; **`dynamic_gap` retirée** → plancher fixe (plus de blocs dos-à-dos en saturation) ; la congestion passe par le base-fee. Skip-empty + heartbeat 10 min conservés. Neutre pour l'émission (intégrée sur le temps).
+- Suite `vinx-node` verte (119 tests, dont 6 au banc n=3), clippy `-D warnings` & fmt propres.
 
----
+## [0.48.0] — 2026-08-05 — Consensus n=3 : rotation sur set actif + quorum de finalité sur set complet (ADR 0027 t2b)
 
-## [0.42.0] — Décisions architecturales : Open PoA, récompenses par époque (ADR 0038, 0028 révisé)
+> Câble la rotation du jailing et **corrige une faille de sûreté révélée par le banc n=3**. Non-breaking (rotation dérivée déterministe ; le quorum de finalité reste inchangé).
 
-> **Décisions de design uniquement** (aucun code modifié). Consolide les choix stratégiques
-> issus de la revue d'architecture sur le modèle d'émission et d'admission des validateurs.
+- **Rotation sur le set actif.** Le leader (`produce_block`) et la file de backup (`try_backup_production`) itèrent désormais sur le **set actif** (`reliability::active_leader_at`/`active_validators`) — les validateurs jailés sont sautés. Bénéfice liveness : un leader mort n'impose plus d'attente de timeout à chaque tour.
+- **⚠️ Sûreté — le quorum de finalité n'est jamais réduit par le jailing.** Le banc a montré qu'exclure les jailés du **dénominateur** casse la sûreté : sous partition 1│2, la minorité jaile la majorité dans sa vue, tombe à quorum 1 et finalise une branche rivale → **double-finalité**. Le seuil reste `⌈2n/3⌉` sur le **set complet bondé** ; seule la gouvernance (`RemoveValidator`, committée) réduit `n`.
+- **Validé au banc n=3** : 3/3 sain → finalité en lockstep ; 2/3 (1 panne) → finalité avance ; 1/3 (2 pannes) → finalité **gelée**, tip continue.
 
-- **Commerce Pool retiré.** Le mécanisme de redistribution secondaire d'émission vers les
-  adresses actives (volume de transactions, destinataires distincts) est **abandonné avant
-  même d'avoir été implémenté**. Gameable (volume artificiel, transactions circulaires), il
-  n'induit pas de création de valeur réelle et sort l'émission du périmètre de la sécurité du
-  consensus. L'émission reste réservée au travail de consensus (proposeurs + co-signataires).
+## [0.47.0] — 2026-08-04 — Finalité : quorum historique par hauteur (ADR 0002)
 
-- **ADR 0028 révisé — partage de l'émission par époque** (remplace le partage « par bloc à
-  la finalisation »). L'émission accumulée sur une fenêtre `EPOCH_DURATION_SECS` (gouvernable,
-  ex. 1 h) est distribuée en **une seule passe** à la clôture : `PROPOSER_SHARE_BPS` aux
-  proposeurs au prorata de leurs blocs, le reste proportionnellement aux co-signatures valides
-  de l'époque. Les **frais** restent au producteur **immédiatement** hors époque. Bénéfices :
-  moins de transactions de crédit (O(1) par époque vs O(N) par bloc), revenus plus lisses,
-  préparation à un set de 50–101 validateurs (ADR 0038). Statut : Accepté (design, non impl.).
+> Corrige le blocage du préfixe de finalité après un changement de set. Non-breaking.
 
-- **ADR 0038 — Admission permissionless (Open PoA).** Bond → file automatique sans approbation
-  admin individuelle. Veto collectif (>66 % des validateurs actifs, fenêtre 7 jours). L'admin
-  ne fixe que le montant du bond via gouvernance. Score `S_perf` uniquement (taux de
-  co-signature et de proposition, 100 % déterministe on-chain) — pas de délégation DPoS ni de
-  pondération par le bond (pas d'avantage aux baleines). Expansion phasée **automatique et
-  immuable depuis la genèse** : Phase 1 (3–5, gouvernance-gated) → Phase 2 (10–21, Open PoA)
-  → Phase 3 (50–101, Open PoA). **Prérequis** : ADR 0002/0027/0031 éprouvés avant Phase 2.
-  Statut : Accepté (design, non impl.).
+- **Quorum par hauteur.** `advance_finality` évalue chaque bloc contre le **quorum du set bondé à sa hauteur** (schedule via `Chain::note_quorum`/`quorum_at`). Banc : les 3 nœuds finalisent en lockstep 7→10.
+- **advance_finality sur les chemins de sync** (P2P `SyncResponse` + sync HTTP) : sans cet appel, `finalized_height` restait figé après un rattrapage par sync.
 
-- **Modules — rémunération différée.** L'architecture d'ancrage bondé (ADR 0001/0010) est
-  maintenue. La question de la rémunération des opérateurs de modules est **délibérément
-  hors-scope** de cette série — à traiter dans un ADR dédié quand l'architecture de modules
-  sera plus avancée.
+## [0.46.0] — 2026-08-03 — Banc n=3 multi-process + état de fiabilité câblé (ADR 0027 t2a)
+
+> Éprouve le consensus multi-validateur en réel et câble la table de fiabilité. `STORAGE_VERSION 10 → 11` (migration in-place).
+
+- **Banc n=3 multi-process réel** (`scripts/bench-n3.sh`) : amorce 3 validateurs (genèse partagée déterministe via `VINX_GENESIS_SPEC` + pré-financement dev-only), puis démontre liveness / tolérance à 1 panne / sûreté à 1/3 avec de vraies co-signatures P2P.
+- **Fix révélé par le banc — blocs backup rejetés.** Le gossip **et** la sync HTTP rejetaient les blocs dont le proposeur ≠ leader strict → finalité figée dès n≥2. Corrigé : tout validateur enregistré peut proposer (`vs.contains`).
+- **État de fiabilité (ADR 0027 t2a).** Nouveau champ `WorldState.reliability`, mise à jour déterministe dans `settle_block`. Ne modifie pas encore le comportement (tracking + log).
+
+## [0.45.0] — 2026-08-02 — Tranches consensus pures : jailing, fork-choice, refus de bâtir dans le vide
+
+> Trois cœurs déterministes purs et testés, non encore branchés sur la transition vivante. Non-breaking.
+
+- **Jailing — cœur pur (ADR 0027 t1).** `vinx-core::reliability` : attribution des manquements, jailing au seuil `MAX_MISSED_PROPOSALS`, set actif, quorum ajusté, `Unjail` après cooldown. 5 tests.
+- **Fork-choice — fonction pure (ADR 0031 t1).** `consensus::canonical_head` : élection indépendante de l'ordre réseau. 6 tests.
+- **Refus de bâtir dans le vide (ADR 0002).** Producteur refuse au-delà de `MAX_UNFINALIZED_DEPTH = 64` blocs non finalisés.
+
+## [0.43.0] — 2026-07-31 — Horloge protocole sur MTP (ADR 0005) + heartbeat 10 min inconditionnel (ADR 0038)
+
+> Durcit l'horloge protocole et supprime l'incitation au spam de blocs.
+
+- **Horloge protocole = Median Time Past (ADR 0005).** Émission, déliaison et activation d'upgrade comparent au MTP incluant le bloc appliqué.
+- **Heartbeat inconditionnel 10 min (ADR 0038).** Au moins un bloc toutes les `HEARTBEAT_INTERVAL_SECS = 600` s — l'incitation à forcer des blocs par fausses tx disparaît.
+
+## [0.42.0] — 2026-07-30 — Durcissement sécurité & robustesse (audit)
+
+> Lot de sécurité et de robustesse issu d'un audit interne. Non-breaking hors format keystore wallet.
+
+- **Routes admin fail-closed + comparaison constant-time.** `/snapshot` et `/admin/compact` refusent par défaut si aucun token n'est configuré ; comparaison de token en temps constant.
+- **Sync HTTP vérifiée comme le P2P.** `sync_from_peer` valide proposeur/quorum/co-signatures, bornes de timestamp, signatures de tx en parallèle, `state_root` et invariant de supply, avec rollback.
+- **Keystore wallet chiffré (argon2 + AES-GCM).** Clés protégées par passphrase ; format plaintext legacy lu avec avertissement.
+- **Rate-limiter RPC borné** + **admission mempool avec état** + **persistance incrémentale de la chaîne** (table par hauteur, `STORAGE_VERSION → 10`).
 
 ---
 

@@ -97,6 +97,8 @@ docs/
 - **Slashing** : équivocation prouvée → 100 % du bond (10 % au rapporteur, 90 % redistribués aux validateurs honnêtes via le pot d'époque) — aucun token détruit, aucune réinjection dans l'émission.
 - **Invariant** vérifié à chaque bloc : `circulation + pot_époque + détruits = émis ≤ 100 000 000 000 VINX`.
 
+> **Évolution décidée (non encore implémentée) :** le halving discret sera remplacé par une **émission élastique à réservoir** `E = r·F` (r=7 %, le *melt* recyclant vers la Fonderie → auto-régulation) qui alimentera un **écosystème de subnets**, l'émission étant répartie **au prorata de l'usage réel (melt)** — ADR [0040](./docs/adr/0040-emission-elastique-reservoir.md)/[0041](./docs/adr/0041-repartition-emission-usage-melt.md)/[0039](./docs/adr/0039-infrastructure-subnets-escrow-recompense.md). Le modèle décrit ci-dessus (halving 8 ans) reste ce qui tourne aujourd'hui.
+
 > Détails complets : [whitepaper.md](./whitepaper.md)
 
 ---
@@ -118,8 +120,8 @@ Un détenteur lambda ne stake pas : il garde son VINX pour **l'utiliser comme ca
 
 > Feuille de route détaillée et priorisée : **[`docs/adr/README.md`](./docs/adr/README.md)** (index de tous les ADR avec statut).
 
-- **Fait** — protocole L1 Rust complet (PoA Threshold, fair launch, slashing prouvable, frais au producteur) + durcissements : vérif parallèle des signatures (ADR 0015), dépôt existentiel anti-bloat (0026), P2P anti-DoS (0022), gouvernance **K-of-M** (0011), **registre de modules bondés** (0010), vecteurs dorés canoniques (0020), **émission progressive sans La Fonderie** (0040 : minting pur, T_half ~20 ans, slash → pot d'époque, invariant `circ + pot + détruits = émis`). `cargo test --workspace` vert.
-- **Chemin critique** — **banc 3 validateurs** puis finalité au quorum (0002), fork-choice (0031), jailing (0027), accountability co-sign (0030).
+- **Fait** — protocole L1 Rust complet (PoA Threshold, *fair launch*, slashing prouvable, frais au producteur) ; **consensus multi-validateur éprouvé au banc n=3** : finalité au quorum + quorum historique par hauteur (0002), jailing/rotation sur set actif (0027), fork-choice `canonical_head` pure (0031 t1+t2a+t2b), horloge protocole sur MTP (0005), heartbeat 10 min ; **émission progressive sans La Fonderie** (0040 : minting pur, T_half ~20 ans, slash → pot d'époque, invariant `circ + pot + détruits = émis`) ; durcissements/extensions : vérif parallèle des signatures (0015), dépôt existentiel anti-bloat (0026), P2P anti-DoS (0022), gouvernance **K-of-M** (0011), **registre de modules bondés** (0010), vecteurs dorés canoniques (0020). `cargo test --workspace` vert, stockage schéma v11.
+- **Chemin critique** — wiring reorg du fork-choice (0031 t2b), tx `Unjail` + règle co-signatures absentes (0027), accountability co-sign (0030).
 - **Ensuite** — **récompenses par époque** (0028 : distribuer l'émission + slash entre proposeurs et co-signataires), **Open PoA** (0038), **rémunération modules par escrow** (0039), DA & preuves d'ancre (0034).
 - **Plus tard** — décentralisation à l'échelle (BLS + comité VRF, 0029), light client (0014), réseau public. Vision d'ensemble : [ADR 0001](./docs/adr/0001-l1-monnaie-pure-modules-ancrage-bonde.md).
 
