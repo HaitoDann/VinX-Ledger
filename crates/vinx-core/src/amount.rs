@@ -7,18 +7,11 @@ pub const DECIMAL_FACTOR: u128 = 1_000_000_000_000_000_000; // 10^18
 
 /// Absolute supply cap: 100 billion VinX — immutable by protocol.
 ///
-/// VinX has no burn and no pre-mine: the supply is conserved forever. At any block,
-/// `circulating_supply + foundry == MAX_SUPPLY_ATOMS`. It all starts in the Foundry and
-/// enters circulation only through work emission (block production).
+/// VinX has no burn and no pre-mine. At genesis `emitted_atoms = 0`; tokens enter
+/// circulation only through progressive minting by block producers (work emission).
+/// The invariant `circulating + epoch_pot + destroyed == emitted_atoms ≤ MAX_SUPPLY_ATOMS`
+/// holds at every block (ADR 0040).
 pub const MAX_SUPPLY_ATOMS: u128 = 100_000_000_000 * DECIMAL_FACTOR;
-
-/// Genesis reserve sealed in the Foundry: the **entire** supply (100 billion VinX).
-///
-/// VinX is a **fair launch**: there is no pre-mine and no founder allocation. At
-/// genesis, circulation is zero and 100% of the supply sits in the Foundry — the
-/// emission reserve. Tokens enter circulation *only* by rewarding the work of block
-/// producers (see [`cumulative_emission_atoms`]).
-pub const FOUNDRY_GENESIS_ATOMS: u128 = MAX_SUPPLY_ATOMS;
 
 /// Flat base transaction fee: 0.0001 VinX. Charged as an absolute forfait (times the
 /// tx-type weight and the congestion multiplier), **independent of the amount moved** —
@@ -48,14 +41,15 @@ pub const MAX_PENDING_UNBONDS_PER_ACCOUNT: usize = 16;
 
 // ─── Emission by work — fair launch ────────────────────────────────────────────
 
-/// Halving period: the emission rate is divided by two every 8 real-time years.
-/// Measured in **seconds** (block timestamps), not block height, because the block
-/// cadence is demand-adaptive and height is not a clock. 8 × 365.25 × 24 × 3600.
-pub const HALVING_PERIOD_SECS: u64 = 252_460_800;
+/// Emission half-life (ADR 0040): the cumulative emission reaches half the supply after
+/// this many real-time **seconds**. ~20 years (20 × 365.25 × 24 × 3600 = 630 720 000 s).
+/// Measured in seconds, not block height — the block cadence is demand-adaptive.
+/// Immutable after genesis (ADR 0021). Replaces the former `HALVING_PERIOD_SECS` (8 years).
+pub const EMISSION_T_HALF_SECS: u64 = 630_720_000;
 
-/// Total to emit over the first halving era (8 years): half of the supply.
-/// Each subsequent era emits half the previous one, so the sum over all eras is
-/// exactly `MAX_SUPPLY_ATOMS` — the whole supply is emitted, ever more slowly.
+/// Tokens emitted over the first half-life (~20 years): half the supply.
+/// Each subsequent half-life emits half the previous quota; the geometric series
+/// converges to `MAX_SUPPLY_ATOMS` — the entire supply, ever more slowly.
 pub const ERA0_EMISSION_ATOMS: u128 = MAX_SUPPLY_ATOMS / 2;
 
 // ─── Module registry (ADR 0010) ─────────────────────────────────────────────────
@@ -90,7 +84,8 @@ pub const BPS_DENOM: u128 = 10_000;
 pub const SLASH_EQUIVOCATION_BPS: u128 = 10_000;
 
 /// Fraction of the slashed amount paid to the reporter as a bounty (10%).
-/// The remainder melts back into the Foundry.
+/// The remainder (90%) is redistributed to honest validators via the epoch
+/// distribution pot — no tokens are destroyed (ADR 0040, no-burn principle).
 pub const SLASH_BOUNTY_BPS: u128 = 1_000;
 
 /// Number of recent blocks to retain with full data (header + transactions + signatures).
@@ -182,18 +177,18 @@ impl Amount {
     }
 }
 
-/// Cumulative VinX (in atoms) that should have been emitted `elapsed_secs` after the
-/// emission epoch (the first block's timestamp).
+/// Cumulative VinX (in atoms) emitted `elapsed_secs` after the emission epoch
+/// (the first block's timestamp).
 ///
-/// Emission follows a discrete **halving** schedule: era `e` lasts
-/// [`HALVING_PERIOD_SECS`] and emits `ERA0_EMISSION_ATOMS >> e` linearly across the
-/// era; each era emits half the previous one, so the sum over all eras converges to
-/// [`MAX_SUPPLY_ATOMS`]. The computation is **pure integer arithmetic** — fully
-/// deterministic across platforms (no floating point), which consensus requires.
+/// Approximates the continuous exponential decay `R(t) = R₀·e^(−λt)` using a
+/// geometric series with linear interpolation within each half-life period.
+/// Over each [`EMISSION_T_HALF_SECS`] window, half the remaining quota is emitted
+/// linearly; the series converges to [`MAX_SUPPLY_ATOMS`]. Pure integer arithmetic —
+/// deterministic across all platforms (no floating point), as consensus requires.
 pub fn cumulative_emission_atoms(elapsed_secs: u64) -> u128 {
-    let h = HALVING_PERIOD_SECS as u128;
-    let full_eras = elapsed_secs / HALVING_PERIOD_SECS;
-    let rem = (elapsed_secs % HALVING_PERIOD_SECS) as u128;
+    let h = EMISSION_T_HALF_SECS as u128;
+    let full_eras = elapsed_secs / EMISSION_T_HALF_SECS;
+    let rem = (elapsed_secs % EMISSION_T_HALF_SECS) as u128;
     let mut total: u128 = 0;
     let mut era_amount = ERA0_EMISSION_ATOMS;
     for _ in 0..full_eras {
@@ -234,52 +229,46 @@ mod tests {
     }
 
     #[test]
-    fn test_genesis_foundry_holds_entire_supply() {
-        // Fair launch: no pre-mine — the whole supply starts in the Foundry.
-        assert_eq!(FOUNDRY_GENESIS_ATOMS, MAX_SUPPLY_ATOMS);
-    }
-
-    #[test]
     fn test_emission_epoch_start_is_zero() {
         assert_eq!(cumulative_emission_atoms(0), 0);
     }
 
     #[test]
-    fn test_emission_first_era_is_half_supply() {
-        // After one full 8-year era, exactly half the supply has been emitted.
+    fn test_emission_first_half_life_is_half_supply() {
+        // After one full ~20-year half-life, exactly half the supply has been emitted.
         assert_eq!(
-            cumulative_emission_atoms(HALVING_PERIOD_SECS),
+            cumulative_emission_atoms(EMISSION_T_HALF_SECS),
             ERA0_EMISSION_ATOMS
         );
         assert_eq!(
-            cumulative_emission_atoms(HALVING_PERIOD_SECS),
+            cumulative_emission_atoms(EMISSION_T_HALF_SECS),
             MAX_SUPPLY_ATOMS / 2
         );
     }
 
     #[test]
-    fn test_emission_halves_each_era() {
-        // Era 0 → 50 Md, era 1 → +25 Md (75 Md total), era 2 → +12.5 Md (87.5 Md).
-        let one = cumulative_emission_atoms(HALVING_PERIOD_SECS);
-        let two = cumulative_emission_atoms(2 * HALVING_PERIOD_SECS);
-        let three = cumulative_emission_atoms(3 * HALVING_PERIOD_SECS);
+    fn test_emission_halves_each_period() {
+        // T₁ → 50 Md, T₂ → +25 Md (75 Md total), T₃ → +12.5 Md (87.5 Md).
+        let one = cumulative_emission_atoms(EMISSION_T_HALF_SECS);
+        let two = cumulative_emission_atoms(2 * EMISSION_T_HALF_SECS);
+        let three = cumulative_emission_atoms(3 * EMISSION_T_HALF_SECS);
         assert_eq!(two - one, ERA0_EMISSION_ATOMS / 2);
         assert_eq!(three - two, ERA0_EMISSION_ATOMS / 4);
     }
 
     #[test]
     fn test_emission_schedule_is_constitutional() {
-        // ADR 0021: these constants ARE VinX's monetary policy and are immutable —
-        // not governable by anyone. Changing any of them is a deliberate, breaking act,
-        // and this test is the tripwire that forces it to be conscious.
+        // ADR 0021 + ADR 0040: these constants ARE VinX's monetary policy — immutable
+        // after genesis, not governable by anyone. Changing any of them is a deliberate,
+        // breaking act; this tripwire forces it to be conscious.
         assert_eq!(
-            HALVING_PERIOD_SECS, 252_460_800,
-            "halving period is 8 years — immutable"
+            EMISSION_T_HALF_SECS, 630_720_000,
+            "emission half-life is ~20 years — immutable (ADR 0040)"
         );
         assert_eq!(
             ERA0_EMISSION_ATOMS,
             MAX_SUPPLY_ATOMS / 2,
-            "era 0 emits half the supply"
+            "first half-life emits half the supply"
         );
         assert_eq!(
             MAX_SUPPLY_ATOMS,
@@ -298,8 +287,9 @@ mod tests {
     #[test]
     fn test_emission_monotonic_and_bounded() {
         let mut prev = 0u128;
-        for years in 0..=120 {
-            let t = years * (HALVING_PERIOD_SECS / 8); // one-year steps
+        for years in 0..=200 {
+            // one-year steps using the ~20-year half-life
+            let t = years * (EMISSION_T_HALF_SECS / 20);
             let e = cumulative_emission_atoms(t);
             assert!(e >= prev, "emission must be non-decreasing");
             assert!(

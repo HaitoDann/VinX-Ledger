@@ -468,7 +468,8 @@ pub async fn get_metrics(State(node): State<Arc<Node>>) -> impl IntoResponse {
     let mempool_size = node.mempool.read().await.size();
     let state = node.state.read().await;
     let base_fee = state.base_fee.atoms();
-    let foundry = state.foundry_balance().atoms();
+    let remaining = state.remaining_supply();
+    let destroyed = state.destroyed_atoms;
     let circulating = state.circulating_supply.atoms();
     let validator_count = state.validator_set.len();
     drop(state);
@@ -483,9 +484,12 @@ pub async fn get_metrics(State(node): State<Arc<Node>>) -> impl IntoResponse {
          # HELP vinx_base_fee Current dynamic fee floor in atoms\n\
          # TYPE vinx_base_fee gauge\n\
          vinx_base_fee {base_fee}\n\
-         # HELP vinx_foundry La Fonderie reserve in atoms (melt/forge reserve)\n\
-         # TYPE vinx_foundry gauge\n\
-         vinx_foundry {foundry}\n\
+         # HELP vinx_remaining_supply Supply not yet emitted in atoms (MAX_SUPPLY − emitted)\n\
+         # TYPE vinx_remaining_supply gauge\n\
+         vinx_remaining_supply {remaining}\n\
+         # HELP vinx_destroyed_atoms Atoms permanently destroyed by reaping dust\n\
+         # TYPE vinx_destroyed_atoms counter\n\
+         vinx_destroyed_atoms {destroyed}\n\
          # HELP vinx_circulating_supply Total circulating supply in atoms\n\
          # TYPE vinx_circulating_supply gauge\n\
          vinx_circulating_supply {circulating}\n\
@@ -526,12 +530,13 @@ pub async fn get_metrics(State(node): State<Arc<Node>>) -> impl IntoResponse {
     )
 }
 
-/// Returns economic network statistics (base_fee, Foundry reserve, circulating supply).
+/// Returns economic network statistics (base_fee, remaining supply, circulating supply).
 pub async fn get_network_stats(State(node): State<Arc<Node>>) -> ApiResult<NetworkStatsResponse> {
     let state = node.state.read().await;
     Ok(Json(NetworkStatsResponse {
         base_fee_atoms: state.base_fee.atoms().to_string(),
-        foundry: state.foundry_balance().to_string(),
+        remaining_supply: vinx_core::Amount::from_atoms(state.remaining_supply()).to_string(),
+        destroyed_atoms: state.destroyed_atoms.to_string(),
         circulating_supply: state.circulating_supply.to_string(),
         admin_address: state.admin_address.as_ref().map(|a| a.to_string()),
     }))

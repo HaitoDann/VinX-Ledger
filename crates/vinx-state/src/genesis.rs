@@ -1,5 +1,5 @@
 use crate::WorldState;
-use vinx_core::{amount::FOUNDRY_GENESIS_ATOMS, Amount, ValidatorSet};
+use vinx_core::{Amount, ValidatorSet};
 use vinx_crypto::Address;
 
 pub struct GenesisConfig {
@@ -17,15 +17,13 @@ pub struct GenesisConfig {
 
 /// Builds the initial chain state from the genesis configuration.
 ///
-/// **Fair launch — no pre-mine.** All 100 billion VinX sit in the Foundry at genesis
-/// and circulation starts at zero. Tokens enter circulation only by rewarding the work
-/// of block producers (work emission), and once the Foundry is drained, transaction
-/// fees become the validators' only reward.
+/// **Fair launch — no pre-mine.** At genesis `emitted_atoms = 0` and circulation = 0.
+/// Tokens are minted progressively as block producers earn work emission. Once the
+/// emission curve reaches dust-level, transaction fees become the sole reward (ADR 0040).
 pub fn create_genesis_state(config: &GenesisConfig) -> WorldState {
     let mut state = WorldState::new();
 
-    // The entire supply is sealed in the Foundry; nothing circulates yet.
-    state.foundry = Amount::from_atoms(FOUNDRY_GENESIS_ATOMS);
+    // Progressive minting: nothing is pre-allocated. emitted_atoms = 0, circulating = 0.
     state.circulating_supply = Amount::ZERO;
 
     state.block_height = 0;
@@ -66,25 +64,19 @@ mod tests {
     }
 
     #[test]
-    fn test_foundry_holds_entire_supply_at_genesis() {
+    fn test_nothing_emitted_at_genesis() {
+        // ADR 0040: progressive minting — emitted_atoms = 0, no pre-allocation.
         let (state, _) = genesis();
-        assert_eq!(state.foundry.atoms(), MAX_SUPPLY_ATOMS);
-    }
-
-    #[test]
-    fn test_circulating_supply_is_zero_at_genesis() {
-        let (state, _) = genesis();
+        assert_eq!(state.emitted_atoms, 0);
         assert_eq!(state.circulating_supply, Amount::ZERO);
+        assert_eq!(state.remaining_supply(), MAX_SUPPLY_ATOMS);
     }
 
     #[test]
-    fn test_circulation_plus_foundry_equals_max_supply() {
-        // The founding invariant: 0 circulating + 100 Md Foundry == the whole supply.
+    fn test_genesis_supply_invariant_holds() {
+        // circulating(0) + epoch_pot(0) + destroyed(0) == emitted(0) ≤ MAX_SUPPLY.
         let (state, _) = genesis();
-        assert_eq!(
-            state.circulating_supply.atoms() + state.foundry.atoms(),
-            MAX_SUPPLY_ATOMS
-        );
+        assert!(state.supply_invariant_holds());
     }
 
     #[test]

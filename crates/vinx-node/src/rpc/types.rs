@@ -285,8 +285,10 @@ pub struct SnapshotResponse {
 #[derive(Serialize)]
 pub struct NetworkStatsResponse {
     pub base_fee_atoms: String,
-    /// La Fonderie reserve (melt/forge). `circulating_supply + foundry == MAX_SUPPLY`.
-    pub foundry: String,
+    /// Supply not yet emitted: `MAX_SUPPLY − emitted_atoms` (ADR 0040).
+    pub remaining_supply: String,
+    /// Atoms permanently destroyed by reaping dust (ADR 0040, normally tiny).
+    pub destroyed_atoms: String,
     pub circulating_supply: String,
     /// On-chain admin address (bech32), if one is configured. Public info — it
     /// signs governance transactions visible on-chain. Used by the admin console

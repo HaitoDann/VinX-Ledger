@@ -29,7 +29,12 @@ use zstd;
 ///     one, so the migration simply appends those fields' default encodings.
 /// v9: WorldState meta gains the ADR 0010 module registry (`modules`), appended last —
 ///     same prefix property, migrated by appending the empty-map encoding.
-const STORAGE_VERSION: u64 = 9;
+/// v10: WorldState meta gains ADR 0040 fields `epoch_dist_emission_pot` (Amount::ZERO)
+///     and `destroyed_atoms` (0u128), appended after `modules`. The dormant `foundry`
+///     field is retained in-place for bincode compatibility. A chain that previously
+///     had slash-melt events will see `epoch_dist_emission_pot = 0` after migration;
+///     `supply_invariant_holds()` will catch any inconsistency on the next block.
+const STORAGE_VERSION: u64 = 10;
 
 /// zstd compression level — level 3 is the sweet spot: ~60-70% size reduction,
 /// negligible latency compared to disk I/O.
@@ -153,6 +158,8 @@ impl Storage {
                 // v8 → v9 (ADR 0010): the module registry was appended last — same prefix
                 // property, migrated by appending the empty-map encoding.
                 8 => Self::append_meta_suffix(tx, &vinx_state::v9_meta_suffix())?,
+                // v9 → v10 (ADR 0040): epoch_dist_emission_pot and destroyed_atoms appended.
+                9 => Self::append_meta_suffix(tx, &vinx_state::v10_meta_suffix())?,
                 unknown => {
                     return Err(Self::io_err(format!(
                         "no automatic migration from schema v{unknown} to v{STORAGE_VERSION}. \
@@ -506,9 +513,10 @@ mod tests {
         s.get(key).unwrap().is_some()
     }
 
-    /// Strips the appended v8 (governance) and v9 (module registry) suffixes from the
-    /// persisted meta blob, turning a current-format meta back into its v7 prefix so the
-    /// append migrations can be exercised on data that genuinely predates ADR 0010/0011.
+    /// Strips the appended v8 (governance), v9 (module registry), and v10 (ADR 0040)
+    /// suffixes from the persisted meta blob, turning a current-format meta back into
+    /// its v7 prefix so the append migrations can be exercised on data that genuinely
+    /// predates ADR 0010/0011/0040.
     fn downgrade_meta_to_v7(dir: &Path) {
         let db = Database::create(dir.join("vinx.redb")).unwrap();
         let tx = db.begin_write().unwrap();
@@ -516,8 +524,9 @@ mod tests {
             let mut s = tx.open_table(STATE).unwrap();
             let compressed = s.get("world_state_meta").unwrap().unwrap().value().to_vec();
             let mut meta = zstd::decode_all(&compressed[..]).unwrap();
-            let suffix_len =
-                vinx_state::v8_meta_suffix().len() + vinx_state::v9_meta_suffix().len();
+            let suffix_len = vinx_state::v8_meta_suffix().len()
+                + vinx_state::v9_meta_suffix().len()
+                + vinx_state::v10_meta_suffix().len();
             meta.truncate(meta.len() - suffix_len);
             let recompressed = zstd::encode_all(&meta[..], ZSTD_LEVEL).unwrap();
             s.insert("world_state_meta", recompressed.as_slice())

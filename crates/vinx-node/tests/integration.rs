@@ -523,9 +523,9 @@ async fn test_crash_recovery() {
 
         {
             let mut s = node.state.write().await;
-            // Fund from the Foundry so the supply invariant holds (ADR 0004): the
+            // Mint tokens so the supply invariant holds (ADR 0004/ADR 0040): the
             // node produces blocks below, which enforce it in settle_block.
-            s.credit_from_foundry_for_test(sender_addr.clone(), Amount::from_vinx(INITIAL_VINX));
+            s.credit_emit_for_test(sender_addr.clone(), Amount::from_vinx(INITIAL_VINX));
         }
 
         let amount = Amount::from_vinx(SEND_VINX);

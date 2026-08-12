@@ -93,9 +93,8 @@ proptest! {
 // ─── WorldState transfer invariants ──────────────────────────────────────────
 
 proptest! {
-    /// A transfer never touches the total supply: `circulating + foundry` is
-    /// conserved. The fee stays in circulation (it moves sender → producer), so it
-    /// does not leave `circulating_supply` either.
+    /// A transfer never touches the total supply: `circulating + pot + destroyed`
+    /// is conserved. The fee stays in circulation (it moves sender → producer).
     #[test]
     fn transfer_conserves_supply(
         amount_vinx  in 1u64..=500u64,
@@ -108,8 +107,8 @@ proptest! {
 
         let mut state = WorldState::new();
         let initial   = Amount::from_vinx(initial_vinx);
-        state.credit_for_test(sender_addr.clone(), initial);
-        state.circulating_supply = initial;
+        // Use credit_emit_for_test to keep the supply invariant consistent.
+        state.credit_emit_for_test(sender_addr.clone(), initial);
 
         let amount = Amount::from_vinx(amount_vinx);
         let fee    = amount.calculate_fee(state.base_fee);
@@ -117,12 +116,12 @@ proptest! {
         if let Some(total_cost) = amount.checked_add(fee) {
             if total_cost <= initial {
                 let tx = Transaction::new_transfer(&sender_kp, receiver_addr, amount, fee, 0);
-                let total_before = state.circulating_supply.atoms() + state.foundry_balance().atoms();
+                let emitted_before = state.emitted_atoms;
                 state.apply_transaction(&tx).unwrap();
+                // A transfer does not mint or destroy tokens — emitted_atoms unchanged.
                 prop_assert_eq!(
-                    state.circulating_supply.atoms() + state.foundry_balance().atoms(),
-                    total_before,
-                    "supply (circulating + foundry) changed after transfer"
+                    state.emitted_atoms, emitted_before,
+                    "emitted_atoms changed after transfer"
                 );
             }
         }
@@ -142,8 +141,7 @@ proptest! {
 
         let mut state = WorldState::new();
         let initial   = Amount::from_vinx(initial_vinx);
-        state.credit_for_test(sender_addr.clone(), initial);
-        state.circulating_supply = initial;
+        state.credit_emit_for_test(sender_addr.clone(), initial);
 
         let amount = Amount::from_vinx(amount_vinx);
         let fee    = amount.calculate_fee(state.base_fee);
@@ -187,8 +185,8 @@ proptest! {
         prop_assert_eq!(nonce_after, nonce_before + 1);
     }
 
-    /// The full fee goes to the block producer — not the Foundry. After settling,
-    /// the producer holds exactly the fee and the Foundry is untouched.
+    /// The full fee goes to the block producer — not the epoch pot. After settling,
+    /// the producer holds exactly the fee and the epoch pot is untouched.
     #[test]
     fn fee_goes_to_producer(
         amount_vinx  in 1u64..=1_000u64,
@@ -201,12 +199,12 @@ proptest! {
         let producer = Address::from_public_key(&KeyPair::generate().public_key());
 
         let mut state = WorldState::new();
-        state.credit_for_test(sender_addr.clone(), Amount::from_vinx(initial_vinx));
+        state.credit_emit_for_test(sender_addr.clone(), Amount::from_vinx(initial_vinx));
 
         let amount = Amount::from_vinx(amount_vinx);
         let fee    = amount.calculate_fee(state.base_fee);
 
-        let foundry_before = state.foundry_balance().atoms();
+        let pot_before = state.epoch_dist_emission_pot;
 
         let tx = Transaction::new_transfer(&sender_kp, receiver_addr, amount, fee, 0);
         state.apply_transaction(&tx).unwrap();
@@ -218,9 +216,9 @@ proptest! {
             "fee not credited in full to the producer"
         );
         prop_assert_eq!(
-            state.foundry_balance().atoms(),
-            foundry_before,
-            "Foundry changed — the fee must not melt"
+            state.epoch_dist_emission_pot,
+            pot_before,
+            "epoch pot changed — the fee must not flow to the pot"
         );
     }
 

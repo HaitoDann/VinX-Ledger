@@ -22,16 +22,15 @@ pub struct WorldState {
     /// is already sorted by address — the Merkle leaf order — avoiding an O(n log n)
     /// sort on every state-root rebuild and every inclusion-proof lookup.
     pub(crate) accounts: BTreeMap<Address, Account>,
-    /// Tokens held by accounts (Σ balances + staked). Always equals `MAX_SUPPLY - foundry`:
-    /// the supply is conserved forever (no burn), it only cycles between accounts and the Foundry.
+    /// Tokens in circulation (Σ balances + staked + pending unbonds). Together with
+    /// `epoch_dist_emission_pot` and `destroyed_atoms` this always equals `emitted_atoms`.
     pub circulating_supply: Amount,
     pub block_height: u64,
-    /// La Fonderie — the emission reserve. At genesis it holds the entire supply; it
-    /// drains *only* to reward block production (work emission) and grows only when a
-    /// slashed bond melts back in. The invariant `circulating_supply + foundry ==
-    /// MAX_SUPPLY` holds at every block: nothing is created or destroyed, only moved.
+    /// Dormant — kept for bincode backward-compatibility (v9 on-disk layout).
+    /// Not used in any logic after ADR 0040. Always `Amount::ZERO` on new chains.
     #[serde(default)]
-    pub foundry: Amount,
+    #[allow(dead_code)]
+    pub(crate) foundry: Amount,
     /// Timestamp (unix seconds) of the first block — the emission epoch. Established
     /// lazily on the first block; `emission_started` guards initialization (so a
     /// genesis timestamp of 0 does not collide with an "unset" sentinel).
@@ -116,6 +115,16 @@ pub struct WorldState {
     /// (empty map). `serde(default)` for pre-0010 state.
     #[serde(default)]
     pub modules: BTreeMap<Hash32, ModuleEntry>,
+    /// Slash proceeds awaiting distribution to honest validators (ADR 0040).
+    /// 90 % of every slashed bond flows here; distributed at epoch close (ADR 0028).
+    /// Appended after `modules` — the v9→v10 migration appends its default encoding.
+    #[serde(default)]
+    pub epoch_dist_emission_pot: Amount,
+    /// Cumulative atoms permanently destroyed by reaping dust (ADR 0026 + ADR 0040).
+    /// The only source of destruction on VinX — amounts are ≤ 0.001 VINX per account.
+    /// Appended after `epoch_dist_emission_pot` — same append-only migration strategy.
+    #[serde(default)]
+    pub destroyed_atoms: u128,
 }
 
 /// A bond amount in its unbonding delay, waiting to return to `address`'s balance
@@ -217,6 +226,15 @@ pub fn v9_meta_suffix() -> Vec<u8> {
     bincode::serialize(&BTreeMap::<Hash32, ModuleEntry>::new()).expect("serialize empty map")
 }
 
+/// The bincode bytes appended to a v9 `WorldState` meta blob to bring it to v10
+/// (ADR 0040): the default `epoch_dist_emission_pot` (Amount::ZERO) followed by the
+/// default `destroyed_atoms` (0u128). Same append-only rationale as prior suffixes.
+pub fn v10_meta_suffix() -> Vec<u8> {
+    let mut out = bincode::serialize(&Amount::ZERO).expect("serialize Amount::ZERO");
+    out.extend(bincode::serialize(&0u128).expect("serialize 0u128"));
+    out
+}
+
 fn default_fee_floor() -> Amount {
     Amount::from_atoms(DEFAULT_FEE_FLOOR_ATOMS)
 }
@@ -261,6 +279,8 @@ impl WorldState {
             admin_policy: None,
             pending_governance: Vec::new(),
             modules: BTreeMap::new(),
+            epoch_dist_emission_pot: Amount::ZERO,
+            destroyed_atoms: 0,
         }
     }
 
@@ -340,27 +360,30 @@ impl WorldState {
         self.base_fee = Amount::from_atoms(new_atoms.max(floor));
     }
 
-    /// *Melt*: moves `amount` from circulation into the Foundry (fees, slashing).
-    /// Preserves the invariant `circulating_supply + foundry == MAX_SUPPLY`.
-    fn melt_to_foundry(&mut self, amount: Amount) {
-        self.foundry = self.foundry.saturating_add(amount);
+    /// Moves `amount` from circulation into the epoch distribution pot (ADR 0040).
+    /// Used for slash redistribution: removes tokens from a validator's bond and parks
+    /// them in the pot until the epoch closes and they are paid to honest validators.
+    fn move_to_epoch_pot(&mut self, amount: Amount) {
+        self.epoch_dist_emission_pot = self.epoch_dist_emission_pot.saturating_add(amount);
         self.circulating_supply = self
             .circulating_supply
             .checked_sub(amount)
             .unwrap_or(Amount::ZERO);
     }
 
-    /// *Forge*: draws up to `amount` out of the Foundry back into circulation
-    /// (staking rewards). Returns the amount actually forged (capped by the reserve).
-    fn forge_from_foundry(&mut self, amount: Amount) -> Amount {
-        let forged = if self.foundry >= amount {
-            amount
-        } else {
-            self.foundry
-        };
-        self.foundry = self.foundry.checked_sub(forged).unwrap_or(Amount::ZERO);
-        self.circulating_supply = self.circulating_supply.saturating_add(forged);
-        forged
+    /// Mints `amount` atoms into existence and credits the emission target account.
+    /// Updates both `emitted_atoms` (the cumulative curve position) and
+    /// `circulating_supply` (the supply-level tracker).
+    fn mint_emission(&mut self, recipient: &Address, amount: Amount) {
+        if amount == Amount::ZERO {
+            return;
+        }
+        self.emitted_atoms = self
+            .emitted_atoms
+            .saturating_add(amount.atoms())
+            .min(vinx_core::amount::MAX_SUPPLY_ATOMS);
+        self.circulating_supply = self.circulating_supply.saturating_add(amount);
+        self.credit(recipient, amount);
     }
 
     /// Records the timestamp of the block currently being applied. Must be called
@@ -375,10 +398,9 @@ impl WorldState {
     /// every path that builds/replays a block (producer, P2P apply, sync). Returns
     /// `(fees, emission)` for logging.
     ///
-    /// Fees stay in circulation (they move sender → producer). Emission is forged from
-    /// the Foundry into circulation. Both are computed deterministically from the block
-    /// (its transactions, its `producer`, its `block_ts`), so validators re-applying
-    /// the block reach the identical state.
+    /// Fees stay in circulation (they move sender → producer). Emission is newly minted
+    /// (progressive minting, ADR 0040). Both are computed deterministically from the
+    /// block so validators re-applying it reach the identical state.
     pub fn settle_block(&mut self, producer: &Address, block_ts: u64) -> (Amount, Amount) {
         // 1. Collected transaction fees → producer (circulation-neutral).
         let fees = std::mem::replace(&mut self.block_fees, Amount::ZERO);
@@ -387,21 +409,31 @@ impl WorldState {
         }
         // 2. Mature any unbonds whose delay has elapsed (real time).
         self.mature_unbonds(block_ts);
-        // 3. Work emission forged from the Foundry → producer.
+        // 3. Work emission — mint new tokens → producer (ADR 0040).
         let emission = self.emit_work_reward(producer, block_ts);
         (fees, emission)
     }
 
-    /// Checks the founding invariant `circulating_supply + foundry == MAX_SUPPLY`
-    /// (ADR 0004). Cheap (two reads + one add). The block paths (producer, P2P apply,
+    /// Checks the supply invariant (ADR 0040):
+    /// `circulating_supply + epoch_dist_emission_pot + destroyed_atoms == emitted_atoms`
+    /// and `emitted_atoms ≤ MAX_SUPPLY_ATOMS`.
+    ///
+    /// Cheap (a handful of reads + additions). The block paths (producer, P2P apply,
     /// sync) treat `false` as a critical fault and reject/roll back the block rather
-    /// than committing a corrupted supply — the enforcement point, since the
-    /// state_root covers only accounts, not the Foundry.
+    /// than committing a corrupted supply.
     pub fn supply_invariant_holds(&self) -> bool {
-        self.circulating_supply
+        let lhs = self
+            .circulating_supply
             .atoms()
-            .checked_add(self.foundry.atoms())
-            == Some(vinx_core::amount::MAX_SUPPLY_ATOMS)
+            .checked_add(self.epoch_dist_emission_pot.atoms())
+            .and_then(|v| v.checked_add(self.destroyed_atoms));
+        lhs == Some(self.emitted_atoms)
+            && self.emitted_atoms <= vinx_core::amount::MAX_SUPPLY_ATOMS
+    }
+
+    /// Supply not yet emitted (`MAX_SUPPLY − emitted_atoms`).
+    pub fn remaining_supply(&self) -> u128 {
+        vinx_core::amount::MAX_SUPPLY_ATOMS.saturating_sub(self.emitted_atoms)
     }
 
     /// Returns matured bonds to their owners' balances. Circulation-neutral: the funds
@@ -424,10 +456,10 @@ impl WorldState {
         }
     }
 
-    /// Forges this block's work-emission reward out of the Foundry and credits it to
-    /// the producer. Emission follows the discrete halving curve, integrated over real
-    /// time since the emission epoch — so a quiet network doesn't stall or accelerate
-    /// it. The first block establishes the epoch and emits nothing.
+    /// Mints this block's work-emission reward and credits it to the producer.
+    /// Emission follows the exponential decay curve, integrated over real time since
+    /// the emission epoch — so a quiet network doesn't stall or accelerate it.
+    /// The first block establishes the epoch and emits nothing (ADR 0040).
     fn emit_work_reward(&mut self, producer: &Address, block_ts: u64) -> Amount {
         if !self.emission_started {
             self.emission_started = true;
@@ -436,16 +468,15 @@ impl WorldState {
         }
         let elapsed = block_ts.saturating_sub(self.emission_epoch_ts);
         let target = cumulative_emission_atoms(elapsed);
-        let to_emit = target.saturating_sub(self.emitted_atoms);
+        let to_emit = target
+            .saturating_sub(self.emitted_atoms)
+            .min(vinx_core::amount::MAX_SUPPLY_ATOMS.saturating_sub(self.emitted_atoms));
         if to_emit == 0 {
             return Amount::ZERO;
         }
-        let forged = self.forge_from_foundry(Amount::from_atoms(to_emit));
-        if forged > Amount::ZERO {
-            self.credit(producer, forged);
-            self.emitted_atoms = self.emitted_atoms.saturating_add(forged.atoms());
-        }
-        forged
+        let minted = Amount::from_atoms(to_emit);
+        self.mint_emission(producer, minted);
+        minted
     }
 
     /// Credits `amount` to `address`, creating the account if necessary.
@@ -467,18 +498,31 @@ impl WorldState {
     /// persistence store (not just the in-memory map, or it would resurrect on reload).
     /// No-op if the account still holds value, has funds unbonding, or does not exist.
     ///
-    /// Circulation-neutral: a reaped account has `balance == 0 && staked == 0`, so the
-    /// tracked `circulating_supply` is untouched and the ADR 0004 mass invariant holds.
+    /// Any residual dust (balance > 0 but below the existential deposit) is destroyed —
+    /// the only source of token destruction in VinX (ADR 0040 §2.4). The transfer
+    /// rules already prevent dust from forming (send that would leave < ED is rejected),
+    /// so in practice `balance == 0` here; the check is a belt-and-suspenders safeguard.
     fn reap_if_empty(&mut self, addr: &Address) {
-        let empty = match self.accounts.get(addr) {
-            Some(a) => a.balance == Amount::ZERO && a.staked == Amount::ZERO,
-            None => false,
+        let reapable_balance = match self.accounts.get(addr) {
+            Some(a) if a.staked == Amount::ZERO => a.balance,
+            _ => return,
         };
-        if !empty {
-            return;
-        }
         if self.pending_unbonds.iter().any(|u| &u.address == addr) {
             return; // funds still unbonding — the account must stay to receive them
+        }
+        // Funded accounts (balance ≥ ED) are healthy — never reap them.
+        if reapable_balance.atoms() >= EXISTENTIAL_DEPOSIT_ATOMS {
+            return;
+        }
+        // Destroy any residual dust (normally zero; belt-and-suspenders for ED invariant).
+        if reapable_balance > Amount::ZERO {
+            self.circulating_supply = self
+                .circulating_supply
+                .checked_sub(reapable_balance)
+                .unwrap_or(Amount::ZERO);
+            self.destroyed_atoms = self
+                .destroyed_atoms
+                .saturating_add(reapable_balance.atoms());
         }
         self.accounts.remove(addr);
         self.leaf_index.remove(addr);
@@ -525,11 +569,6 @@ impl WorldState {
             .get(address)
             .map(|a| a.staked)
             .unwrap_or(Amount::ZERO)
-    }
-
-    /// La Fonderie balance — the melt/forge reserve.
-    pub fn foundry_balance(&self) -> Amount {
-        self.foundry
     }
 
     // ---- Incremental persistence support ----------------------------------
@@ -597,13 +636,12 @@ impl WorldState {
         acc.balance = acc.balance.saturating_add(amount);
     }
 
-    /// Test helper that funds an account **while preserving the supply invariant**:
-    /// it forges from the Foundry (like real emission) instead of conjuring balance.
-    /// Prefer this over `credit_for_test` when the test then produces a block (which
-    /// enforces the invariant in `settle_block`). Requires a genesis-funded Foundry.
-    pub fn credit_from_foundry_for_test(&mut self, address: Address, amount: Amount) {
-        let forged = self.forge_from_foundry(amount);
-        self.credit(&address, forged);
+    /// Test helper that mints tokens into an account while preserving the supply
+    /// invariant (`circulating + pot + destroyed = emitted ≤ MAX_SUPPLY`). Prefer
+    /// this over `credit_for_test` when the test then produces a block (which checks
+    /// the invariant). Simulates work emission without going through the timing logic.
+    pub fn credit_emit_for_test(&mut self, address: Address, amount: Amount) {
+        self.mint_emission(&address, amount);
     }
 
     /// Applies a transaction with full verification: chain-id/TTL replay checks
@@ -1111,8 +1149,8 @@ impl WorldState {
             if returned > 0 {
                 self.credit(target, Amount::from_atoms(returned));
             }
-            self.credit(&tx.from, Amount::from_atoms(bounty)); // reporter bounty
-            self.melt_to_foundry(Amount::from_atoms(to_melt)); // rest → Foundry
+            self.credit(&tx.from, Amount::from_atoms(bounty)); // reporter bounty (10%)
+            self.move_to_epoch_pot(Amount::from_atoms(to_melt)); // 90% → honest validators
         }
 
         self.mark_dirty(&tx.from);
@@ -1491,77 +1529,75 @@ mod tests {
     }
 
     // ─── Fair launch: emission, fees, bond, unbonding, slashing ──────────────
-    use vinx_core::amount::{cumulative_emission_atoms, HALVING_PERIOD_SECS, MAX_SUPPLY_ATOMS};
+    use vinx_core::amount::{cumulative_emission_atoms, EMISSION_T_HALF_SECS, MAX_SUPPLY_ATOMS};
     use vinx_core::block::GENESIS_PREV_HASH;
     use vinx_core::{BlockHeader, BlockSignature, SlashEvidence};
 
     #[test]
     fn test_supply_invariant_detects_corruption() {
         let mut s = WorldState::new();
-        s.foundry = Amount::from_atoms(MAX_SUPPLY_ATOMS);
+        // Fresh state: nothing emitted yet — invariant holds trivially.
         assert!(s.supply_invariant_holds());
-        // Corrupt the reserve → the invariant must report a violation.
-        s.foundry = Amount::from_atoms(MAX_SUPPLY_ATOMS - 1);
+        // Corrupt emitted_atoms so circ + pot + destroyed ≠ emitted → violation.
+        s.emitted_atoms = 1;
         assert!(!s.supply_invariant_holds());
+        // Repair: align circulating with emitted.
+        s.circulating_supply = Amount::from_atoms(1);
+        assert!(s.supply_invariant_holds());
     }
 
     #[test]
     fn test_first_block_sets_emission_epoch_and_emits_nothing() {
         let mut s = WorldState::new();
-        s.foundry = Amount::from_atoms(MAX_SUPPLY_ATOMS);
         let (_, producer) = kp_addr();
         let (fees, emission) = s.settle_block(&producer, 1_000);
         assert_eq!(fees, Amount::ZERO);
         assert_eq!(emission, Amount::ZERO);
         assert_eq!(s.emission_epoch_ts, 1_000);
-        assert_eq!(s.foundry.atoms(), MAX_SUPPLY_ATOMS);
+        assert_eq!(s.emitted_atoms, 0);
     }
 
     #[test]
     fn test_emission_rewards_producer_and_conserves_supply() {
         let mut s = WorldState::new();
-        s.foundry = Amount::from_atoms(MAX_SUPPLY_ATOMS);
         let (_, producer) = kp_addr();
         s.settle_block(&producer, 0); // establish epoch at t=0
-                                      // One full era later: half the supply is emitted to the producer.
-        let (_, emission) = s.settle_block(&producer, HALVING_PERIOD_SECS);
-        let expected = cumulative_emission_atoms(HALVING_PERIOD_SECS);
+        // One full half-life later: ~50% of the supply has been minted.
+        let (_, emission) = s.settle_block(&producer, EMISSION_T_HALF_SECS);
+        let expected = cumulative_emission_atoms(EMISSION_T_HALF_SECS);
         assert_eq!(emission.atoms(), expected);
         assert_eq!(s.accounts[&producer].balance.atoms(), expected);
-        assert_eq!(s.foundry.atoms(), MAX_SUPPLY_ATOMS - expected);
-        assert_eq!(
-            s.circulating_supply.atoms() + s.foundry.atoms(),
-            MAX_SUPPLY_ATOMS
-        );
+        assert_eq!(s.emitted_atoms, expected);
+        // Supply invariant: circulating == emitted (no pot, no destroyed).
+        assert_eq!(s.circulating_supply.atoms(), s.emitted_atoms);
+        assert!(s.supply_invariant_holds());
     }
 
     #[test]
     fn test_emission_is_not_weighted_by_bond() {
         // A producer with zero stake still earns the full block emission.
         let mut s = WorldState::new();
-        s.foundry = Amount::from_atoms(MAX_SUPPLY_ATOMS);
         let (_, producer) = kp_addr();
         s.settle_block(&producer, 0);
-        let (_, emission) = s.settle_block(&producer, HALVING_PERIOD_SECS / 8); // ~1 year
+        let (_, emission) = s.settle_block(&producer, EMISSION_T_HALF_SECS / 20); // ~1 year
         assert!(emission > Amount::ZERO);
         assert_eq!(s.accounts[&producer].balance, emission);
     }
 
     #[test]
-    fn test_fee_goes_to_producer_not_foundry() {
+    fn test_fee_goes_to_producer_not_epoch_pot() {
         let mut s = WorldState::new();
         let (sender_kp, sender) = kp_addr();
         let (_, receiver) = kp_addr();
         let (_, producer) = kp_addr();
-        s.credit_for_test(sender, Amount::from_vinx(1_000));
-        s.circulating_supply = Amount::from_vinx(1_000);
+        s.credit_emit_for_test(sender, Amount::from_vinx(1_000));
         let amount = Amount::from_vinx(100);
         let fee = amount.calculate_fee(s.base_fee);
         let tx = Transaction::new_transfer(&sender_kp, receiver, amount, fee, 0);
-        let foundry_before = s.foundry;
+        let pot_before = s.epoch_dist_emission_pot;
         s.apply_transaction(&tx).unwrap();
-        // Fee is collected, not melted — the Foundry does not change.
-        assert_eq!(s.foundry, foundry_before);
+        // Fee is collected, not routed to the epoch pot.
+        assert_eq!(s.epoch_dist_emission_pot, pot_before);
         // Settling credits the producer with the fee (epoch established, no emission).
         s.settle_block(&producer, 100);
         assert_eq!(s.accounts[&producer].balance, fee);
@@ -1596,6 +1632,7 @@ mod tests {
     fn test_unstake_enters_unbonding_then_matures() {
         let mut s = WorldState::new();
         let (kp, addr) = kp_addr();
+        let (_, producer) = kp_addr(); // separate producer so emission doesn't land on addr
         s.credit_for_test(addr, Amount::from_vinx(1_000));
         s.apply_transaction(&Transaction::new_stake(
             &kp,
@@ -1619,11 +1656,11 @@ mod tests {
         assert_eq!(s.accounts[&addr].balance, Amount::from_vinx(500)); // still not back
         assert_eq!(s.pending_unbonds.len(), 1);
 
-        // Just before unlock: nothing matures.
-        s.settle_block(&addr, 1_000 + UNBONDING_SECS - 1);
+        // Just before unlock: nothing matures. Use a separate producer so addr stays clean.
+        s.settle_block(&producer, 1_000 + UNBONDING_SECS - 1);
         assert_eq!(s.pending_unbonds.len(), 1);
-        // At unlock: the bond returns to the balance.
-        s.settle_block(&addr, 1_000 + UNBONDING_SECS);
+        // At unlock: the bond returns to addr's balance.
+        s.settle_block(&producer, 1_000 + UNBONDING_SECS);
         assert!(s.pending_unbonds.is_empty());
         assert_eq!(s.accounts[&addr].balance, Amount::from_vinx(1_000));
     }
@@ -2222,9 +2259,9 @@ mod tests {
         // 100% of the bond slashed: victim loses everything and its seat.
         assert_eq!(s.accounts[&victim].staked, Amount::ZERO);
         assert!(!s.validator_set.contains(&victim));
-        // 10% bounty to the reporter (100 VINX), 90% (900 VINX) melted to the Foundry.
+        // 10% bounty to the reporter (100 VINX), 90% (900 VINX) moved to the epoch pot.
         assert_eq!(s.accounts[&reporter].balance, Amount::from_vinx(110));
-        assert_eq!(s.foundry, Amount::from_vinx(900));
+        assert_eq!(s.epoch_dist_emission_pot, Amount::from_vinx(900));
     }
 
     // ─── protocol upgrades ───────────────────────────────────────────────────

@@ -62,7 +62,7 @@ enum Commands {
         #[arg(long, default_value = "http://127.0.0.1:8545")]
         node: String,
     },
-    /// Lock VINX as stake to earn rewards forged from the Foundry
+    /// Lock VINX as stake to earn work-emission rewards (minting progressif)
     Stake {
         /// Amount to stake (e.g. 1000)
         #[arg(long)]

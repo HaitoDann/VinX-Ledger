@@ -167,7 +167,7 @@ const HTML: &str = r####"<!DOCTYPE html>
       <div class="stats" style="grid-template-columns:1fr 1fr">
         <div><div class="stat-v sm" id="e-fee">—</div><div class="stat-l">Base fee (atoms)</div></div>
         <div><div class="stat-v sm" id="e-supply">—</div><div class="stat-l">En circulation</div></div>
-        <div><div class="stat-v sm" id="e-foundry">—</div><div class="stat-l">La Fonderie</div></div>
+        <div><div class="stat-v sm" id="e-remaining">—</div><div class="stat-l">Non encore émis</div></div>
       </div>
       <div style="margin-top:14px;padding-top:14px;border-top:1px solid var(--border)">
         <div style="font-size:10px;color:var(--muted);text-transform:uppercase;letter-spacing:.5px;margin-bottom:10px">Faucet testnet</div>
@@ -451,9 +451,9 @@ async function refreshStatus() {
 async function refreshEconStats() {
   try {
     const s = await (await fetch(BASE + '/network/stats')).json();
-    document.getElementById('e-fee').textContent    = Number(BigInt(s.base_fee_atoms)).toLocaleString();
-    document.getElementById('e-supply').textContent = fmtAtoms(s.circulating_supply.split(' ')[0] + '000000000000000000').replace('.00 VINX','');
-    document.getElementById('e-foundry').textContent = s.foundry;
+    document.getElementById('e-fee').textContent       = Number(BigInt(s.base_fee_atoms)).toLocaleString();
+    document.getElementById('e-supply').textContent    = fmtAtoms(s.circulating_supply.split(' ')[0] + '000000000000000000').replace('.00 VINX','');
+    document.getElementById('e-remaining').textContent = s.remaining_supply;
   } catch {}
 }
 
@@ -982,7 +982,7 @@ const ADMIN_HTML: &str = r####"<!DOCTYPE html>
         <div><div class="stat-v" id="d-height">—</div><div class="stat-l">Hauteur</div></div>
         <div><div class="stat-v" id="d-mempool">—</div><div class="stat-l">Mempool</div></div>
         <div><div class="stat-v sm" id="d-version">—</div><div class="stat-l">Version protocole</div></div>
-        <div><div class="stat-v sm" id="d-foundry">—</div><div class="stat-l">La Fonderie</div></div>
+        <div><div class="stat-v sm" id="d-remaining">—</div><div class="stat-l">Non encore émis</div></div>
         <div><div class="stat-v sm" id="d-circ">—</div><div class="stat-l">Circulation</div></div>
         <div><div class="stat-v sm" id="d-fee">—</div><div class="stat-l">Base fee</div></div>
       </div>
@@ -1224,7 +1224,7 @@ async function refreshDash(){
     ]);
     set('d-height',h.height);set('d-mempool',h.mempool_pending);
     set('d-version',p.current_version);
-    set('d-foundry',s.foundry);set('d-circ',s.circulating_supply);
+    set('d-remaining',s.remaining_supply);set('d-circ',s.circulating_supply);
     set('d-fee',fmtAtoms(s.base_fee_atoms));
     const up=document.getElementById('u-current');
     up.textContent='Version courante : '+p.current_version+(p.pending_upgrade?' · upgrade planifiée v'+p.pending_upgrade.version+' le '+new Date(p.pending_upgrade.activation_ts*1000).toLocaleString():' · aucune upgrade en attente');

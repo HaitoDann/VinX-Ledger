@@ -341,7 +341,7 @@ fn print_banner(
     println!("  {mode}");
     println!("{line}");
     println!("  Admin     : {admin}");
-    println!("               (fair launch — aucun pre-mine ; 100 Md scellés dans La Fonderie)");
+    println!("               (fair launch — aucun pre-mine ; minting progressif, demi-vie ~20 ans)");
     println!("  Validator : {validator}");
     if let Some(fa) = faucet {
         println!("  Faucet    : {fa}");

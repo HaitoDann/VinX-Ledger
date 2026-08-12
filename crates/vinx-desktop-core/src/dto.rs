@@ -24,7 +24,8 @@ pub struct Account {
 #[derive(Debug, Serialize, Deserialize)]
 pub struct NetworkStats {
     pub base_fee_atoms: String,
-    pub foundry: String,
+    pub remaining_supply: String,
+    pub destroyed_atoms: String,
     pub circulating_supply: String,
     pub admin_address: Option<String>,
 }

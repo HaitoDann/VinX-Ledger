@@ -3,7 +3,7 @@ pub mod world_state;
 
 pub use genesis::{create_genesis_state, GenesisConfig};
 pub use world_state::{
-    v8_meta_suffix, v9_meta_suffix, AdminPolicy, GovernanceProposal, ModuleEntry, WorldState,
+    v8_meta_suffix, v9_meta_suffix, v10_meta_suffix, AdminPolicy, GovernanceProposal, ModuleEntry, WorldState,
 };
 
 #[cfg(test)]
@@ -177,14 +177,14 @@ mod tests {
         let amount = Amount::from_vinx(10_000);
         let fee = fee_for(amount);
 
-        let foundry_before = state.foundry_balance();
+        let pot_before = state.epoch_dist_emission_pot;
         let tx = Transaction::new_transfer(&sender_kp, receiver, amount, fee, 0);
         state.apply_transaction(&tx).unwrap();
         state.settle_block(&producer, 1);
 
-        // 100% of the fee goes to the block producer; the Foundry is untouched.
+        // 100% of the fee goes to the block producer; the epoch pot is untouched.
         assert_eq!(state.account_balance(&producer), fee);
-        assert_eq!(state.foundry_balance(), foundry_before);
+        assert_eq!(state.epoch_dist_emission_pot, pot_before);
     }
 
     #[test]
