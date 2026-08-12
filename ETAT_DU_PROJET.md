@@ -1,7 +1,7 @@
 # VinX Ledger — État du Projet
 
 > Document de référence interne — mis à jour à chaque sprint.
-> Dernière mise à jour : juillet 2026 (**série ADR — durcissement, anti-bloat, gouvernance décentralisée, modules, mise à l'échelle**). Base économique : fair launch v5 (whitepaper v4.0).
+> Dernière mise à jour : août 2026 (**décisions de design : récompenses par époque ADR 0028 révisé, Open PoA ADR 0038, suppression du Commerce Pool**). Base économique : fair launch v5 (whitepaper v4.0).
 
 ---
 
@@ -20,10 +20,10 @@
 > - **ADR 0020** — **vecteurs dorés** de sérialisation canonique (octets exacts figés).
 >
 > ### Proposé / à faire (design rédigé, non implémenté) — voir l'index ADR
-> Consensus & sûreté : **0002** (finir la finalité), **0027** (jailing), **0030** (accountability co-sign), **0031** (fork-choice), **0036** (churn validateurs). Économie/lancement : **0028** (partage d'émission), **0033** (bootstrap fair-launch). Modules : **0034** (DA & preuve d'ancre), **0023** (slashing de fraude). Gouvernance : **0032** (garde-fous, 🚧 à discuter). Scaling : **0029** (BLS + comité VRF), **0035** (bornes de ressources), **0037** (blocs compacts). Divers : **0012** (clés HSM), **0013** (rent d'état), **0014** (light client), **0016** (post-quantique), **0017** (halt), **0018** (SLO), **0019** (TLS).
+> Consensus & sûreté : **0002** (finir la finalité), **0027** (jailing), **0030** (accountability co-sign), **0031** (fork-choice), **0036** (churn validateurs). Économie/lancement : **0028** (récompenses par époque — Accepté, révisé), **0033** (bootstrap fair-launch). Admission validateur : **0038** (Open PoA permissionless — Accepté). Modules : **0034** (DA & preuve d'ancre), **0023** (slashing de fraude) ; rémunération des opérateurs **à définir (ADR à venir)**. Gouvernance : **0032** (garde-fous, 🚧 à discuter). Scaling : **0029** (BLS + comité VRF), **0035** (bornes de ressources), **0037** (blocs compacts). Divers : **0012** (clés HSM), **0013** (rent d'état), **0014** (light client), **0016** (post-quantique), **0017** (halt), **0018** (SLO), **0019** (TLS).
 >
 > ### ⚠️ Le chemin critique
-> Rien du backlog n'a de valeur tant que le **consensus multi-validateur (n≥3) n'est pas éprouvé au banc**. Priorité : monter un **banc 3-validateurs** → il débloque d'un coup 0002 (finalité), 0027 (jailing) et 0031 (fork-choice). Ensuite 0030 (sûreté, faible risque), puis 0028 (économie, avant que le réseau ait de la valeur).
+> Rien du backlog n'a de valeur tant que le **consensus multi-validateur (n≥3) n'est pas éprouvé au banc**. Priorité : monter un **banc 3-validateurs** → il débloque d'un coup 0002 (finalité), 0027 (jailing) et 0031 (fork-choice). Ensuite 0030 (sûreté, faible risque), puis 0028 (récompenses par époque, avant que le réseau ait de la valeur) et 0038 (Open PoA, synergique avec l'époque).
 
 ---
 
@@ -74,7 +74,7 @@ VinX Ledger est une blockchain L1 de paiement écrite intégralement en Rust, sa
 - [x] Supply totale : 100 milliards de VinX, **immuable, sans burn** (18 décimales) — courbe d'émission **gravée immuable** (ADR 0021)
 - [x] **Genèse sans pre-mine** : 0 en circulation, 100 Md scellés dans **La Fonderie**
 - [x] **Invariant vérifié à chaque bloc** (garde dure) : `circulating_supply + foundry == 100 Md` (ADR 0004)
-- [x] **Émission par le travail** : La Fonderie se vide *uniquement* pour rémunérer la production, décroissance par **halving 8 ans** (arithmétique entière déterministe), intégrée sur les **timestamps**. Créditée au producteur, **non pondérée par le bond**
+- [x] **Émission par le travail** : La Fonderie se vide *uniquement* pour rémunérer la production, décroissance par **halving 8 ans** (arithmétique entière déterministe), intégrée sur les **timestamps**. Actuellement créditée au producteur (100 %) — **ADR 0028 (Accepté, non implémenté)** introduira la distribution par époque entre proposeurs et co-signataires
 - [x] **Frais forfaitaires** (indépendants du montant), **100 % au producteur** (plus de melt) ; multiplicateur de congestion ×1–3
 - [x] **Dépôt existentiel + reaping** (ADR 0026) : plancher 0,001 VINX, comptes vidés supprimés de l'état
 
@@ -189,6 +189,10 @@ Le `WorldState` est l'état complet de la chaîne. Il est sérialisé sur disque
 | `modules` | `BTreeMap<Hash32, ModuleEntry>` | **Registre de modules bondés** (ADR 0010) |
 | `current_version` / `pending_upgrade` | | Version protocole + upgrade planifié (activation par timestamp, ADR 0006) |
 | `validator_set` | `ValidatorSet` | Validateurs actifs (quorum `⌈2n/3⌉`, round-robin) |
+| `epoch_dist_start_ts` | `u64` | *(à venir — ADR 0028)* Timestamp de début de l'époque de distribution en cours |
+| `epoch_dist_emission_pot` | `u128` | *(à venir — ADR 0028)* Émission accumulée dans l'époque, part co-signataires |
+| `epoch_dist_proposer_credits` | `BTreeMap<Address, u128>` | *(à venir — ADR 0028)* Crédits proposeur accumulés dans l'époque |
+| `epoch_dist_cosign_counts` | `BTreeMap<Address, u32>` | *(à venir — ADR 0028)* Nombre de co-signatures par validateur dans l'époque |
 
 ### `vinx-node` — Nœud complet
 
@@ -248,7 +252,7 @@ Actions disponibles :
 
 > La Fonderie se vide **uniquement** pour rémunérer la production de blocs, selon une décroissance par **halving tous les 8 ans** (`débit(t) = R₀·2^(−t/8 ans)`), **intégrée sur les timestamps** — une chaîne inactive ne produit aucun bloc (donc rien n'est forgé), et le premier bloc après une période d'activité forge l'émission accumulée depuis le précédent. La Fonderie ne se recharge jamais (aucun melt) — elle décroît de façon monotone jusqu'à la poussière, puis c'est **fees-only**. L'invariant `circulation + Fonderie = 100 Md` reste vrai trivialement.
 >
-> *Note d'incitation (voir ADR 0028) :* l'émission va aujourd'hui **100 % au producteur** ; l'ADR 0028 (proposé) la partagerait entre le proposeur et les co-signataires du quorum, pour rémunérer la finalité et lisser la distribution.
+> *Note d'incitation (voir ADR 0028 — Accepté, non implémenté) :* l'émission va aujourd'hui **100 % au producteur**. ADR 0028 la distribuera **par époque** (1 h par défaut) : une fraction `PROPOSER_SHARE_BPS` (20 % indicatif) revient au proposeur de chaque bloc, le reste va dans un pot partagé entre co-signataires proportionnellement à leur nombre de co-signatures dans l'époque. Les **frais** restent crédités au producteur **immédiatement** à chaque bloc, hors époque. À `n=1`, le comportement est identique (aucune régression).
 
 ---
 
@@ -460,14 +464,16 @@ sync_peer_rpc = "http://1.2.3.4:8545"  # Sync depuis un pair au démarrage
 |----------|----------|-----|
 | 🔴 **Critique** | **Banc 3-validateurs** — éprouver co-signing / quorum / finalité / tolérance de panne en réel. Débloque tout le reste du consensus. | (prérequis de 0002/0027/0031) |
 | 🔴 Haute | **Finir la finalité** (view-change, refus de bâtir trop loin), **fork-choice**, **jailing**, **accountability co-sign** | 0002, 0031, 0027, 0030 |
-| 🟠 Moyenne | **Partage d'émission sur le quorum** (avant que le réseau ait de la valeur), **bootstrap fair-launch** | 0028, 0033 |
-| 🟠 Moyenne | **Garde-fous de gouvernance** (🚧 à discuter), **bornes de churn** & **de ressources par tx** | 0032, 0036, 0035 |
-| 🟠 Moyenne | **Modules : DA & preuve d'ancre** puis **slashing de fraude** | 0034, 0023 |
+| 🟠 Moyenne | **Récompenses par époque** — distribuer l'émission entre proposeurs + co-signataires (1 h, `PROPOSER_SHARE_BPS=20 %`) ; frais restent immédiats au producteur | 0028 (Accepté) |
+| 🟠 Moyenne | **Open PoA** — admission permissionless par bond, veto collectif >66 % (7 j), S_perf scoring, expansion phasée immuable (3-5 → 10-21 → 50-101) | 0038 (Accepté) |
+| 🟠 Moyenne | **Bootstrap fair-launch**, **garde-fous de gouvernance** (🚧 à discuter), **bornes de churn** & **de ressources par tx** | 0033, 0032, 0036, 0035 |
+| 🟠 Moyenne | **Modules : DA & preuve d'ancre** puis **slashing de fraude** ; rémunération des opérateurs de modules (ADR à définir) | 0034, 0023 |
 | 🟢 Future | **Décentralisation à l'échelle** (BLS + comité VRF), **blocs compacts** | 0029, 0037 |
 | 🟢 Future | Light client (0014), rent d'état (0013), clés HSM (0012), halt d'urgence (0017), TLS natif (0019), post-quantique (0016), SLO (0018) | — |
 
 ### Déjà fait (historique)
 
+- **Décisions de design — août 2026** : ADR 0028 révisé (récompenses par **époque** plutôt que par bloc) ; ADR 0038 créé (**Open PoA** — admission permissionless par bond, veto collectif, S_perf, expansion phasée immuable) ; **Commerce Pool supprimé** (design rejeté — gameable, incite aux transactions artificielles, valeur insuffisante).
 - **Cette série (durcissement & extensions)** : vérif parallèle des signatures (0015), dépôt existentiel + reaping (0026), durcissement P2P anti-DoS (0022), gouvernance K-of-M (0011), registre de modules bondés (0010), vecteurs dorés canoniques (0020). *Plus* un lot antérieur « cohérence & robustesse » : chain_id sûr (0008), immutabilité d'émission (0021), temps réseau (0005), frais stake/unstake (0009), unification gouvernance (0007), préavis upgrade temps réel (0006).
 - **Refonte économique fair launch v5** : genèse sans pre-mine, émission par le travail (halving 8 ans), frais forfaitaires au producteur, bond de validateur + déliaison temps réel, slashing réparé (vérification cryptographique réelle).
 - **Itérations plus anciennes** : console admin `/admin`, robustesse au démarrage, clés typées + ahash, capacités relevées (10k tx/bloc, mempool 100k), cadence de bloc adaptative, migration de schéma sans wipe.

@@ -1,13 +1,15 @@
-# ADR 0028 — Partage de l'émission sur le quorum de finalité
+# ADR 0028 — Partage de l'émission par époque
 
-- **Statut :** Proposé
+- **Statut :** Accepté (décision de design) — **non implémenté** à ce jour.
 - **Catégorie :** Tokenomics & frais / Consensus · **Priorité :** 🟠 moyenne
-- **Date :** Juillet 2026
+- **Date :** Juillet 2026 — révisé Août 2026 (passage au modèle par époque)
 - **Liens :** modifie la distribution (pas la courbe) de l'émission (ADR 0021, respectée) ;
   s'appuie sur la finalité au quorum (ADR 0002) ; adresse la concentration early (contexte
-  fair launch).
+  fair launch) ; s'articule avec l'admission Open PoA (ADR 0038).
 
-## Contexte
+---
+
+## 1. Contexte
 
 Aujourd'hui, `emit_work_reward` crédite **100 % de l'émission (et des frais) au seul
 producteur** du bloc. Or :
@@ -22,92 +24,138 @@ producteur** du bloc. Or :
    du prochain producteur est grosse → micro-pression **contre la liveness**.
 4. **Concentration early** (fair launch) : le halving front-load 50 % de la masse sur 8 ans ;
    si peu d'acteurs proposent tôt, ils captent l'essentiel. Le *winner-take-all* amplifie.
+5. **Coût en crédits à l'échelle** : créditer individuellement N validateurs à chaque bloc
+   (N pouvant croître jusqu'à 101 avec ADR 0038) génère des opérations d'état par bloc
+   proportionnelles à la taille du set → coût prohibitif à grande échelle.
 
-## Décision proposée
+## 2. Décision
 
-**Répartir l'émission de chaque bloc entre son proposeur et les co-signataires qui l'ont
-finalisé**, au lieu de tout donner au proposeur. Cela **ne touche pas la courbe d'émission**
-(ADR 0021 immuable) : le **total émis par unité de temps est identique** ; seule la
-**distribution entre validateurs** change.
+**Distribuer l'émission par époque** — une fenêtre temporelle définie — au lieu de bloc
+par bloc. Les **frais** restent crédités au producteur **immédiatement** à chaque bloc.
 
-### Où et quand créditer
+> La courbe d'émission (ADR 0021) est **inchangée** : la masse totale par unité de temps
+> est identique. Ce que change cet ADR : le *rythme et la répartition* de la distribution,
+> pas la *masse créée*.
 
-Les co-signatures arrivent **après** la production (le bloc est diffusé, puis les
-`BlockCoSignature` sont gossipées). Au moment de `settle_block`, le proposeur n'a que sa
-propre signature. Donc le partage impose de **créditer l'émission à la finalisation**, pas à
-la production :
+### 2.1 Époque de distribution
 
-> Quand un bloc `H` atteint le quorum et devient **finalisé** (avance de `finalized_height`,
-> prefix-closed, ADR 0002), on distribue l'émission accumulée qui lui est attribuée :
-> - `PROPOSER_SHARE_BPS` au proposeur (récompense de la mise en ordre + inclusion),
-> - le reste **à parts égales entre les co-signataires valides** du bloc finalisant.
+Une **époque** est une fenêtre de durée `EPOCH_DURATION_SECS` (paramètre gouvernable,
+valeur indicative : 3 600 s = 1 heure). L'émission accumulée sur l'époque est distribuée
+en **une seule passe** à la clôture.
 
-La finalité étant *prefix-closed*, chaque bloc finalise dans l'ordre → attribution par bloc
-sans ambiguïté. L'émission est toujours **forgée depuis la Fonderie** ; seul le **nombre de
-bénéficiaires** change. L'invariant de masse (ADR 0004) tient (Fonderie −x, N comptes +x).
+#### Accumulation (à chaque bloc finalisé dans l'époque)
 
-### Frais
+Pour chaque bloc `B` dont les co-signatures atteignent le quorum dans l'époque courante :
 
-Les **frais** peuvent suivre la même règle (partagés) ou rester au proposeur (il assume
-l'inclusion et la construction du bloc). Recommandation tranche 1 : **frais au proposeur,
-émission partagée** — les frais rémunèrent le travail d'inclusion, l'émission rémunère la
-sécurité collective (co-signatures).
+```
+block_emission_B  = curve(ts_B) − emitted_avant_B     (forgé depuis la Fonderie, inchangé)
+part_proposeur_B  = block_emission_B × PROPOSER_SHARE_BPS / 10_000
+pot_cosignataires += block_emission_B − part_proposeur_B
 
-### Répartition égalitaire
+proposer_credits[proposeur_de_B] += part_proposeur_B
+pour chaque co-signataire v valide du bloc B :
+    cosign_count[v] += 1
+```
 
-Le partage entre co-signataires est **à parts égales** (une signature = une part), **pas
-pondéré par le bond** — cohérent avec l'ethos VinX (`test_emission_is_not_weighted_by_bond`) :
-aucun avantage aux baleines. Le `PROPOSER_SHARE_BPS` est un paramètre de politique (p.ex.
-20–40 %), **gouvernable** (contrairement à la courbe) car il ne change pas la masse.
+#### Distribution (à la clôture de l'époque)
 
-## Modèle
+Quand `timestamp_bloc_courant ≥ epoch_start_ts + EPOCH_DURATION_SECS` :
 
-- L'émission d'un bloc = `curve(ts_H) − emitted_avant_H`, forgée à la finalisation de `H`.
-- `part_proposeur = émission × PROPOSER_SHARE_BPS / 10_000`.
-- `reste = émission − part_proposeur`, réparti en `reste / k` à chacun des `k` co-signataires
-  (le résidu de division entière va au proposeur — déterministe, pas de perte).
-- Crédits soumis au dépôt existentiel (ADR 0026) : un validateur est bondé (`staked > 0`) donc
-  exempté du plancher, jamais poussière.
+1. Créditer chaque proposeur depuis `proposer_credits[addr]` (accumulé au fil des blocs).
+2. Calculer `total_cosign_events = Σ cosign_count[v]`.
+3. Si `total_cosign_events > 0` : chaque co-signataire `v` reçoit
+   `floor(pot_cosignataires × cosign_count[v] / total_cosign_events)`.
+4. Le **résidu** (troncature entière) va au validateur ayant le plus de co-signatures dans
+   l'époque — déterministe, zéro perte de atoms.
+5. Réinitialiser : `pot_cosignataires = 0`, `proposer_credits = {}`, `cosign_count = {}`,
+   `epoch_start_ts += EPOCH_DURATION_SECS`.
 
-## Conséquences
+L'invariant de masse (ADR 0004) tient : Fonderie −x, Σ comptes +x, avec x = émission totale
+de l'époque. La Fonderie décroît de façon monotone sur chaque époque.
+
+### 2.2 Frais — inchangés, immédiats
+
+Les **frais de transaction** restent crédités au producteur du bloc **immédiatement**, hors
+mécanisme d'époque. Ils rémunèrent le travail d'**inclusion** (sélection, ordering, infra)
+qui revient au proposeur. Seule l'**émission** rémunère la sécurité collective (co-signatures)
+et passe donc par l'époque.
+
+### 2.3 Répartition proportionnelle à la participation
+
+La part d'un co-signataire est **proportionnelle au nombre de blocs co-signés** dans l'époque.
+Un validateur ayant co-signé 90 % des blocs gagne 9× plus qu'un validateur en ayant co-signé
+10 %. Ce n'est pas une égalité stricte entre validateurs mais une égalité **par acte de
+co-signature** — chaque co-sign vaut la même fraction du pot, indépendamment de qui le pose.
+
+> **Cohérence avec ADR 0027 (jailing)** : un validateur jailé ne co-signe plus → son
+> `cosign_count` est zéro → il ne reçoit aucune émission de l'époque. Incitation douce
+> à la disponibilité, sans slash économique du bond.
+
+### 2.4 Paramètres
+
+| Paramètre | Gouvernable ? | Valeur indicative | Rôle |
+|---|---|---|---|
+| `EPOCH_DURATION_SECS` | Oui | 3 600 s (1 h) | Durée d'une époque |
+| `PROPOSER_SHARE_BPS` | Oui | 2 000 (20 %) | Part du proposeur dans l'émission du bloc |
+
+Les deux paramètres sont **gouvernables** (ne touchent pas la courbe d'émission, ADR 0021
+immuable). Une valeur de `PROPOSER_SHARE_BPS = 10_000` revient au modèle actuel (100 % au
+proposeur) ; `0` donne tout aux co-signataires — les deux extrêmes sont valides.
+
+### 2.5 Comportement à n = 1 (bootstrap)
+
+À un seul validateur, il est à la fois le seul proposeur et le seul co-signataire → il reçoit
+l'intégralité de l'émission de l'époque. Comportement **identique à aujourd'hui** — pas de
+régression au bootstrap.
+
+## 3. Conséquences
 
 **Positif**
-- Rémunère la **participation à la finalité** → renforce la sécurité qu'on demande déjà.
-- **Lisse** les revenus sur l'ensemble des signataires → meilleure décentralisation, atténue
-  la concentration early (Q4) **sans** toucher l'émission immuable.
-- **Réduit l'incitation à retarder** : la manne d'un long silence se partage, elle n'enrichit
-  plus un seul acteur.
-- Synergie avec l'ADR 0027 : rater ses co-signatures réduit naturellement le revenu (incitation
-  douce à la fiabilité, sans peine subjective).
+- **Rémunère la finalité** → renforce l'incitation à co-signer, qui est le cœur du consensus.
+- **Lisse les revenus** : plus de grumeaux géants sur un seul proposeur ; distribution régulière.
+- **Réduit l'incitation à retarder** : la manne d'un long silence se dilue sur toute l'époque.
+- **Moins de transactions de crédit** : une seule passe par époque, quelle que soit la taille
+  du set (O(1) par époque au lieu de O(N) par bloc).
+- **Synergie avec ADR 0038 (Open PoA)** : plus le set grandit, plus l'époque est efficace.
 
 **Coûts / pièges**
-- **Déplace le moment du crédit** de la production vers la finalisation → change quand
-  l'émission entre en circulation ; à réconcilier avec `finalized_height`, l'invariant de
-  masse et les tests. Changement **consensus-critique**.
-- À `n = 1` (mono-validateur, finalité immédiate), le proposeur = unique co-signataire → il
-  reçoit tout : comportement identique à aujourd'hui (pas de régression au bootstrap).
-- Un bloc non finalisé n'émet pas encore : l'émission « en attente » doit être suivie
-  proprement (idempotence, pas de double crédit à la finalisation).
+- **Champs d'état supplémentaires** dans `WorldState` (pot, credits, cosign counts, epoch ts) →
+  changement **consensus-critique** ; bump de version de stockage.
+- **Délai de paiement** : les co-signataires attendent la fin de l'époque (≤ 1 h en config
+  par défaut). Acceptable pour un réseau de paiement ; à documenter pour les opérateurs.
+- **Bord d'époque** : le passage d'époque est déclenché par le timestamp du premier bloc
+  qui dépasse `epoch_start_ts + EPOCH_DURATION_SECS` — déterministe et identique sur tous les
+  nœuds. Si aucun bloc n'est produit pendant plusieurs époques, la clôture de toutes les
+  époques vides est traitée en séquence au bloc suivant (époques vides = distribution nulle).
+- **Idempotence** : la clôture d'époque doit être idempotente et rejouable (replay de sync).
 
-## Alternatives écartées
+## 4. Alternatives écartées
 
-- **Garder 100 % au proposeur** : rejeté — sous-paie la finalité, concentre, incite à retarder.
+- **Partage par bloc, à la finalisation** (version initiale de cet ADR) : rejeté — O(N)
+  crédits par bloc → coût prohibitif à grande échelle (N jusqu'à 101) ; revenus toujours
+  en grumeaux à chaque finalisation.
+- **Garder 100 % au proposeur** : rejeté — sous-paie la finalité, concentre l'émission,
+  incite à retarder.
 - **Pondérer les parts par le bond** : rejeté — casse l'égalitarisme volontaire de VinX,
   favorise les baleines.
-- **Toucher la courbe d'émission pour lisser le début** : rejeté — l'ADR 0021 l'a gravée
-  immuable ; c'est une feature de confiance. Ce ADR agit sur la **distribution**, jamais sur la
-  masse.
-- **Créditer à la production avec les co-sigs connues d'avance** : impossible — les co-sigs
-  arrivent après la diffusion du bloc.
+- **Commerce Pool** (redistribution vers l'activité transactionnelle) : rejeté — gameable
+  (volume artificiel), ne crée pas de valeur réelle, sort l'émission du périmètre de la
+  sécurité du consensus.
+- **Toucher la courbe d'émission pour lisser le début** : rejeté — ADR 0021 l'a gravée
+  immuable ; ce ADR agit sur la **distribution**, jamais sur la **masse**.
 
-## Notes d'implémentation
+## 5. Notes d'implémentation
 
-- `vinx-core` : `PROPOSER_SHARE_BPS` (gouvernable via `UpdateFeeFloor`-like ou nouvelle action).
-- `vinx-state` : déplacer l'attribution de l'émission de `settle_block` (production) vers le
-  point de finalisation ; répartir sur `block.signatures` valides ; suivre l'émission en
-  attente par bloc pour éviter tout double crédit ; conserver l'invariant de masse (ADR 0004).
-- Tests : somme des crédits = émission forgée (conservation), parts égales + résidu au
-  proposeur, `n=1` inchangé, pas de double crédit, exemption ED des validateurs (ADR 0026),
-  idempotence à la finalisation.
-- Dépendance : nécessite la finalité prefix-closed (ADR 0002) et le banc n≥2 pour valider le
-  flux co-signatures→crédit.
+- `vinx-core` : constantes `EPOCH_DURATION_SECS` + `PROPOSER_SHARE_BPS` (gouvernables).
+- `vinx-state` : ajouter à `WorldState` :
+  `epoch_dist_start_ts: u64`, `epoch_dist_emission_pot: u128`,
+  `epoch_dist_proposer_credits: BTreeMap<Address, u128>`,
+  `epoch_dist_cosign_counts: BTreeMap<Address, u32>`.
+  `settle_block` → accumuler (plus créditer immédiatement pour l'émission).
+  `close_epoch_if_due` → distribuer puis réinitialiser ; appelé dans la boucle de production
+  et à la réception P2P (avant ou après `settle_block`, ordre déterministe à préciser).
+- Bump `STORAGE_VERSION` : `epoch_dist_*` appendés → migration append (préfixe strict).
+- Tests : conservation (Σ crédits = émission de l'époque), proportionnalité co-signatures,
+  `n=1` inchangé, pas de double crédit, bord d'époque à timestamp exact, époques vides,
+  idempotence, exemption ED des validateurs (ADR 0026).
+- Dépendances : ADR 0002 (finalité), ADR 0038 (Open PoA, synergique pour l'échelle).

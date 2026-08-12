@@ -5,6 +5,41 @@ Format : `MAJEUR.MINEUR.CORRECTIF` — les versions `0.x.y` sont des versions de
 
 ---
 
+## [0.42.0] — Décisions architecturales : Open PoA, récompenses par époque (ADR 0038, 0028 révisé)
+
+> **Décisions de design uniquement** (aucun code modifié). Consolide les choix stratégiques
+> issus de la revue d'architecture sur le modèle d'émission et d'admission des validateurs.
+
+- **Commerce Pool retiré.** Le mécanisme de redistribution secondaire d'émission vers les
+  adresses actives (volume de transactions, destinataires distincts) est **abandonné avant
+  même d'avoir été implémenté**. Gameable (volume artificiel, transactions circulaires), il
+  n'induit pas de création de valeur réelle et sort l'émission du périmètre de la sécurité du
+  consensus. L'émission reste réservée au travail de consensus (proposeurs + co-signataires).
+
+- **ADR 0028 révisé — partage de l'émission par époque** (remplace le partage « par bloc à
+  la finalisation »). L'émission accumulée sur une fenêtre `EPOCH_DURATION_SECS` (gouvernable,
+  ex. 1 h) est distribuée en **une seule passe** à la clôture : `PROPOSER_SHARE_BPS` aux
+  proposeurs au prorata de leurs blocs, le reste proportionnellement aux co-signatures valides
+  de l'époque. Les **frais** restent au producteur **immédiatement** hors époque. Bénéfices :
+  moins de transactions de crédit (O(1) par époque vs O(N) par bloc), revenus plus lisses,
+  préparation à un set de 50–101 validateurs (ADR 0038). Statut : Accepté (design, non impl.).
+
+- **ADR 0038 — Admission permissionless (Open PoA).** Bond → file automatique sans approbation
+  admin individuelle. Veto collectif (>66 % des validateurs actifs, fenêtre 7 jours). L'admin
+  ne fixe que le montant du bond via gouvernance. Score `S_perf` uniquement (taux de
+  co-signature et de proposition, 100 % déterministe on-chain) — pas de délégation DPoS ni de
+  pondération par le bond (pas d'avantage aux baleines). Expansion phasée **automatique et
+  immuable depuis la genèse** : Phase 1 (3–5, gouvernance-gated) → Phase 2 (10–21, Open PoA)
+  → Phase 3 (50–101, Open PoA). **Prérequis** : ADR 0002/0027/0031 éprouvés avant Phase 2.
+  Statut : Accepté (design, non impl.).
+
+- **Modules — rémunération différée.** L'architecture d'ancrage bondé (ADR 0001/0010) est
+  maintenue. La question de la rémunération des opérateurs de modules est **délibérément
+  hors-scope** de cette série — à traiter dans un ADR dédié quand l'architecture de modules
+  sera plus avancée.
+
+---
+
 ## [0.41.0] — Vecteurs dorés de sérialisation canonique (ADR 0020, tranche 2)
 
 > Ajout **non-breaking** (tests uniquement) : fige les octets exacts des encodages consensus-critiques.

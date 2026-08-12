@@ -83,7 +83,7 @@ L'intégrale sur l'infini vaut exactement **100 milliards** : toute la supply fi
 
 ### 3.3 Deux propriétés clés de l'émission
 
-- **Créditée au producteur du bloc, jamais pondérée par le bond.** En rotation round-robin, chaque validateur produit environ 1 bloc sur *n* et encaisse donc ~1/*n* de l'émission sur la durée. **Le montant du bond ne multiplie pas les gains** : validateurs égaux, revenus espérés égaux. VinX refuse la logique plutocratique du « plus je stake, plus je gagne ».
+- **Distribuée par époque, jamais pondérée par le bond.** L'émission accumulée sur une fenêtre temporelle (époque) est distribuée entre proposeurs et co-signataires : les proposeurs reçoivent une fraction fixe (`PROPOSER_SHARE_BPS`) proportionnelle à leurs blocs dans l'époque ; le reste est réparti proportionnellement aux co-signatures valides. **Le montant du bond ne multiplie pas les gains** : seul le travail effectif compte (blocs proposés et co-signés). VinX refuse la logique plutocratique du « plus je stake, plus je gagne ».
 - **En temps réel.** L'émission entre deux blocs est l'intégrale du débit sur l'intervalle `[timestamp précédent, timestamp courant]`. Si le réseau reste au repos, le bloc qui le réveille encaisse l'émission accumulée pendant toute la période creuse — on rémunère le temps réel écoulé **sans** produire de blocs vides au repos.
 
 ### 3.4 Le relais automatique vers les frais
@@ -120,18 +120,20 @@ frais = FRAIS_BASE × poids(type) × multiplicateur_congestion
 
 > VinX abandonne l'ancien frais *ad valorem* (0,05 % du montant), qui taxait injustement les gros paiements légitimes sans justification technique.
 
-### 4.2 100 % au validateur producteur
+### 4.2 Frais au producteur, émission par époque
 
-**L'intégralité du frais est créditée au validateur qui produit le bloc.** Ce sont les seuls acteurs qui effectuent un travail réel (produire et co-signer les blocs, faire tourner l'infra) ; les payer directement est le modèle le plus honnête.
+**L'intégralité des frais est créditée immédiatement au validateur qui produit le bloc.** Les frais rémunèrent le travail d'**inclusion** (sélection des transactions, construction du bloc, infra) — une responsabilité qui appartient uniquement au proposeur.
 
-Le frais **ne quitte jamais la circulation** — il change simplement de main, de l'expéditeur vers le validateur. Il n'y a plus de *melt*, plus de réserve intermédiaire, plus de redistribution à des tiers passifs.
+L'**émission**, elle, rémunère la **sécurité collective** (co-signatures qui donnent la finalité). Elle est distribuée par **époque** (fenêtre temporelle, ex. 1 heure) entre proposeurs et co-signataires — proportionnellement à leur participation effective sur l'époque.
+
+Le frais et l'émission **ne quittent jamais la circulation** — ils changent simplement de main. Il n'y a plus de *melt*, plus de réserve intermédiaire, plus de redistribution à des tiers passifs.
 
 ```
-[Émission] ──(travail des validateurs)──► circulation ──► paiements P2P
+[Émission — par époque] ──► proposeurs + co-signataires ──► circulation
                                                               │
    ┌──────────────────────────────────────────────────────────┘
    ▼
-[Frais forfaitaires] ──► validateur producteur ──► circulation ──► …
+[Frais forfaitaires — immédiats] ──► validateur producteur ──► circulation ──► …
 ```
 
 ---
@@ -155,19 +157,24 @@ Dans un réseau **PoA permissionné**, la sécurité vient de l'identité légal
 
 ## 6. Infrastructure : Validateurs & Full Nodes
 
-### 6.1 Validateurs Core (PoA Threshold)
+### 6.1 Validateurs Core (PoA Threshold — Open PoA)
 
-Liste restreinte de nœuds sélectionnés, opérés par VinX Labs et des partenaires de confiance, **légalement identifiés et responsables**.
+Nœuds qui produisent et co-signent les blocs, responsables de la sécurité du réseau.
 
 **Rôle** : proposer et co-signer les blocs, maintenir le consensus, garantir la disponibilité du réseau.
 
-**Mécanisme** : Proof of Authority Threshold — à chaque bloc, le validateur désigné (rotation déterministe) propose un bloc. Ce bloc est finalisé lorsque **plus de 66 % des validateurs actifs** (≥ 14 sur 21 à maturité) l'ont co-signé. La finalité est déterministe : un bloc quorum-signé ne peut jamais être réorganisé.
+**Mécanisme** : Proof of Authority Threshold — à chaque bloc, le validateur désigné (rotation déterministe) propose un bloc. Ce bloc est finalisé lorsque **plus de 66 % des validateurs actifs** l'ont co-signé. La finalité est déterministe : un bloc quorum-signé ne peut jamais être réorganisé.
 
-**Tolérance aux pannes** : le réseau reste opérationnel tant que 66 % des validateurs sont en ligne. Jusqu'à 33 % de validateurs hors-ligne ou défaillants sont tolérés sans interruption.
+**Tolérance aux pannes** : le réseau reste opérationnel tant que 66 % des validateurs sont en ligne.
 
-**Rémunération** : par leur **travail** uniquement — l'émission (forte au début) puis les frais (dominants à terme). Pour rejoindre le set, un validateur doit poser un **bond** (§5) ; ce bond le sécurise, il ne le rémunère pas.
+**Admission — Open PoA :** à partir de la Phase 2, n'importe qui peut candidater en postant le bond requis — sans approbation admin individuelle. Les validateurs existants peuvent opposer un veto collectif (>66 %, fenêtre 7 jours). L'admin fixe seulement le montant du bond via gouvernance. Le set s'élargit en **trois phases automatiques et immuables**, gravées à la genèse :
+- Phase 1 (bootstrap) : 3–5 validateurs, admission gouvernance-gated le temps d'éprouver le consensus.
+- Phase 2 : 10–21 validateurs, Open PoA.
+- Phase 3 : 50–101 validateurs, Open PoA.
 
-**Évolution** : 1 (local) → 3 (redondance), extensible ensuite.
+**Rémunération** : par leur **travail** uniquement — l'émission distribuée par époque (proposeurs + co-signataires) puis les frais immédiats. Pour candidater, un validateur poste un **bond** (§5) ; ce bond le sécurise, il ne le rémunère pas.
+
+**Score S_perf** : l'attribution des slots suit un score basé sur le taux de co-signature et de proposition réussie, 100 % déterministe et on-chain. Pas de délégation DPoS, pas de pondération par le bond.
 
 ### 6.2 Full Nodes Communautaires
 

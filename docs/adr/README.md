@@ -78,9 +78,13 @@ Rien ci-dessous n'est décidé — ce sont des propositions à instruire une par
 
 ### Tokenomics & frais
 
-- **0028 — [Partage de l'émission sur le quorum de finalité](./0028-partage-emission-quorum.md)** 🟠 **— Proposé**
-  *Problème :* 100 % de l'émission va au seul proposeur ; la co-signature (qui donne la finalité) est un travail non payé, les revenus sont en grumeaux, et le *winner-take-all* + émission temporelle amplifie la concentration early (fair launch) et l'incitation à retarder.
-  *Direction :* répartir l'émission de chaque bloc entre le proposeur (`PROPOSER_SHARE_BPS`, gouvernable) et les **co-signataires** qui l'ont finalisé, à parts égales (non pondéré par le bond). **Ne touche pas la courbe** (ADR 0021 immuable) : même masse par unité de temps, distribution différente. Impose de créditer à la **finalisation** (les co-sigs arrivent après la production). À `n=1` : inchangé.
+- **0028 — [Partage de l'émission par époque](./0028-partage-emission-quorum.md)** 🟠 **— Accepté (design, non implémenté)**
+  *Problème :* 100 % de l'émission va au seul proposeur ; la co-signature (qui donne la finalité) est un travail non payé, les revenus sont en grumeaux, et le *winner-take-all* amplifie la concentration early et l'incitation à retarder. À grande échelle (set jusqu'à 101), créditer N validateurs par bloc est prohibitif.
+  *Direction :* **modèle par époque** — l'émission s'accumule dans un pot sur une fenêtre `EPOCH_DURATION_SECS` (ex. 1 h), puis est distribuée en une seule passe : `PROPOSER_SHARE_BPS` (gouvernable) aux proposeurs au prorata de leurs blocs, le reste proportionnellement aux co-signatures valides de l'époque. Les frais restent au producteur immédiatement (hors époque). **Ne touche pas la courbe** (ADR 0021 immuable). À `n=1` : inchangé.
+
+- **0038 — [Admission permissionless au set de validateurs (Open PoA)](./0038-open-poa-admission.md)** 🟠 **— Accepté (design, non implémenté)**
+  *Problème :* l'admission gouvernance-gatée crée une contradiction avec le fair launch — l'admin choisit les individus → l'admin choisit qui gagne l'émission.
+  *Direction :* **Open PoA** — le bond suffit à entrer dans la file (pas d'approbation admin individuelle) ; veto collectif des validateurs existants (>66 %, fenêtre 7 jours) ; l'admin ne fixe que le montant du bond. Score `S_perf` uniquement (taux de co-signature et de proposition, 100 % déterministe on-chain, pas de DPoS/W_stake). Expansion phasée **automatique et immuable depuis la genèse** : Phase 1 (3–5, gouvernance-gated pendant le bootstrap) → Phase 2 (10–21, Open PoA) → Phase 3 (50–101, Open PoA). **Prérequis** : ADR 0002/0027/0031 éprouvés avant Phase 2.
 
 - **0033 — [Genèse & bootstrap de fair-launch](./0033-genese-bootstrap-fair-launch.md)** 🟠 **— Proposé**
   *Problème :* le lancement n'est pas cadré (`GenesisConfig` = 1 validateur + 1 clé admin) ; si le set de départ est petit et gated pendant la fenêtre de forte émission, une poignée d'acteurs capte le front-loading → contredit le fair-launch (le vrai risque du Q4 : *peu* gagnent beaucoup).
