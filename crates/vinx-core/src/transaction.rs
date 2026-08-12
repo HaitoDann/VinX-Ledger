@@ -83,6 +83,31 @@ fn default_chain_id() -> u32 {
 }
 
 impl Transaction {
+    /// Worst-case balance debit this transaction imposes on its **sender** when
+    /// applied, in atoms. Used by stateful mempool admission (anti-spam): the
+    /// sender must actually hold what the transaction claims to spend, otherwise
+    /// a zero-balance account could poison the fee-priority queue with unpayable
+    /// high-fee transactions for free.
+    ///
+    /// Sponsored transfers exclude the fee (the sponsor pays it — checked
+    /// separately). Unstake moves staked funds back to the balance, so the
+    /// sender's balance is only ever debited the fee (zero under the ADR 0009
+    /// exemption); same for the remaining administrative types.
+    pub fn admission_cost_atoms(&self) -> u128 {
+        match self.tx_type {
+            TransactionType::Transfer => {
+                let amount = self.amount.atoms();
+                if self.sponsor.is_some() {
+                    amount
+                } else {
+                    amount.saturating_add(self.fee.atoms())
+                }
+            }
+            TransactionType::Stake => self.amount.atoms().saturating_add(self.fee.atoms()),
+            _ => self.fee.atoms(),
+        }
+    }
+
     /// Canonical byte layout signed by the sender (and sponsor). Does NOT include
     /// `pub_key` or `signature`.
     ///

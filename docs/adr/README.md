@@ -27,12 +27,14 @@ Rien ci-dessous n'est décidé — ce sont des propositions à instruire une par
 
 - **0002 — Finalité au quorum** 🔴 **— ✅ tranche 1 implémentée**
   *Problème :* le producteur commite le bloc avec sa **seule** signature ; le quorum n'est vérifié qu'*a posteriori*.
-  *Fait :* pointeur `finalized_height` explicite et **prefix-closed** (avance sur le préfixe contigu de blocs quorum-signés), mis à jour à la production et à chaque co-signature, exposé sur `/health`, avec `is_final(height)`. À n=1 la finalité est immédiate ; à n≥2 elle suit les co-signatures.
-  *Reste (nécessite le banc 3-validateurs) :* refuser de bâtir au-delà d'une profondeur non finalisée, view-change formel, latence de finalité = 1 aller-retour.
+  *Fait :* pointeur `finalized_height` explicite et **prefix-closed** (avance sur le préfixe contigu de blocs quorum-signés), mis à jour à la production et à chaque co-signature, exposé sur `/health`, avec `is_final(height)`. À n=1 la finalité est immédiate ; à n≥2 elle suit les co-signatures. **+ Refus de bâtir dans le vide** : le producteur (leader **et** backup) refuse de sceller au-delà de `MAX_UNFINALIZED_DEPTH` (64) blocs non finalisés au-dessus de la finalité → borne les forks concurrents et la fenêtre du fork-choice (0031). À n=1 jamais déclenché ; mord seulement si la finalité est réellement bloquée. Testé.
+  **+ Banc multi-process réel** (`scripts/bench-n3.sh`) : amorce n=3 (genèse partagée déterministe + pré-financement dev), et **valide en réel** liveness (finalité en lockstep), tolérance à 1 panne (2/3 finalise), et sûreté (finalité gelée à 1/3). A **révélé et corrigé** un bug : gossip **et** sync rejetaient les blocs **backup** (proposeur ≠ leader strict) → finalité figée dès n≥2 ; désormais tout validateur enregistré peut proposer, aligné sur `consensus::validate_block`.
+  **+ Fait — quorum historique (✅ corrigé, validé au banc) :** `advance_finality` évalue chaque bloc contre le **quorum du set (complet) bondé à sa hauteur** (schedule `(from_height, quorum)` reconstruit déterministiquement à l'application, `Chain::note_quorum`/`quorum_at`), et non contre le seul quorum courant. Corrige le blocage du préfixe après un **changement de set par gouvernance** (banc : les 3 nœuds finalisent en lockstep 7→10). `advance_finality` aussi rappelé sur les chemins de sync (P2P + HTTP). **Note (ADR 0027 t2b) :** ce quorum-par-hauteur suit les changements de **taille du set** (gouvernance), **pas** le jailing — le jailing ne réduit jamais le seuil de finalité (sûreté sous partition).
+  *Reste (nécessite le banc 3-validateurs) :* view-change formel, latence de finalité = 1 aller-retour ; persistance du schedule quorum (aujourd'hui reconstruit à l'application → après reload, repli sur le quorum courant pour le petit suffixe non finalisé).
 
-- **0027 — [Fiabilité & jailing des validateurs](./0027-fiabilite-jailing-validateurs.md)** 🟠 **— Proposé**
+- **0027 — [Fiabilité & jailing des validateurs](./0027-fiabilite-jailing-validateurs.md)** 🟠 **— ✅ t1 (cœur pur) + t2a (état câblé) + t2b (rotation, validé au banc n=3) ; Unjail & règle 2 à venir**
   *Problème :* aucun mécanisme pour écarter un validateur lent/hors-ligne (distinct du slashing d'équivocation) ; un leader mort dégrade la liveness à chaque tour.
-  *Direction :* note de fiabilité **déterministe** (slots manqués + co-signatures absentes, jamais la latence subjective → fork) pilotant un **jailing** réversible (retrait de rotation, bond conservé, unjail après cooldown). Attribution propre en block-on-demand (un créneau inactif n'est pas un manquement). Complète le view-change de l'ADR 0002.
+  *Fait (t1) :* `vinx-core::reliability` — fonctions **pures et déterministes** (attribution des manquements, jailing au seuil, set actif, quorum ajusté, unjail, plancher de liveness ; 5 tests). *Fait (t2a) :* **état câblé dans la transition** — champ `WorldState.reliability` (dernier champ sérialisé), **migration meta v10→v11** (append map vide, testée), mis à jour déterministiquement dans `settle_block` (hook universel : production/backup/P2P/sync) avec le proposeur effectif → table identique sur tous les nœuds. *Fait (t2b) :* la **rotation** leader (`produce_block`) et la file de **backup** (`try_backup_production`) opèrent sur le **set actif** (`active_leader_at`/`active_validators`, jailés sautés). **⚠️ Correction de sûreté (révélée par le banc n=3) :** le **quorum de finalité reste sur le set complet bondé** (`⌈2n/3⌉`), **jamais** réduit par le jailing — la table `reliability` est dérivée/subjective sous partition ; la réduire laisserait une minorité (split 1│2) jailer la majorité dans sa vue, tomber à quorum 1 et finaliser une branche rivale (double-finalité). Seule la gouvernance (`RemoveValidator`, committée) réduit `n`. Banc : à 1/3 vivant la finalité **gèle**, à 2/3 elle avance. *Reste :* tx `Unjail` (opérateur, après cooldown), règle 2 (co-signatures absentes).
 
 - **0029 — [Décentralisation à grande échelle : agrégation & comité dynamique](./0029-agregation-signatures-comite-dynamique.md)** 🟢 **— Proposé** (évolution majeure du consensus)
   *Problème :* le round-robin + *tous* co-signent est O(N) → plafonne à des dizaines de validateurs.
@@ -42,9 +44,9 @@ Rien ci-dessous n'est décidé — ce sont des propositions à instruire une par
   *Problème :* la primitive de slashing on-chain punit **déjà** tout validateur signant deux en-têtes conflictuels à la même hauteur, mais le P2P ne **détecte** que la double-*proposition*, pas les **co-signatures** conflictuelles → la finalité n'est pas *accountable* (une double-finalité resterait impunie).
   *Direction :* fermer la boucle **côté détection** (rétention bornée des en-têtes/co-sigs conflictuels, assemblage de `SlashEvidence`, auto-report) — la vérif on-chain est inchangée. Rend la finalité (0002) économiquement *accountable* (argument de recoupement de quorums). Coût faible, sûreté élevée.
 
-- **0031 — [Règle de fork-choice](./0031-regle-fork-choice.md)** 🔴 **— Proposé** (sûreté)
-  *Problème :* on a `finalized_height` (plancher inréorganisable) mais **aucune règle déterministe** pour choisir entre forks concurrents *avant* finalité — un leader et son backup peuvent produire deux blocs valides à la même hauteur ; le « premier-vu » actuel dépend de l'ordre réseau (divergence transitoire).
-  *Direction :* fonction de fork-choice **pure et déterministe** (finalité d'abord, puis poids de co-signatures, puis priorité au leader prévu, puis départage par hash), réorg bornée sous finalité, cohérente avec le slot-skip (0027) et la VRF future (0029). Évite en amont la double-finalité que 0030 punit en aval.
+- **0031 — [Règle de fork-choice](./0031-regle-fork-choice.md)** 🔴 **— ✅ t1 + t2a + t2b (mécanisme + câblage vivant) ; convergence prouvée au banc n=3, reste un soak réseau réel**
+  *Problème :* on a `finalized_height` (plancher inréorganisable) mais **aucune règle déterministe** pour choisir entre forks concurrents *avant* finalité — un leader et son backup peuvent produire deux blocs valides à la même hauteur ; le « premier-vu » dépendait de l'ordre réseau (divergence transitoire).
+  *Fait (t1) :* `consensus::canonical_head` — fonction **pure et totale** (poids de co-signatures → leader prévu → plus petit hash), 6 tests. *Fait (t2a) :* store de candidats concurrents + `canonical_choice`/`would_reorg_at` + purge sous finalité. *Fait (t2b mécanisme) :* module `reorg` — reconstruction d'état par **snapshot finalisé + rejeu** (option A), `reorg_replace` (troncature), MTP indexé par hauteur ; re-vérifie supply+state_root (refus si branche ≠ producteur). *Fait (t2b câblage) :* `consider_candidate` branché dans le handler P2P `NewBlock` (un concurrent valide non finalisé déclenche une réorg si canonique) ; snapshot maintenu à chaque finalité ; persistance complète après réorg ; verrous ordonnés (pas d'AB-BA). **Convergence indépendante de l'ordre d'arrivée prouvée au banc n=3.** *Reste :* soak multi-nœuds réseau réel + co-sigs sur candidats (raffinement). Cohérente avec le slot-skip (0027) ; évite en amont la double-finalité que 0030 punit en aval.
 
 - **0032 — [Garde-fous de gouvernance](./0032-garde-fous-gouvernance.md)** 🟠 **— 🚧 brouillon de discussion**
   *Problème :* depuis 0011, un comité capté/piraté peut bricoler la chaîne (frais censurants, vidage du set, verrouillage de la gouvernance) — rien ne borne l'amplitude de ces pouvoirs.
@@ -54,7 +56,7 @@ Rien ci-dessous n'est décidé — ce sont des propositions à instruire une par
   *Problème :* 0009 borne les unbonds *par compte* mais pas l'**agrégat** — une sortie massive simultanée (même honnête) fait chuter le set d'un coup → quorum inatteignable / sécurité effondrée.
   *Direction :* **file de sortie (et d'entrée) bornée** — au plus N sorties par fenêtre, ordre déterministe, bond retenu/slashable dans la file, **plancher de set** jamais franchi (partagé avec 0032). Généralise le délai d'unbonding (0009) au set entier ; distinct du jail temporaire (0027) ; s'articule avec l'admission permissionless (0033).
 
-- **0005 — Temps réseau robuste** 🟠 **— ✅ implémenté** (bornes de timestamp à la réception + helper Median Time Past ; câblage émission↔MTP à finir au banc n≥2)
+- **0005 — Temps réseau robuste** 🟠 **— ✅ implémenté** (bornes de timestamp à la réception — P2P **et** sync HTTP — et horloge protocole sur le Median Time Past : émission, déliaison et activation d'upgrade comparent au MTP incluant le bloc appliqué, sur les trois chemins production/P2P/sync ; à éprouver au banc n≥2)
   *Problème :* l'émission et la déliaison font confiance au `timestamp` du bloc, posé par un seul producteur. Bornes actuelles : monotonie + horloge locale à la production seulement.
   *Direction :* timestamp = médiane des horloges des validateurs (façon Bitcoin "median time past"), bornes strictes à la **réception** P2P (plafond futur, monotonie).
   *Compromis :* nécessite d'échanger/valider des horloges — pertinent surtout à n≥2.
@@ -107,7 +109,13 @@ Rien ci-dessous n'est décidé — ce sont des propositions à instruire une par
   *Direction :* décider — soit facturer le forfait (aligne le whitepaper), soit assumer l'exemption et corriger le whitepaper. Traiter l'anti-spam.
 
 - **0021 — Immutabilité de la courbe d'émission** 🟠 **— Accepté — révisé (ADR 0040)**
-  *Principe :* la courbe est **immuable après la genèse** — ni l'admin, ni une `GovernanceAction` ne peut la modifier. Le `T_half` a été mis à jour avant le lancement (8 ans → ~20 ans, ADR 0040) ; cela respecte l'esprit (le changement précède la genèse). Graver dans le `GenesisConfig` + test constitutionnel.
+  *Principe :* la courbe est **immuable après la genèse** — ni l'admin, ni une `GovernanceAction` ne peut la modifier. Le `T_half` a été mis à jour avant le lancement (8 ans → ~20 ans, ADR 0040) ; cela respecte l'esprit (le changement précède la genèse). Gravé dans le `GenesisConfig` + test constitutionnel.
+
+- **[Heartbeat périodique](./0038-bloc-heartbeat-periodique.md)** 🟠 **— ✅ implémenté** (voir `0038-bloc-heartbeat-periodique.md`)
+  *Fait :* **au moins un bloc toutes les 10 min** (`HEARTBEAT_INTERVAL_SECS = 600`), même vide (~15-30 Mo/an). Supprime l'incitation au spam pour capturer l'accrual ; borne le retard du MTP ; fait mûrir déliaisons/upgrades.
+
+- **[Cadence de consensus fixe 12 s](./0043-parametres-cadence-consensus.md)** 🔴 **— ✅ accepté (appliqué)** (voir `0043-parametres-cadence-consensus.md`)
+  *Fait :* **block time 5 → 12 s**, accélération dos-à-dos retirée — **plancher fixe anti-fork**. Débit max **3 000 tx/bloc** (~250 TPS). La congestion passe par le base-fee, pas par des blocs rapprochés. Complémentaire de 0031 : réduit les collisions.
 
 ### Données, état & scaling
 
@@ -169,6 +177,10 @@ Rien ci-dessous n'est décidé — ce sont des propositions à instruire une par
 
 - **0023 — Adjudication du slashing de module** 🟢
   *Direction :* comment une fraude d'opérateur de module est prouvée et sanctionnée (bond → réputation → preuves de fraude → zk), sans jamais exécuter la logique du module sur la L1. **Dépend d'ADR 0034** (DA + preuve pour qu'une fraude soit prouvable).
+
+- **0039 — [Infrastructure de subnets : escrow bondé + racine de récompense](./0039-infrastructure-subnets-escrow-recompense.md)** 🟠 **— Proposé**
+  *Problème :* un module 0010 est **mono-opérateur** (il ancre un nombre) ; pour héberger un vrai subnet — plusieurs participants qui font un travail et **gagnent des VINX** — il manque le paiement **sans confiance** de participants multiples, jugé hors-chaîne.
+  *Direction :* un subnet = module bondé + **escrow VINX** + **racine de récompense cumulative** + **réclamation par preuve Merkle** (`Deposit`/`SetRewardRoot`/`Claim`, appendés à `ModuleOp`). La L1 ne juge jamais le travail ; dommage max borné par l'escrow ; aucune émission détournée (rejette le modèle Bittensor). Premier subnet de démo : **balise d'aléa VRF** (honnête par construction, synergie 0029). **Prérequis :** 0034 (preuves), 0023 (fraude), banc n≥3.
 
 ### Robustesse & exploitation
 

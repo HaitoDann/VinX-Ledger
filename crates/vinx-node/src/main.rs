@@ -4,7 +4,7 @@ use tracing_subscriber::EnvFilter;
 use vinx_core::CHAIN_ID_DEVNET;
 use vinx_crypto::{Address, KeyPair};
 use vinx_node::{chain::Chain, config::NodeConfig, storage::Storage};
-use vinx_state::{create_genesis_state, GenesisConfig};
+use vinx_state::{create_genesis_state_with_dev_prefund, GenesisConfig};
 
 // ─── Config file ─────────────────────────────────────────────────────────────
 
@@ -121,6 +121,22 @@ impl KeyFile {
     }
 }
 
+// ─── Genesis spec (dev/ops multi-validateurs) ──────────────────────────────────
+
+/// Spécification de genèse **partagée** entre tous les nœuds d'un testnet — garantit une
+/// genèse **déterministe et identique** (même hash) sur chaque nœud, sans quoi la sync casse
+/// (elle exige `prev_hash == tip` dès la hauteur 1). Chargée via `VINX_GENESIS_SPEC=<fichier>`.
+/// DEV/OPS uniquement ; le pré-financement est ignoré sur mainnet (fair launch).
+#[derive(serde::Serialize, serde::Deserialize)]
+struct GenesisSpec {
+    chain_id: u32,
+    genesis_timestamp: u64,
+    admin_address: String,
+    initial_validator: String,
+    #[serde(default)]
+    prefund_initial_validator_vinx: u128,
+}
+
 // ─── Main ─────────────────────────────────────────────────────────────────────
 
 #[tokio::main]
@@ -145,7 +161,7 @@ async fn main() {
     };
 
     // CLI flag > config file > hardcoded default
-    let block_time = args.block_time.or(file_cfg.block_time_secs).unwrap_or(5);
+    let block_time = args.block_time.or(file_cfg.block_time_secs).unwrap_or(12); // ADR 0043
     let rpc_listen = args
         .rpc_listen
         .or(file_cfg.rpc_listen)
@@ -209,13 +225,48 @@ async fn main() {
             (s, c, true)
         }
         None => {
-            let state = create_genesis_state(&GenesisConfig {
-                admin_address: admin_addr,
-                validator_address: validator_addr,
-                chain_id,
-            });
-            let (chain, _genesis) = Chain::new_with_genesis(validator_addr, timestamp);
-            (state, chain, false)
+            // DEV/OPS : genèse partagée via VINX_GENESIS_SPEC → tous les nœuds calculent une
+            // genèse identique (même hash), prérequis pour que la sync multi-nœuds fonctionne.
+            if let Ok(spec_path) = std::env::var("VINX_GENESIS_SPEC") {
+                let raw = std::fs::read_to_string(&spec_path).expect("read genesis spec");
+                let spec: GenesisSpec = serde_json::from_str(&raw).expect("parse genesis spec");
+                let admin: Address = spec.admin_address.parse().expect("spec admin address");
+                let init_val: Address = spec
+                    .initial_validator
+                    .parse()
+                    .expect("spec initial_validator");
+                let cfg = GenesisConfig {
+                    admin_address: admin,
+                    validator_address: init_val,
+                    chain_id: spec.chain_id,
+                };
+                let prefund_atoms = spec
+                    .prefund_initial_validator_vinx
+                    .saturating_mul(vinx_core::amount::DECIMAL_FACTOR);
+                tracing::warn!(
+                    spec = %spec_path,
+                    initial_validator = %spec.initial_validator,
+                    "⚠ Genèse construite depuis une spec partagée (testnet dev)"
+                );
+                let state = create_genesis_state_with_dev_prefund(&cfg, prefund_atoms);
+                let (chain, _genesis) = Chain::new_with_genesis(init_val, spec.genesis_timestamp);
+                (state, chain, false)
+            } else {
+                let genesis_cfg = GenesisConfig {
+                    admin_address: admin_addr,
+                    validator_address: validator_addr,
+                    chain_id,
+                };
+                // VINX_DEV_PREFUND_VINX : pré-finance le validateur de genèse (mono-nœud dev).
+                let dev_prefund_atoms = std::env::var("VINX_DEV_PREFUND_VINX")
+                    .ok()
+                    .and_then(|v| v.parse::<u128>().ok())
+                    .map(|vinx| vinx.saturating_mul(vinx_core::amount::DECIMAL_FACTOR))
+                    .unwrap_or(0);
+                let state = create_genesis_state_with_dev_prefund(&genesis_cfg, dev_prefund_atoms);
+                let (chain, _genesis) = Chain::new_with_genesis(validator_addr, timestamp);
+                (state, chain, false)
+            }
         }
     };
 
@@ -245,6 +296,11 @@ async fn main() {
     }
     if let Some(token) = file_cfg.admin_token {
         config = config.with_admin_token(token);
+    } else {
+        tracing::warn!(
+            "No admin_token configured — the admin routes (/snapshot, /admin/compact, \
+             /validators/pending) are disabled. Set admin_token in config.toml to enable them."
+        );
     }
     config.max_block_txs = max_block_txs;
     config.max_mempool_size = max_mempool_size;
@@ -268,13 +324,7 @@ async fn main() {
     // Startup chain sync from trusted peer (if configured)
     if let Some(ref peer_url) = sync_peer_rpc {
         tracing::info!(peer = %peer_url, "Starting chain sync from peer");
-        let applied = vinx_node::sync::sync_from_peer(
-            peer_url,
-            &mut state,
-            &mut chain,
-            &config.validator_set,
-        )
-        .await;
+        let applied = vinx_node::sync::sync_from_peer(peer_url, &mut state, &mut chain).await;
         if applied > 0 {
             tracing::info!(applied, tip = chain.tip_height(), "Chain sync complete");
         } else {

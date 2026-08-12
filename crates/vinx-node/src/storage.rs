@@ -5,7 +5,7 @@ use std::sync::Arc;
 use crate::chain::Chain;
 use ahash::AHashMap;
 use redb::{Database, ReadableTable, TableDefinition};
-use vinx_core::{Account, Transaction};
+use vinx_core::{Account, Block, Transaction};
 use vinx_crypto::{Address, Hash32};
 use vinx_state::WorldState;
 use zstd;
@@ -31,10 +31,11 @@ use zstd;
 ///     same prefix property, migrated by appending the empty-map encoding.
 /// v10: WorldState meta gains ADR 0040 fields `epoch_dist_emission_pot` (Amount::ZERO)
 ///     and `destroyed_atoms` (0u128), appended after `modules`. The dormant `foundry`
-///     field is retained in-place for bincode compatibility. A chain that previously
-///     had slash-melt events will see `epoch_dist_emission_pot = 0` after migration;
-///     `supply_invariant_holds()` will catch any inconsistency on the next block.
-const STORAGE_VERSION: u64 = 10;
+///     field is retained in-place for bincode compatibility.
+/// v11: (1) blocks are persisted per-height in BLOCKS table; the monolithic "chain"
+///      blob is replaced by a tiny "chain_meta" entry (finalized height). (2) WorldState
+///      meta gains ADR 0027 `reliability` map appended last — same prefix property.
+const STORAGE_VERSION: u64 = 11;
 
 /// zstd compression level — level 3 is the sweet spot: ~60-70% size reduction,
 /// negligible latency compared to disk I/O.
@@ -44,6 +45,9 @@ const STATE: TableDefinition<&str, &[u8]> = TableDefinition::new("state");
 /// Per-account rows: bech32 address → bincode(Account), stored uncompressed.
 /// Accounts are tiny (~100 B); per-row zstd framing would cost more than it saves.
 const ACCOUNTS: TableDefinition<&[u8], &[u8]> = TableDefinition::new("accounts");
+/// Per-block rows: height → zstd(bincode((block_hash, Block))). Written
+/// incrementally — only heights dirtied since the last flush (v10).
+const BLOCKS: TableDefinition<u64, &[u8]> = TableDefinition::new("blocks");
 const META: TableDefinition<&str, u64> = TableDefinition::new("meta");
 
 pub struct Storage {
@@ -65,7 +69,15 @@ pub struct StateWrite {
     /// When true, the accounts table is wiped before writing `account_rows`
     /// (used by full snapshot import to drop rows no longer present).
     pub replace_accounts: bool,
-    pub chain: Vec<u8>,
+    /// Tiny chain metadata blob (finalized height) — rewritten every flush.
+    pub chain_meta: Vec<u8>,
+    /// Changed block rows: (height, bincode((hash, Block))). Only the heights
+    /// dirtied since the last flush — O(new blocks), not O(chain length).
+    pub block_rows: Vec<(u64, Vec<u8>)>,
+    /// When true, the blocks table is wiped before writing `block_rows`
+    /// (full save: genesis bootstrap or snapshot import, where the new chain
+    /// may be shorter than the one it replaces).
+    pub replace_blocks: bool,
     pub tx_index: Vec<u8>,
     pub account_tx_index: Vec<u8>,
 }
@@ -160,6 +172,12 @@ impl Storage {
                 8 => Self::append_meta_suffix(tx, &vinx_state::v9_meta_suffix())?,
                 // v9 → v10 (ADR 0040): epoch_dist_emission_pot and destroyed_atoms appended.
                 9 => Self::append_meta_suffix(tx, &vinx_state::v10_meta_suffix())?,
+                // v10 → v11: (1) split monolithic chain blob into per-height BLOCKS rows,
+                // (2) append reliability map (ADR 0027) to WorldState meta.
+                10 => {
+                    Self::migrate_v9_chain_blob(tx)?;
+                    Self::append_meta_suffix(tx, &vinx_state::v11_meta_suffix())?;
+                }
                 unknown => {
                     return Err(Self::io_err(format!(
                         "no automatic migration from schema v{unknown} to v{STORAGE_VERSION}. \
@@ -170,6 +188,48 @@ impl Storage {
             }
             v += 1;
         }
+        Ok(())
+    }
+
+    /// v9 → v10: explodes the monolithic compressed chain blob into per-height rows
+    /// in the BLOCKS table and a "chain_meta" entry, then removes the blob. A no-op
+    /// if no chain has been written yet.
+    fn migrate_v9_chain_blob(tx: &redb::WriteTransaction) -> io::Result<()> {
+        let mut state = tx.open_table(STATE).map_err(Self::io_err)?;
+        let compressed = state
+            .get("chain")
+            .map_err(Self::io_err)?
+            .map(|g| g.value().to_vec());
+        let Some(compressed) = compressed else {
+            return Ok(());
+        };
+        let chain_bytes = Self::decompress(&compressed)?;
+        let chain: Chain = bincode::deserialize(&chain_bytes)
+            .map_err(|e| Self::io_err(format!("v10 migration: decode chain blob: {e}")))?;
+
+        let mut blocks_tbl = tx.open_table(BLOCKS).map_err(Self::io_err)?;
+        let mut height = 0u64;
+        while let Some(row) = chain.block_row(height) {
+            let bytes = bincode::serialize(row)
+                .map_err(|e| Self::io_err(format!("v10 migration: encode block {height}: {e}")))?;
+            let compressed_row = Self::compress(&bytes)?;
+            blocks_tbl
+                .insert(height, compressed_row.as_slice())
+                .map_err(Self::io_err)?;
+            height += 1;
+        }
+
+        let meta = bincode::serialize(&chain.finalized_height())
+            .map_err(|e| Self::io_err(format!("v10 migration: encode chain_meta: {e}")))?;
+        let meta_c = Self::compress(&meta)?;
+        state
+            .insert("chain_meta", meta_c.as_slice())
+            .map_err(Self::io_err)?;
+        state.remove("chain").map_err(Self::io_err)?;
+        tracing::info!(
+            blocks = height,
+            "Chain blob migrated to per-height rows (v10)"
+        );
         Ok(())
     }
 
@@ -211,23 +271,43 @@ impl Storage {
         zstd::decode_all(data).map_err(|e| Self::io_err(format!("zstd decompress: {e}")))
     }
 
-    /// Serializes the chain and its tx indexes (no accounts, no meta).
-    fn serialize_chain(chain: &Chain) -> io::Result<(Vec<u8>, Vec<u8>, Vec<u8>)> {
-        let chain_bytes =
-            bincode::serialize(chain).map_err(|e| Self::io_err(format!("serialize chain: {e}")))?;
+    /// Serializes the chain's dirty block rows, meta and tx indexes (no accounts).
+    /// Drains the chain's dirty-height set — rows are written by `write_state`.
+    #[allow(clippy::type_complexity)]
+    fn serialize_chain(
+        chain: &mut Chain,
+    ) -> io::Result<(Vec<u8>, Vec<(u64, Vec<u8>)>, Vec<u8>, Vec<u8>)> {
+        let chain_meta = bincode::serialize(&chain.finalized_height())
+            .map_err(|e| Self::io_err(format!("serialize chain_meta: {e}")))?;
+        let mut block_rows = Vec::new();
+        for height in chain.take_dirty_heights() {
+            if let Some(row) = chain.block_row(height) {
+                let bytes = bincode::serialize(row)
+                    .map_err(|e| Self::io_err(format!("serialize block {height}: {e}")))?;
+                block_rows.push((height, bytes));
+            }
+        }
         let (tx_index, account_tx_index) = chain.export_tx_indexes();
         let tx_index_bytes = bincode::serialize(tx_index)
             .map_err(|e| Self::io_err(format!("serialize tx_index: {e}")))?;
         let account_tx_index_bytes = bincode::serialize(account_tx_index)
             .map_err(|e| Self::io_err(format!("serialize account_tx_index: {e}")))?;
-        Ok((chain_bytes, tx_index_bytes, account_tx_index_bytes))
+        Ok((
+            chain_meta,
+            block_rows,
+            tx_index_bytes,
+            account_tx_index_bytes,
+        ))
     }
 
     /// Builds an incremental `StateWrite`: the meta blob plus only the accounts
-    /// changed since the last flush. Call while holding the state write lock —
-    /// `serialize_meta` moves the accounts map out and back, and `take_persist_dirty`
-    /// drains the change set. Compression + I/O happen later in `write_state`.
-    pub fn serialize_incremental(state: &mut WorldState, chain: &Chain) -> io::Result<StateWrite> {
+    /// and block rows changed since the last flush. Call while holding the state
+    /// and chain write locks — `serialize_meta` moves the accounts map out and back,
+    /// and the dirty sets are drained. Compression + I/O happen later in `write_state`.
+    pub fn serialize_incremental(
+        state: &mut WorldState,
+        chain: &mut Chain,
+    ) -> io::Result<StateWrite> {
         let meta = state
             .serialize_meta()
             .map_err(|e| Self::io_err(format!("serialize meta: {e}")))?;
@@ -244,24 +324,29 @@ impl Storage {
                 account_deletes.push(*addr.as_bytes());
             }
         }
-        let (chain, tx_index, account_tx_index) = Self::serialize_chain(chain)?;
+        let (chain_meta, block_rows, tx_index, account_tx_index) = Self::serialize_chain(chain)?;
         Ok(StateWrite {
             meta,
             account_rows,
             account_deletes,
             replace_accounts: false,
-            chain,
+            chain_meta,
+            block_rows,
+            replace_blocks: false,
             tx_index,
             account_tx_index,
         })
     }
 
-    /// Builds a full `StateWrite` containing every account, flagged to wipe any
-    /// stale rows first. Used for the initial genesis save and snapshot import.
-    pub fn serialize_full(state: &mut WorldState, chain: &Chain) -> io::Result<StateWrite> {
+    /// Builds a full `StateWrite` containing every account and every block,
+    /// flagged to wipe any stale rows first. Used for the initial genesis save
+    /// and snapshot import.
+    pub fn serialize_full(state: &mut WorldState, chain: &mut Chain) -> io::Result<StateWrite> {
         state.mark_all_persist_dirty();
+        chain.mark_all_dirty();
         let mut w = Self::serialize_incremental(state, chain)?;
         w.replace_accounts = true;
+        w.replace_blocks = true;
         Ok(w)
     }
 
@@ -269,14 +354,19 @@ impl Storage {
     /// Designed to run inside `tokio::task::spawn_blocking` — pure blocking I/O.
     pub fn write_state(&self, w: StateWrite) -> io::Result<()> {
         let meta_c = Self::compress(&w.meta)?;
-        let chain_c = Self::compress(&w.chain)?;
+        let chain_meta_c = Self::compress(&w.chain_meta)?;
         let tx_idx_c = Self::compress(&w.tx_index)?;
         let acc_idx_c = Self::compress(&w.account_tx_index)?;
+        let mut block_rows_c = Vec::with_capacity(w.block_rows.len());
+        for (height, bytes) in &w.block_rows {
+            block_rows_c.push((*height, Self::compress(bytes)?));
+        }
 
         tracing::debug!(
             meta_raw = w.meta.len(),
             meta_compressed = meta_c.len(),
             account_rows = w.account_rows.len(),
+            block_rows = w.block_rows.len(),
             replace = w.replace_accounts,
             "Persisting state (incremental)"
         );
@@ -286,16 +376,27 @@ impl Storage {
             // Drop and recreate the accounts table to clear rows no longer present.
             tx.delete_table(ACCOUNTS).map_err(Self::io_err)?;
         }
+        if w.replace_blocks {
+            // Same for blocks: the incoming chain may be shorter than the stored one.
+            tx.delete_table(BLOCKS).map_err(Self::io_err)?;
+        }
         {
             let mut tbl = tx.open_table(STATE).map_err(Self::io_err)?;
             tbl.insert("world_state_meta", meta_c.as_slice())
                 .map_err(Self::io_err)?;
-            tbl.insert("chain", chain_c.as_slice())
+            tbl.insert("chain_meta", chain_meta_c.as_slice())
                 .map_err(Self::io_err)?;
             tbl.insert("tx_index", tx_idx_c.as_slice())
                 .map_err(Self::io_err)?;
             tbl.insert("account_tx_index", acc_idx_c.as_slice())
                 .map_err(Self::io_err)?;
+        }
+        {
+            let mut btbl = tx.open_table(BLOCKS).map_err(Self::io_err)?;
+            for (height, bytes) in &block_rows_c {
+                btbl.insert(*height, bytes.as_slice())
+                    .map_err(Self::io_err)?;
+            }
         }
         {
             let mut atbl = tx.open_table(ACCOUNTS).map_err(Self::io_err)?;
@@ -316,8 +417,8 @@ impl Storage {
     }
 
     /// Full synchronous save (initial genesis bootstrap, tests, snapshot import).
-    /// Writes every account and clears any stale rows.
-    pub fn save(&self, state: &mut WorldState, chain: &Chain) -> io::Result<()> {
+    /// Writes every account and block and clears any stale rows.
+    pub fn save(&self, state: &mut WorldState, chain: &mut Chain) -> io::Result<()> {
         let w = Self::serialize_full(state, chain)?;
         self.write_state(w)
     }
@@ -352,12 +453,42 @@ impl Storage {
             tracing::debug!(accounts = count, "Loaded accounts from per-key store");
         }
 
-        let chain_bytes = Self::decompress(tbl.get("chain").ok()??.value())
-            .map_err(|e| tracing::warn!("Cannot decompress chain: {e}"))
+        // Chain: finalized-height watermark + per-height block rows (v10).
+        let chain_meta_bytes = Self::decompress(tbl.get("chain_meta").ok()??.value())
+            .map_err(|e| tracing::warn!("Cannot decompress chain_meta: {e}"))
             .ok()?;
-        let mut chain: Chain = bincode::deserialize(&chain_bytes)
-            .map_err(|e| tracing::warn!("Cannot deserialize chain: {e}"))
+        let finalized_height: u64 = bincode::deserialize(&chain_meta_bytes)
+            .map_err(|e| tracing::warn!("Cannot deserialize chain_meta: {e}"))
             .ok()?;
+
+        let btbl = tx.open_table(BLOCKS).ok()?;
+        let mut blocks: Vec<(Hash32, Block)> = Vec::new();
+        let iter = btbl.iter().ok()?;
+        for entry in iter.flatten() {
+            let (height, row) = (entry.0.value(), entry.1.value());
+            // redb iterates u64 keys in ascending order; enforce density so a
+            // corrupted table cannot silently produce a chain with holes.
+            if height != blocks.len() as u64 {
+                tracing::warn!(
+                    expected = blocks.len(),
+                    found = height,
+                    "Block table has a gap — refusing to load"
+                );
+                return None;
+            }
+            let bytes = Self::decompress(row)
+                .map_err(|e| tracing::warn!("Cannot decompress block {height}: {e}"))
+                .ok()?;
+            let parsed: (Hash32, Block) = bincode::deserialize(&bytes)
+                .map_err(|e| tracing::warn!("Cannot deserialize block {height}: {e}"))
+                .ok()?;
+            blocks.push(parsed);
+        }
+        if blocks.is_empty() {
+            tracing::warn!("chain_meta present but no block rows — refusing to load");
+            return None;
+        }
+        let mut chain = Chain::from_parts(blocks, finalized_height);
 
         // Restore persisted indexes — O(1) vs O(blocks×txs) rebuild
         let indexes_restored = (|| -> Option<()> {
@@ -513,10 +644,10 @@ mod tests {
         s.get(key).unwrap().is_some()
     }
 
-    /// Strips the appended v8 (governance), v9 (module registry), and v10 (ADR 0040)
-    /// suffixes from the persisted meta blob, turning a current-format meta back into
-    /// its v7 prefix so the append migrations can be exercised on data that genuinely
-    /// predates ADR 0010/0011/0040.
+    /// Strips the appended v8 (governance), v9 (module registry), v10 (ADR 0040),
+    /// and v11 (reliability) suffixes from the persisted meta blob, turning a
+    /// current-format meta back into its v7 prefix so the append migrations can be
+    /// exercised on data that genuinely predates ADR 0010/0011/0040/0027.
     fn downgrade_meta_to_v7(dir: &Path) {
         let db = Database::create(dir.join("vinx.redb")).unwrap();
         let tx = db.begin_write().unwrap();
@@ -526,7 +657,8 @@ mod tests {
             let mut meta = zstd::decode_all(&compressed[..]).unwrap();
             let suffix_len = vinx_state::v8_meta_suffix().len()
                 + vinx_state::v9_meta_suffix().len()
-                + vinx_state::v10_meta_suffix().len();
+                + vinx_state::v10_meta_suffix().len()
+                + vinx_state::v11_meta_suffix().len();
             meta.truncate(meta.len() - suffix_len);
             let recompressed = zstd::encode_all(&meta[..], ZSTD_LEVEL).unwrap();
             s.insert("world_state_meta", recompressed.as_slice())
@@ -623,7 +755,7 @@ mod tests {
         // v8 governance suffix so the meta is v7-format, and stamp an older (v6) marker.
         {
             let storage = Storage::open(&tmp.0).unwrap();
-            storage.save(&mut state, &chain).unwrap();
+            storage.save(&mut state, &mut chain).unwrap();
         }
         downgrade_meta_to_v7(&tmp.0);
         set_version(&tmp.0, 6);
@@ -642,6 +774,10 @@ mod tests {
         assert!(loaded_state.admin_policy.is_none());
         assert!(loaded_state.pending_governance.is_empty());
         assert!(loaded_state.modules.is_empty());
+        assert!(
+            loaded_state.reliability.is_empty(),
+            "ADR 0027 reliability loads empty (v11)"
+        );
         assert_eq!(loaded_chain.tip_height(), 1, "chain must survive migration");
         assert!(
             loaded_chain.get_tx_by_hash(&tx_hash).is_some(),
@@ -673,7 +809,7 @@ mod tests {
             admin_address: admin,
             validator_address: validator,
         });
-        let (chain, _) = Chain::new_with_genesis(validator, 0);
+        let (mut chain, _) = Chain::new_with_genesis(validator, 0);
 
         // Fund bob with exactly amount + fee so a single transfer drains him to zero.
         let amount = Amount::from_vinx(10);
@@ -685,7 +821,7 @@ mod tests {
         // Scoped so the redb handle (and its file lock) is released before reopening.
         {
             let storage = Storage::open(&tmp.0).unwrap();
-            storage.save(&mut state, &chain).unwrap(); // bob's row is on disk
+            storage.save(&mut state, &mut chain).unwrap(); // bob's row is on disk
 
             // Drain bob → he is reaped from the map.
             let tx = Transaction::new_transfer(&bob_kp, carol, amount, fee, 0);
@@ -693,7 +829,7 @@ mod tests {
             assert!(state.get_account(&bob).is_none(), "bob reaped in memory");
 
             // Persist incrementally.
-            let w = Storage::serialize_incremental(&mut state, &chain).unwrap();
+            let w = Storage::serialize_incremental(&mut state, &mut chain).unwrap();
             assert!(
                 w.account_deletes.iter().any(|a| a == bob.as_bytes()),
                 "reaped account must be scheduled for deletion"
@@ -712,5 +848,119 @@ mod tests {
             amount,
             "carol keeps the funds"
         );
+    }
+
+    fn make_test_block(height: u64, prev_hash: Hash32, validator: Address) -> Block {
+        use vinx_core::BlockHeader;
+        Block {
+            header: BlockHeader {
+                height,
+                prev_hash,
+                timestamp: height,
+                validator,
+                tx_count: 0,
+                state_root: [0u8; 32],
+                base_fee: 0,
+                receipts_root: [0u8; 32],
+            },
+            transactions: vec![],
+            signatures: vec![],
+        }
+    }
+
+    // v10: a flush after N new blocks serializes exactly those N rows — never the
+    // whole chain — and the chain reloads identically from the per-height table.
+    #[test]
+    fn test_incremental_block_rows_and_reload() {
+        use vinx_crypto::KeyPair;
+        use vinx_state::{create_genesis_state, GenesisConfig};
+
+        let tmp = Tmp::new();
+        let admin = Address::from_public_key(&KeyPair::generate().public_key());
+        let validator = Address::from_public_key(&KeyPair::generate().public_key());
+        let mut state = create_genesis_state(&GenesisConfig {
+            chain_id: vinx_core::CHAIN_ID_DEVNET,
+            admin_address: admin,
+            validator_address: validator,
+        });
+        let (mut chain, _) = Chain::new_with_genesis(validator, 0);
+
+        {
+            let storage = Storage::open(&tmp.0).unwrap();
+            storage.save(&mut state, &mut chain).unwrap();
+
+            // Two new blocks → exactly two dirty rows in the next flush.
+            chain.push(make_test_block(1, chain.tip_hash(), validator));
+            chain.push(make_test_block(2, chain.tip_hash(), validator));
+            let w = Storage::serialize_incremental(&mut state, &mut chain).unwrap();
+            let mut heights: Vec<u64> = w.block_rows.iter().map(|(h, _)| *h).collect();
+            heights.sort_unstable();
+            assert_eq!(heights, vec![1, 2], "only the new blocks are written");
+            storage.write_state(w).unwrap();
+
+            // Nothing changed → the follow-up flush writes zero block rows.
+            let w2 = Storage::serialize_incremental(&mut state, &mut chain).unwrap();
+            assert!(w2.block_rows.is_empty(), "clean chain flushes no rows");
+            storage.write_state(w2).unwrap();
+        }
+
+        let storage = Storage::open(&tmp.0).unwrap();
+        let (_, loaded) = storage.load().expect("chain reloads from per-height rows");
+        assert_eq!(loaded.tip_height(), 2);
+        assert_eq!(loaded.tip_hash(), chain.tip_hash());
+        assert_eq!(loaded.finalized_height(), chain.finalized_height());
+    }
+
+    // v9 → v10: a monolithic v9 "chain" blob is exploded into per-height rows on
+    // open, the blob removed, and the chain loads identically afterwards.
+    #[test]
+    fn test_migrate_v9_chain_blob_to_block_rows() {
+        use vinx_crypto::KeyPair;
+        use vinx_state::{create_genesis_state, GenesisConfig};
+
+        let tmp = Tmp::new();
+        let admin = Address::from_public_key(&KeyPair::generate().public_key());
+        let validator = Address::from_public_key(&KeyPair::generate().public_key());
+        let mut state = create_genesis_state(&GenesisConfig {
+            chain_id: vinx_core::CHAIN_ID_DEVNET,
+            admin_address: admin,
+            validator_address: validator,
+        });
+        let (mut chain, _) = Chain::new_with_genesis(validator, 0);
+        chain.push(make_test_block(1, chain.tip_hash(), validator));
+        chain.push(make_test_block(2, chain.tip_hash(), validator));
+        let tip_hash = chain.tip_hash();
+
+        // Save at the current version, then rewrite the chain the way a v9 binary
+        // stored it: one compressed bincode blob under "chain", no per-height rows.
+        {
+            let storage = Storage::open(&tmp.0).unwrap();
+            storage.save(&mut state, &mut chain).unwrap();
+        }
+        {
+            let db = Database::create(tmp.0.join("vinx.redb")).unwrap();
+            let tx = db.begin_write().unwrap();
+            {
+                let mut s = tx.open_table(STATE).unwrap();
+                let blob = bincode::serialize(&chain).unwrap();
+                let compressed = zstd::encode_all(&blob[..], ZSTD_LEVEL).unwrap();
+                s.insert("chain", compressed.as_slice()).unwrap();
+                s.remove("chain_meta").unwrap();
+            }
+            tx.delete_table(BLOCKS).unwrap();
+            tx.commit().unwrap();
+        }
+        set_version(&tmp.0, 9);
+
+        // Scoped so the redb handle is released before has_state_key reopens the file.
+        let loaded = {
+            let storage = Storage::open(&tmp.0).expect("v9 must migrate, not wipe");
+            let (_, loaded) = storage.load().expect("chain survives v9→v10 migration");
+            loaded
+        };
+        assert_eq!(loaded.tip_height(), 2);
+        assert_eq!(loaded.tip_hash(), tip_hash);
+        assert!(!has_state_key(&tmp.0, "chain"), "v9 blob removed");
+        assert!(has_state_key(&tmp.0, "chain_meta"), "chain_meta written");
     }
 }

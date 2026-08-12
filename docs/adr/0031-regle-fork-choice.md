@@ -1,6 +1,15 @@
 # ADR 0031 — Règle de fork-choice
 
-- **Statut :** Proposé
+- **Statut :** ✅ Tranche 1 (fonction pure `canonical_head` + tests) · ✅ Tranche 2a
+  (candidats concurrents + choix canonique + purge sous finalité) · ✅ Tranche 2b **mécanisme**
+  (module `reorg` : reconstruction d'état par snapshot+rejeu, `reorg_replace`, MTP par hauteur) ·
+  ✅ Tranche 2b **câblage vivant** (`consider_candidate` branché dans le handler P2P `NewBlock` :
+  un bloc concurrent valide à une hauteur non finalisée est enregistré et déclenche une réorg si
+  canonique ; snapshot finalisé maintenu à chaque avancée de finalité ; persistance complète
+  après réorg). **Convergence indépendante de l'ordre d'arrivée prouvée au banc n=3.**
+  **Reste : soak multi-nœuds réseau réel** (concurrence des verrous + persistance sous partition)
+  — non exécutable hors d'un déploiement à 3 nœuds ; et co-signatures sur candidats (raffinement,
+  cf. §Limites).
 - **Catégorie :** Consensus & finalité · **Priorité :** 🔴 haute (complétude de sûreté du
   consensus)
 - **Date :** Juillet 2026
@@ -97,6 +106,61 @@ plus de co-signatures, finalité plus haute). C'est la propriété clé.
   réseau) → divergence transitoire.
 - **Heaviest par bond des signataires** : écarté — pondérer par le stake contredit
   l'égalitarisme VinX (ADR 0028) ; le **nombre** de co-signatures est le signal, pas leur poids.
+
+## État d'implémentation
+
+- **Tranche 1 (✅ faite)** — `consensus::canonical_head(candidates, validator_set)` : fonction
+  **pure et totale** appliquant les règles 3 (poids de co-signatures) → 4 (leader prévu) → 5
+  (plus petit hash). Ordre total ⇒ élection **indépendante de l'ordre d'itération** (testé).
+  6 tests unitaires (leader vs backup à poids égal, poids > priorité leader, départage par hash,
+  cas simple/vide, déterminisme d'ordre).
+- **Tranche 2a (✅ faite)** — **fondation dans `Chain`** : champ `candidates: {hauteur → [Block]}`
+  (`#[serde(skip)]`, non persisté), `record_candidate` (n'accepte qu'un concurrent valide **au-
+  dessus** de la finalité, dédup par hash, jamais le bloc déjà retenu), `canonical_choice(height)`
+  (élit le hash de la tête parmi {bloc retenu} ∪ candidats via `more_canonical`, sans cloner),
+  `would_reorg_at(height)` (décision pure : un concurrent gagnerait-il ?), et **purge** des
+  candidats sous `finalized_height` à chaque `advance_finality`. **Aucun changement de
+  comportement** — le store n'est pas encore alimenté par le chemin d'acceptation. 4 tests.
+- **Tranche 2b — mécanisme (✅ fait)** — module `reorg` (**option A** : snapshot au point
+  finalisé + rejeu) : `rebuild_canonical_state(finalized_state, finalized_height, chain,
+  contested_height, canonical_block)` clone l'état finalisé, rejoue les blocs **partagés**
+  finalisé+1..contesté-1, applique le bloc canonique, et **re-vérifie supply + state_root à
+  chaque bloc** (refus si la branche reconstruite ≠ producteur → sûreté). `Chain::reorg_replace`
+  tronque la branche perdante et installe le bloc élu ; `Chain::median_time_past_ending_at`
+  fournit l'horloge protocole **indexée par hauteur** (nécessaire au rejeu en milieu de chaîne).
+  Testé, dont un **test d'identité** (rejouer la branche existante reproduit exactement l'état du
+  tip) et le refus d'un `state_root` falsifié / d'une réorg sous la finalité. **Non encore
+  déclenché par le chemin vivant.**
+- **Tranche 2b — câblage vivant (✅ fait)** — orchestration `reorg::consider_candidate`
+  (chemin **unique** partagé par le handler P2P et le banc n=3) : enregistre le candidat, et si
+  la règle le désigne canonique, reconstruit l'état depuis le snapshot + `reorg_replace` +
+  installe état/validator set + avance la finalité ; candidat invalide au rejeu → retiré (sûreté).
+  Branché dans le handler P2P `NewBlock` : le bloc jadis jeté comme « déjà vu » (hauteur ≤ tip)
+  est, s'il est un **concurrent valide au-dessus de la finalité bâti sur le même parent**, soumis
+  au fork-choice. Le **snapshot finalisé** (`ForkChoiceCtx`, base de rejeu) est initialisé à
+  `(tip, état)` et maintenu par `reorg::advance_snapshot` à chaque avancée de finalité (tick +
+  chemins P2P). **Persistance complète** (`serialize_full`, qui purge les rangs tronqués) après
+  une réorg. Verrous ordonnés state→chain→validator_set→finalized_state (cohérent avec `tick`,
+  pas d'AB-BA).
+- **Preuve (banc n=3)** : `n3_fork_choice_converges_regardless_of_arrival_order` — deux blocs
+  valides concurrents (leader vs backup) à la même hauteur ; deux nœuds les recevant dans des
+  ordres opposés convergent vers la **même tête et le même state_root**, via le vrai chemin de
+  production/fork-choice/réorg.
+- **Reste : soak multi-nœuds sur réseau réel** (concurrence des verrous + durabilité de la
+  persistance sous partition) — non exécutable hors d'un déploiement à 3 nœuds réseau.
+- **Optimisation future (option B)** — journal d'annulation (undo log) par bloc pour éviter la
+  copie O(comptes) du snapshot sur gros état ; non nécessaire pré-mainnet (réorg rare et peu
+  profonde). Documentée ici comme chemin de mise à l'échelle.
+
+## Limites connues
+
+- **Co-signatures sur candidats.** Les `BlockCoSignature` reçues ne sont routées que vers le bloc
+  **retenu** à chaque hauteur, pas vers les candidats concurrents. Le poids de co-signatures d'un
+  candidat (règle #3) ne croît donc pas après son arrivée : le départage repose alors sur le
+  **leader prévu (#4) puis le plus petit hash (#5)** — ce qui suffit à faire **converger
+  déterministiquement** les nœuds sur une collision leader/backup fraîche (le cas central).
+  Router les co-sigs vers les candidats (pour qu'un backup très soutenu batte le leader) est un
+  **raffinement** ultérieur, sans impact sur la convergence de base.
 
 ## Notes d'implémentation
 
