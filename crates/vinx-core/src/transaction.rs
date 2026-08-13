@@ -19,6 +19,11 @@ pub enum TransactionType {
     /// Module-registry operation (ADR 0010). `payload` = bincode(ModuleOp). Appended last so
     /// existing bincode/borsh variant indices are unchanged.
     AnchorState,
+    /// Validator self-registers their BLS12-381 public key + Proof-of-Possession (ADR 0046).
+    /// `payload` = bincode(RegisterBlsKeyPayload). Any bonded validator may call this for
+    /// themselves; no admin authorization required. Appended last to preserve bincode/borsh
+    /// discriminants of all prior variants.
+    RegisterBlsKey,
 }
 
 impl TransactionType {
@@ -34,6 +39,7 @@ impl TransactionType {
             TransactionType::SlashValidator => 0x07,
             TransactionType::AdminAction => 0x08,
             TransactionType::AnchorState => 0x09,
+            TransactionType::RegisterBlsKey => 0x0A,
         }
     }
 }
@@ -73,6 +79,16 @@ pub struct Transaction {
     /// Proves the sponsor consented to pay the fee for this exact transaction.
     #[serde(default)]
     pub sponsor_signature: Option<VinxSignature>,
+}
+
+/// Payload for a `RegisterBlsKey` transaction (ADR 0046).
+/// Both fields are serialized as length-prefixed byte vectors (bincode default).
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct RegisterBlsKeyPayload {
+    /// BLS12-381 G1 compressed public key, 48 bytes.
+    pub bls_pub_key: Vec<u8>,
+    /// Proof-of-Possession: BLS G2 signature over `bls_pub_key` using `BLS_POP_DST`, 96 bytes.
+    pub bls_pop: Vec<u8>,
 }
 
 /// serde default for a missing `chain_id` (ADR 0008): the invalid sentinel, not devnet.
@@ -371,6 +387,36 @@ impl Transaction {
             chain_id: CHAIN_ID_DEVNET,
             expires_at_height: None,
             payload,
+            pub_key: Some(pk),
+            signature: None,
+            sponsor: None,
+            sponsor_pub_key: None,
+            sponsor_signature: None,
+        };
+        tx.signature = Some(keypair.sign(&tx.signing_bytes()));
+        tx
+    }
+
+    /// Constructs and signs a RegisterBlsKey transaction (ADR 0046).
+    /// Any bonded validator calls this to register their BLS12-381 key + Proof-of-Possession.
+    pub fn new_register_bls_key(
+        keypair: &KeyPair,
+        payload: &RegisterBlsKeyPayload,
+        nonce: u64,
+    ) -> Self {
+        let pk = keypair.public_key();
+        let from = Address::from_public_key(&pk);
+        let raw = bincode::serialize(payload).expect("RegisterBlsKeyPayload serialization is infallible");
+        let mut tx = Self {
+            tx_type: TransactionType::RegisterBlsKey,
+            from,
+            to: from,
+            amount: Amount::ZERO,
+            fee: Amount::ZERO,
+            nonce,
+            chain_id: CHAIN_ID_DEVNET,
+            expires_at_height: None,
+            payload: raw,
             pub_key: Some(pk),
             signature: None,
             sponsor: None,

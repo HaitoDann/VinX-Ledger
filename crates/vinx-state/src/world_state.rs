@@ -14,9 +14,9 @@ use vinx_core::{
     protocol::{ProtocolVersion, ScheduledUpgrade},
     reliability::{self, ReliabilityMap},
     validator_pool::PoolStatus,
-    Account, CoreError, Transaction, TransactionType, ValidatorSet,
+    Account, CoreError, RegisterBlsKeyPayload, Transaction, TransactionType, ValidatorSet,
 };
-use vinx_crypto::{sha256, Address, Hash32, IncrementalMerkleTree};
+use vinx_crypto::{sha256, Address, BlsPubKey, BlsSignature, Hash32, IncrementalMerkleTree};
 
 /// In-memory representation of the full chain state.
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -1081,6 +1081,7 @@ impl WorldState {
             TransactionType::SlashValidator => self.apply_slash_validator(tx),
             TransactionType::AdminAction => self.apply_admin_action(tx),
             TransactionType::AnchorState => self.apply_anchor_state(tx),
+            TransactionType::RegisterBlsKey => self.apply_register_bls_key(tx),
         }
     }
 
@@ -1824,6 +1825,78 @@ impl WorldState {
         // The fee changes hands into the block pool → credited to the producer at settle.
         self.block_fees = self.block_fees.saturating_add(tx.fee);
         self.mark_dirty(&operator);
+        Ok(())
+    }
+
+    /// Applies a `RegisterBlsKey` transaction (ADR 0046): stores a validator's BLS12-381
+    /// public key and Proof-of-Possession in the validator pool after verifying both.
+    ///
+    /// Self-authorized — any bonded validator may call this for themselves; no admin key
+    /// required. Validates the PoP cryptographically before writing, so the pool never holds
+    /// an unverified BLS key. Like `apply_admin_action`, validation happens before mutation,
+    /// so a rejected payload does not consume the sender's nonce.
+    fn apply_register_bls_key(&mut self, tx: &Transaction) -> Result<(), CoreError> {
+        let account = self
+            .accounts
+            .get(&tx.from)
+            .ok_or(CoreError::InsufficientBalance)?;
+        if account.nonce != tx.nonce {
+            return Err(CoreError::InvalidNonce {
+                expected: account.nonce,
+                got: tx.nonce,
+            });
+        }
+
+        if !self.validator_pool.contains_key(&tx.from) {
+            return Err(CoreError::InvalidTransaction(
+                "only bonded validators may register a BLS key".to_string(),
+            ));
+        }
+
+        let payload: RegisterBlsKeyPayload =
+            bincode::deserialize(&tx.payload).map_err(|_| {
+                CoreError::InvalidTransaction("malformed RegisterBlsKey payload".to_string())
+            })?;
+
+        if payload.bls_pub_key.len() != 48 {
+            return Err(CoreError::InvalidTransaction(
+                "BLS public key must be 48 bytes (G1 compressed)".to_string(),
+            ));
+        }
+        if payload.bls_pop.len() != 96 {
+            return Err(CoreError::InvalidTransaction(
+                "BLS Proof-of-Possession must be 96 bytes (G2 compressed)".to_string(),
+            ));
+        }
+
+        let pk_arr: [u8; 48] = payload.bls_pub_key.as_slice().try_into().unwrap();
+        let pop_arr: [u8; 96] = payload.bls_pop.as_slice().try_into().unwrap();
+
+        let bls_pub = BlsPubKey::from_bytes(&pk_arr).map_err(|_| {
+            CoreError::InvalidTransaction("BLS public key is not a valid G1 point".to_string())
+        })?;
+        let bls_pop_sig = BlsSignature(pop_arr);
+
+        bls_pub.verify_pop(&bls_pop_sig).map_err(|_| {
+            CoreError::InvalidTransaction(
+                "BLS Proof-of-Possession verification failed".to_string(),
+            )
+        })?;
+
+        // Verification passed — mutate.
+        let entry = self
+            .validator_pool
+            .get_mut(&tx.from)
+            .expect("existence checked above");
+        entry.bls_pub_key = Some(payload.bls_pub_key);
+        entry.bls_pop = Some(payload.bls_pop);
+
+        self.accounts
+            .get_mut(&tx.from)
+            .expect("existence checked above")
+            .nonce += 1;
+        self.mark_dirty(&tx.from);
+        tracing::info!(validator = %tx.from, "ADR 0046: BLS key registered");
         Ok(())
     }
 
@@ -2741,5 +2814,150 @@ mod tests {
                 "stake amount below minimum 1 VINX".to_string()
             ))
         );
+    }
+
+    // ─── ADR 0046: BLS key registration ──────────────────────────────────────
+
+    /// Build a minimal state where `kp`'s address is in the validator pool.
+    fn validator_pool_state() -> (WorldState, KeyPair, Address) {
+        use vinx_core::validator_pool::ValidatorPoolEntry;
+        let mut s = WorldState::new();
+        let kp = KeyPair::generate();
+        let addr = Address::from_public_key(&kp.public_key());
+        s.credit_for_test(addr, Amount::from_vinx(1_000));
+        // Insert directly into the pool (bypasses admission rules for test simplicity).
+        s.validator_pool.insert(
+            addr,
+            ValidatorPoolEntry::new(MIN_VALIDATOR_BOND_ATOMS, 0),
+        );
+        (s, kp, addr)
+    }
+
+    #[test]
+    fn test_register_bls_key_happy_path() {
+        use vinx_core::RegisterBlsKeyPayload;
+        use vinx_crypto::BlsSecretKey;
+
+        let (mut s, kp, addr) = validator_pool_state();
+
+        let bls_sk = BlsSecretKey::generate();
+        let bls_pk = bls_sk.public_key();
+        let pop = bls_sk.proof_of_possession();
+        let payload = RegisterBlsKeyPayload {
+            bls_pub_key: bls_pk.0.to_vec(),
+            bls_pop: pop.0.to_vec(),
+        };
+        let tx = Transaction::new_register_bls_key(&kp, &payload, 0);
+        s.apply_transaction(&tx).unwrap();
+
+        let entry = &s.validator_pool[&addr];
+        assert_eq!(entry.bls_pub_key.as_deref(), Some(bls_pk.0.as_slice()));
+        assert_eq!(entry.bls_pop.as_deref(), Some(pop.0.as_slice()));
+        // Nonce consumed.
+        assert_eq!(s.accounts[&addr].nonce, 1);
+    }
+
+    #[test]
+    fn test_register_bls_key_non_validator_rejected() {
+        use vinx_core::RegisterBlsKeyPayload;
+        use vinx_crypto::BlsSecretKey;
+
+        let mut s = WorldState::new();
+        let kp = KeyPair::generate();
+        let addr = Address::from_public_key(&kp.public_key());
+        s.credit_for_test(addr, Amount::from_vinx(10));
+
+        let bls_sk = BlsSecretKey::generate();
+        let pop = bls_sk.proof_of_possession();
+        let payload = RegisterBlsKeyPayload {
+            bls_pub_key: bls_sk.public_key().0.to_vec(),
+            bls_pop: pop.0.to_vec(),
+        };
+        let tx = Transaction::new_register_bls_key(&kp, &payload, 0);
+        assert!(s.apply_transaction(&tx).is_err());
+        // No pool entry created.
+        assert!(!s.validator_pool.contains_key(&addr));
+    }
+
+    #[test]
+    fn test_register_bls_key_invalid_pop_rejected() {
+        use vinx_core::RegisterBlsKeyPayload;
+        use vinx_crypto::BlsSecretKey;
+
+        let (mut s, kp, addr) = validator_pool_state();
+
+        let bls_sk = BlsSecretKey::generate();
+        let wrong_sk = BlsSecretKey::generate();
+        // PoP from a different key — cryptographic verification must reject this.
+        let bad_pop = wrong_sk.proof_of_possession();
+        let payload = RegisterBlsKeyPayload {
+            bls_pub_key: bls_sk.public_key().0.to_vec(),
+            bls_pop: bad_pop.0.to_vec(),
+        };
+        let tx = Transaction::new_register_bls_key(&kp, &payload, 0);
+        assert!(s.apply_transaction(&tx).is_err());
+        // Pool entry untouched: still no BLS key.
+        assert!(s.validator_pool[&addr].bls_pub_key.is_none());
+        // Nonce not consumed on rejected tx.
+        assert_eq!(s.accounts[&addr].nonce, 0);
+    }
+
+    #[test]
+    fn test_register_bls_key_wrong_sizes_rejected() {
+        use vinx_core::RegisterBlsKeyPayload;
+        use vinx_core::CoreError;
+
+        let (mut s, kp, _addr) = validator_pool_state();
+
+        // 47-byte pubkey (should be 48).
+        let bad_pk = RegisterBlsKeyPayload {
+            bls_pub_key: vec![0u8; 47],
+            bls_pop: vec![0u8; 96],
+        };
+        assert!(matches!(
+            s.apply_transaction(&Transaction::new_register_bls_key(&kp, &bad_pk, 0)),
+            Err(CoreError::InvalidTransaction(_))
+        ));
+
+        // 95-byte PoP (should be 96).
+        let bad_pop = RegisterBlsKeyPayload {
+            bls_pub_key: vec![0u8; 48],
+            bls_pop: vec![0u8; 95],
+        };
+        assert!(matches!(
+            s.apply_transaction(&Transaction::new_register_bls_key(&kp, &bad_pop, 0)),
+            Err(CoreError::InvalidTransaction(_))
+        ));
+    }
+
+    #[test]
+    fn test_register_bls_key_updates_existing() {
+        use vinx_core::RegisterBlsKeyPayload;
+        use vinx_crypto::BlsSecretKey;
+
+        let (mut s, kp, addr) = validator_pool_state();
+
+        // Register once with key A.
+        let sk_a = BlsSecretKey::generate();
+        let pop_a = sk_a.proof_of_possession();
+        let payload_a = RegisterBlsKeyPayload {
+            bls_pub_key: sk_a.public_key().0.to_vec(),
+            bls_pop: pop_a.0.to_vec(),
+        };
+        s.apply_transaction(&Transaction::new_register_bls_key(&kp, &payload_a, 0))
+            .unwrap();
+
+        // Re-register with key B — should overwrite.
+        let sk_b = BlsSecretKey::generate();
+        let pop_b = sk_b.proof_of_possession();
+        let payload_b = RegisterBlsKeyPayload {
+            bls_pub_key: sk_b.public_key().0.to_vec(),
+            bls_pop: pop_b.0.to_vec(),
+        };
+        s.apply_transaction(&Transaction::new_register_bls_key(&kp, &payload_b, 1))
+            .unwrap();
+
+        let entry = &s.validator_pool[&addr];
+        assert_eq!(entry.bls_pub_key.as_deref(), Some(sk_b.public_key().0.as_slice()));
     }
 }
