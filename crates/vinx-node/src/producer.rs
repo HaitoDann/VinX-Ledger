@@ -8,7 +8,7 @@ use vinx_core::{
     amount::{Amount, MAX_UNFINALIZED_DEPTH},
     reliability, Block, BlockHeader, BlockSignature, Transaction, ValidatorSet,
 };
-use vinx_crypto::sha256;
+use vinx_crypto::{bls_aggregate, sha256};
 use vinx_state::WorldState;
 
 /// ADR 0002 — **refus de bâtir dans le vide.** Empêche un producteur d'empiler un bloc dont
@@ -175,6 +175,8 @@ pub fn produce_block(
         header,
         transactions: block_txs,
         signatures: Vec::new(),
+        bls_aggregate: None,
+        bls_cosigner_pks: vec![],
     };
 
     // Proposer signs the block header hash (counts as one co-signature)
@@ -184,6 +186,19 @@ pub fn produce_block(
         pub_key: config.validator_keypair.public_key(),
         signature: config.validator_keypair.sign(&header_hash),
     });
+
+    // ADR 0046 Phase 2 — BLS co-signature: the proposer contributes its own BLS sig.
+    // The aggregate starts as a single-sig aggregate; P2P gossip adds more sigs in Phase 3.
+    if let Some(bls_sk) = &config.bls_secret_key {
+        let bls_sig = bls_sk.sign(&header_hash);
+        match bls_aggregate(&[bls_sig]) {
+            Ok(agg) => {
+                block.bls_aggregate = Some(agg.0.to_vec());
+                block.bls_cosigner_pks = vec![bls_sk.public_key().0.to_vec()];
+            }
+            Err(e) => tracing::warn!("BLS aggregate init failed: {e}"),
+        }
+    }
 
     // ADR 0002/0027 — enregistre le quorum du set COMPLET pré-bloc (capturé plus haut) pour
     // que la finalité l'évalue correctement même après un futur changement de set par
@@ -309,6 +324,8 @@ fn produce_block_inner(
         header,
         transactions: block_txs,
         signatures: Vec::new(),
+        bls_aggregate: None,
+        bls_cosigner_pks: vec![],
     };
     let header_hash = block.hash();
     block.signatures.push(BlockSignature {
@@ -316,6 +333,13 @@ fn produce_block_inner(
         pub_key: config.validator_keypair.public_key(),
         signature: config.validator_keypair.sign(&header_hash),
     });
+    if let Some(bls_sk) = &config.bls_secret_key {
+        let bls_sig = bls_sk.sign(&header_hash);
+        if let Ok(agg) = bls_aggregate(&[bls_sig]) {
+            block.bls_aggregate = Some(agg.0.to_vec());
+            block.bls_cosigner_pks = vec![bls_sk.public_key().0.to_vec()];
+        }
+    }
     // ADR 0002/0027 — quorum du set COMPLET pré-bloc (même raison que le chemin leader).
     chain.note_quorum(next_height, pre_quorum);
     chain.push(block.clone());

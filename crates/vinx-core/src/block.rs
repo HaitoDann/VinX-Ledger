@@ -3,7 +3,10 @@ use crate::validator_set::ValidatorSet;
 use borsh::{BorshDeserialize, BorshSerialize};
 use serde::{Deserialize, Serialize};
 use std::collections::HashSet;
-use vinx_crypto::{sha256, Address, Hash32, PublicKey, VinxSignature};
+use vinx_crypto::{
+    bls_verify_aggregate, sha256, Address, BlsError, BlsPubKey, BlsSignature, Hash32, PublicKey,
+    VinxSignature,
+};
 
 pub const GENESIS_PREV_HASH: Hash32 = [0u8; 32];
 
@@ -71,9 +74,17 @@ pub struct SlashEvidence {
 pub struct Block {
     pub header: BlockHeader,
     pub transactions: Vec<Transaction>,
-    /// Co-signatures from validators. A block is finalized once
-    /// `valid_signer_count(validator_set) >= validator_set.quorum()`.
+    /// Ed25519 co-signatures (pre-ADR-0046 path, retained for equivocation proofs).
     pub signatures: Vec<BlockSignature>,
+    /// BLS12-381 aggregate co-signature (G2, 96 bytes). Present when the block was
+    /// co-signed with BLS (ADR 0046 Phase 2+). Takes priority over Ed25519 in
+    /// `is_finalized`. Absent on pre-BLS blocks deserialized from older storage.
+    #[serde(default)]
+    pub bls_aggregate: Option<Vec<u8>>,
+    /// BLS G1 public keys (48 bytes each) of the validators whose signatures were
+    /// aggregated into `bls_aggregate`. Same order used during aggregation.
+    #[serde(default)]
+    pub bls_cosigner_pks: Vec<Vec<u8>>,
 }
 
 impl Block {
@@ -84,6 +95,37 @@ impl Block {
 
     pub fn is_genesis(&self) -> bool {
         self.header.height == 0
+    }
+
+    /// Verifies the BLS aggregate signature and returns the cosigner count.
+    /// Returns `Ok(0)` when `bls_aggregate` is absent; `Err` on invalid aggregate or
+    /// on malformed byte lengths (expected 96 bytes for sig, 48 bytes per pubkey).
+    pub fn bls_signer_count(&self) -> Result<usize, BlsError> {
+        let agg_vec = match &self.bls_aggregate {
+            Some(b) => b,
+            None => return Ok(0),
+        };
+        if self.bls_cosigner_pks.is_empty() {
+            return Err(BlsError::EmptyAggregate);
+        }
+        let agg_arr: [u8; 96] = agg_vec
+            .as_slice()
+            .try_into()
+            .map_err(|_| BlsError::InvalidSignature)?;
+        let agg_sig = BlsSignature(agg_arr);
+        let pks: Vec<BlsPubKey> = self
+            .bls_cosigner_pks
+            .iter()
+            .map(|pk_vec| {
+                let arr: [u8; 48] = pk_vec
+                    .as_slice()
+                    .try_into()
+                    .map_err(|_| BlsError::InvalidKey)?;
+                BlsPubKey::from_bytes(&arr)
+            })
+            .collect::<Result<_, _>>()?;
+        bls_verify_aggregate(&pks, &agg_sig, &self.header.hash())?;
+        Ok(pks.len())
     }
 
     /// Counts distinct valid co-signatures from registered validators.
@@ -102,9 +144,20 @@ impl Block {
     }
 
     /// Returns true when this block has enough valid signatures (≥ quorum).
-    /// The genesis block (height 0) is always considered finalized.
+    /// When a BLS aggregate is present it is verified and the cosigner count is used;
+    /// otherwise falls back to Ed25519 co-signatures (pre-ADR-0046 blocks).
     pub fn is_finalized(&self, validator_set: &ValidatorSet) -> bool {
-        self.is_genesis() || self.valid_signer_count(validator_set) >= validator_set.quorum()
+        if self.is_genesis() {
+            return true;
+        }
+        let quorum = validator_set.quorum();
+        if self.bls_aggregate.is_some() {
+            self.bls_signer_count()
+                .map(|c| c >= quorum)
+                .unwrap_or(false)
+        } else {
+            self.valid_signer_count(validator_set) >= quorum
+        }
     }
 }
 
@@ -144,6 +197,8 @@ mod tests {
             },
             transactions: vec![],
             signatures: vec![],
+            bls_aggregate: None,
+            bls_cosigner_pks: vec![],
         }
     }
 
@@ -168,6 +223,8 @@ mod tests {
             header: make_genesis_header(),
             transactions: vec![],
             signatures: vec![],
+            bls_aggregate: None,
+            bls_cosigner_pks: vec![],
         };
         assert!(block.is_genesis());
         assert_eq!(block.header.prev_hash, GENESIS_PREV_HASH);
@@ -323,5 +380,64 @@ mod tests {
 
         assert_eq!(block.valid_signer_count(&vs), 0);
         assert!(!block.is_finalized(&vs));
+    }
+
+    #[test]
+    fn test_bls_single_sig_finalizes_block() {
+        use vinx_crypto::BlsSecretKey;
+        let ed_kp = KeyPair::generate();
+        let addr = Address::from_public_key(&ed_kp.public_key());
+        let vs = ValidatorSet::single(addr.clone());
+
+        let mut block = make_block(1, addr);
+        let header_hash = block.hash();
+
+        let bls_sk = BlsSecretKey::generate();
+        let bls_sig = bls_sk.sign(&header_hash);
+        // Use the public-API aggregate for proper encoding (aggregate of 1 = the sig itself).
+        let agg = vinx_crypto::bls_aggregate(&[bls_sig]).unwrap();
+        block.bls_aggregate = Some(agg.0.to_vec());
+        block.bls_cosigner_pks = vec![bls_sk.public_key().0.to_vec()];
+
+        assert_eq!(block.bls_signer_count().unwrap(), 1);
+        assert!(block.is_finalized(&vs));
+    }
+
+    #[test]
+    fn test_bls_wrong_sig_not_finalized() {
+        use vinx_crypto::BlsSecretKey;
+        let ed_kp = KeyPair::generate();
+        let addr = Address::from_public_key(&ed_kp.public_key());
+        let vs = ValidatorSet::single(addr.clone());
+
+        let mut block = make_block(1, addr);
+        let header_hash = block.hash();
+
+        let bls_sk = BlsSecretKey::generate();
+        let wrong_sk = BlsSecretKey::generate();
+        // Sign with one key but advertise a different public key.
+        let agg = vinx_crypto::bls_aggregate(&[bls_sk.sign(&header_hash)]).unwrap();
+        block.bls_aggregate = Some(agg.0.to_vec());
+        block.bls_cosigner_pks = vec![wrong_sk.public_key().0.to_vec()];
+
+        assert!(block.bls_signer_count().is_err());
+        assert!(!block.is_finalized(&vs));
+    }
+
+    #[test]
+    fn test_bls_absent_falls_back_to_ed25519() {
+        let kp = KeyPair::generate();
+        let addr = Address::from_public_key(&kp.public_key());
+        let vs = ValidatorSet::single(addr.clone());
+        let mut block = make_block(1, addr.clone());
+        let header_hash = block.hash();
+        block.signatures.push(BlockSignature {
+            validator: addr,
+            pub_key: kp.public_key(),
+            signature: kp.sign(&header_hash),
+        });
+        // No bls_aggregate set: should use Ed25519 path.
+        assert!(block.bls_aggregate.is_none());
+        assert!(block.is_finalized(&vs));
     }
 }

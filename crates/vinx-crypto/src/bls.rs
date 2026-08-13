@@ -19,6 +19,13 @@ pub const BLS_POP_DST: &[u8] = b"VINX_BLS_POP_V1";
 /// A BLS12-381 secret key (32 bytes scalar).
 pub struct BlsSecretKey(SecretKey);
 
+impl Clone for BlsSecretKey {
+    fn clone(&self) -> Self {
+        let bytes = self.to_bytes();
+        Self::from_bytes(&bytes).expect("cloning a valid key never fails")
+    }
+}
+
 /// A BLS12-381 public key (G1 point, 48 bytes compressed).
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct BlsPubKey(pub [u8; 48]);

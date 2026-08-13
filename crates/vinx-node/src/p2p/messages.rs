@@ -54,6 +54,17 @@ pub enum P2pMessage {
         height: u64,
         signature: BlockSignature,
     },
+    /// A single BLS12-381 co-signature on a block, gossiped by validators (ADR 0046).
+    BlockBlsCoSignature {
+        height: u64,
+        /// SHA-256 hash of the signed block header (96-byte message). Carried in the
+        /// message so recipients can verify the signature before doing a chain lookup.
+        block_hash: Vec<u8>,
+        /// BLS G2 compressed signature (96 bytes).
+        bls_sig: Vec<u8>,
+        /// BLS G1 compressed public key (48 bytes).
+        bls_pk: Vec<u8>,
+    },
     /// Request blocks starting from `from_height` (sent when a node detects it's behind).
     SyncRequest { from_height: u64, limit: u32 },
     /// Response to SyncRequest with the requested block range.
@@ -101,6 +112,7 @@ impl P2pMessage {
             P2pMessage::NewBlock(_) => "vinx/blocks/1",
             P2pMessage::NewTransaction(_) => "vinx/txs/1",
             P2pMessage::BlockCoSignature { .. } => "vinx/sigs/1",
+            P2pMessage::BlockBlsCoSignature { .. } => "vinx/bls/1",
             P2pMessage::SyncRequest { .. } | P2pMessage::SyncResponse { .. } => "vinx/sync/1",
         }
     }
@@ -145,6 +157,8 @@ mod tests {
             },
             transactions: vec![],
             signatures: vec![],
+            bls_aggregate: None,
+            bls_cosigner_pks: vec![],
         }
     }
 
@@ -245,6 +259,29 @@ mod tests {
     }
 
     #[test]
+    fn test_bls_cosig_message_roundtrip() {
+        use vinx_crypto::BlsSecretKey;
+        let sk = BlsSecretKey::generate();
+        let msg_hash = [0xABu8; 32];
+        let bls_sig = sk.sign(&msg_hash);
+        let bls_pk = sk.public_key();
+        let msg = P2pMessage::BlockBlsCoSignature {
+            height: 7,
+            block_hash: msg_hash.to_vec(),
+            bls_sig: bls_sig.0.to_vec(),
+            bls_pk: bls_pk.0.to_vec(),
+        };
+        let decoded = P2pMessage::decode(&msg.encode()).unwrap();
+        match decoded {
+            P2pMessage::BlockBlsCoSignature { height, bls_pk: pk, .. } => {
+                assert_eq!(height, 7);
+                assert_eq!(pk.len(), 48);
+            }
+            _ => panic!("expected BlockBlsCoSignature"),
+        }
+    }
+
+    #[test]
     fn test_topic_names() {
         assert_eq!(P2pMessage::NewBlock(dummy_block()).topic(), "vinx/blocks/1");
         assert_eq!(
@@ -258,6 +295,16 @@ mod tests {
         assert_eq!(
             P2pMessage::SyncResponse { blocks: vec![] }.topic(),
             "vinx/sync/1"
+        );
+        assert_eq!(
+            P2pMessage::BlockBlsCoSignature {
+                height: 1,
+                block_hash: vec![0u8; 32],
+                bls_sig: vec![0u8; 96],
+                bls_pk: vec![0u8; 48],
+            }
+            .topic(),
+            "vinx/bls/1"
         );
     }
 

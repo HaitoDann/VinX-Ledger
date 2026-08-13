@@ -39,6 +39,12 @@ pub struct ValidatorPoolEntry {
     /// Total finalized blocks within the score window where this validator was in
     /// the active set. Used as the denominator of the score.
     pub eligible_blocks_in_window: u64,
+    /// BLS12-381 public key (G1 compressed, 48 bytes). None before ADR 0046 registration.
+    #[serde(default)]
+    pub bls_pub_key: Option<Vec<u8>>,
+    /// Proof-of-Possession BLS signature (G2 compressed, 96 bytes). None before ADR 0046.
+    #[serde(default)]
+    pub bls_pop: Option<Vec<u8>>,
 }
 
 impl ValidatorPoolEntry {
@@ -52,6 +58,8 @@ impl ValidatorPoolEntry {
             },
             cosign_count_in_window: 0,
             eligible_blocks_in_window: 0,
+            bls_pub_key: None,
+            bls_pop: None,
         }
     }
 

@@ -20,6 +20,7 @@ use crate::{
 };
 use messages::P2pMessage;
 use rayon::prelude::*;
+use std::collections::HashMap;
 use std::sync::atomic::Ordering;
 use vinx_core::{Block, BlockSignature, SlashEvidence, Transaction, ValidatorSet};
 use vinx_crypto::{Address, Hash32};
@@ -108,6 +109,22 @@ impl P2pHandle {
                 signature,
             }));
     }
+    pub fn broadcast_bls_cosig(
+        &self,
+        height: u64,
+        block_hash: Vec<u8>,
+        bls_sig: Vec<u8>,
+        bls_pk: Vec<u8>,
+    ) {
+        let _ = self.cmd_tx.send(P2pCommand::Broadcast(
+            P2pMessage::BlockBlsCoSignature {
+                height,
+                block_hash,
+                bls_sig,
+                bls_pk,
+            },
+        ));
+    }
     pub fn shutdown(&self) {
         let _ = self.cmd_tx.send(P2pCommand::Shutdown);
     }
@@ -120,7 +137,13 @@ struct VinxBehaviour {
     mdns: mdns::tokio::Behaviour,
 }
 
-const TOPICS: &[&str] = &["vinx/blocks/1", "vinx/txs/1", "vinx/sigs/1", "vinx/sync/1"];
+const TOPICS: &[&str] = &[
+    "vinx/blocks/1",
+    "vinx/txs/1",
+    "vinx/sigs/1",
+    "vinx/bls/1",
+    "vinx/sync/1",
+];
 
 pub async fn start(
     config: &NodeConfig,
@@ -242,6 +265,7 @@ pub async fn start(
 
     let local_kp = config.validator_keypair.clone();
     let local_addr = config.validator_address;
+    let bls_sk = config.bls_secret_key.clone();
 
     tokio::spawn(async move {
         run_event_loop(
@@ -255,6 +279,7 @@ pub async fn start(
             local_addr,
             metrics,
             fork_choice,
+            bls_sk,
         )
         .await;
     });
@@ -277,8 +302,12 @@ async fn run_event_loop(
     local_addr: Address,
     metrics: NodeMetrics,
     fork_choice: ForkChoiceCtx,
+    bls_sk: Option<vinx_crypto::BlsSecretKey>,
 ) {
     let mut guard = guard::PeerGuard::new();
+    // ADR 0046: pending BLS co-signatures keyed by (height, block_hash).
+    // Entries are pruned below the finalized height and drained once quorum is reached.
+    let mut pending_bls: HashMap<(u64, Hash32), Vec<(Vec<u8>, Vec<u8>)>> = HashMap::new();
 
     loop {
         tokio::select! {
@@ -298,7 +327,7 @@ async fn run_event_loop(
             }
             event = swarm.next() => {
                 if let Some(event) = event {
-                    handle_swarm_event(event, &chain, &mempool, &state, &validator_set, &local_kp, &local_addr, &mut swarm, &mut guard, &metrics, &fork_choice).await;
+                    handle_swarm_event(event, &chain, &mempool, &state, &validator_set, &local_kp, &local_addr, &mut swarm, &mut guard, &metrics, &fork_choice, &bls_sk, &mut pending_bls).await;
                 }
             }
         }
@@ -318,6 +347,8 @@ async fn handle_swarm_event(
     guard: &mut guard::PeerGuard,
     metrics: &NodeMetrics,
     fork_choice: &ForkChoiceCtx,
+    bls_sk: &Option<vinx_crypto::BlsSecretKey>,
+    pending_bls: &mut HashMap<(u64, Hash32), Vec<(Vec<u8>, Vec<u8>)>>,
 ) {
     match event {
         SwarmEvent::NewListenAddr { address, .. } => {
@@ -391,6 +422,8 @@ async fn handle_swarm_event(
                 swarm,
                 metrics,
                 fork_choice,
+                bls_sk,
+                pending_bls,
             )
             .await;
         }
@@ -543,6 +576,8 @@ async fn dispatch_message(
     swarm: &mut libp2p::Swarm<VinxBehaviour>,
     metrics: &NodeMetrics,
     fork_choice: &ForkChoiceCtx,
+    bls_sk: &Option<vinx_crypto::BlsSecretKey>,
+    pending_bls: &mut HashMap<(u64, Hash32), Vec<(Vec<u8>, Vec<u8>)>>,
 ) {
     match msg {
         P2pMessage::NewTransaction(tx) => {
@@ -792,6 +827,23 @@ async fn dispatch_message(
                     .publish(topic, co_msg.encode());
                 debug!(height, "Co-signed block");
 
+                // ADR 0046: broadcast BLS co-signature when a BLS key is configured.
+                if let Some(sk) = bls_sk {
+                    let bls_sig = sk.sign(&block_hash);
+                    let bls_msg = P2pMessage::BlockBlsCoSignature {
+                        height,
+                        block_hash: block_hash.to_vec(),
+                        bls_sig: bls_sig.0.to_vec(),
+                        bls_pk: sk.public_key().0.to_vec(),
+                    };
+                    let bls_topic = IdentTopic::new(bls_msg.topic());
+                    let _ = swarm
+                        .behaviour_mut()
+                        .gossipsub
+                        .publish(bls_topic, bls_msg.encode());
+                    debug!(height, "BLS co-signed block");
+                }
+
                 let mut c = chain.write().await;
                 c.record_signature(local_addr, height, block_hash);
                 let finalized = c.add_co_signature(height, sig, &vs);
@@ -849,6 +901,99 @@ async fn dispatch_message(
                 crate::reorg::advance_snapshot(&mut snap, &c);
                 info!(height, "Block finalized via co-signatures");
             }
+        }
+
+        // ADR 0046: accumulate BLS co-signatures; aggregate and finalize once quorum is met.
+        P2pMessage::BlockBlsCoSignature {
+            height,
+            block_hash,
+            bls_sig,
+            bls_pk,
+        } => {
+            // Size guards — reject malformed frames early.
+            if bls_pk.len() != 48 || bls_sig.len() != 96 || block_hash.len() != 32 {
+                warn!(height, "P2P BLS cosig: wrong byte lengths");
+                return;
+            }
+            // We must already have this block stored and the message hash must match.
+            let our_block_hash: Hash32 = {
+                let c = chain.read().await;
+                match c.get_block(height) {
+                    Some(b) => b.hash(),
+                    None => {
+                        debug!(height, "P2P BLS cosig for unknown height");
+                        return;
+                    }
+                }
+            };
+            if block_hash.as_slice() != our_block_hash {
+                warn!(height, "P2P BLS cosig: block_hash mismatch");
+                return;
+            }
+            // Verify BLS signature cryptographically.
+            let pk_arr: [u8; 48] = bls_pk.as_slice().try_into().unwrap();
+            let sig_arr: [u8; 96] = bls_sig.as_slice().try_into().unwrap();
+            let bls_pub = match vinx_crypto::BlsPubKey::from_bytes(&pk_arr) {
+                Ok(p) => p,
+                Err(_) => {
+                    warn!(height, "P2P BLS cosig: invalid pubkey");
+                    return;
+                }
+            };
+            let bls_signature = vinx_crypto::BlsSignature(sig_arr);
+            if vinx_crypto::bls_verify(&bls_pub, &bls_signature, &our_block_hash).is_err() {
+                warn!(height, "P2P BLS cosig: signature verification failed");
+                return;
+            }
+            // Prune entries that can no longer affect finality.
+            {
+                let fin = chain.read().await.finalized_height();
+                pending_bls.retain(|(h, _), _| *h > fin);
+            }
+            // Accumulate, deduplicating by BLS public key.
+            let count = {
+                let entry = pending_bls.entry((height, our_block_hash)).or_default();
+                if entry.iter().any(|(pk, _)| pk.as_slice() == bls_pk.as_slice()) {
+                    debug!(height, "P2P BLS cosig: duplicate pubkey, ignoring");
+                    return;
+                }
+                entry.push((bls_pk, bls_sig));
+                entry.len()
+            };
+            debug!(height, count, "P2P BLS cosig accumulated");
+            // Check quorum — aggregate and update block when met.
+            let vs = validator_set.read().await.clone();
+            if count < vs.quorum() {
+                return;
+            }
+            let (pks, raw_sigs): (Vec<Vec<u8>>, Vec<Vec<u8>>) =
+                match pending_bls.get(&(height, our_block_hash)) {
+                    Some(v) => v.iter().cloned().unzip(),
+                    None => return,
+                };
+            let bls_sigs: Vec<vinx_crypto::BlsSignature> = raw_sigs
+                .iter()
+                .map(|s| vinx_crypto::BlsSignature(s.as_slice().try_into().unwrap()))
+                .collect();
+            let agg = match vinx_crypto::bls_aggregate(&bls_sigs) {
+                Ok(a) => a,
+                Err(e) => {
+                    warn!(height, error = %e, "P2P BLS aggregate failed");
+                    return;
+                }
+            };
+            let agg_count = pks.len();
+            {
+                let mut c = chain.write().await;
+                c.set_block_bls(height, agg.0.to_vec(), pks);
+                let fin = c.advance_finality(&vs);
+                if fin >= height {
+                    let mut snap = fork_choice.finalized_state.write().await;
+                    crate::reorg::advance_snapshot(&mut snap, &c);
+                    info!(height, cosigners = agg_count, "Block finalized via BLS aggregate");
+                }
+            }
+            pending_bls.remove(&(height, our_block_hash));
         }
 
         // Respond to sync requests with our stored blocks
@@ -1024,6 +1169,8 @@ mod tests {
             header,
             transactions: vec![],
             signatures: vec![sig],
+            bls_aggregate: None,
+            bls_cosigner_pks: vec![],
         }
     }
 

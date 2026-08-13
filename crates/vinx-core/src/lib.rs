@@ -20,6 +20,6 @@ pub use governance::GovernanceAction;
 pub use module::ModuleOp;
 pub use protocol::{ProtocolVersion, ScheduledUpgrade};
 pub use reliability::ValidatorReliability;
-pub use transaction::{Transaction, TransactionType};
+pub use transaction::{RegisterBlsKeyPayload, Transaction, TransactionType};
 pub use validator_pool::{PoolStatus, ValidatorPoolEntry};
 pub use validator_set::ValidatorSet;

@@ -101,6 +101,8 @@ fn test_storage_roundtrip_preserves_typed_tx_index() {
         },
         transactions: vec![tx],
         signatures: vec![],
+        bls_aggregate: None,
+        bls_cosigner_pks: vec![],
     };
     chain.push(block);
 
