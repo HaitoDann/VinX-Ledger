@@ -178,7 +178,7 @@ async fn main() {
     };
     let bootstrap_peers = args.bootstrap_peers;
     let chain_id = args.chain_id;
-    let max_block_txs = file_cfg.max_block_txs.unwrap_or(10_000);
+    let max_block_txs = file_cfg.max_block_txs.unwrap_or(3_000);
     let max_mempool_size = file_cfg.max_mempool_size.unwrap_or(100_000);
     let sync_peer_rpc = args.sync_peer.or(file_cfg.sync_peer_rpc);
 

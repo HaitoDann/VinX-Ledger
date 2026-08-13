@@ -35,7 +35,7 @@ Les validateurs sont rémunérés par le protocole lui-même (émission progress
 | **Consensus** | PoA Threshold — >66 % des validateurs co-signent chaque bloc |
 | **Finalité** | Déterministe — un bloc quorum-signé n'est jamais réorganisé |
 | **Cadence** | Fixe à 12 s — un bloc produit toutes les 12 secondes |
-| **Capacité** | Jusqu'à 10 000 tx/bloc · ~833 TPS max (configurable) |
+| **Capacité** | 3 000 tx/bloc · ~250 TPS (configurable) |
 | **Frais** | Forfait fixe × congestion (×1–3) · **100 % au validateur producteur** |
 | **Cryptographie** | Ed25519 · BLS12-381 · SHA-256 · Bech32 (`vinx1`) |
 | **Supply** | 100 milliards VINX · fixe · **sans pre-mine · sans burn** |

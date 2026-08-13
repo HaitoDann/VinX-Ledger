@@ -63,7 +63,7 @@ VinX Ledger est une blockchain L1 de paiement écrite intégralement en Rust, sa
 ### Production de blocs
 - [x] Producteur **à plancher de cadence fixe** (ADR 0043) : au plus un bloc toutes les **12 s**, même en saturation (l'ancienne accélération dos-à-dos, génératrice de forks, a été retirée — la congestion passe par le base-fee). Skip-empty au repos conservé. Garde anti-spin (pas de blocs vides en boucle sur backlog inapplicable)
 - [x] **Heartbeat 10 min** (ADR 0038) : au repos, au moins un bloc (même vide) toutes les 600 s — forge l'émission accumulée à heure fixe (supprime l'incitation à forcer des blocs par fausses tx), borne le retard du MTP, fait mûrir déliaisons/upgrades. Coût : ~15-30 Mo/an
-- [x] Capacités : **10 000 tx/bloc**, mempool **100 000** (réglables `max_block_txs` / `max_mempool_size`)
+- [x] Capacités : **3 000 tx/bloc** (~250 TPS), mempool **100 000** (réglables `max_block_txs` / `max_mempool_size`)
 - [x] Frais dynamiques style EIP-1559 (×1 à ×3 selon la charge mémoire)
 - [x] **Frais au producteur** : 100 % des frais du bloc créditent le validateur producteur (plus de melt)
 - [x] Vérification des signatures en parallèle (rayon, tous les cœurs CPU)

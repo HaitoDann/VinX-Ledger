@@ -210,8 +210,8 @@ cargo run -p vinx-node -- \
 
 | Option CLI | Config TOML | Défaut |
 |---|---|---|
-| `--block-time` | `block_time_secs` | 5 (écart sous activité légère ; se resserre à charge) |
-| — | `max_block_txs` | 10000 |
+| `--block-time` | `block_time_secs` | 12 (fixe) |
+| — | `max_block_txs` | 3000 |
 | — | `max_mempool_size` | 100000 |
 | `--rpc-listen` | `rpc_listen` | `0.0.0.0:8545` |
 | `--p2p-listen` | `p2p_listen` | désactivé |

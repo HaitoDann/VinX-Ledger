@@ -1,4 +1,4 @@
-# ADR 0040 — Émission élastique à réservoir
+# ADR 0047 — Émission élastique à réservoir
 
 - **Statut :** Proposé (design constitutionnel — à décider avant le mainnet)
 - **Catégorie :** Tokenomics · **Priorité :** 🔴 haute

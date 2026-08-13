@@ -1,6 +1,6 @@
 # ADR 0040 — Émission progressive sans La Fonderie
 
-- **Statut :** Accepté (décision de design) — **non implémenté** à ce jour.
+- **Statut :** Accepté — **✅ implémenté** (`STORAGE_VERSION` 10, commit `f044bc4`).
 - **Catégorie :** Tokenomics & Économie · **Priorité :** 🔴 haute (change l'invariant de base)
 - **Date :** Août 2026
 - **Liens :** remplace le modèle « La Fonderie » (whitepaper v4, ADR 0021 révisé) ; modifie

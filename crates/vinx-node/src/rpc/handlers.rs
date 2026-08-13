@@ -912,6 +912,6 @@ pub async fn get_fee_estimate(State(node): State<Arc<Node>>) -> ApiResult<FeeEst
         base_fee_atoms: base_fee.atoms().to_string(),
         recommended_fee_atoms: recommended_fee.atoms().to_string(),
         mempool_pending: mempool.size(),
-        mempool_max: node.config.max_block_txs,
+        mempool_max: node.config.max_mempool_size,
     }))
 }
