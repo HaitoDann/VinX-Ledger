@@ -42,8 +42,8 @@ pub const MAX_PENDING_UNBONDS_PER_ACCOUNT: usize = 16;
 // ─── Emission by work — fair launch ────────────────────────────────────────────
 
 /// Emission half-life (ADR 0040): the cumulative emission reaches half the supply after
-/// this many real-time **seconds**. ~20 years (20 × 365.25 × 24 × 3600 = 630 720 000 s).
-/// Measured in seconds, not block height — the block cadence is demand-adaptive.
+/// this many real-time **seconds**. ~20 years (20 × 365 × 24 × 3600 = 630 720 000 s).
+/// Measured in seconds, not block height — the block cadence is fixed at 12 s (ADR 0043).
 /// Immutable after genesis (ADR 0021). Replaces the former `HALVING_PERIOD_SECS` (8 years).
 pub const EMISSION_T_HALF_SECS: u64 = 630_720_000;
 
