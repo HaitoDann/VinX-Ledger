@@ -3,9 +3,9 @@ use std::collections::{BTreeMap, HashMap, HashSet};
 use vinx_core::{
     amount::{
         cumulative_emission_atoms, Amount, BPS_DENOM, DEFAULT_ACTIVE_SET_SIZE,
-        DEFAULT_FEE_FLOOR_ATOMS, EXISTENTIAL_DEPOSIT_ATOMS, MAX_MODULES, MAX_NONCE_AHEAD,
-        MIN_MODULE_BOND_ATOMS, MIN_STAKE_ATOMS, MIN_VALIDATOR_BOND_ATOMS, SLASH_BOUNTY_BPS,
-        SLASH_EQUIVOCATION_BPS, UNBONDING_SECS,
+        DEFAULT_FEE_FLOOR_ATOMS, EPOCH_DURATION_SECS, EXISTENTIAL_DEPOSIT_ATOMS, MAX_MODULES,
+        MAX_NONCE_AHEAD, MIN_MODULE_BOND_ATOMS, MIN_STAKE_ATOMS, MIN_VALIDATOR_BOND_ATOMS,
+        SLASH_BOUNTY_BPS, SLASH_EQUIVOCATION_BPS, UNBONDING_SECS, VALIDATOR_SCORE_WINDOW_SECS,
     },
     block::SlashEvidence,
     chain_id::CHAIN_ID_DEVNET,
@@ -13,6 +13,7 @@ use vinx_core::{
     module::ModuleOp,
     protocol::{ProtocolVersion, ScheduledUpgrade},
     reliability::{self, ReliabilityMap},
+    validator_pool::PoolStatus,
     Account, CoreError, Transaction, TransactionType, ValidatorSet,
 };
 use vinx_crypto::{sha256, Address, Hash32, IncrementalMerkleTree};
@@ -164,6 +165,12 @@ pub struct WorldState {
     /// Appended after `last_active_set_size_change_ts`.
     #[serde(default)]
     pub last_bond_change_ts: u64,
+    /// Timestamp of the most recent epoch close (ADR 0028 / ADR 0038).
+    /// Epoch closes trigger score decay, active-set rotation, warmup ticks, and
+    /// epoch-pot distribution. Zero until the first epoch close fires.
+    /// Appended after `last_bond_change_ts` — v12→v13 migration appends `u64 = 0`.
+    #[serde(default)]
+    pub last_epoch_close_ts: u64,
 }
 
 /// A bond amount in its unbonding delay, waiting to return to `address`'s balance
@@ -306,6 +313,22 @@ pub fn v12_meta_suffix() -> Vec<u8> {
     out
 }
 
+/// The bincode bytes appended to a v12 `WorldState` meta blob to bring it to v13 (ADR 0028
+/// epoch close). Appends the default for one new field:
+///   1. `last_epoch_close_ts` — `u64 = 0`
+pub fn v13_meta_suffix() -> Vec<u8> {
+    bincode::serialize(&0u64).expect("serialize 0u64")
+}
+
+/// SHA-256(epoch_number_le || address) — deterministic sort key for tiebreaking
+/// validators with identical reliability scores at epoch rotation (ADR 0038).
+fn epoch_tiebreaker(epoch: u64, addr: &Address) -> [u8; 32] {
+    let mut buf = [0u8; 8 + 20];
+    buf[..8].copy_from_slice(&epoch.to_le_bytes());
+    buf[8..].copy_from_slice(addr.as_bytes());
+    sha256(&buf)
+}
+
 fn default_fee_floor() -> Amount {
     Amount::from_atoms(DEFAULT_FEE_FLOOR_ATOMS)
 }
@@ -362,6 +385,7 @@ impl WorldState {
             active_set_size: DEFAULT_ACTIVE_SET_SIZE,
             last_active_set_size_change_ts: 0,
             last_bond_change_ts: 0,
+            last_epoch_close_ts: 0,
         }
     }
 
@@ -497,12 +521,7 @@ impl WorldState {
         self.mature_unbonds(block_ts);
         // 3. Work emission — mint new tokens → producer (ADR 0040).
         let emission = self.emit_work_reward(producer, block_ts);
-        // 4. Fiabilité des validateurs (ADR 0027, tranche 2a) : attribution déterministe des
-        //    manquements de proposition (proposeur effectif vs leader actif prévu) + jailing.
-        //    Hook UNIVERSEL — `settle_block` est appelé sur tous les chemins d'application
-        //    (production, backup, P2P, sync) avec le proposeur effectif, donc la table de
-        //    fiabilité évolue identiquement sur tous les nœuds. N'affecte PAS encore la
-        //    rotation ni le quorum (tranche 2b) — pour l'instant on ne fait que TRACER les faits.
+        // 4. Fiabilité des validateurs (ADR 0027) : attributions + jailing.
         if height > 0 {
             let jailed = reliability::on_block_applied(
                 &mut self.reliability,
@@ -517,7 +536,141 @@ impl WorldState {
                 );
             }
         }
+        // 5. Epoch close (ADR 0028/0038) — triggered when EPOCH_DURATION_SECS have elapsed
+        //    since the last close. Deterministic on block_ts so all nodes close the same epoch.
+        if EPOCH_DURATION_SECS > 0 && self.emission_started {
+            let since_last = block_ts.saturating_sub(
+                if self.last_epoch_close_ts == 0 {
+                    self.emission_epoch_ts
+                } else {
+                    self.last_epoch_close_ts
+                },
+            );
+            if since_last >= EPOCH_DURATION_SECS {
+                self.tick_epoch_close();
+            }
+        }
         (fees, emission)
+    }
+
+    /// Moves `amount` out of the epoch pot back into validator balances.
+    /// Inverse of `move_to_epoch_pot`: epoch_pot decreases, circulating increases.
+    fn distribute_from_epoch_pot(&mut self, addr: &Address, amount: Amount) {
+        if amount == Amount::ZERO {
+            return;
+        }
+        self.epoch_dist_emission_pot = self
+            .epoch_dist_emission_pot
+            .checked_sub(amount)
+            .unwrap_or(Amount::ZERO);
+        self.circulating_supply = self.circulating_supply.saturating_add(amount);
+        self.credit(addr, amount);
+    }
+
+    /// Records which validators co-signed a finalized block.
+    ///
+    /// Updates `cosign_count_in_window` and `eligible_blocks_in_window` for every
+    /// validator currently in the Active status. Call once per finalized block,
+    /// after the block's co-signature set is known.
+    pub fn record_block_cosigns(&mut self, cosigner_addrs: &[Address]) {
+        let cosigners: HashSet<Address> = cosigner_addrs.iter().copied().collect();
+        let active_addrs: Vec<Address> = self
+            .validator_pool
+            .iter()
+            .filter(|(_, e)| matches!(e.status, PoolStatus::Active))
+            .map(|(a, _)| *a)
+            .collect();
+        for addr in active_addrs {
+            if let Some(entry) = self.validator_pool.get_mut(&addr) {
+                entry.record_block(true, cosigners.contains(&addr));
+            }
+        }
+    }
+
+    /// Closes the current epoch: decays score windows, ticks warmup, rotates the active
+    /// set by score (SHA-256 tiebreaker), distributes the epoch pot, and updates
+    /// `validator_set` to the new active set (ADR 0028 + ADR 0038).
+    ///
+    /// Called automatically from `settle_block` when `EPOCH_DURATION_SECS` have elapsed.
+    pub fn tick_epoch_close(&mut self) {
+        let epoch_number = if EPOCH_DURATION_SECS > 0 {
+            self.last_epoch_close_ts / EPOCH_DURATION_SECS
+        } else {
+            0
+        };
+
+        // 1. Decay all pool window counters (sliding-window approximation).
+        let window_epochs = VALIDATOR_SCORE_WINDOW_SECS / EPOCH_DURATION_SECS.max(1);
+        for entry in self.validator_pool.values_mut() {
+            entry.decay_window(window_epochs);
+        }
+
+        // 2. Tick warmup counters — validators completing warm-up become Benched.
+        for entry in self.validator_pool.values_mut() {
+            entry.tick_warmup();
+        }
+
+        // 3. Rank eligible validators by score, SHA-256 tiebreaker.
+        let n = self.active_set_size as usize;
+        let mut eligible: Vec<(Address, u32)> = self
+            .validator_pool
+            .iter()
+            .filter(|(_, e)| e.is_eligible())
+            .map(|(a, e)| (*a, e.score_bps()))
+            .collect();
+
+        eligible.sort_by(|(a1, s1), (a2, s2)| {
+            s2.cmp(s1).then_with(|| {
+                epoch_tiebreaker(epoch_number, a1).cmp(&epoch_tiebreaker(epoch_number, a2))
+            })
+        });
+
+        let new_active: HashSet<Address> = eligible.iter().take(n).map(|(a, _)| *a).collect();
+
+        // 4. Update pool statuses to match selection.
+        for (addr, entry) in self.validator_pool.iter_mut() {
+            if matches!(entry.status, PoolStatus::Active | PoolStatus::Benched) {
+                entry.status = if new_active.contains(addr) {
+                    PoolStatus::Active
+                } else {
+                    PoolStatus::Benched
+                };
+            }
+        }
+
+        // 5. Distribute epoch pot equally among the new active set.
+        if !new_active.is_empty() {
+            let pot = self.epoch_dist_emission_pot;
+            if pot > Amount::ZERO {
+                let count = new_active.len() as u128;
+                let share_atoms = pot.atoms() / count;
+                let remainder_atoms = pot.atoms() % count;
+                // Sorted for a deterministic remainder recipient.
+                let mut sorted: Vec<Address> = new_active.iter().copied().collect();
+                sorted.sort();
+                for &addr in &sorted {
+                    if share_atoms > 0 {
+                        self.distribute_from_epoch_pot(&addr, Amount::from_atoms(share_atoms));
+                    }
+                }
+                if remainder_atoms > 0 {
+                    self.distribute_from_epoch_pot(
+                        &sorted[0],
+                        Amount::from_atoms(remainder_atoms),
+                    );
+                }
+            }
+        }
+
+        // 6. Rebuild validator_set from the new active pool (sorted for determinism).
+        if !new_active.is_empty() {
+            let mut new_vs_addrs: Vec<Address> = new_active.iter().copied().collect();
+            new_vs_addrs.sort();
+            self.validator_set = ValidatorSet::new(new_vs_addrs);
+        }
+        // If the pool is empty (e.g. genesis before any bonds), leave validator_set as-is.
+
+        self.last_epoch_close_ts = self.current_block_ts;
     }
 
     /// Checks the supply invariant (ADR 0040):

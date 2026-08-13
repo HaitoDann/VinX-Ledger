@@ -38,7 +38,9 @@ use zstd;
 /// v12: Open PoA (ADR 0038) — `validator_pool`, `banned_validator_keys`,
 ///      `active_set_size`, `last_active_set_size_change_ts`, `last_bond_change_ts`
 ///      appended after `reliability`. Migration appends their default encodings.
-const STORAGE_VERSION: u64 = 12;
+/// v13: Epoch close (ADR 0028/0038) — `last_epoch_close_ts` appended after
+///      `last_bond_change_ts`. Migration appends `u64 = 0`.
+const STORAGE_VERSION: u64 = 13;
 
 /// zstd compression level — level 3 is the sweet spot: ~60-70% size reduction,
 /// negligible latency compared to disk I/O.
@@ -185,6 +187,8 @@ impl Storage {
                 // banned_validator_keys (empty HashSet), active_set_size (u32 = 21),
                 // last_active_set_size_change_ts (u64 = 0), last_bond_change_ts (u64 = 0).
                 11 => Self::append_meta_suffix(tx, &vinx_state::v12_meta_suffix())?,
+                // v12 → v13 (ADR 0028 epoch close): append last_epoch_close_ts (u64 = 0).
+                12 => Self::append_meta_suffix(tx, &vinx_state::v13_meta_suffix())?,
                 unknown => {
                     return Err(Self::io_err(format!(
                         "no automatic migration from schema v{unknown} to v{STORAGE_VERSION}. \

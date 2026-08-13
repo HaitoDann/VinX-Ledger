@@ -87,4 +87,34 @@ impl ValidatorPoolEntry {
         }
         false
     }
+
+    /// Sliding-window decay: multiply both counters by `(window_epochs − 1) / window_epochs`.
+    ///
+    /// Applied at every epoch close so data older than `window_epochs` epochs is
+    /// progressively forgotten. After `window_epochs` applications the original value is
+    /// reduced to `((w-1)/w)^w ≈ 1/e ≈ 37%` — a natural decay, not a hard reset.
+    /// Both numerator and denominator are decayed identically, so the ratio (score) is
+    /// stable for a validator whose co-signature rate is constant.
+    pub fn decay_window(&mut self, window_epochs: u64) {
+        if window_epochs <= 1 {
+            return;
+        }
+        let w = window_epochs;
+        self.cosign_count_in_window = self.cosign_count_in_window * (w - 1) / w;
+        self.eligible_blocks_in_window = self.eligible_blocks_in_window * (w - 1) / w;
+    }
+
+    /// Records a finalized block for this validator.
+    ///
+    /// `was_eligible`: the validator was in the active set for this block (increments
+    /// the denominator). `did_cosign`: the validator's signature appeared in the block
+    /// (increments the numerator). Calling with `was_eligible = false` is a no-op.
+    pub fn record_block(&mut self, was_eligible: bool, did_cosign: bool) {
+        if was_eligible {
+            self.eligible_blocks_in_window += 1;
+            if did_cosign {
+                self.cosign_count_in_window += 1;
+            }
+        }
+    }
 }

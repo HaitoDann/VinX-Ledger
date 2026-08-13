@@ -13,6 +13,7 @@ serde = { workspace = true }
 hex = { workspace = true }
 thiserror = { workspace = true }
 borsh = { workspace = true }
+blst = { workspace = true }
 
 [dev-dependencies]
 serde_json = { workspace = true }

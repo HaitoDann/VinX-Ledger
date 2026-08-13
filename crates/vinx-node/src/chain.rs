@@ -519,6 +519,43 @@ impl Chain {
         false
     }
 
+    /// Time-based pruning: drops tx and signature data from blocks whose timestamp is
+    /// older than `retain_secs` seconds before `now_ts`. Block headers are kept forever.
+    ///
+    /// This is the primary retention policy (ADR 0045 / `TX_RETENTION_SECS = 90 days`).
+    /// Use `prune` for block-count-based compaction in tests.
+    pub fn prune_by_age(&mut self, now_ts: u64, retain_secs: u64) {
+        let cutoff = now_ts.saturating_sub(retain_secs);
+        let mut pruned_blocks = 0usize;
+        let mut tx_pruned = 0usize;
+        let mut sig_pruned = 0usize;
+
+        for (height, (_, block)) in self.blocks.iter_mut().enumerate() {
+            if block.header.timestamp >= cutoff {
+                break; // blocks are monotonically ordered by time
+            }
+            if !block.transactions.is_empty() || !block.signatures.is_empty() {
+                tx_pruned += block.transactions.len();
+                sig_pruned += block.signatures.len();
+                block.transactions.clear();
+                block.signatures.clear();
+                self.dirty_heights.insert(height as u64);
+                pruned_blocks += 1;
+            }
+        }
+
+        if pruned_blocks > 0 {
+            self.rebuild_tx_index();
+            tracing::info!(
+                pruned_blocks,
+                tx_pruned,
+                sig_pruned,
+                cutoff_ts = cutoff,
+                "Chain: time-based tx/sig pruning complete"
+            );
+        }
+    }
+
     /// Compacts transaction data from blocks older than `keep_last` blocks.
     /// Block headers and hashes are retained to preserve chain integrity.
     /// This reduces memory/disk usage without breaking hash linkage verification.

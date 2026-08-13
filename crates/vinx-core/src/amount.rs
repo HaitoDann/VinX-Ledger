@@ -98,7 +98,10 @@ pub const UNBONDING_SECS: u64 = 3 * 24 * 3_600;
 // ─── Open PoA — active set (ADR 0038) ─────────────────────────────────────────
 
 /// Default number of validators in the active signing set (ADR 0038). Governable
-/// within [MIN_ACTIVE_SET_SIZE, MAX_ACTIVE_SET_SIZE], in steps of ACTIVE_SET_STEP.
+/// in steps of ACTIVE_SET_STEP with ACTIVE_SET_COOLDOWN_SECS between modifications.
+/// No hard upper cap — governance controls the ceiling. Note: above ~100 validators,
+/// Ed25519 individual co-signatures stress the gossip layer; BLS aggregation (ADR 0029)
+/// is recommended for large committees.
 pub const DEFAULT_ACTIVE_SET_SIZE: u32 = 21;
 
 /// Hard floor on the active set size (ADR 0038). Immutable — below 5 the BFT
@@ -107,19 +110,19 @@ pub const DEFAULT_ACTIVE_SET_SIZE: u32 = 21;
 /// the pool size.
 pub const MIN_ACTIVE_SET_SIZE: u32 = 5;
 
-/// Hard cap on the active set size (ADR 0038). Immutable. Above 101, Ed25519
-/// individual co-signatures per block stress the gossip layer; BLS (ADR 0029) is
-/// required for larger committees.
-pub const MAX_ACTIVE_SET_SIZE: u32 = 101;
-
 /// Active-set size changes are limited to this step per governance action (ADR 0038).
-/// Prevents an attacker from jumping from 21 to 3 in a single transaction.
+/// Prevents an attacker from jumping from 21 to the floor of 5 in a single transaction.
 pub const ACTIVE_SET_STEP: u32 = 2;
 
 /// Minimum real-time gap between two active-set-size governance modifications (7 days).
 /// Immutable. Combined with ACTIVE_SET_STEP, going from 21 to the floor of 5 takes
 /// 8 steps × 7 days = 56 days of sustained governance control (ADR 0038).
 pub const ACTIVE_SET_COOLDOWN_SECS: u64 = 7 * 24 * 3_600;
+
+/// Duration of one epoch in real-time seconds (ADR 0028). With a fixed 12s block cadence
+/// (ADR 0043/0045), each epoch contains exactly EPOCH_DURATION_SECS / block_time_secs = 300
+/// blocks. The epoch close triggers: score rotation, warmup tick, epoch pot distribution.
+pub const EPOCH_DURATION_SECS: u64 = 3_600;
 
 /// Sliding window over which the validator reliability score is computed (7 days).
 /// score(v) = co_signatures(v) / finalized_blocks_where_v_was_in_active_set
@@ -142,11 +145,12 @@ pub const SLASH_EQUIVOCATION_BPS: u128 = 10_000;
 /// distribution pot — no tokens are destroyed (ADR 0040, no-burn principle).
 pub const SLASH_BOUNTY_BPS: u128 = 1_000;
 
-/// Number of recent blocks to retain with full data (header + transactions + signatures).
-/// Older blocks are compacted: transactions and signatures are dropped, only the header
-/// (height, hashes, validator, state_root) is kept for chain integrity verification.
-/// At peak load (1 block/3s) this covers ~3.5 days; at low activity, much longer.
-pub const BLOCK_RETENTION_COUNT: u64 = 100_000;
+/// How long (in real-time seconds) to keep full block data (header + transactions +
+/// signatures). After this window, transactions and signatures are dropped — only the
+/// header (height, hashes, validator, state_root) is kept for chain integrity.
+/// 90 days ≈ 648 000 blocks at 12 s cadence. Keeps the node light while allowing
+/// 3-month transaction history lookups.
+pub const TX_RETENTION_SECS: u64 = 90 * 24 * 3_600;
 
 /// Pruning runs every N blocks to amortize the O(n) tx-index rebuild cost.
 pub const PRUNE_INTERVAL: u64 = 1_000;

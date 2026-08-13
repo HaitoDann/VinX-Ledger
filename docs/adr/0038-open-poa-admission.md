@@ -70,12 +70,15 @@ Le set actif est composé des **N validateurs ayant le score le plus élevé** p
 complété leur warmup.
 
 **N** est gouvernable, modifiable de ±2 par modification, avec un cooldown de 7 jours entre
-deux modifications. Bornes immuables :
+deux modifications. Seul un plancher dur est immuable :
 
 ```
-MIN_ACTIVE_SET_SIZE = 5   (plancher dur, immuable)
-MAX_ACTIVE_SET_SIZE = 101 (plafond dur, immuable)
+MIN_ACTIVE_SET_SIZE = 5   (plancher dur, immuable — dessous, BFT n'offre aucune tolérance)
 ```
+
+Il n'y a **pas de plafond dur** : la gouvernance fixe N librement au-dessus du plancher.
+Note pratique : au-delà de ~100 validateurs, les co-signatures Ed25519 individuelles pèsent
+sur le gossip ; l'agrégation BLS (ADR 0046) est recommandée pour de grands comités.
 
 Le plancher de 5 s'active dès que le pool atteint 5 validateurs ; en dessous de 5, le set
 actif = tout le pool (`set_size = min(N, pool_size)`).
@@ -150,7 +153,7 @@ Les co-signatures en lock-step sont observables on-chain par n'importe quel anal
 |---|---|---|
 | `N` (set actif par défaut) | 21 | Gouvernable, ±2, cooldown 7 j |
 | `MIN_ACTIVE_SET_SIZE` | 5 | **Immuable** |
-| `MAX_ACTIVE_SET_SIZE` | 101 | **Immuable** |
+| ~~`MAX_ACTIVE_SET_SIZE`~~ | ~~101~~ | ~~Immuable~~ → **supprimé** (ADR 0046) |
 | `ACTIVE_SET_STEP` | 2 | **Immuable** |
 | `ACTIVE_SET_COOLDOWN_SECS` | 604 800 (7 j) | **Immuable** |
 | `VALIDATOR_SCORE_WINDOW_SECS` | 604 800 (7 j) | Immuable |

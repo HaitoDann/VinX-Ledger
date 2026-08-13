@@ -286,6 +286,18 @@ impl Node {
         // with more validators it becomes final once quorum co-signs (via P2P).
         chain.advance_finality(&state.validator_set);
 
+        // ADR 0038 — update pool co-signature window for the produced block.
+        // On a single-validator chain the block is immediately finalized; on multi-validator
+        // chains the full cosigner set arrives via P2P co-signatures.
+        {
+            let cosigners: Vec<vinx_crypto::Address> = block
+                .signatures
+                .iter()
+                .map(|s| s.validator)
+                .collect();
+            state.record_block_cosigns(&cosigners);
+        }
+
         // ADR 0031 — maintenir le snapshot d'état finalisé (base de rejeu des réorgs). Verrous
         // déjà tenus : state, chain ; finalized_state acquis en DERNIER (ordre global cohérent).
         {
@@ -510,19 +522,12 @@ impl Node {
                         "Block sealed"
                     );
                     {
-                        use vinx_core::amount::{BLOCK_RETENTION_COUNT, PRUNE_INTERVAL};
-                        const AUTO_COMPACT_INTERVAL: u64 = 500;
+                        use vinx_core::amount::{PRUNE_INTERVAL, TX_RETENTION_SECS};
                         const LIVENESS_EVICTION_BLOCKS: u64 = 50;
                         let h = block.header.height;
+                        let block_ts = block.header.timestamp;
                         if h > 0 && h % PRUNE_INTERVAL == 0 {
-                            self.chain.write().await.prune(BLOCK_RETENTION_COUNT);
-                        }
-                        if h > 0 && h % AUTO_COMPACT_INTERVAL == 0 {
-                            self.chain
-                                .write()
-                                .await
-                                .compact_old_txs(BLOCK_RETENTION_COUNT);
-                            tracing::debug!(height = h, "Auto-compacted chain tx data");
+                            self.chain.write().await.prune_by_age(block_ts, TX_RETENTION_SECS);
                         }
                         if h >= LIVENESS_EVICTION_BLOCKS {
                             let liveness = self.validator_liveness.read().await;
