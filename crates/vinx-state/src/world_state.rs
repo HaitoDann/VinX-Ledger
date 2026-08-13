@@ -5,7 +5,8 @@ use vinx_core::{
         cumulative_emission_atoms, Amount, BPS_DENOM, DEFAULT_ACTIVE_SET_SIZE,
         DEFAULT_FEE_FLOOR_ATOMS, EPOCH_DURATION_SECS, EXISTENTIAL_DEPOSIT_ATOMS, MAX_MODULES,
         MAX_NONCE_AHEAD, MIN_MODULE_BOND_ATOMS, MIN_STAKE_ATOMS, MIN_VALIDATOR_BOND_ATOMS,
-        SLASH_BOUNTY_BPS, SLASH_EQUIVOCATION_BPS, UNBONDING_SECS, VALIDATOR_SCORE_WINDOW_SECS,
+        PROPOSER_SHARE_BPS, SLASH_BOUNTY_BPS, SLASH_EQUIVOCATION_BPS, UNBONDING_SECS,
+        VALIDATOR_SCORE_WINDOW_SECS,
     },
     block::SlashEvidence,
     chain_id::CHAIN_ID_DEVNET,
@@ -13,7 +14,7 @@ use vinx_core::{
     module::ModuleOp,
     protocol::{ProtocolVersion, ScheduledUpgrade},
     reliability::{self, ReliabilityMap},
-    validator_pool::PoolStatus,
+    validator_pool::{PoolStatus, ValidatorPoolEntry},
     Account, CoreError, RegisterBlsKeyPayload, Transaction, TransactionType, ValidatorSet,
 };
 use vinx_crypto::{sha256, Address, BlsPubKey, BlsSignature, Hash32, IncrementalMerkleTree};
@@ -521,6 +522,10 @@ impl WorldState {
         self.mature_unbonds(block_ts);
         // 3. Work emission — mint new tokens → producer (ADR 0040).
         let emission = self.emit_work_reward(producer, block_ts);
+        // 3.5 Record proposer for epoch pot distribution (ADR 0028).
+        if let Some(entry) = self.validator_pool.get_mut(producer) {
+            entry.record_epoch_proposed();
+        }
         // 4. Fiabilité des validateurs (ADR 0027) : attributions + jailing.
         if height > 0 {
             let jailed = reliability::on_block_applied(
@@ -653,26 +658,62 @@ impl WorldState {
             }
         }
 
-        // 5. Distribute epoch pot equally among the new active set.
+        // 5. Distribute epoch pot — ADR 0028 split: PROPOSER_SHARE_BPS to proposers
+        //    (weighted by blocks proposed this epoch), remainder equally to active set.
         if !new_active.is_empty() {
             let pot = self.epoch_dist_emission_pot;
             if pot > Amount::ZERO {
-                let count = new_active.len() as u128;
-                let share_atoms = pot.atoms() / count;
-                let remainder_atoms = pot.atoms() % count;
-                // Sorted for a deterministic remainder recipient.
-                let mut sorted: Vec<Address> = new_active.iter().copied().collect();
-                sorted.sort();
-                for &addr in &sorted {
-                    if share_atoms > 0 {
-                        self.distribute_from_epoch_pot(&addr, Amount::from_atoms(share_atoms));
+                let sorted: Vec<Address> = {
+                    let mut v: Vec<Address> = new_active.iter().copied().collect();
+                    v.sort();
+                    v
+                };
+                let n = sorted.len() as u128;
+
+                // Copy epoch_proposed counts before any mutation (avoids borrow conflict).
+                let proposed: Vec<u32> = sorted
+                    .iter()
+                    .map(|a| self.validator_pool.get(a).map(|e| e.epoch_proposed).unwrap_or(0))
+                    .collect();
+                let total_proposed: u128 = proposed.iter().map(|&c| c as u128).sum();
+
+                // If no proposer tracked this epoch (e.g. genesis or pool just populated),
+                // fold the proposer share into the equal distribution.
+                let proposer_pot =
+                    if total_proposed > 0 { pot.atoms() * PROPOSER_SHARE_BPS / BPS_DENOM } else { 0 };
+                let equal_pot = pot.atoms().saturating_sub(proposer_pot);
+
+                // Pre-compute each validator's share to avoid mid-loop borrow of self.
+                let mut shares: Vec<u128> = sorted
+                    .iter()
+                    .enumerate()
+                    .map(|(i, _)| {
+                        let proposer_share = if total_proposed > 0 {
+                            proposer_pot * proposed[i] as u128 / total_proposed
+                        } else {
+                            0
+                        };
+                        let equal_share = equal_pot / n;
+                        proposer_share + equal_share
+                    })
+                    .collect();
+
+                // Assign integer-division remainder to the first validator (deterministic).
+                let allocated: u128 = shares.iter().sum();
+                if let Some(first) = shares.first_mut() {
+                    *first = first.saturating_add(pot.atoms().saturating_sub(allocated));
+                }
+
+                // Distribute — all shares pre-computed, no outstanding borrows.
+                for (&addr, &atoms) in sorted.iter().zip(shares.iter()) {
+                    if atoms > 0 {
+                        self.distribute_from_epoch_pot(&addr, Amount::from_atoms(atoms));
                     }
                 }
-                if remainder_atoms > 0 {
-                    self.distribute_from_epoch_pot(
-                        &sorted[0],
-                        Amount::from_atoms(remainder_atoms),
-                    );
+
+                // Reset per-epoch counters for next epoch.
+                for entry in self.validator_pool.values_mut() {
+                    entry.reset_epoch_counters();
                 }
             }
         }
@@ -1097,6 +1138,8 @@ impl WorldState {
             TransactionType::AdminAction => self.apply_admin_action(tx),
             TransactionType::AnchorState => self.apply_anchor_state(tx),
             TransactionType::RegisterBlsKey => self.apply_register_bls_key(tx),
+            TransactionType::Unjail => self.apply_unjail(tx),
+            TransactionType::BondValidator => self.apply_bond_validator(tx),
         }
     }
 
@@ -1840,6 +1883,113 @@ impl WorldState {
         // The fee changes hands into the block pool → credited to the producer at settle.
         self.block_fees = self.block_fees.saturating_add(tx.fee);
         self.mark_dirty(&operator);
+        Ok(())
+    }
+
+    /// Applies an `Unjail` transaction (ADR 0027): removes the jailed flag from a validator
+    /// that has served the mandatory cooldown period.
+    ///
+    /// No fee, no amount — nonce is consumed only on success.  The sender must currently be
+    /// jailed and `block_height >= jailed_until` (UNJAIL_COOLDOWN_HEIGHTS blocks since
+    /// jailing).  Trying to unjail before the cooldown or when not jailed returns an error
+    /// without consuming the nonce.
+    fn apply_unjail(&mut self, tx: &Transaction) -> Result<(), CoreError> {
+        let account = self
+            .accounts
+            .get(&tx.from)
+            .ok_or(CoreError::InsufficientBalance)?;
+        if account.nonce != tx.nonce {
+            return Err(CoreError::InvalidNonce {
+                expected: account.nonce,
+                got: tx.nonce,
+            });
+        }
+        let current_height = self.block_height;
+        if !reliability::try_unjail(&mut self.reliability, &tx.from, current_height) {
+            return Err(CoreError::InvalidTransaction(
+                "not jailed or unjail cooldown not elapsed (ADR 0027)".to_string(),
+            ));
+        }
+        self.accounts.get_mut(&tx.from).unwrap().nonce += 1;
+        self.mark_dirty(&tx.from);
+        tracing::info!(
+            validator = %tx.from,
+            height = current_height,
+            "ADR 0027: validator unjailed"
+        );
+        Ok(())
+    }
+
+    /// Applies a `BondValidator` transaction (ADR 0038): moves `amount` atoms from
+    /// `balance` to `staked` and inserts the sender into the Open PoA admission queue
+    /// in `Warmup` status.
+    ///
+    /// The sender must not already be in the validator pool or admin-admitted validator
+    /// set, and must not be permanently banned.  After VALIDATOR_WARMUP_EPOCHS epochs the
+    /// entry becomes eligible for the active set during the next `tick_epoch_close`.
+    fn apply_bond_validator(&mut self, tx: &Transaction) -> Result<(), CoreError> {
+        if tx.amount.atoms() < MIN_VALIDATOR_BOND_ATOMS {
+            return Err(CoreError::InvalidTransaction(
+                "bond below minimum validator bond".to_string(),
+            ));
+        }
+        let expected_fee = Amount::from_atoms(DEFAULT_FEE_FLOOR_ATOMS);
+        if tx.fee < expected_fee {
+            return Err(CoreError::InvalidTransaction("fee below floor".to_string()));
+        }
+        let account = self
+            .accounts
+            .get(&tx.from)
+            .ok_or(CoreError::InsufficientBalance)?;
+        if account.nonce != tx.nonce {
+            return Err(CoreError::InvalidNonce {
+                expected: account.nonce,
+                got: tx.nonce,
+            });
+        }
+        if self.banned_validator_keys.contains(&tx.from) {
+            return Err(CoreError::InvalidTransaction(
+                "address is permanently banned from the validator set".to_string(),
+            ));
+        }
+        if self.validator_pool.contains_key(&tx.from) {
+            return Err(CoreError::InvalidTransaction(
+                "address is already in the validator pool".to_string(),
+            ));
+        }
+        if self.validator_set.contains(&tx.from) {
+            return Err(CoreError::InvalidTransaction(
+                "address is already a validator (admin-admitted)".to_string(),
+            ));
+        }
+        let total = tx.amount.checked_add(tx.fee).ok_or(CoreError::AmountOverflow)?;
+        if account.balance < total {
+            return Err(CoreError::InsufficientBalance);
+        }
+        let remaining = account.balance.checked_sub(total).unwrap_or(Amount::ZERO);
+        if remaining.atoms() > 0
+            && remaining.atoms() < EXISTENTIAL_DEPOSIT_ATOMS
+            && account.staked == Amount::ZERO
+        {
+            return Err(CoreError::BelowExistentialDeposit);
+        }
+        let now_ts = self.current_block_ts;
+        let bond_atoms = tx.amount.atoms();
+        {
+            let account = self.accounts.get_mut(&tx.from).unwrap();
+            account.balance = account.balance.checked_sub(total).unwrap();
+            account.staked = account.staked.saturating_add(tx.amount);
+            account.nonce += 1;
+        }
+        self.block_fees = self.block_fees.saturating_add(tx.fee);
+        self.validator_pool
+            .insert(tx.from, ValidatorPoolEntry::new(bond_atoms, now_ts));
+        self.mark_dirty(&tx.from);
+        tracing::info!(
+            validator = %tx.from,
+            bond_atoms,
+            "ADR 0038: validator bonded, entering warmup"
+        );
         Ok(())
     }
 
@@ -2974,5 +3124,139 @@ mod tests {
 
         let entry = &s.validator_pool[&addr];
         assert_eq!(entry.bls_pub_key.as_deref(), Some(sk_b.public_key().0.as_slice()));
+    }
+
+    // ─── ADR 0027: Unjail ────────────────────────────────────────────────────
+
+    fn jailed_state() -> (WorldState, KeyPair, Address) {
+        use vinx_core::reliability::{ValidatorReliability, UNJAIL_COOLDOWN_HEIGHTS};
+        let (kp, addr) = kp_addr();
+        let mut s = WorldState::new();
+        s.credit_for_test(addr, Amount::from_vinx(10));
+        // Manually jail at height 1; cooldown expires at 1 + UNJAIL_COOLDOWN_HEIGHTS.
+        s.reliability.insert(
+            addr,
+            ValidatorReliability {
+                missed_proposals: 0,
+                jailed_until: Some(1 + UNJAIL_COOLDOWN_HEIGHTS),
+            },
+        );
+        (s, kp, addr)
+    }
+
+    #[test]
+    fn test_unjail_happy_path() {
+        use vinx_core::reliability::UNJAIL_COOLDOWN_HEIGHTS;
+        let (mut s, kp, addr) = jailed_state();
+        // Advance height past cooldown.
+        s.block_height = 1 + UNJAIL_COOLDOWN_HEIGHTS;
+        let tx = Transaction::new_unjail(&kp, 0);
+        s.apply_transaction(&tx).unwrap();
+        // No longer jailed and nonce advanced.
+        assert!(!s.reliability.get(&addr).unwrap().is_jailed());
+        assert_eq!(s.accounts[&addr].nonce, 1);
+    }
+
+    #[test]
+    fn test_unjail_too_early_rejected() {
+        use vinx_core::reliability::UNJAIL_COOLDOWN_HEIGHTS;
+        let (mut s, kp, _addr) = jailed_state();
+        // Height still within cooldown.
+        s.block_height = UNJAIL_COOLDOWN_HEIGHTS / 2;
+        let tx = Transaction::new_unjail(&kp, 0);
+        assert!(s.apply_transaction(&tx).is_err());
+    }
+
+    #[test]
+    fn test_unjail_not_jailed_rejected() {
+        let mut s = WorldState::new();
+        let (kp, addr) = kp_addr();
+        s.credit_for_test(addr, Amount::from_vinx(10));
+        // Not jailed at all.
+        let tx = Transaction::new_unjail(&kp, 0);
+        assert!(s.apply_transaction(&tx).is_err());
+    }
+
+    // ─── ADR 0038: BondValidator ─────────────────────────────────────────────
+
+    fn bond_state() -> (WorldState, KeyPair, Address) {
+        let (kp, addr) = kp_addr();
+        let mut s = WorldState::new();
+        let bond = Amount::from_atoms(MIN_VALIDATOR_BOND_ATOMS);
+        let fee = Amount::from_atoms(DEFAULT_FEE_FLOOR_ATOMS);
+        s.credit_for_test(addr, bond.saturating_add(fee).saturating_add(Amount::from_vinx(1)));
+        (s, kp, addr)
+    }
+
+    #[test]
+    fn test_bond_validator_happy_path() {
+        let (mut s, kp, addr) = bond_state();
+        let bond = Amount::from_atoms(MIN_VALIDATOR_BOND_ATOMS);
+        let fee = Amount::from_atoms(DEFAULT_FEE_FLOOR_ATOMS);
+        let tx = Transaction::new_bond_validator(&kp, bond, fee, 0);
+        s.apply_transaction(&tx).unwrap();
+        assert!(s.validator_pool.contains_key(&addr));
+        assert_eq!(s.accounts[&addr].staked, bond);
+        assert_eq!(s.accounts[&addr].nonce, 1);
+        // Pool entry should be in Warmup status.
+        let entry = &s.validator_pool[&addr];
+        assert!(matches!(entry.status, vinx_core::validator_pool::PoolStatus::Warmup { .. }));
+    }
+
+    #[test]
+    fn test_bond_validator_below_minimum_rejected() {
+        let (mut s, kp, _addr) = bond_state();
+        let bond = Amount::from_atoms(MIN_VALIDATOR_BOND_ATOMS - 1);
+        let fee = Amount::from_atoms(DEFAULT_FEE_FLOOR_ATOMS);
+        let tx = Transaction::new_bond_validator(&kp, bond, fee, 0);
+        assert!(s.apply_transaction(&tx).is_err());
+    }
+
+    #[test]
+    fn test_bond_validator_already_in_pool_rejected() {
+        let (mut s, kp, addr) = bond_state();
+        let bond = Amount::from_atoms(MIN_VALIDATOR_BOND_ATOMS);
+        let fee = Amount::from_atoms(DEFAULT_FEE_FLOOR_ATOMS);
+        // First bond succeeds.
+        s.credit_for_test(addr, bond.saturating_add(fee));
+        let tx = Transaction::new_bond_validator(&kp, bond, fee, 0);
+        s.apply_transaction(&tx).unwrap();
+        // Second bond rejected — already in pool.
+        s.credit_for_test(addr, bond.saturating_add(fee));
+        let tx2 = Transaction::new_bond_validator(&kp, bond, fee, 1);
+        assert!(s.apply_transaction(&tx2).is_err());
+    }
+
+    #[test]
+    fn test_bond_validator_banned_key_rejected() {
+        let (mut s, kp, addr) = bond_state();
+        s.banned_validator_keys.insert(addr);
+        let bond = Amount::from_atoms(MIN_VALIDATOR_BOND_ATOMS);
+        let fee = Amount::from_atoms(DEFAULT_FEE_FLOOR_ATOMS);
+        let tx = Transaction::new_bond_validator(&kp, bond, fee, 0);
+        assert!(s.apply_transaction(&tx).is_err());
+    }
+
+    #[test]
+    fn test_bond_validator_admin_admitted_rejected() {
+        use vinx_core::GovernanceAction;
+        let (mut s, admin_kp, admin_addr) = admin_state();
+        let (cand_kp, cand_addr) = kp_addr();
+        // Give candidate bond and credit.
+        s.set_staked_for_test(&cand_addr, Amount::from_atoms(MIN_VALIDATOR_BOND_ATOMS));
+        s.credit_for_test(cand_addr, Amount::from_atoms(MIN_VALIDATOR_BOND_ATOMS + DEFAULT_FEE_FLOOR_ATOMS + 1_000_000));
+        // Admin-admit candidate.
+        let add_tx = Transaction::new_admin_action(
+            &admin_kp,
+            &GovernanceAction::AddValidator(cand_addr),
+            0,
+        );
+        s.apply_transaction(&add_tx).unwrap();
+        assert!(s.validator_set.contains(&cand_addr));
+        // Now candidate tries to self-bond → rejected (already admin-admitted).
+        let bond = Amount::from_atoms(MIN_VALIDATOR_BOND_ATOMS);
+        let fee = Amount::from_atoms(DEFAULT_FEE_FLOOR_ATOMS);
+        let bond_tx = Transaction::new_bond_validator(&cand_kp, bond, fee, 0);
+        assert!(s.apply_transaction(&bond_tx).is_err());
     }
 }

@@ -45,6 +45,11 @@ pub struct ValidatorPoolEntry {
     /// Proof-of-Possession BLS signature (G2 compressed, 96 bytes). None before ADR 0046.
     #[serde(default)]
     pub bls_pop: Option<Vec<u8>>,
+    /// Blocks proposed by this validator in the current epoch (ADR 0028).
+    /// Reset to 0 at each epoch close. Used to split the epoch pot between
+    /// proposers (PROPOSER_SHARE_BPS) and the equal co-signer base share.
+    #[serde(default)]
+    pub epoch_proposed: u32,
 }
 
 impl ValidatorPoolEntry {
@@ -60,7 +65,18 @@ impl ValidatorPoolEntry {
             eligible_blocks_in_window: 0,
             bls_pub_key: None,
             bls_pop: None,
+            epoch_proposed: 0,
         }
+    }
+
+    /// Record that this validator proposed a block in the current epoch (ADR 0028).
+    pub fn record_epoch_proposed(&mut self) {
+        self.epoch_proposed = self.epoch_proposed.saturating_add(1);
+    }
+
+    /// Reset per-epoch counters at epoch close (ADR 0028).
+    pub fn reset_epoch_counters(&mut self) {
+        self.epoch_proposed = 0;
     }
 
     /// Score in [0, 10_000] basis points (10_000 = 100 % co-signature rate).

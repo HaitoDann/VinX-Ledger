@@ -137,6 +137,12 @@ pub const VALIDATOR_WARMUP_EPOCHS: u32 = 3;
 /// Basis-point denominator (10_000 = 100%).
 pub const BPS_DENOM: u128 = 10_000;
 
+/// Share of the epoch emission pot directed to block proposers, in basis points (ADR 0028).
+/// Remaining (1 − PROPOSER_SHARE_BPS / BPS_DENOM) is distributed equally to all active
+/// validators regardless of their proposal count (co-signer base reward).
+/// 20 % proposer | 80 % equal — balances incentive to lead vs incentive to co-sign.
+pub const PROPOSER_SHARE_BPS: u128 = 2_000;
+
 /// Fraction of the bond destroyed on a proven equivocation (100%).
 pub const SLASH_EQUIVOCATION_BPS: u128 = 10_000;
 
