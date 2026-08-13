@@ -4,10 +4,10 @@ use vinx_core::{
     amount::{
         cumulative_emission_atoms, Amount, BPS_DENOM, DEFAULT_ACTIVE_SET_SIZE,
         DEFAULT_FEE_FLOOR_ATOMS, EPOCH_DURATION_SECS, EXISTENTIAL_DEPOSIT_ATOMS, MAX_MODULES,
-        MAX_NONCE_AHEAD, MIN_MODULE_BOND_ATOMS, MIN_STAKE_ATOMS, MIN_VALIDATOR_BOND_ATOMS,
-        MODULE_ESCROW_MAX_OPEN, MODULE_ESCROW_MAX_TIMEOUT_SECS, MODULE_ESCROW_MIN_TIMEOUT_SECS,
-        PROPOSER_SHARE_BPS, SLASH_BOUNTY_BPS, SLASH_EQUIVOCATION_BPS, UNBONDING_SECS,
-        VALIDATOR_SCORE_WINDOW_SECS,
+        MAX_NONCE_AHEAD, MAX_PAYLOAD_BYTES, MIN_MODULE_BOND_ATOMS, MIN_STAKE_ATOMS,
+        MIN_VALIDATOR_BOND_ATOMS, MODULE_ESCROW_MAX_OPEN, MODULE_ESCROW_MAX_TIMEOUT_SECS,
+        MODULE_ESCROW_MIN_TIMEOUT_SECS, PROPOSER_SHARE_BPS, SLASH_BOUNTY_BPS,
+        SLASH_EQUIVOCATION_BPS, UNBONDING_SECS, VALIDATOR_SCORE_WINDOW_SECS,
     },
     block::SlashEvidence,
     chain_id::CHAIN_ID_DEVNET,
@@ -1167,6 +1167,16 @@ impl WorldState {
 
     /// Dispatches a (pre-verified) transaction to its type-specific handler.
     fn dispatch_tx(&mut self, tx: &Transaction) -> Result<(), CoreError> {
+        // ADR 0035: reject oversized payloads before any state mutation so no nonce is
+        // consumed. The check is cheap (a single comparison) and must precede all
+        // type-specific handlers, which assume a well-bounded payload.
+        if tx.payload.len() > MAX_PAYLOAD_BYTES {
+            return Err(CoreError::InvalidTransaction(format!(
+                "payload {} bytes exceeds protocol maximum {} bytes (ADR 0035)",
+                tx.payload.len(),
+                MAX_PAYLOAD_BYTES
+            )));
+        }
         match &tx.tx_type {
             TransactionType::Transfer => self.apply_transfer(tx),
             TransactionType::Stake => self.apply_stake(tx),
@@ -3905,5 +3915,55 @@ mod tests {
             .apply_transaction(&Transaction::new_anchor_state(&op_kp, &op, fee, 1))
             .is_err());
         assert!(!s.module_fee_schedules.contains_key(&module_id));
+    }
+
+    // ─── ADR 0035: transaction and block resource bounds ──────────────────────
+
+    #[test]
+    fn test_payload_at_max_bytes_is_accepted() {
+        use vinx_core::amount::MAX_PAYLOAD_BYTES;
+
+        let mut s = WorldState::new();
+        let (sender_kp, sender) = kp_addr();
+        let (_, receiver) = kp_addr();
+        s.credit_for_test(sender, Amount::from_vinx(1_000));
+
+        let fee = Amount::ZERO.calculate_fee(s.base_fee);
+        let mut tx =
+            Transaction::new_transfer(&sender_kp, receiver, Amount::from_vinx(1), fee, 0);
+        // Attach exactly MAX_PAYLOAD_BYTES of zeros; Transfer ignores payload content.
+        tx.payload = vec![0u8; MAX_PAYLOAD_BYTES];
+        tx.sign(&sender_kp); // re-sign to cover the new payload in signing_bytes
+        s.apply_transaction(&tx)
+            .expect("payload at MAX_PAYLOAD_BYTES must be accepted (ADR 0035 boundary)");
+        assert_eq!(s.accounts[&sender].nonce, 1, "nonce must advance on success");
+    }
+
+    #[test]
+    fn test_payload_over_max_bytes_is_rejected_nonce_not_consumed() {
+        use vinx_core::amount::MAX_PAYLOAD_BYTES;
+
+        let mut s = WorldState::new();
+        let (sender_kp, sender) = kp_addr();
+        let (_, receiver) = kp_addr();
+        s.credit_for_test(sender, Amount::from_vinx(1_000));
+
+        let fee = Amount::ZERO.calculate_fee(s.base_fee);
+        let mut tx =
+            Transaction::new_transfer(&sender_kp, receiver, Amount::from_vinx(1), fee, 0);
+        tx.payload = vec![0u8; MAX_PAYLOAD_BYTES + 1];
+        tx.sign(&sender_kp);
+        let err = s.apply_transaction(&tx).unwrap_err();
+        assert!(
+            matches!(err, CoreError::InvalidTransaction(_)),
+            "oversized payload must produce InvalidTransaction, got {err:?}"
+        );
+        // ADR 0035 critical invariant: the payload guard fires before any state
+        // mutation, so the nonce must remain at 0.
+        assert_eq!(
+            s.accounts[&sender].nonce,
+            0,
+            "nonce must not be consumed when payload exceeds MAX_PAYLOAD_BYTES"
+        );
     }
 }

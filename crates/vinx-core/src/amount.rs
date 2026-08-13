@@ -201,6 +201,25 @@ pub const MAX_CLOCK_DRIFT_SECS: u64 = 120;
 /// producer cannot make the network's time reference jump because it is a median.
 pub const MEDIAN_TIME_BLOCKS: usize = 11;
 
+// ─── Transaction resource bounds (ADR 0035) ──────────────────────────────────
+
+/// Maximum byte-size of the `payload` field in a single transaction (ADR 0035).
+/// Consensus-critical: a transaction whose payload exceeds this limit is rejected
+/// before any state mutation, without consuming the nonce. 64 KiB is generous for
+/// all legitimate payload types (the largest realistic payloads — GovernanceAction
+/// with a full 64-signer committee, SlashEvidence with two headers + two sigs, or a
+/// SetFeeSchedule with many recipients — are a few kilobytes at most). Immutable.
+/// Pinned by `test_resource_bounds_are_constitutional`.
+pub const MAX_PAYLOAD_BYTES: usize = 65_536; // 64 KiB
+
+/// Maximum aggregate serialized size of all transactions in a block (ADR 0035).
+/// "Weight" = sum of `bincode::serialized_size(tx)` over all included transactions.
+/// Bounds total I/O imposed on every node, independently of tx count.
+/// Invariant: MAX_BLOCK_WEIGHT < MAX_DECODED_BYTES (16 MiB P2P cap, ADR 0022).
+/// 4 MiB comfortably fits 3 000 × ~200-byte-overhead txs (~600 KB) while capping
+/// a block packed with 64-KiB-payload txs at ≤ 64 such transactions. Immutable.
+pub const MAX_BLOCK_WEIGHT: usize = 4_194_304; // 4 MiB
+
 /// Announcement lead-time minimums by upgrade type, in **real seconds** (ADR 0006).
 /// Block height is not a clock (adaptive cadence), so the upgrade notice window is
 /// measured against block timestamps — consistent with emission and unbonding.
@@ -463,5 +482,33 @@ mod tests {
     fn test_ordering() {
         assert!(Amount::from_vinx(10) > Amount::from_vinx(5));
         assert!(Amount::ZERO < Amount::from_vinx(1));
+    }
+
+    #[test]
+    fn test_resource_bounds_are_constitutional() {
+        // ADR 0035: these constants are consensus-critical — any change to them is a
+        // hard fork. This tripwire forces the act to be conscious and deliberate.
+        assert_eq!(
+            MAX_PAYLOAD_BYTES,
+            65_536,
+            "per-tx payload cap is 64 KiB — graved, non-governable (ADR 0035)"
+        );
+        assert_eq!(
+            MAX_BLOCK_WEIGHT,
+            4_194_304,
+            "aggregate block weight cap is 4 MiB — graved, non-governable (ADR 0035)"
+        );
+        // Invariant: payload fits in a block (single oversized-payload tx is still
+        // rejected before the block weight check fires).
+        assert!(
+            MAX_PAYLOAD_BYTES <= MAX_BLOCK_WEIGHT,
+            "a single max-payload tx must fit within the block weight cap"
+        );
+        // Invariant: block weight cap is strictly below the 16 MiB P2P cap (ADR 0022).
+        const MAX_DECODED_BYTES: usize = 16 * 1024 * 1024; // 16 MiB
+        assert!(
+            MAX_BLOCK_WEIGHT < MAX_DECODED_BYTES,
+            "block weight must be below the P2P decode cap"
+        );
     }
 }

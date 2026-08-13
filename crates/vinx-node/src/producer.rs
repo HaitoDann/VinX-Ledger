@@ -5,7 +5,7 @@ use crate::{
     NodeError,
 };
 use vinx_core::{
-    amount::{Amount, MAX_UNFINALIZED_DEPTH},
+    amount::{Amount, MAX_BLOCK_WEIGHT, MAX_UNFINALIZED_DEPTH},
     reliability, Block, BlockHeader, BlockSignature, Transaction, ValidatorSet,
 };
 use vinx_crypto::{bls_aggregate, sha256};
@@ -109,12 +109,26 @@ pub fn produce_block(
     // Pull pending transactions from mempool and apply them.
     // Signatures were already verified at mempool admission (verified `queues`
     // invariant), so use the trusted apply path — no redundant Ed25519 verify.
+    // ADR 0035: also enforce MAX_BLOCK_WEIGHT — stop including txs once the block
+    // is full by serialized weight, not just by count.
     let pending = mempool.drain(config.max_block_txs);
     let mut rejected = 0usize;
+    let mut block_weight: usize = 0;
     let mut requeue_buf: Vec<vinx_core::Transaction> = Vec::new();
     for tx in pending {
+        // ADR 0035 weight gate: estimate this tx's serialized size before applying.
+        // Over-estimate is safe (conservative cap); under-estimate never happens since
+        // bincode is deterministic. Requeue weight-limited txs for the next block.
+        let tx_weight = bincode::serialized_size(&tx).unwrap_or(u64::MAX) as usize;
+        if block_weight.saturating_add(tx_weight) > MAX_BLOCK_WEIGHT {
+            requeue_buf.push(tx);
+            continue;
+        }
         match state.apply_transaction_trusted(&tx) {
-            Ok(()) => block_txs.push(tx),
+            Ok(()) => {
+                block_txs.push(tx);
+                block_weight = block_weight.saturating_add(tx_weight);
+            }
             Err(e) => {
                 tracing::debug!(error = %e, "Transaction rejected during block production");
                 if is_future_nonce(&e) {
@@ -272,12 +286,22 @@ fn produce_block_inner(
 
     let mut block_txs: Vec<vinx_core::Transaction> = Vec::new();
     // Trusted apply: mempool queues hold only signature-verified transactions.
+    // ADR 0035: enforce MAX_BLOCK_WEIGHT alongside max_block_txs.
     let pending = mempool.drain(config.max_block_txs);
     let mut rejected = 0usize;
+    let mut block_weight: usize = 0;
     let mut requeue_buf: Vec<vinx_core::Transaction> = Vec::new();
     for tx in pending {
+        let tx_weight = bincode::serialized_size(&tx).unwrap_or(u64::MAX) as usize;
+        if block_weight.saturating_add(tx_weight) > MAX_BLOCK_WEIGHT {
+            requeue_buf.push(tx);
+            continue;
+        }
         match state.apply_transaction_trusted(&tx) {
-            Ok(()) => block_txs.push(tx),
+            Ok(()) => {
+                block_txs.push(tx);
+                block_weight = block_weight.saturating_add(tx_weight);
+            }
             Err(e) => {
                 tracing::debug!(error = %e, "Transaction rejected during block production");
                 if is_future_nonce(&e) {
