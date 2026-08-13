@@ -4,7 +4,8 @@ pub mod world_state;
 pub use genesis::{create_genesis_state, create_genesis_state_with_dev_prefund, GenesisConfig};
 pub use world_state::{
     v8_meta_suffix, v9_meta_suffix, v10_meta_suffix, v11_meta_suffix, v12_meta_suffix,
-    v13_meta_suffix, v15_meta_suffix, AdminPolicy, GovernanceProposal, ModuleEntry, WorldState,
+    v13_meta_suffix, v15_meta_suffix, v16_meta_suffix, AdminPolicy, GovernanceProposal,
+    ModuleEntry, WorldState,
 };
 
 #[cfg(test)]
@@ -226,14 +227,18 @@ mod tests {
         let (mut state, sender_kp, sender_addr) = funded_state();
         let initial_balance = state.account_balance(&sender_addr);
         let stake_amount = Amount::from_vinx(1_000);
+        let fee = floor();
 
-        let tx = Transaction::new_stake(&sender_kp, stake_amount, Amount::ZERO, 0);
+        let tx = Transaction::new_stake(&sender_kp, stake_amount, fee, 0);
         state.apply_transaction(&tx).unwrap();
 
-        assert_eq!(
-            state.account_balance(&sender_addr),
-            initial_balance.checked_sub(stake_amount).unwrap()
-        );
+        // Balance decreases by stake amount + fee; staked increases by stake amount.
+        let expected_balance = initial_balance
+            .checked_sub(stake_amount)
+            .unwrap()
+            .checked_sub(fee)
+            .unwrap();
+        assert_eq!(state.account_balance(&sender_addr), expected_balance);
         assert_eq!(state.account_staked(&sender_addr), stake_amount);
     }
 
@@ -241,13 +246,15 @@ mod tests {
     fn test_unstake_enters_unbonding_then_returns_after_delay() {
         use vinx_core::amount::UNBONDING_SECS;
         let (mut state, sender_kp, sender_addr) = funded_state();
+        let producer = Address::from_public_key(&KeyPair::generate().public_key());
         let stake_amount = Amount::from_vinx(500);
+        let fee = floor();
 
         state
             .apply_transaction(&Transaction::new_stake(
                 &sender_kp,
                 stake_amount,
-                Amount::ZERO,
+                fee,
                 0,
             ))
             .unwrap();
@@ -259,25 +266,28 @@ mod tests {
             .apply_transaction(&Transaction::new_unstake(
                 &sender_kp,
                 stake_amount,
-                Amount::ZERO,
+                fee,
                 1,
             ))
             .unwrap();
         assert_eq!(state.account_staked(&sender_addr), Amount::ZERO);
-        assert_eq!(state.account_balance(&sender_addr), balance_after_stake); // not yet back
+        // Balance decreases by the unstake fee; stake_amount is in pending_unbonds.
+        let balance_after_unstake = balance_after_stake.checked_sub(fee).unwrap();
+        assert_eq!(state.account_balance(&sender_addr), balance_after_unstake);
 
-        // After the unbonding delay, settling matures it back to the balance.
-        state.settle_block(&sender_addr, 1, 1_000 + UNBONDING_SECS);
+        // After the unbonding delay, settling matures the 500 VINX back to the balance.
+        // Use a separate producer so fees/emission don't land on sender_addr.
+        state.settle_block(&producer, 1, 1_000 + UNBONDING_SECS);
         assert_eq!(
             state.account_balance(&sender_addr),
-            balance_after_stake.checked_add(stake_amount).unwrap()
+            balance_after_unstake.checked_add(stake_amount).unwrap()
         );
     }
 
     #[test]
     fn test_cannot_unstake_more_than_staked() {
         let (mut state, sender_kp, _) = funded_state();
-        let tx = Transaction::new_unstake(&sender_kp, Amount::from_vinx(1), Amount::ZERO, 0);
+        let tx = Transaction::new_unstake(&sender_kp, Amount::from_vinx(1), floor(), 0);
         assert_eq!(
             state.apply_transaction(&tx),
             Err(vinx_core::CoreError::InsufficientBalance)
@@ -289,6 +299,7 @@ mod tests {
         let (mut state, sender_kp, _) = funded_state();
         use vinx_core::amount::DECIMAL_FACTOR;
         let below_min = Amount::from_atoms(DECIMAL_FACTOR - 1);
+        // Amount check fires before fee check — Amount::ZERO fee is fine here.
         let tx = Transaction::new_stake(&sender_kp, below_min, Amount::ZERO, 0);
         assert_eq!(
             state.apply_transaction(&tx),

@@ -619,12 +619,15 @@ async fn test_admin_action_adds_validator() {
         let mut s = node.state.write().await;
         s.admin_address = Some(admin_addr.clone());
         s.credit_for_test(admin_addr.clone(), Amount::from_vinx(1_000));
-        s.credit_for_test(new_val_addr.clone(), Amount::from_atoms(bond));
+        // Extra for the stake fee (ADR 0009).
+        let fee = Amount::from_atoms(DEFAULT_FEE_FLOOR_ATOMS);
+        s.credit_for_test(new_val_addr.clone(), Amount::from_atoms(bond).checked_add(fee).unwrap());
     }
 
     // The candidate posts the minimum validator bond (required for admission).
+    let fee = Amount::from_atoms(DEFAULT_FEE_FLOOR_ATOMS);
     let stake_tx =
-        vinx_core::Transaction::new_stake(&new_val_kp, Amount::from_atoms(bond), Amount::ZERO, 0);
+        vinx_core::Transaction::new_stake(&new_val_kp, Amount::from_atoms(bond), fee, 0);
     node.mempool.write().await.add(stake_tx).unwrap();
     node.tick().await.expect("tick bond");
 

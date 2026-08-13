@@ -220,6 +220,25 @@ pub const MAX_PAYLOAD_BYTES: usize = 65_536; // 64 KiB
 /// a block packed with 64-KiB-payload txs at ≤ 64 such transactions. Immutable.
 pub const MAX_BLOCK_WEIGHT: usize = 4_194_304; // 4 MiB
 
+// ─── Validator churn bounds (ADR 0036) ───────────────────────────────────────
+
+/// Maximum number of validators that may effectively leave the active set per
+/// churn window (ADR 0036). Requests beyond this rate are queued FIFO and
+/// processed at subsequent window boundaries, keeping the set evolution bounded
+/// and predictable. Consensus-critical. Pinned by `test_churn_bounds_are_constitutional`.
+pub const MAX_VALIDATOR_EXITS_PER_WINDOW: usize = 2;
+
+/// Width of a churn window in blocks (ADR 0036). With 4-second blocks (ADR 0043),
+/// 128 blocks ≈ 8.5 minutes — long enough to smooth a rush of exits without
+/// trapping honest validators for an unreasonable time.
+pub const EXIT_QUEUE_WINDOW_BLOCKS: u64 = 128;
+
+/// Minimum number of active validators that must remain after any exit (ADR 0036).
+/// The exit queue will not process a removal that would drop the active set below
+/// this floor; the entry is retained in the queue until a compensating admission.
+/// Value 1 prevents a complete set collapse while admitting solo-validator devnets.
+pub const MIN_VALIDATOR_SET_SIZE: usize = 1;
+
 /// Announcement lead-time minimums by upgrade type, in **real seconds** (ADR 0006).
 /// Block height is not a clock (adaptive cadence), so the upgrade notice window is
 /// measured against block timestamps — consistent with emission and unbonding.
@@ -509,6 +528,33 @@ mod tests {
         assert!(
             MAX_BLOCK_WEIGHT < MAX_DECODED_BYTES,
             "block weight must be below the P2P decode cap"
+        );
+    }
+
+    #[test]
+    fn test_churn_bounds_are_constitutional() {
+        // ADR 0036: validator churn constants are consensus-critical — any change
+        // is a hard fork. Tripwire forces the change to be conscious and deliberate.
+        assert_eq!(
+            MAX_VALIDATOR_EXITS_PER_WINDOW,
+            2,
+            "at most 2 validators may exit per churn window (ADR 0036)"
+        );
+        assert_eq!(
+            EXIT_QUEUE_WINDOW_BLOCKS,
+            128,
+            "churn window is 128 blocks ≈ 8.5 min at 4s/block (ADR 0036)"
+        );
+        assert_eq!(
+            MIN_VALIDATOR_SET_SIZE,
+            1,
+            "active set must never drop below 1 validator (ADR 0036)"
+        );
+        // Structural invariant: the per-window exit cap must not exceed the window
+        // width (you can't exit more validators than there are blocks in a window).
+        assert!(
+            MAX_VALIDATOR_EXITS_PER_WINDOW as u64 <= EXIT_QUEUE_WINDOW_BLOCKS,
+            "exit cap must not exceed window width"
         );
     }
 }

@@ -330,7 +330,8 @@ async fn cmd_stake(amount_str: &str, wallet: &Path, node: &str) -> Result<(), Wa
     let acc = client.get_account(ks.address()).await?;
     let nonce = acc.nonce;
 
-    let tx = Transaction::new_stake(&kp, amount, Amount::ZERO, nonce);
+    let fee = Amount::from_atoms(DEFAULT_FEE_FLOOR_ATOMS);
+    let tx = Transaction::new_stake(&kp, amount, fee, nonce);
 
     println!("Address : {}", ks.address());
     println!("Stake   : {}", amount);
@@ -355,7 +356,8 @@ async fn cmd_unstake(amount_str: &str, wallet: &Path, node: &str) -> Result<(), 
     let acc = client.get_account(ks.address()).await?;
     let nonce = acc.nonce;
 
-    let tx = Transaction::new_unstake(&kp, amount, Amount::ZERO, nonce);
+    let fee = Amount::from_atoms(DEFAULT_FEE_FLOOR_ATOMS);
+    let tx = Transaction::new_unstake(&kp, amount, fee, nonce);
 
     println!("Address : {}", ks.address());
     println!("Unstake : {}", amount);

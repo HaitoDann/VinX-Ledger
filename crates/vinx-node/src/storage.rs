@@ -48,7 +48,10 @@ use zstd;
 ///      (`BTreeMap<Hash32, EscrowEntry>`) and `module_fee_schedules`
 ///      (`BTreeMap<Hash32, FeeSchedule>`), both empty by default, appended last.
 ///      Migration appends their default encodings via `v15_meta_suffix`.
-const STORAGE_VERSION: u64 = 15;
+/// v16: Validator churn bounds (ADR 0036) — WorldState meta gains `validator_exit_queue`
+///      (`Vec<Address>`), empty by default, appended last.
+///      Migration appends its default encoding via `v16_meta_suffix`.
+const STORAGE_VERSION: u64 = 16;
 
 /// zstd compression level — level 3 is the sweet spot: ~60-70% size reduction,
 /// negligible latency compared to disk I/O.
@@ -202,6 +205,9 @@ impl Storage {
                 // v14 → v15 (ADR 0039 module escrow): append pending_escrows and
                 // module_fee_schedules (both empty BTreeMaps) to the WorldState meta.
                 14 => Self::append_meta_suffix(tx, &vinx_state::v15_meta_suffix())?,
+                // v15 → v16 (ADR 0036 validator churn): append validator_exit_queue
+                // (empty Vec<Address>) to the WorldState meta.
+                15 => Self::append_meta_suffix(tx, &vinx_state::v16_meta_suffix())?,
                 unknown => {
                     return Err(Self::io_err(format!(
                         "no automatic migration from schema v{unknown} to v{STORAGE_VERSION}. \

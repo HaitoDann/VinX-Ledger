@@ -4,8 +4,9 @@ use vinx_core::{
     amount::{
         cumulative_emission_atoms, Amount, BPS_DENOM, DEFAULT_ACTIVE_SET_SIZE,
         DEFAULT_FEE_FLOOR_ATOMS, EPOCH_DURATION_SECS, EXISTENTIAL_DEPOSIT_ATOMS, MAX_MODULES,
-        MAX_NONCE_AHEAD, MAX_PAYLOAD_BYTES, MIN_MODULE_BOND_ATOMS, MIN_STAKE_ATOMS,
-        MIN_VALIDATOR_BOND_ATOMS, MODULE_ESCROW_MAX_OPEN, MODULE_ESCROW_MAX_TIMEOUT_SECS,
+        EXIT_QUEUE_WINDOW_BLOCKS, MAX_NONCE_AHEAD, MAX_PAYLOAD_BYTES, MAX_VALIDATOR_EXITS_PER_WINDOW,
+        MIN_MODULE_BOND_ATOMS, MIN_STAKE_ATOMS, MIN_VALIDATOR_BOND_ATOMS, MIN_VALIDATOR_SET_SIZE,
+        MODULE_ESCROW_MAX_OPEN, MODULE_ESCROW_MAX_TIMEOUT_SECS,
         MODULE_ESCROW_MIN_TIMEOUT_SECS, PROPOSER_SHARE_BPS, SLASH_BOUNTY_BPS,
         SLASH_EQUIVOCATION_BPS, UNBONDING_SECS, VALIDATOR_SCORE_WINDOW_SECS,
     },
@@ -191,6 +192,18 @@ pub struct WorldState {
     /// Appended after `pending_escrows` — v14→v15 migration appends its default.
     #[serde(default)]
     pub module_fee_schedules: BTreeMap<Hash32, FeeSchedule>,
+    // ── Validator churn bounds (ADR 0036) ───────────────────────────────────────
+    // Appended after `module_fee_schedules` — the v15→v16 migration appends its
+    // default encoding (empty Vec). `serde(default)` so pre-v16 state loads cleanly.
+    //
+    /// FIFO queue of validator addresses pending removal from the active set (ADR 0036).
+    /// Populated by `RemoveValidator` governance actions when the churn window is at
+    /// capacity or the set floor would be violated. Processed at window boundaries in
+    /// `settle_block` (up to `MAX_VALIDATOR_EXITS_PER_WINDOW` per `EXIT_QUEUE_WINDOW_BLOCKS`).
+    /// Validators in this queue remain in `validator_set` (and slashable) until dequeued.
+    /// Appended after `module_fee_schedules` — v15→v16 migration appends empty-vec default.
+    #[serde(default)]
+    pub validator_exit_queue: Vec<Address>,
 }
 
 /// A bond amount in its unbonding delay, waiting to return to `address`'s balance
@@ -354,6 +367,12 @@ pub fn v15_meta_suffix() -> Vec<u8> {
     out
 }
 
+/// Encoding appended to the meta blob by the v15→v16 migration (ADR 0036).
+/// Adds the default value of `validator_exit_queue: Vec<Address>` — an empty vec.
+pub fn v16_meta_suffix() -> Vec<u8> {
+    bincode::serialize(&Vec::<Address>::new()).expect("serialize empty exit queue")
+}
+
 /// SHA-256(epoch_number_le || address) — deterministic sort key for tiebreaking
 /// validators with identical reliability scores at epoch rotation (ADR 0038).
 fn epoch_tiebreaker(epoch: u64, addr: &Address) -> [u8; 32] {
@@ -422,6 +441,7 @@ impl WorldState {
             last_epoch_close_ts: 0,
             pending_escrows: BTreeMap::new(),
             module_fee_schedules: BTreeMap::new(),
+            validator_exit_queue: Vec::new(),
         }
     }
 
@@ -590,7 +610,30 @@ impl WorldState {
                 self.tick_epoch_close();
             }
         }
+        // 6. Validator exit queue (ADR 0036) — at each window boundary, dequeue and
+        //    remove up to MAX_VALIDATOR_EXITS_PER_WINDOW validators from the active set.
+        //    Deterministic: driven by block height, independent of time and ordering.
+        if height > 0 && height % EXIT_QUEUE_WINDOW_BLOCKS == 0 {
+            self.process_exit_queue();
+        }
+        self.block_height = height;
         (fees, emission)
+    }
+
+    /// Processes the validator exit queue at a window boundary (ADR 0036).
+    /// Removes up to `MAX_VALIDATOR_EXITS_PER_WINDOW` addresses from the front of
+    /// `validator_exit_queue`, evicting them from the active set.  Skips any address
+    /// that is no longer in `validator_set` (redundant entries from prior removals).
+    fn process_exit_queue(&mut self) {
+        let mut processed = 0usize;
+        while processed < MAX_VALIDATOR_EXITS_PER_WINDOW && !self.validator_exit_queue.is_empty() {
+            let addr = self.validator_exit_queue.remove(0);
+            if self.validator_set.contains(&addr) {
+                self.validator_set.remove(&addr);
+                tracing::info!(%addr, "ADR 0036: validator exited active set from queue");
+            }
+            processed += 1;
+        }
     }
 
     /// Moves `amount` out of the epoch pot back into validator balances.
@@ -1324,6 +1367,14 @@ impl WorldState {
                 "stake amount below minimum 1 VINX".to_string(),
             ));
         }
+        // ADR 0009: stake carries the same flat forfait as a transfer (anti-spam
+        // symmetry). The fee goes to the block producer via block_fees.
+        if tx.fee < self.base_fee {
+            return Err(CoreError::InvalidTransaction(format!(
+                "stake fee {} is below minimum {} (ADR 0009)",
+                tx.fee, self.base_fee
+            )));
+        }
         let account = self
             .accounts
             .get_mut(&tx.from)
@@ -1334,17 +1385,19 @@ impl WorldState {
                 got: tx.nonce,
             });
         }
-        if account.balance < tx.amount {
+        let total_debit = tx.amount.checked_add(tx.fee).ok_or(CoreError::AmountOverflow)?;
+        if account.balance < total_debit {
             return Err(CoreError::InsufficientBalance);
         }
-        // Bond posting: move balance → staked. No yield, no warm-up — the bond is
-        // pure security collateral. Circulation-neutral (balance −a, staked +a).
-        account.balance = account.balance.checked_sub(tx.amount).unwrap();
+        // Bond posting: balance −(amount+fee), staked +(amount). Fee to producer.
+        // Circulation-neutral: the fee just moves from balance to block_fees.
+        account.balance = account.balance.checked_sub(total_debit).unwrap();
         account.staked = account
             .staked
             .checked_add(tx.amount)
             .ok_or(CoreError::AmountOverflow)?;
         account.nonce += 1;
+        self.block_fees = self.block_fees.saturating_add(tx.fee);
         self.mark_dirty(&tx.from);
         Ok(())
     }
@@ -1354,8 +1407,7 @@ impl WorldState {
         let is_active_validator = self.validator_set.contains(&tx.from);
         let unlock_ts = self.current_block_ts.saturating_add(UNBONDING_SECS);
 
-        // ADR 0009: cap concurrent unbonding entries per account (anti-spam on
-        // `pending_unbonds`, a stronger bound than a negligible flat fee would be).
+        // ADR 0009: cap concurrent unbonding entries per account (anti-spam).
         let pending_for_sender = self
             .pending_unbonds
             .iter()
@@ -1365,6 +1417,14 @@ impl WorldState {
             return Err(CoreError::InvalidTransaction(
                 "too many pending unbonds — wait for one to mature".to_string(),
             ));
+        }
+
+        // ADR 0009: unstake carries the same flat forfait as a transfer.
+        if tx.fee < self.base_fee {
+            return Err(CoreError::InvalidTransaction(format!(
+                "unstake fee {} is below minimum {} (ADR 0009)",
+                tx.fee, self.base_fee
+            )));
         }
 
         let account = self
@@ -1380,6 +1440,11 @@ impl WorldState {
         if account.staked < tx.amount {
             return Err(CoreError::InsufficientBalance);
         }
+        // Sender needs liquid balance to pay the fee (the unstaked amount goes to
+        // pending_unbonds, not back to balance immediately).
+        if account.balance < tx.fee {
+            return Err(CoreError::InsufficientBalance);
+        }
         let remaining = account.staked.checked_sub(tx.amount).unwrap();
         // A properly bonded, active validator may not drop below the minimum bond
         // while in the set — it must be removed from the validator set first.
@@ -1390,6 +1455,7 @@ impl WorldState {
             ));
         }
         account.staked = remaining;
+        account.balance = account.balance.checked_sub(tx.fee).unwrap();
         account.nonce += 1;
         // The withdrawn amount does NOT return to the balance now: it enters the
         // unbonding delay and stays slashable until `unlock_ts`. Circulation-neutral.
@@ -1398,6 +1464,7 @@ impl WorldState {
             amount: tx.amount,
             unlock_ts,
         });
+        self.block_fees = self.block_fees.saturating_add(tx.fee);
         self.mark_dirty(&tx.from);
         Ok(())
     }
@@ -1754,18 +1821,33 @@ impl WorldState {
                 tracing::info!(%addr, "Admin: validator added");
             }
             GovernanceAction::RemoveValidator(addr) => {
-                if self.validator_set.len() <= 1 {
-                    return Err(CoreError::InvalidTransaction(
-                        "cannot remove the last validator".to_string(),
-                    ));
-                }
                 if !self.validator_set.contains(&addr) {
                     return Err(CoreError::InvalidTransaction(
                         "address is not a validator".to_string(),
                     ));
                 }
-                self.validator_set.remove(&addr);
-                tracing::info!(%addr, "Admin: validator removed");
+                if self.validator_exit_queue.contains(&addr) {
+                    return Err(CoreError::InvalidTransaction(
+                        "validator is already in the exit queue".to_string(),
+                    ));
+                }
+                // ADR 0036: compute the effective set size after all pending exits and
+                // this new one are eventually processed, then enforce the floor.
+                let effective_after = self
+                    .validator_set
+                    .len()
+                    .saturating_sub(self.validator_exit_queue.len())
+                    .saturating_sub(1);
+                if effective_after < MIN_VALIDATOR_SET_SIZE {
+                    return Err(CoreError::InvalidTransaction(format!(
+                        "removing this validator would drop the effective set below \
+                         the minimum of {MIN_VALIDATOR_SET_SIZE}"
+                    )));
+                }
+                // Enqueue instead of immediately removing: the validator stays active
+                // (and slashable) until processed at the next window boundary.
+                self.validator_exit_queue.push(addr);
+                tracing::info!(%addr, "Admin: validator queued for exit (ADR 0036)");
             }
             GovernanceAction::UpdateFeeFloor { atoms } => {
                 self.fee_floor = Amount::from_atoms(atoms as u128);
@@ -2531,36 +2613,43 @@ mod tests {
         let mut s = WorldState::new();
         let (kp, addr) = kp_addr();
         let (_, producer) = kp_addr(); // separate producer so emission doesn't land on addr
+        let fee = s.base_fee;
         s.credit_for_test(addr, Amount::from_vinx(1_000));
+        let balance_start = s.accounts[&addr].balance;
         s.apply_transaction(&Transaction::new_stake(
             &kp,
             Amount::from_vinx(500),
-            Amount::ZERO,
+            fee,
             0,
         ))
         .unwrap();
         assert_eq!(s.accounts[&addr].staked, Amount::from_vinx(500));
+        let balance_after_stake = s.accounts[&addr].balance;
 
         // Unstake at ts = 1000 → enters the unbonding delay, NOT credited yet.
         s.set_block_context(1_000);
         s.apply_transaction(&Transaction::new_unstake(
             &kp,
             Amount::from_vinx(500),
-            Amount::ZERO,
+            fee,
             1,
         ))
         .unwrap();
         assert_eq!(s.accounts[&addr].staked, Amount::ZERO);
-        assert_eq!(s.accounts[&addr].balance, Amount::from_vinx(500)); // still not back
+        // Balance decreases by the unstake fee; the 500 VINX is in pending_unbonds.
+        let balance_after_unstake = balance_after_stake.checked_sub(fee).unwrap();
+        assert_eq!(s.accounts[&addr].balance, balance_after_unstake);
         assert_eq!(s.pending_unbonds.len(), 1);
 
         // Just before unlock: nothing matures. Use a separate producer so addr stays clean.
         s.settle_block(&producer, 1, 1_000 + UNBONDING_SECS - 1);
         assert_eq!(s.pending_unbonds.len(), 1);
-        // At unlock: the bond returns to addr's balance.
+        // At unlock: the 500 VINX bond returns to addr's balance.
         s.settle_block(&producer, 2, 1_000 + UNBONDING_SECS);
         assert!(s.pending_unbonds.is_empty());
-        assert_eq!(s.accounts[&addr].balance, Amount::from_vinx(1_000));
+        // Original 1000 VINX minus two fees (stake + unstake) plus 500 VINX returned.
+        let expected_final = balance_start.checked_sub(fee).unwrap().checked_sub(fee).unwrap();
+        assert_eq!(s.accounts[&addr].balance, expected_final);
     }
 
     // ─── ADR 0026: existential deposit & account reaping ─────────────────────
@@ -2690,20 +2779,26 @@ mod tests {
         // survive to receive the maturing funds — reaping it would burn them.
         let mut s = WorldState::new();
         let (kp, addr) = kp_addr();
+        let (_, producer) = kp_addr(); // separate producer — fees/emission must not land on addr
+        let fee = s.base_fee;
         let stake = Amount::from_vinx(10);
-        s.credit_for_test(addr, stake);
-        s.apply_transaction(&Transaction::new_stake(&kp, stake, Amount::ZERO, 0))
+        // Credit enough to cover the stake amount plus fees for both stake and unstake.
+        let two_fees = fee.checked_add(fee).unwrap();
+        s.credit_for_test(addr, stake.checked_add(two_fees).unwrap());
+        s.apply_transaction(&Transaction::new_stake(&kp, stake, fee, 0))
             .unwrap();
-        assert_eq!(s.accounts[&addr].balance, Amount::ZERO);
+        // After stake: balance == fee (the unstake fee reserve).
+        assert_eq!(s.accounts[&addr].balance, fee);
         s.set_block_context(1_000);
-        s.apply_transaction(&Transaction::new_unstake(&kp, stake, Amount::ZERO, 1))
+        s.apply_transaction(&Transaction::new_unstake(&kp, stake, fee, 1))
             .unwrap();
-        // balance 0, staked 0, but a pending unbond exists → account must remain.
+        // balance 0 (fee consumed), staked 0, but a pending unbond exists → account must remain.
         assert!(s.get_account(&addr).is_some());
         assert_eq!(s.accounts[&addr].balance, Amount::ZERO);
         assert_eq!(s.accounts[&addr].staked, Amount::ZERO);
-        // After maturation the funds return.
-        s.settle_block(&addr, 1, 1_000 + UNBONDING_SECS);
+        // After maturation the funds return. Use a separate producer so fees/emission
+        // don't confound the balance check on addr.
+        s.settle_block(&producer, 1, 1_000 + UNBONDING_SECS);
         assert_eq!(s.accounts[&addr].balance, stake);
     }
 
@@ -3029,11 +3124,12 @@ mod tests {
         use vinx_core::amount::MAX_PENDING_UNBONDS_PER_ACCOUNT;
         let mut s = WorldState::new();
         let (kp, addr) = kp_addr();
+        let fee = s.base_fee;
         s.credit_for_test(addr, Amount::from_vinx(1_000));
         s.apply_transaction(&Transaction::new_stake(
             &kp,
             Amount::from_vinx(100),
-            Amount::ZERO,
+            fee,
             0,
         ))
         .unwrap();
@@ -3041,15 +3137,15 @@ mod tests {
         // Unstake 1 VINX up to the cap — all accepted.
         for i in 0..MAX_PENDING_UNBONDS_PER_ACCOUNT {
             let tx =
-                Transaction::new_unstake(&kp, Amount::from_vinx(1), Amount::ZERO, (i + 1) as u64);
+                Transaction::new_unstake(&kp, Amount::from_vinx(1), fee, (i + 1) as u64);
             s.apply_transaction(&tx).unwrap();
         }
         assert_eq!(s.pending_unbonds.len(), MAX_PENDING_UNBONDS_PER_ACCOUNT);
-        // One more → rejected (anti-spam).
+        // One more → rejected (anti-spam cap, not balance).
         let over = Transaction::new_unstake(
             &kp,
             Amount::from_vinx(1),
-            Amount::ZERO,
+            fee,
             (MAX_PENDING_UNBONDS_PER_ACCOUNT + 1) as u64,
         );
         assert!(s.apply_transaction(&over).is_err());
@@ -3059,19 +3155,20 @@ mod tests {
     fn test_active_validator_cannot_unstake_below_bond() {
         let mut s = WorldState::new();
         let (kp, addr) = kp_addr();
+        let fee = s.base_fee;
         let bond = MIN_VALIDATOR_BOND_ATOMS;
         s.credit_for_test(addr, Amount::from_atoms(bond * 2));
         s.apply_transaction(&Transaction::new_stake(
             &kp,
             Amount::from_atoms(bond),
-            Amount::ZERO,
+            fee,
             0,
         ))
         .unwrap();
         s.validator_set = ValidatorSet::single(addr);
         s.set_block_context(1_000);
         // Unstaking any of the bond would drop below the minimum → rejected.
-        let bad = Transaction::new_unstake(&kp, Amount::from_atoms(bond / 2), Amount::ZERO, 1);
+        let bad = Transaction::new_unstake(&kp, Amount::from_atoms(bond / 2), fee, 1);
         assert!(s.apply_transaction(&bad).is_err());
     }
 
@@ -3291,6 +3388,7 @@ mod tests {
         let addr = Address::from_public_key(&kp.public_key());
         s.credit_for_test(addr.clone(), Amount::from_vinx(10));
         let below_min = Amount::from_atoms(DECIMAL_FACTOR - 1);
+        // Amount check fires before the fee check — Amount::ZERO fee is fine here.
         let tx = Transaction::new_stake(&kp, below_min, Amount::ZERO, 0);
         assert_eq!(
             s.apply_transaction(&tx),
@@ -3937,6 +4035,222 @@ mod tests {
         s.apply_transaction(&tx)
             .expect("payload at MAX_PAYLOAD_BYTES must be accepted (ADR 0035 boundary)");
         assert_eq!(s.accounts[&sender].nonce, 1, "nonce must advance on success");
+    }
+
+    // ─── ADR 0036: validator churn bounds ────────────────────────────────────
+
+    fn bonded_validator_state() -> (WorldState, KeyPair, Address, KeyPair, Address) {
+        // Returns a state with one active bonded validator plus an admin.
+        use vinx_core::amount::MIN_VALIDATOR_BOND_ATOMS;
+        let (admin_kp, admin_addr) = kp_addr();
+        let (val_kp, val_addr) = kp_addr();
+        let mut s = WorldState::new();
+        s.admin_address = Some(admin_addr.clone());
+        s.credit_for_test(admin_addr.clone(), Amount::from_vinx(1_000));
+        s.set_staked_for_test(&val_addr, Amount::from_atoms(MIN_VALIDATOR_BOND_ATOMS));
+        // Add the validator to the active set.
+        s.apply_transaction(&Transaction::new_admin_action(
+            &admin_kp,
+            &GovernanceAction::AddValidator(val_addr.clone()),
+            0,
+        ))
+        .unwrap();
+        (s, admin_kp, admin_addr, val_kp, val_addr)
+    }
+
+    #[test]
+    fn test_remove_validator_enqueues_not_immediately_removes() {
+        use vinx_core::amount::MIN_VALIDATOR_BOND_ATOMS;
+        let (admin_kp, admin_addr) = kp_addr();
+        let (_, val1) = kp_addr();
+        let (_, val2) = kp_addr();
+        let mut s = WorldState::new();
+        s.admin_address = Some(admin_addr.clone());
+        s.credit_for_test(admin_addr.clone(), Amount::from_vinx(1_000));
+        for addr in [val1.clone(), val2.clone()] {
+            s.set_staked_for_test(&addr, Amount::from_atoms(MIN_VALIDATOR_BOND_ATOMS));
+            s.apply_transaction(&Transaction::new_admin_action(
+                &admin_kp,
+                &GovernanceAction::AddValidator(addr),
+                s.accounts[&admin_addr].nonce,
+            ))
+            .unwrap();
+        }
+        assert_eq!(s.validator_set.len(), 3); // genesis placeholder + val1 + val2
+
+        // RemoveValidator enqueues — the validator stays in the active set.
+        s.apply_transaction(&Transaction::new_admin_action(
+            &admin_kp,
+            &GovernanceAction::RemoveValidator(val1.clone()),
+            s.accounts[&admin_addr].nonce,
+        ))
+        .unwrap();
+        assert!(s.validator_set.contains(&val1), "val1 must still be in the active set");
+        assert_eq!(s.validator_exit_queue, vec![val1.clone()]);
+    }
+
+    #[test]
+    fn test_remove_validator_duplicate_queue_entry_rejected() {
+        use vinx_core::amount::MIN_VALIDATOR_BOND_ATOMS;
+        let (admin_kp, admin_addr) = kp_addr();
+        let (_, val1) = kp_addr();
+        let (_, val2) = kp_addr();
+        let mut s = WorldState::new();
+        s.admin_address = Some(admin_addr.clone());
+        s.credit_for_test(admin_addr.clone(), Amount::from_vinx(1_000));
+        for addr in [val1.clone(), val2.clone()] {
+            s.set_staked_for_test(&addr, Amount::from_atoms(MIN_VALIDATOR_BOND_ATOMS));
+            s.apply_transaction(&Transaction::new_admin_action(
+                &admin_kp,
+                &GovernanceAction::AddValidator(addr),
+                s.accounts[&admin_addr].nonce,
+            ))
+            .unwrap();
+        }
+        let nonce = s.accounts[&admin_addr].nonce;
+        s.apply_transaction(&Transaction::new_admin_action(
+            &admin_kp,
+            &GovernanceAction::RemoveValidator(val1.clone()),
+            nonce,
+        ))
+        .unwrap();
+        // Second RemoveValidator for the same address must be rejected.
+        let result = s.apply_transaction(&Transaction::new_admin_action(
+            &admin_kp,
+            &GovernanceAction::RemoveValidator(val1.clone()),
+            nonce + 1,
+        ));
+        assert!(result.is_err(), "duplicate queue entry must be rejected");
+    }
+
+    #[test]
+    fn test_exit_queue_processed_at_window_boundary() {
+        use vinx_core::amount::{EXIT_QUEUE_WINDOW_BLOCKS, MIN_VALIDATOR_BOND_ATOMS};
+        let (admin_kp, admin_addr) = kp_addr();
+        let (_, val1) = kp_addr();
+        let (_, val2) = kp_addr();
+        let (_, producer) = kp_addr();
+        let mut s = WorldState::new();
+        s.admin_address = Some(admin_addr.clone());
+        s.credit_for_test(admin_addr.clone(), Amount::from_vinx(1_000));
+        // Add two extra validators (so the floor check won't block either removal).
+        for addr in [val1.clone(), val2.clone()] {
+            s.set_staked_for_test(&addr, Amount::from_atoms(MIN_VALIDATOR_BOND_ATOMS));
+            s.apply_transaction(&Transaction::new_admin_action(
+                &admin_kp,
+                &GovernanceAction::AddValidator(addr),
+                s.accounts[&admin_addr].nonce,
+            ))
+            .unwrap();
+        }
+        let nonce = s.accounts[&admin_addr].nonce;
+        s.apply_transaction(&Transaction::new_admin_action(
+            &admin_kp,
+            &GovernanceAction::RemoveValidator(val1.clone()),
+            nonce,
+        ))
+        .unwrap();
+        s.apply_transaction(&Transaction::new_admin_action(
+            &admin_kp,
+            &GovernanceAction::RemoveValidator(val2.clone()),
+            nonce + 1,
+        ))
+        .unwrap();
+        assert_eq!(s.validator_exit_queue.len(), 2);
+
+        // One block before the boundary: nothing is dequeued.
+        s.settle_block(&producer, EXIT_QUEUE_WINDOW_BLOCKS - 1, 1_000);
+        assert_eq!(s.validator_exit_queue.len(), 2);
+        assert!(s.validator_set.contains(&val1));
+
+        // At the window boundary: both are dequeued and removed from the active set.
+        s.settle_block(&producer, EXIT_QUEUE_WINDOW_BLOCKS, 2_000);
+        assert!(s.validator_exit_queue.is_empty());
+        assert!(!s.validator_set.contains(&val1));
+        assert!(!s.validator_set.contains(&val2));
+    }
+
+    #[test]
+    fn test_exit_queue_limited_to_max_per_window() {
+        use vinx_core::amount::{
+            EXIT_QUEUE_WINDOW_BLOCKS, MAX_VALIDATOR_EXITS_PER_WINDOW, MIN_VALIDATOR_BOND_ATOMS,
+        };
+        // Fill the queue with more entries than MAX_VALIDATOR_EXITS_PER_WINDOW.
+        // Genesis placeholder + val1..valN = set of N+1. We need effective_after >= 1.
+        // With 4 validators and 3 queued: effective = 4 - 3 - 1 = 0 < 1, so only 2 can queue.
+        // Use 5 extra validators to leave room.
+        let (admin_kp, admin_addr) = kp_addr();
+        let (_, producer) = kp_addr();
+        let mut s = WorldState::new();
+        s.admin_address = Some(admin_addr.clone());
+        s.credit_for_test(admin_addr.clone(), Amount::from_vinx(1_000));
+        let mut extras: Vec<Address> = Vec::new();
+        for _ in 0..5 {
+            let (_, addr) = kp_addr();
+            s.set_staked_for_test(&addr, Amount::from_atoms(MIN_VALIDATOR_BOND_ATOMS));
+            s.apply_transaction(&Transaction::new_admin_action(
+                &admin_kp,
+                &GovernanceAction::AddValidator(addr.clone()),
+                s.accounts[&admin_addr].nonce,
+            ))
+            .unwrap();
+            extras.push(addr);
+        }
+        // Queue the first MAX_VALIDATOR_EXITS_PER_WINDOW + 1 extras (but floor must hold).
+        // With 6 validators (placeholder + 5 extras) and queuing 3:
+        // effective_after for 3rd = 6 - 2 - 1 = 3 >= 1 ✓
+        let to_queue = MAX_VALIDATOR_EXITS_PER_WINDOW + 1;
+        for addr in extras.iter().take(to_queue) {
+            s.apply_transaction(&Transaction::new_admin_action(
+                &admin_kp,
+                &GovernanceAction::RemoveValidator(addr.clone()),
+                s.accounts[&admin_addr].nonce,
+            ))
+            .unwrap();
+        }
+        assert_eq!(s.validator_exit_queue.len(), to_queue);
+
+        // At the first window boundary: only MAX_VALIDATOR_EXITS_PER_WINDOW are dequeued.
+        s.settle_block(&producer, EXIT_QUEUE_WINDOW_BLOCKS, 1_000);
+        assert_eq!(
+            s.validator_exit_queue.len(),
+            to_queue - MAX_VALIDATOR_EXITS_PER_WINDOW,
+            "overflow must remain in queue for the next window"
+        );
+        // The overflow entry is dequeued at the next window boundary.
+        s.settle_block(&producer, EXIT_QUEUE_WINDOW_BLOCKS * 2, 2_000);
+        assert!(s.validator_exit_queue.is_empty());
+    }
+
+    #[test]
+    fn test_remove_validator_floor_check_blocks_removal() {
+        use vinx_core::amount::MIN_VALIDATOR_SET_SIZE;
+        // A single-validator state — removing that validator would drop to 0, below MIN.
+        let (mut s, admin_kp, admin_addr) = admin_state();
+        let (_, val) = kp_addr();
+        use vinx_core::amount::MIN_VALIDATOR_BOND_ATOMS;
+        s.set_staked_for_test(&val, Amount::from_atoms(MIN_VALIDATOR_BOND_ATOMS));
+        let nonce = s.accounts[&admin_addr].nonce;
+        s.apply_transaction(&Transaction::new_admin_action(
+            &admin_kp,
+            &GovernanceAction::AddValidator(val.clone()),
+            nonce,
+        ))
+        .unwrap();
+        // Replace genesis placeholder so only `val` is active.
+        s.validator_set = ValidatorSet::single(val.clone());
+
+        // Removing `val` would leave 0 active validators → rejected.
+        let result = s.apply_transaction(&Transaction::new_admin_action(
+            &admin_kp,
+            &GovernanceAction::RemoveValidator(val.clone()),
+            nonce + 1,
+        ));
+        assert!(
+            result.is_err(),
+            "removal that would drop below {MIN_VALIDATOR_SET_SIZE} must be rejected"
+        );
+        assert!(s.validator_exit_queue.is_empty(), "queue must be empty after rejection");
     }
 
     #[test]
