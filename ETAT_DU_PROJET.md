@@ -1,32 +1,34 @@
 # VinX Ledger — État du Projet
 
 > Document de référence interne — mis à jour à chaque sprint.
-> Dernière mise à jour : août 2026 (**consensus multi-validateur éprouvé : banc n=3 réel, finalité au quorum, jailing/rotation, fork-choice câblé de bout en bout** + **ADR 0040 implémenté** : émission progressive sans La Fonderie, T_half ~20 ans — whitepaper v5.0). **Cadence de consensus révisée** (12 s fixe, 3 000 tx/bloc max — anti-fork).
+> Dernière mise à jour : août 2026 (**Phase 2 complète** : tx `Unjail` 0x0B (ADR 0027 ✅), récompenses par époque pondérées proposeur 20%/égalitaire 80% (ADR 0028 ✅), `BondValidator` 0x0C Open PoA (ADR 0038 ✅), BLS12-381 (ADR 0046 ✅) — 78 tests ✅). Socle : consensus multi-validateur éprouvé au banc n=3 + ADR 0040 émission progressive + whitepaper v5.0. **Cadence** 12 s fixe, **3 000 tx/bloc** max (~250 TPS).
 
 ---
 
 > ## 🧭 Où en est le projet (lis ceci en premier)
 >
-> **Le socle est solide et le consensus multi-validateur est désormais éprouvé en réel.** Le **banc n=3 multi-process** (`scripts/bench-n3.sh`) valide, avec de vraies co-signatures P2P : liveness (finalité en lockstep), tolérance à 1 panne (2/3 finalise), et **sûreté** (à 1/3 la finalité gèle, le tip continue). Sur ce socle : **fair launch v6** (ADR 0040 ✅ : émission progressive, T_half ~20 ans, minting pur), état anti-bloat, P2P durci, gouvernance K-of-M, modules bondés. `cargo test --workspace` **vert** (~309 tests), clippy `-D warnings` & fmt propres. Stockage **schéma v11**.
+> **Le socle est solide et le consensus multi-validateur est désormais éprouvé en réel.** Le **banc n=3 multi-process** (`scripts/bench-n3.sh`) valide, avec de vraies co-signatures P2P : liveness (finalité en lockstep), tolérance à 1 panne (2/3 finalise), et **sûreté** (à 1/3 la finalité gèle, le tip continue). Sur ce socle : **fair launch v6** (ADR 0040 ✅ : émission progressive, T_half ~20 ans, minting pur), état anti-bloat, P2P durci, gouvernance K-of-M, modules bondés, **Phase 2 économie/admission** (ADR 0027/0028/0038/0046 ✅ : Unjail, récompenses proposeur-pondérées, Open PoA BondValidator, BLS12-381). `cargo test --workspace` **vert** (78 tests), clippy `-D warnings` & fmt propres. Stockage **schéma v11**.
 >
 > **La source de vérité de la feuille de route, c'est [`docs/adr/README.md`](./docs/adr/README.md)** — l'index de tous les ADR (Décisions d'Architecture), avec pour chacun son statut (✅ implémenté / Proposé / 🚧 brouillon). Ce document-ci décrit le **code tel qu'il tourne** ; l'index ADR décrit **ce qui est décidé et ce qui reste**.
 >
-> ### Implémenté dans la tranche consensus (avec ADR dédié)
+> ### Implémenté dans la tranche consensus + Phase 2 (avec ADR dédié)
 > - **ADR 0002 — Finalité au quorum** : pointeur `finalized_height` explicite, **prefix-closed**, évalué contre le **quorum historique à chaque hauteur** (`Chain::note_quorum`/`quorum_at`, corrige le blocage du préfixe après changement de set) ; avancé aussi sur les chemins de sync (P2P + HTTP). **+ Refus de bâtir dans le vide** (`MAX_UNFINALIZED_DEPTH = 64`).
-> - **ADR 0027 — Jailing (t1+t2a+t2b)** : cœur pur déterministe (`vinx-core::reliability`), état câblé dans `settle_block` (`WorldState.reliability`, migration meta **v10→v11**), et **rotation** leader/backup sur le **set actif** (jailés sautés). ⚠️ **Sûreté :** le quorum de finalité **reste sur le set complet bondé** — jamais réduit par le jailing (le banc a montré que le réduire casse la sûreté sous partition ; seule la gouvernance réduit `n`).
-> - **ADR 0031 — Fork-choice (t1 + t2a + t2b)** : `consensus::canonical_head` (fonction pure) **câblé de bout en bout** — candidats concurrents, mécanisme de réorg par snapshot+rejeu (`reorg`), et déclenchement vivant dans le handler P2P. **Convergence indépendante de l'ordre d'arrivée prouvée au banc n=3.** Reste : soak multi-nœuds réseau réel.
+> - **ADR 0027 — Jailing + Unjail (✅ complet)** : cœur pur déterministe (`vinx-core::reliability`), état câblé dans `settle_block`, rotation leader/backup sur le **set actif**. **+ tx `Unjail` (0x0B ✅)** — `apply_unjail` câble `reliability::try_unjail()` ; nonce consommé seulement en succès ; 3 tests. ⚠️ **Sûreté :** quorum de finalité **jamais réduit par le jailing**. *Reste : règle 2 (co-signatures absentes).*
+> - **ADR 0028 — Récompenses par époque (✅ implémenté)** : `PROPOSER_SHARE_BPS = 2 000` (20 %) — les proposeurs reçoivent 20 % de l'`epoch_dist_emission_pot` au prorata de blocs produits dans l'époque, les 80 % restants sont distribués également à tous les validateurs actifs. `ValidatorPoolEntry.epoch_proposed` tracké dans `settle_block`, réinitialisé à `tick_epoch_close`.
+> - **ADR 0038 — Open PoA BondValidator (✅ implémenté)** : tx `BondValidator` (0x0C) — auto-bond permissionless, `balance → staked`, admission en `Warmup` dans le `validator_pool` ; `tick_epoch_close` reconstruit le `validator_set` depuis le pool. 5 tests.
+> - **ADR 0046 — BLS12-381 (✅ implémenté)** : clés BLS G1 compressées (48 octets), PoP G2 (96 octets), tx `RegisterBlsKey` (0x0A), agrégation au niveau du bloc.
+> - **ADR 0031 — Fork-choice (t1 + t2a + t2b)** : `consensus::canonical_head` (fonction pure) **câblé de bout en bout** — candidats concurrents, mécanisme de réorg par snapshot+rejeu (`reorg`), et déclenchement vivant dans le handler P2P. **Convergence indépendante de l'ordre d'arrivée prouvée au banc n=3.** Reste : soak réseau réel.
 > - **ADR 0005 — Horloge protocole sur MTP** : émission/déliaison/upgrade comparent au Median Time Past incluant le bloc, sur les 3 chemins (prod/P2P/sync).
-> - **Heartbeat 10 min** : au moins un bloc toutes les 600 s (`HEARTBEAT_INTERVAL_SECS`), supprime l'incitation à forcer des blocs par fausses tx, borne le retard du MTP.
-> - **ADR 0040 — Émission progressive sans La Fonderie** : minting pur (`emitted_atoms`), `T_half` ~20 ans, slash 90 % → `epoch_dist_emission_pot`, invariant `circ + pot + détruits = émis ≤ MAX` garanti à chaque bloc. Migration `STORAGE_VERSION` v9→v10. Cadence fixe **12 s**, **3 000 tx/bloc** max (~250 TPS).
+> - **ADR 0040 — Émission progressive sans La Fonderie** : minting pur (`emitted_atoms`), `T_half` ~20 ans, slash 90 % → `epoch_dist_emission_pot` (distribué via ADR 0028), invariant `circ + pot + détruits = émis ≤ MAX` garanti à chaque bloc. Cadence fixe **12 s**, **3 000 tx/bloc** max (~250 TPS).
 >
 > ### Implémenté antérieurement (durcissement & extensions)
 > **0015** (vérif parallèle des signatures) · **0026** (dépôt existentiel + reaping) · **0022** (durcissement P2P anti-DoS) · **0011** (gouvernance K-of-M) · **0010** (registre de modules bondés) · **0020** (vecteurs dorés canoniques). Plus un lot sécurité : routes admin fail-closed + comparaison constant-time, sync HTTP vérifiée (proposeur/quorum/state_root), keystore wallet chiffré (argon2 + AES-GCM), rate-limiter borné, persistance incrémentale de la chaîne par hauteur.
 >
 > ### Proposé / à faire (design rédigé, non implémenté) — voir l'index ADR
-> Consensus & sûreté : **0030** (accountability co-sign), **0036** (churn validateurs), reste de **0002** (view-change) et **0031** (soak réseau réel), **0027** (tx `Unjail`, règle 2). Économie : **0028** (récompenses par époque — Accepté), **0033** (bootstrap §1 : genèse multi-validateurs). Admission validateur : **0038** (Open PoA — Accepté). Modules : **0039** (rémunération par escrow — Accepté), **0034** (DA & preuve d'ancre), **0023** (slashing de fraude). Gouvernance : **0032** (garde-fous, 🚧 à discuter). Scaling : **0029** (BLS + comité VRF), **0035** (bornes de ressources), **0037** (blocs compacts). Divers : **0012** (clés HSM), **0013** (rent d'état), **0014** (light client), **0016** (post-quantique), **0017** (halt), **0018** (SLO), **0019** (TLS).
+> Consensus & sûreté : **0030** (accountability co-sign 🔴), **0036** (churn validateurs 🟠), reste de **0002** (view-change) et **0031** (soak réseau réel). Économie : **0039** (rémunération modules par escrow 🟠), **0033** (bootstrap §1 : genèse multi-validateurs 🟠). Modules : **0034** (DA & preuve d'ancre), **0023** (slashing de fraude). Gouvernance : **0032** (garde-fous, 🚧 à discuter). Scaling : **0029** (BLS + comité VRF 🟢), **0035** (bornes de ressources 🟢), **0037** (blocs compacts 🟢). Divers : **0012** (clés HSM), **0013** (rent d'état), **0014** (light client), **0016** (post-quantique), **0017** (halt), **0018** (SLO), **0019** (TLS).
 >
 > ### ⚠️ Le chemin critique
-> Le banc n=3 et le wiring reorg du fork-choice (0031 t2b) sont **faits** (convergence prouvée au banc n=3). **Chemin critique désormais :** tx `Unjail` (0027), règle 2 (co-signatures absentes), **0030** (accountability), **soak fork-choice n=3 sur réseau réel** (0031). En parallèle : **récompenses par époque** (0028 — distribuer `epoch_dist_emission_pot` + émission entre proposeurs et co-signataires) puis **Open PoA** (0038) et **rémunération modules** (0039).
+> **Phase 2 terminée** (ADR 0027 Unjail ✅, ADR 0028 ✅, ADR 0038 ✅, ADR 0046 ✅). **Chemin critique désormais :** règle 2 ADR 0027 (co-signatures absentes), **0030** (accountability co-sign — ferme la sécurité), **soak fork-choice n=3 sur réseau réel** (0031). En parallèle : **rémunération modules** (0039) et **churn bounds** (0036).
 
 ---
 
@@ -174,6 +176,9 @@ sdk/
 | `0x07` | `SlashValidator` | Slashing pour équivocation (preuve vérifiée) |
 | `0x08` | `AdminAction` | Action de gouvernance (`GovernanceAction`) — mono-admin ou comité K-of-M (ADR 0011) |
 | `0x09` | `AnchorState` | Opération de registre de modules (`ModuleOp` : Register/Anchor/Deregister — ADR 0010) |
+| `0x0A` | `RegisterBlsKey` | Enregistre la clé BLS12-381 + PoP du validateur (ADR 0046) |
+| `0x0B` | `Unjail` | Auto-unjail après le cooldown (ADR 0027) — sans frais ni montant |
+| `0x0C` | `BondValidator` | Auto-bond Open PoA : `balance → staked`, entre dans le pool en Warmup (ADR 0038) |
 
 **Les `GovernanceAction`** (payload d'`AdminAction`) : `AddValidator`, `RemoveValidator`, `UpdateFeeFloor`, `ScheduleUpgrade`, `RotateAdmin`, **`SetAdminPolicy`** (installe le comité K-of-M — ADR 0011).
 
@@ -474,15 +479,18 @@ sync_peer_rpc = "http://1.2.3.4:8545"  # Sync depuis un pair au démarrage
 
 | Priorité | Chantier | ADR |
 |----------|----------|-----|
-| 🔴 **Haute** | **Jailing — finir** : tx `Unjail` (opérateur, après cooldown) + règle 2 (co-signatures absentes) | 0027 |
-| 🔴 Haute | **Accountability co-sign** (détection des co-signatures conflictuelles → finalité *accountable*) ; reste de la finalité (view-change formel) | 0030, 0002 |
+| ✅ **Fait** | **Jailing — tx `Unjail`** (opérateur, après cooldown) | 0027 |
+| ✅ Fait | **Récompenses par époque** — 20 % proposeur + 80 % égalitaire depuis `epoch_dist_emission_pot` ; `PROPOSER_SHARE_BPS = 2 000` | 0028 |
+| ✅ Fait | **Open PoA `BondValidator`** — admission permissionless par bond, entrée en Warmup | 0038 |
+| ✅ Fait | **BLS12-381 + PoP + `RegisterBlsKey`** | 0046 |
+| 🔴 **Haute** | **ADR 0027 règle 2** : co-signatures absentes — tracker les co-sigs manquantes dans `settle_block`, alimenter `cosign_count_in_window` sur les peers P2P | 0027 |
+| 🔴 Haute | **Accountability co-sign** — détection des co-signatures conflictuelles → assemblage `SlashEvidence`, auto-report, finalité *accountable* | 0030 |
 | 🔴 Haute | **Soak fork-choice n=3** sur réseau réel (convergence prouvée au banc ; reste la validation réseau) | 0031 |
-| 🟠 Moyenne | **Récompenses par époque** — distribuer `epoch_dist_emission_pot` + émission entre proposeurs + co-signataires (1 h, `PROPOSER_SHARE_BPS=20 %`) ; frais restent immédiats au producteur | 0028 (Accepté) |
-| 🟠 Moyenne | **Open PoA** — admission permissionless par bond, veto collectif >66 % (7 j), S_perf scoring, expansion phasée immuable (3-5 → 10-21 → 50-101) | 0038 (Accepté) |
-| 🟠 Moyenne | **Rémunération des modules par escrow** — `ModuleEscrow`/`ModuleEscrowRefund`, partage via `fee_schedule`, preuve de livraison via `AnchorState` | 0039 (Accepté) |
-| 🟠 Moyenne | **Bootstrap §1** (genèse multi-validateurs + `genesis_hash`), **garde-fous de gouvernance** (🚧 à discuter), **bornes de churn** & **de ressources par tx** | 0033§1, 0032, 0036, 0035 |
+| 🟠 Moyenne | **Rémunération des modules par escrow** — `ModuleEscrow`/`ModuleEscrowRefund`, partage via `fee_schedule`, preuve de livraison via `AnchorState` | 0039 |
+| 🟠 Moyenne | **Bootstrap §1** (genèse multi-validateurs + `genesis_hash`), **bornes de churn** | 0033§1, 0036 |
+| 🟠 Moyenne | **Garde-fous de gouvernance** (🚧 à discuter), **bornes de ressources par tx** | 0032, 0035 |
 | 🟠 Moyenne | **Modules : DA & preuve d'ancre** puis **slashing de fraude** | 0034, 0023 |
-| 🟢 Future | **Décentralisation à l'échelle** (BLS + comité VRF), **blocs compacts** | 0029, 0037 |
+| 🟢 Future | **Décentralisation à l'échelle** (BLS agrégation comité VRF), **blocs compacts** | 0029, 0037 |
 | 🟢 Future | Light client (0014), rent d'état (0013), clés HSM (0012), halt d'urgence (0017), TLS natif (0019), post-quantique (0016), SLO (0018) | — |
 
 ### Déjà fait (historique)
@@ -494,7 +502,7 @@ sync_peer_rpc = "http://1.2.3.4:8545"  # Sync depuis un pair au démarrage
 
 ### 🧭 Reprendre le travail (prochaine session)
 
-Le **fork-choice (ADR 0031 t2a+t2b) est câblé** et la convergence est prouvée au banc n=3. Les prochains chantiers par priorité : **(1)** tx `Unjail` + règle 2 co-signatures absentes (ADR 0027) ; **(2)** accountability co-sign (ADR 0030) ; **(3)** soak fork-choice n=3 sur réseau réel ; **(4)** récompenses par époque (ADR 0028 : distribuer `epoch_dist_emission_pot` + émission entre proposeurs et co-signataires).
+**Phase 2 terminée** (ADR 0027 Unjail ✅ + ADR 0028 récompenses ✅ + ADR 0038 Open PoA ✅ + ADR 0046 BLS ✅ — branche `claude/phase2-rewards-open-poa`). Les prochains chantiers par priorité : **(1)** ADR 0027 règle 2 — co-signatures absentes (câbler `cosign_count_in_window` depuis les données P2P) ; **(2)** ADR 0030 — accountability co-sign (détection, auto-report) ; **(3)** soak fork-choice n=3 sur réseau réel ; **(4)** ADR 0039 — rémunération modules par escrow.
 
 ---
 
