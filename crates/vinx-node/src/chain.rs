@@ -140,11 +140,18 @@ impl Chain {
             // courant — sinon un bloc antérieur à un changement de set (moins de signataires)
             // bloquerait le préfixe.
             let threshold = self.quorum_at(next, fallback);
-            match self.block_row(next) {
-                Some((_, b)) if b.valid_signer_count(validator_set) >= threshold => {
-                    self.finalized_height = next
+            // ADR 0046: BLS aggregate path takes priority when present.
+            let is_final = match self.block_row(next) {
+                Some((_, b)) if b.bls_aggregate.is_some() => {
+                    b.bls_signer_count().map(|c| c >= threshold).unwrap_or(false)
                 }
-                _ => break,
+                Some((_, b)) => b.valid_signer_count(validator_set) >= threshold,
+                None => break,
+            };
+            if is_final {
+                self.finalized_height = next;
+            } else {
+                break;
             }
         }
         // ADR 0031 — les candidats désormais sous la finalité ne peuvent plus gagner : purge.
@@ -501,6 +508,22 @@ impl Chain {
             return block.is_finalized(validator_set);
         }
         false
+    }
+
+    /// Updates the BLS aggregate co-signature on a stored block (ADR 0046).
+    /// Called by the P2P handler once ≥ quorum BLS co-signatures have been aggregated.
+    /// Marks the block dirty so the persistence layer rewrites it.
+    pub fn set_block_bls(
+        &mut self,
+        height: u64,
+        bls_aggregate: Vec<u8>,
+        bls_cosigner_pks: Vec<Vec<u8>>,
+    ) {
+        if let Some((_, block)) = self.blocks.get_mut(height as usize) {
+            block.bls_aggregate = Some(bls_aggregate);
+            block.bls_cosigner_pks = bls_cosigner_pks;
+            self.dirty_heights.insert(height);
+        }
     }
 
     /// Records that `validator` signed `block_hash` at `height`.
