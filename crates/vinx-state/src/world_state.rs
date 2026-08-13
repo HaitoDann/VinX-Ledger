@@ -2,10 +2,10 @@ use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, HashMap, HashSet};
 use vinx_core::{
     amount::{
-        cumulative_emission_atoms, Amount, BPS_DENOM, DEFAULT_FEE_FLOOR_ATOMS,
-        EXISTENTIAL_DEPOSIT_ATOMS, MAX_MODULES, MAX_NONCE_AHEAD, MIN_MODULE_BOND_ATOMS,
-        MIN_STAKE_ATOMS, MIN_VALIDATOR_BOND_ATOMS, SLASH_BOUNTY_BPS, SLASH_EQUIVOCATION_BPS,
-        UNBONDING_SECS,
+        cumulative_emission_atoms, Amount, BPS_DENOM, DEFAULT_ACTIVE_SET_SIZE,
+        DEFAULT_FEE_FLOOR_ATOMS, EXISTENTIAL_DEPOSIT_ATOMS, MAX_MODULES, MAX_NONCE_AHEAD,
+        MIN_MODULE_BOND_ATOMS, MIN_STAKE_ATOMS, MIN_VALIDATOR_BOND_ATOMS, SLASH_BOUNTY_BPS,
+        SLASH_EQUIVOCATION_BPS, UNBONDING_SECS,
     },
     block::SlashEvidence,
     chain_id::CHAIN_ID_DEVNET,
@@ -129,10 +129,41 @@ pub struct WorldState {
     pub destroyed_atoms: u128,
     /// Fiabilité des validateurs (ADR 0027) : manquements de proposition + jailing, dérivés
     /// **déterministiquement** de la séquence de blocs (comme `pending_unbonds`, hors
-    /// `state_root`). **Dernier champ sérialisé** → la migration v10→v11 append sa valeur par
-    /// défaut (map vide), propriété de préfixe. `serde(default)` pour l'état pré-0027.
+    /// `state_root`). `serde(default)` pour l'état pré-0027.
     #[serde(default)]
     pub reliability: ReliabilityMap,
+    // ── Open PoA (ADR 0038) ─────────────────────────────────────────────────────
+    // All fields below are appended after `reliability` — the v11→v12 migration
+    // appends their default encodings (empty map / empty set / default value).
+    // The bincode prefix-append property requires these fields to stay LAST and
+    // be individually serde(default)-gated so pre-v12 blobs load cleanly.
+    //
+    /// Pool of all bonded validators (ADR 0038). Keyed by validator signing address.
+    /// Includes active, benched, warming-up, and unbonding entries.
+    /// Appended after `reliability` — v11→v12 migration appends its default (empty).
+    #[serde(default)]
+    pub validator_pool: BTreeMap<Address, vinx_core::ValidatorPoolEntry>,
+    /// Validator keys permanently banned after a proven equivocation (ADR 0038).
+    /// `AddValidator`/bond transactions referencing a banned key are rejected.
+    /// Appended after `validator_pool`.
+    #[serde(default)]
+    pub banned_validator_keys: std::collections::HashSet<Address>,
+    /// Current governable active-set size N (ADR 0038). Default: DEFAULT_ACTIVE_SET_SIZE.
+    /// Governable within [MIN_ACTIVE_SET_SIZE, MAX_ACTIVE_SET_SIZE] in steps of
+    /// ACTIVE_SET_STEP with ACTIVE_SET_COOLDOWN_SECS between modifications.
+    /// Appended after `banned_validator_keys`.
+    #[serde(default = "default_active_set_size")]
+    pub active_set_size: u32,
+    /// Timestamp of the last governance modification to `active_set_size` (ADR 0038).
+    /// Used to enforce the ACTIVE_SET_COOLDOWN_SECS between modifications.
+    /// Appended after `active_set_size`.
+    #[serde(default)]
+    pub last_active_set_size_change_ts: u64,
+    /// Timestamp of the last governance modification to `min_validator_bond` (ADR 0038).
+    /// Used to enforce BOND_COOLDOWN_SECS between modifications.
+    /// Appended after `last_active_set_size_change_ts`.
+    #[serde(default)]
+    pub last_bond_change_ts: u64,
 }
 
 /// A bond amount in its unbonding delay, waiting to return to `address`'s balance
@@ -251,12 +282,40 @@ pub fn v11_meta_suffix() -> Vec<u8> {
     bincode::serialize(&ReliabilityMap::new()).expect("serialize empty map")
 }
 
+/// The bincode bytes appended to a v11 `WorldState` meta blob to bring it to v12 (ADR 0038
+/// Open PoA). Appends the defaults of five new fields in declaration order:
+///   1. `validator_pool`                  — empty `BTreeMap<Address, ValidatorPoolEntry>`
+///   2. `banned_validator_keys`           — empty `HashSet<Address>`
+///   3. `active_set_size`                 — `u32 = DEFAULT_ACTIVE_SET_SIZE` (21)
+///   4. `last_active_set_size_change_ts`  — `u64 = 0`
+///   5. `last_bond_change_ts`             — `u64 = 0`
+pub fn v12_meta_suffix() -> Vec<u8> {
+    use std::collections::{BTreeMap, HashSet};
+    use vinx_core::ValidatorPoolEntry;
+    let mut out =
+        bincode::serialize(&BTreeMap::<Address, ValidatorPoolEntry>::new())
+            .expect("serialize empty pool");
+    out.extend(
+        bincode::serialize(&HashSet::<Address>::new()).expect("serialize empty ban set"),
+    );
+    out.extend(
+        bincode::serialize(&DEFAULT_ACTIVE_SET_SIZE).expect("serialize active_set_size"),
+    );
+    out.extend(bincode::serialize(&0u64).expect("serialize 0u64"));
+    out.extend(bincode::serialize(&0u64).expect("serialize 0u64"));
+    out
+}
+
 fn default_fee_floor() -> Amount {
     Amount::from_atoms(DEFAULT_FEE_FLOOR_ATOMS)
 }
 
 fn default_chain_id() -> u32 {
     CHAIN_ID_DEVNET
+}
+
+fn default_active_set_size() -> u32 {
+    DEFAULT_ACTIVE_SET_SIZE
 }
 
 impl Default for WorldState {
@@ -298,6 +357,11 @@ impl WorldState {
             epoch_dist_emission_pot: Amount::ZERO,
             destroyed_atoms: 0,
             reliability: ReliabilityMap::new(),
+            validator_pool: BTreeMap::new(),
+            banned_validator_keys: std::collections::HashSet::new(),
+            active_set_size: DEFAULT_ACTIVE_SET_SIZE,
+            last_active_set_size_change_ts: 0,
+            last_bond_change_ts: 0,
         }
     }
 

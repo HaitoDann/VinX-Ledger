@@ -484,66 +484,22 @@ impl Node {
         }
     }
 
-    /// Background task: produce blocks on demand (event-driven) with a heartbeat fallback.
+    /// Background task: produce one block every `block_time_secs`, unconditionally.
     ///
-    /// Workflow:
-    ///  - Sleeps until the mempool signals a new transaction (`tx_ready` Notify).
-    ///  - Waits a short batch window so concurrent submissions land in the same block.
-    ///  - Falls back to a heartbeat block every HEARTBEAT_INTERVAL_SECS when idle,
-    ///    keeping height-based timers (freeze expiry, upgrade activation) advancing.
+    /// ADR 0045 — cadence fixe 12 s, blocs à la demande et heartbeat supprimés.
+    /// Empty blocks are normal during low-activity periods; the emission curve is
+    /// time-integrated (ADR 0040) so empty blocks emit the same as a silent window
+    /// of equal duration. The fixed tick also makes epoch boundaries (ADR 0028) and
+    /// warm-up counting (ADR 0038) fully predictable: every epoch = exactly
+    /// EPOCH_DURATION_SECS / block_time_secs blocks.
     ///
-    /// Implements **slot skip**: if the scheduled leader is offline, backup validators
-    /// step in after 2, 3, … block-times so the chain keeps advancing.
+    /// Slot skip (ADR 0027): if the scheduled leader is offline, backup validators
+    /// step in after 2 × block-times via `try_backup_production`.
     pub async fn run_block_producer(self: Arc<Self>) {
-        use vinx_core::amount::HEARTBEAT_INTERVAL_SECS;
-
         let block_time = std::time::Duration::from_secs(self.config.block_time_secs);
-        let heartbeat = std::time::Duration::from_secs(HEARTBEAT_INTERVAL_SECS);
-
-        // Extract the Notify handle once — no lock held while awaiting.
-        let tx_ready = self.mempool.read().await.tx_ready.clone();
-
-        // True when the last block came out empty despite a backlog — the pending
-        // txs can't be applied yet (fee too low, nonce gap). We then fall back to
-        // waiting for a fresh signal instead of spinning on empty blocks.
-        let mut stalled = false;
 
         loop {
-            // Proceed straight to production when there's pending work and we aren't
-            // stalled — the demand-scaled gap below paces us, and any leftover txs
-            // from a previous block keep draining. Otherwise wait for a signal or
-            // the unconditional heartbeat (ADR 0038): at least one block every
-            // HEARTBEAT_INTERVAL_SECS, even empty. Guaranteeing that the accrued
-            // emission is forged on schedule removes the incentive to force blocks
-            // with junk self-transactions, and keeps the MTP clock, unbond
-            // maturation and upgrade activation advancing at rest.
-            let have_work = !stalled && self.mempool.read().await.size() > 0;
-
-            let is_heartbeat_block = if have_work {
-                false
-            } else {
-                tokio::select! {
-                    _ = tx_ready.notified() => false,
-                    _ = tokio::time::sleep(heartbeat) => true,
-                }
-            };
-            // Any fresh wake clears a prior stall — we retry the backlog.
-            stalled = false;
-
-            if is_heartbeat_block {
-                tracing::debug!("Heartbeat block (ADR 0038)");
-            } else {
-                // ADR 0043 — cadence à plancher fixe : au plus un bloc toutes les `block_time`,
-                // même en saturation. L'ancienne accélération à la demande (écart → 0, blocs
-                // dos-à-dos sous charge) était le générateur #1 de forks ; on la retire. La
-                // congestion est absorbée par le base-fee, pas par des blocs plus rapprochés.
-                tokio::time::sleep(block_time).await;
-                // Skip-empty conservé : rien à sceller (réveil spurious ou déjà drainé) → on ne
-                // produit pas de bloc vide, on repart attendre.
-                if self.mempool.read().await.size() == 0 {
-                    continue;
-                }
-            }
+            tokio::time::sleep(block_time).await;
 
             match self.tick().await {
                 Ok(block) => {
@@ -558,11 +514,9 @@ impl Node {
                         const AUTO_COMPACT_INTERVAL: u64 = 500;
                         const LIVENESS_EVICTION_BLOCKS: u64 = 50;
                         let h = block.header.height;
-                        // Periodic pruning: drop old tx/sig data every PRUNE_INTERVAL blocks
                         if h > 0 && h % PRUNE_INTERVAL == 0 {
                             self.chain.write().await.prune(BLOCK_RETENTION_COUNT);
                         }
-                        // Auto-compact old tx index every 500 blocks (E)
                         if h > 0 && h % AUTO_COMPACT_INTERVAL == 0 {
                             self.chain
                                 .write()
@@ -570,7 +524,6 @@ impl Node {
                                 .compact_old_txs(BLOCK_RETENTION_COUNT);
                             tracing::debug!(height = h, "Auto-compacted chain tx data");
                         }
-                        // Update suspended validators based on liveness (F)
                         if h >= LIVENESS_EVICTION_BLOCKS {
                             let liveness = self.validator_liveness.read().await;
                             let vs = self.validator_set.read().await;
@@ -578,7 +531,7 @@ impl Node {
                             let mut suspended = self.suspended_validators.write().await;
                             for addr in vs.validators() {
                                 if *addr == my_addr {
-                                    continue; // never suspend ourselves
+                                    continue;
                                 }
                                 let offline_for =
                                     liveness.get(addr).map_or(h, |&last| h.saturating_sub(last));
@@ -600,12 +553,6 @@ impl Node {
                         }
                     }
                     self.persist().await;
-                    // A block that came out empty despite a full backlog means the
-                    // pending txs can't be applied yet (fee too low, nonce gap). Mark
-                    // stalled so the next iteration waits for a fresh signal instead of
-                    // spinning on empty blocks; any wake clears it and retries.
-                    let pending = self.mempool.read().await.size();
-                    stalled = pending >= self.config.max_block_txs && block.header.tx_count == 0;
                 }
                 Err(NodeError::Consensus(_)) => {
                     self.try_backup_production().await;

@@ -35,7 +35,10 @@ use zstd;
 /// v11: (1) blocks are persisted per-height in BLOCKS table; the monolithic "chain"
 ///      blob is replaced by a tiny "chain_meta" entry (finalized height). (2) WorldState
 ///      meta gains ADR 0027 `reliability` map appended last — same prefix property.
-const STORAGE_VERSION: u64 = 11;
+/// v12: Open PoA (ADR 0038) — `validator_pool`, `banned_validator_keys`,
+///      `active_set_size`, `last_active_set_size_change_ts`, `last_bond_change_ts`
+///      appended after `reliability`. Migration appends their default encodings.
+const STORAGE_VERSION: u64 = 12;
 
 /// zstd compression level — level 3 is the sweet spot: ~60-70% size reduction,
 /// negligible latency compared to disk I/O.
@@ -178,6 +181,10 @@ impl Storage {
                     Self::migrate_v9_chain_blob(tx)?;
                     Self::append_meta_suffix(tx, &vinx_state::v11_meta_suffix())?;
                 }
+                // v11 → v12 (ADR 0038 Open PoA): append validator_pool (empty BTreeMap),
+                // banned_validator_keys (empty HashSet), active_set_size (u32 = 21),
+                // last_active_set_size_change_ts (u64 = 0), last_bond_change_ts (u64 = 0).
+                11 => Self::append_meta_suffix(tx, &vinx_state::v12_meta_suffix())?,
                 unknown => {
                     return Err(Self::io_err(format!(
                         "no automatic migration from schema v{unknown} to v{STORAGE_VERSION}. \

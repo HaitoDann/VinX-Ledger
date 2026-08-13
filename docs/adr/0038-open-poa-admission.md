@@ -1,147 +1,208 @@
-# ADR 0038 — Admission permissionless au set de validateurs (Open PoA)
+# ADR 0038 — Open PoA : set ranked par score, rotation par époque
 
-- **Statut :** Accepté (décision de design) — **non implémenté** à ce jour.
-- **Catégorie :** Consensus & finalité / Tokenomics · **Priorité :** 🟠 moyenne-haute
-- **Date :** Août 2026
+- **Statut :** Accepté — **non implémenté** à ce jour.
+- **Catégorie :** Consensus & finalité / Tokenomics · **Priorité :** 🔴 haute
+- **Date :** Août 2026 (révision majeure — remplace la version « bond + veto collectif »)
 - **Liens :** concrétise le fair launch (ADR 0021, ADR 0033) ; s'articule avec les récompenses
-  par époque (ADR 0028) et les garde-fous de gouvernance (ADR 0032) ; dépend du consensus
-  multi-validateur éprouvé (ADR 0002/0027/0031) **avant** l'ouverture des phases 2 et 3.
+  par époque (ADR 0028) ; dépend du consensus multi-validateur éprouvé (ADR 0002/0027/0031)
+  avant d'ouvrir le pool à des tiers.
 
 ---
 
 ## 1. Contexte
 
-VinX est **PoA** (Proof of Authority) : les validateurs sont une liste restreinte qui produit
-et co-signe les blocs. Aujourd'hui, l'admission est **gouvernance-gatée** — l'admin ajoute
-chaque validateur individuellement via `GovernanceAction::AddValidator`.
+L'ADR 0038 précédent proposait un mécanisme d'admission « bond + veto collectif ». Ce design
+a été abandonné après discussion : le veto collectif ouvre la porte à des cartels (les 14
+validateurs actifs s'organisent pour bloquer le #15 concurrent), et n'est pas nécessaire si le
+score de performance est le seul critère de sélection.
 
-Cette centralisation crée une **contradiction structurelle avec le fair launch** :
-l'admin choisit qui valide → l'admin choisit qui gagne l'émission. Un réseau qui se prétend
-« sans pre-mine, émission par le travail » mais dont le fondateur sélectionne
-individuellement les bénéficiaires de ce travail n'est pas fair — c'est un avantage accordé,
-pas un travail récompensé.
-
-La question n'est pas de supprimer le PoA (l'identité et la responsabilité légale des
-validateurs restent des atouts), mais d'en retirer la dimension de sélection arbitraire.
+Le nouveau modèle : **n'importe qui** peut rejoindre le pool de validateurs en postant le bond
+requis — sans approbation individuelle, sans veto. Le **set actif** (N validateurs qui
+co-signent réellement les blocs) est déterminé par le **score de fiabilité** de chaque
+validateur, recalculé et rotaté à chaque clôture d'époque.
 
 ## 2. Décision
 
-Remplacer la sélection individuelle par un mécanisme **Open PoA** : le bond suffit à entrer
-dans la file de candidature ; la sélection nominative est remplacée par un veto collectif.
+### 2.1 Pool de validateurs (sans barrière de gouvernance)
 
-### 2.1 File de candidature automatique
+Toute adresse postant le bond requis entre **automatiquement** dans le pool — sans validation
+individuelle par l'admin ni veto collectif. L'admin conserve un seul pouvoir lié aux
+validateurs : ajuster les bornes du bond via gouvernance (ADR 0011), dans les limites immuables
+ci-dessous.
 
-Toute adresse ayant posté le bond requis (`MIN_VALIDATOR_BOND_ATOMS`, gouvernable) **entre
-automatiquement dans la file de candidature** — sans approbation admin individuelle.
+**Condition d'entrée :** `bond_atoms ≥ MIN_VALIDATOR_BOND_ATOMS` (gouvernable, par défaut
+100 000 VinX, borné dans `[MIN_BOND_HARD_FLOOR, MAX_BOND_HARD_CAP]`).
 
-L'admin ne conserve qu'**une** prérogative liée aux validateurs : ajuster le montant
-du bond minimum via `GovernanceAction::UpdateMinValidatorBond`. Il ne choisit plus les
-individus admis.
+**Warmup :** un validateur entrant dans le pool n'est **pas immédiatement éligible** au set
+actif. Il doit compléter **3 époques complètes** (= 3 × `EPOCH_DURATION_SECS` de temps réel)
+de co-signatures réelles avant d'entrer dans le classement. Son score est calculé à partir de
+ses co-signatures effectives pendant le warmup ; il n'entre dans le ranking qu'à l'issue de la
+3ᵉ époque complète.
 
-### 2.2 Veto collectif (fenêtre 7 jours)
+> Exception bootstrap : si la taille du pool est inférieure à N, les validateurs en warmup
+> sont comptés dans le set actif dès leur entrée (pas de luxe de refuser le quorum).
 
-À l'entrée en file, une **fenêtre de 7 jours** (`CANDIDATE_VETO_WINDOW_SECS = 604_800`)
-s'ouvre pendant laquelle les validateurs actifs peuvent voter pour rejeter le candidat.
+### 2.2 Score de fiabilité
 
-- Si **plus de 66 % des validateurs actifs** votent contre dans la fenêtre → rejet ;
-  le bond est rendu intégralement ; le candidat peut re-candidater après un cooldown.
-- **Absence de veto** dans la fenêtre → admission automatique à l'expiration.
-- Le vote est **on-chain** (transaction signée par le validateur) : pas de décision
-  discrétionnaire ni hors-chaîne. L'historique est immuable et auditable.
+Le score d'un validateur est son **taux de co-signature sur une fenêtre glissante de 7 jours**
+(`VALIDATOR_SCORE_WINDOW_SECS = 604_800`).
 
-### 2.3 Score S_perf — mérite, pas capital
+```
+score(v) = co_signatures_de_v_sur_7j / blocs_finalisés_sur_7j_où_v_était_dans_le_set_actif
+```
 
-L'attribution des slots de production dans le set actif suit un score `S_perf` calculé sur
-des métriques **100 % déterministes et on-chain** :
+**Règles fermes :**
+- Aucune pondération par le bond : le bond sécurise, il ne multiplie pas le score.
+- Aucune pondération par l'ancienneté dans le score lui-même (l'ancienneté sert uniquement
+  de tiebreaker).
+- Calculé exclusivement depuis les blocs finalisés (déterministe sur tous les nœuds).
 
-- **Taux de co-signature** : `signatures_participées / slots_attendus` sur les N derniers blocs.
-- **Taux de proposition réussie** : blocs proposés acceptés par le quorum / total des slots
-  où le validateur était leader désigné.
+**Score de départ :** 50 % (valeur sentinelle pendant le warmup, non utilisée dans le
+ranking jusqu'à l'issue du warmup).
 
-**Règles fermes de S_perf :**
+**Tiebreaker à score égal :** `SHA-256(epoch_number_le || validator_address)`. Uniforme,
+déterministe, calculable par tous les nœuds, varie à chaque époque — aucun avantage
+structurel pour aucune adresse.
 
-| Règle | Raison |
-|---|---|
-| Aucun composant de délégation (pas de W_stake) | Évite la spirale plutocratique DPoS |
-| Aucune pondération par le bond | Le bond sécurise ; il ne multiplie pas les gains |
-| Aucune métrique de latence / timing réseau | Non déterministe — divergence de consensus |
-| Métriques calculées uniquement depuis les blocs finalisés | Identique sur tous les nœuds |
+### 2.3 Set actif et rotation par époque
 
-L'égalité round-robin est préservée parmi les validateurs de même score : personne n'achète
-un avantage de slot avec un bond supérieur au minimum.
+Le set actif est composé des **N validateurs ayant le score le plus élevé** parmi ceux ayant
+complété leur warmup.
 
-### 2.4 Expansion phasée — automatique et immuable depuis la genèse
+**N** est gouvernable, modifiable de ±2 par modification, avec un cooldown de 7 jours entre
+deux modifications. Bornes immuables :
 
-L'expansion du set suit trois phases dont les **seuils de déclenchement sont gravés à la
-genèse** (vecteur doré, ADR 0020) et **non gouvernables** — personne ne peut les modifier
-après déploiement.
+```
+MIN_ACTIVE_SET_SIZE = 5   (plancher dur, immuable)
+MAX_ACTIVE_SET_SIZE = 101 (plafond dur, immuable)
+```
 
-| Phase | Set cible | Mode d'admission | Déclencheur (gravé, à calibrer à la genèse) |
-|---|---|---|---|
-| 1 — Bootstrap | 3–5 validateurs | Gouvernance-gated (admin) | Consensus n≥3 éprouvé en banc |
-| 2 — Ouverture | 10–21 validateurs | Open PoA (bond + veto collectif) | Seuil de circulation ou durée depuis la genèse |
-| 3 — Échelle | 50–101 validateurs | Open PoA (idem, bond adapté) | Seuil de circulation supérieur ou durée |
+Le plancher de 5 s'active dès que le pool atteint 5 validateurs ; en dessous de 5, le set
+actif = tout le pool (`set_size = min(N, pool_size)`).
 
-> La Phase 1 garde la sélection gouvernance-gated le temps que le consensus multi-validateur
-> soit éprouvé (ADR 0002, 0027, 0031). Activer Open PoA avant est risqué : un set dynamique
-> non testé sous pression peut casser la liveness.
+La **rotation** a lieu à chaque clôture d'époque (même tick que ADR 0028) :
+1. Recalculer le score de chaque validateur du pool ayant terminé son warmup.
+2. Classer par score décroissant, tiebreaker SHA-256.
+3. Les N premiers deviennent le nouveau set actif.
+4. Les validateurs sortant du set actif retournent dans le pool (continuent d'observer).
+5. Le quorum reste calculé sur le **set actif** courant (`⌈2N/3⌉`).
 
-Les **valeurs concrètes** des seuils (en VINX circulants ou en secondes depuis la genèse)
-sont définies lors de la cérémonie de genèse et figées dans le `GenesisConfig` (ADR 0033).
+### 2.4 Bond gouvernable — bornes immuables
 
-## 3. Modèle de confiance
+| Paramètre | Valeur | Gouvernable ? |
+|---|---|---|
+| `MIN_VALIDATOR_BOND_ATOMS` (défaut) | 100 000 VinX | Oui — ±25 % par modif, cooldown 7 j |
+| `MIN_BOND_HARD_FLOOR` | 10 000 VinX | **Non — immuable** |
+| `MAX_BOND_HARD_CAP` | 100 000 000 VinX | **Non — immuable** |
+| Pas de modification | ±25 % | Immuable |
+| Cooldown entre modifs | 7 jours | Immuable |
 
-| Ce que l'Open PoA **garantit** | Ce qu'il **ne garantit pas** |
-|---|---|
-| N'importe qui avec le bond peut candidater | Que tous les candidats seront admis (veto possible) |
-| L'admin ne choisit pas les individus admis | Que le veto collectif ne peut pas être instrumentalisé |
-| La sélection est on-chain et auditable | L'identité légale des nouveaux validateurs (≠ PoA classique) |
+La gouvernance ne peut jamais descendre le bond en dessous du plancher ni le faire monter
+au-dessus du plafond — un attaquant qui contrôle le comité ne peut ni rendre l'entrée triviale
+(bond microscopique = Sybil gratuit) ni la rendre inaccessible (bond astronomique = monopole).
 
-> La Sybil-résistance repose sur le **bond** (capital immobilisé, slashable). Elle ne repose
-> plus sur une liste de confiance — c'est le compromis assumé de l'ouverture.
+### 2.5 Équivocation — slash et blacklist
 
-## 4. Conséquences
+**Équivocation prouvée** (double-signature à la même hauteur, ADR 0030) :
+1. 100 % du bond est slashé (10 % au rapporteur, 90 % au pot d'époque ADR 0028).
+2. La **clé de validation** (adresse Ed25519 qui signe les blocs) est ajoutée à
+   `banned_validator_keys` — un `HashSet<Address>` persisté dans le WorldState.
+3. Toute tentative de rejoindre le pool avec cette clé est refusée.
+
+La blacklist porte sur la **clé de validation**, pas l'adresse de paiement : l'attaquant
+doit créer une nouvelle identité cryptographique, transférer des fonds, et attendre 3 époques
+de warmup avant de réintégrer le pool. C'est la friction maximale sans KYC.
+
+Le bannissement est irréversible — il ne peut pas être levé par gouvernance.
+
+### 2.6 Downtime — sortie douce sans slash
+
+Un validateur dont le score chute en dessous du top-N **sort du set actif** à la prochaine
+rotation d'époque. Il reste dans le pool, continue d'observer et de co-signer (pour améliorer
+son score), et peut réintégrer le set actif à une prochaine rotation si son score remonte.
+
+**Aucun slash pour downtime.** La perte de revenus d'émission (zéro co-sigs = zéro part de
+l'époque, ADR 0028) est la sanction naturelle.
+
+### 2.7 Sortie volontaire — unbonding
+
+Un validateur qui souhaite quitter soumet une transaction `Unstake` (son bond). Le bond entre
+en période de déliaison (`UNBONDING_SECS = 3 jours`). Pendant la déliaison, la clé reste dans
+le pool mais avec un marqueur `unbonding` — elle ne participe plus au set actif et son bond
+reste slashable pendant la fenêtre de preuve.
+
+## 3. Multi-validateurs par opérateur
+
+Un opérateur peut faire tourner plusieurs validateurs (plusieurs clés, plusieurs bonds). Aucune
+règle protocolaire ne l'interdit — c'est un choix de design assumé :
+
+- **Bénéfique** si les nœuds sont géographiquement distribués : plus de co-signatures, plus de
+  résilience.
+- **Risqué** seulement si un opérateur contrôle ≥ 1/3 du set actif (liveness attack) ou
+  ≥ 2/3 (mais la finalité BFT empêche le reorg des blocs finalisés).
+
+La barrière est économique : contrôler 7/21 validateurs coûte 7 × bond + 7 × infrastructure.
+Les co-signatures en lock-step sont observables on-chain par n'importe quel analyste.
+
+## 4. Paramètres résumés
+
+| Constante | Valeur | Modifiable ? |
+|---|---|---|
+| `N` (set actif par défaut) | 21 | Gouvernable, ±2, cooldown 7 j |
+| `MIN_ACTIVE_SET_SIZE` | 5 | **Immuable** |
+| `MAX_ACTIVE_SET_SIZE` | 101 | **Immuable** |
+| `ACTIVE_SET_STEP` | 2 | **Immuable** |
+| `ACTIVE_SET_COOLDOWN_SECS` | 604 800 (7 j) | **Immuable** |
+| `VALIDATOR_SCORE_WINDOW_SECS` | 604 800 (7 j) | Immuable |
+| `VALIDATOR_WARMUP_EPOCHS` | 3 | Immuable |
+| `MIN_VALIDATOR_BOND_ATOMS` (défaut) | 100 000 VinX | Gouvernable ±25 % cooldown 7 j |
+| `MIN_BOND_HARD_FLOOR` | 10 000 VinX | **Immuable** |
+| `MAX_BOND_HARD_CAP` | 100 000 000 VinX | **Immuable** |
+| `BOND_STEP_BPS` | 2 500 (25 %) | **Immuable** |
+| `BOND_COOLDOWN_SECS` | 604 800 (7 j) | **Immuable** |
+
+## 5. Conséquences
 
 **Positif**
-- Le fair launch devient **cohérent** : l'émission va au travail, et quiconque peut
-  s'exposer à ce travail en postant le bond.
-- L'admin est **désintéressé** de la sélection des bénéficiaires de l'émission.
-- La transparence on-chain du veto rend les rejections auditables et contestables.
-- Synergie directe avec ADR 0028 (récompenses par époque) : plus le set est large,
-  plus la distribution est efficace.
+- Admission permissionless : quiconque avec le bond peut participer — fair launch cohérent.
+- Score de co-signature = seul critère : le travail de sécurité est la seule monnaie.
+- Rotation époque : stabilité à court terme (pas de churn bloc par bloc), adaptation à moyen
+  terme (downtime détecté en quelques heures).
+- Intégration naturelle avec ADR 0028 : les co-signataires du set actif sont exactement ceux
+  qui seront récompensés à la clôture d'époque.
+- Pas de veto : aucun cartel ne peut bloquer l'admission d'un concurrent.
 
-**Négatif / compromis assumés**
-- Un set dynamique complexifie le consensus (churn, fork-choice, jailing). **Dépend
-  impérativement** d'ADR 0002, 0027 et 0031 avant d'être activé.
-- Le veto collectif peut être instrumentalisé par un cartel de validateurs existants pour
-  bloquer la concurrence. Le seuil de 66 % et les garde-fous de gouvernance (ADR 0032)
-  atténuent ce risque — à surveiller à l'usage.
-- La Phase 1 reste gouvernance-gated — le fondateur garde une sélection centralisée pendant
-  le bootstrap. C'est un point de confiance résiduel à documenter honnêtement.
-
-## 5. Alternatives écartées
-
-- **Statu quo (sélection individuelle permanente)** : rejeté — l'admin reste l'arbitre
-  permanent de qui gagne l'émission ; contredit le fair launch.
-- **DPoS (délégation avec pondération par stake)** : rejeté — réintroduit l'avantage du
-  capital, favorise les baleines, recentralise à terme par la spirale commission/délégation.
-- **PoUW ou mining fallback** : rejeté — dépendance à la rentabilité d'un protocole externe,
-  complexité injustifiée, contredit « monnaie pure ».
-- **Airdrop comme mécanisme d'émission** : rejeté — pas de lien avec le travail de sécurité ;
-  gameable ; rompt l'invariant « émission = travail de consensus ».
+**Compromis assumés**
+- Sybil possible si le bond est accessible : économiquement borné par le coût N × bond.
+- Pas de preuve d'identité : la responsabilité légale repose sur la traçabilité on-chain et la
+  réputation, pas sur un registre tiers.
+- Warmup de 3 époques : un nouvel opérateur attend ~3 h avant d'être éligible au set actif.
 
 ## 6. Notes d'implémentation
 
-- **Prérequis stricts** : ADR 0002/0027/0031 éprouvés en banc n≥3 **avant** Phase 2.
-- `vinx-core` : nouveau type `ValidatorCandidate { address, bond_atoms, entry_ts }` ;
-  `GovernanceAction::VetoCandidate { candidate }` (vote d'un validateur actif) ;
-  `GovernanceAction::UpdateMinValidatorBond { atoms }`.
-- `vinx-state` : `pending_candidates: Vec<ValidatorCandidate>` dans `WorldState` ;
-  `candidate_veto_votes: BTreeMap<Address, BTreeSet<Address>>` (candidat → validateurs ayant
-  voté contre) ; logique d'admission à l'expiration ; logique de rejet au seuil 66 %.
-- `vinx-state` : `S_perf` calculé en lecture depuis les blocs finalisés de `Chain` (pas de
-  champ supplémentaire dans `WorldState`, données dérivées).
-- `GenesisConfig` : `phase2_trigger` et `phase3_trigger` (seuil circulant ou ts) gravés ;
-  `min_validator_bond_phase2`, `min_validator_bond_phase3` ; vecteur doré (ADR 0020).
-- Dépendances : ADR 0002 (finalité), 0027 (jailing), 0028 (récompenses par époque),
-  0031 (fork-choice), 0032 (garde-fous), 0033 (genèse multi-validateurs).
+**Nouveaux types (`vinx-core`) :**
+- `ValidatorPoolEntry { bond_atoms, bonded_since_ts, warmup_epochs_remaining, status }`
+- `PoolStatus` : `Warmup`, `Active`, `Benched`, `Unbonding`
+
+**Changements `WorldState` (`vinx-state`) :**
+- `validator_pool: BTreeMap<Address, ValidatorPoolEntry>` (append après `reliability`)
+- `banned_validator_keys: HashSet<Address>` (append)
+- `active_set_size: u32` (N courant, gouvernable)
+- `last_bond_change_ts: u64` (cooldown bond)
+- `last_active_set_size_change_ts: u64` (cooldown N)
+
+**Nouveaux types de gouvernance (`vinx-core`) :**
+- `GovernanceAction::UpdateActiveSetSize { new_size: u32 }`
+- `GovernanceAction::UpdateMinValidatorBond { atoms: u128 }` (déjà prévu)
+
+**Logique de rotation (appelée à `close_epoch_if_due`, ADR 0028) :**
+1. Décrémenter `warmup_epochs_remaining` pour chaque entrée en warmup.
+2. Calculer le score de chaque validateur ayant terminé le warmup.
+3. Trier par score décroissant, tiebreaker SHA-256(epoch || addr).
+4. Mettre à jour `status` : Active (top N), Benched (hors top N).
+5. Bump STORAGE_VERSION : append-only sur les nouveaux champs.
+
+**Bump de version :** STORAGE_VERSION 11 → 12 (append `validator_pool` + `banned_validator_keys`
++ `active_set_size` + timestamps de cooldown).
+
+**Dépendances :** ADR 0002, 0027, 0028, 0031, 0040.

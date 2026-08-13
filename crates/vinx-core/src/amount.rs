@@ -65,17 +65,71 @@ pub const MAX_MODULES: usize = 100_000;
 
 // ─── Validator bond & slashing ─────────────────────────────────────────────────
 
-/// Minimum bond required to be admitted to the validator set (100,000 VinX).
-/// The genesis validator is grandfathered (it bootstraps with no balance). The bond
-/// is a security deposit — skin in the game slashed on equivocation — it earns no
-/// yield. Governable via governance.
+/// Minimum bond required to enter the validator pool (100,000 VinX, governable).
+/// The genesis validator is grandfathered. The bond is a security deposit slashed
+/// on equivocation — it earns no yield. Governable within [MIN_BOND_HARD_FLOOR,
+/// MAX_BOND_HARD_CAP]. Changes limited to ±BOND_STEP_BPS per modification with
+/// BOND_COOLDOWN_SECS between modifications (ADR 0038).
 pub const MIN_VALIDATOR_BOND_ATOMS: u128 = 100_000 * DECIMAL_FACTOR;
+
+/// Hard floor on the validator bond (ADR 0038). Immutable — governance cannot drop
+/// the bond below this even if the governable minimum is set lower.
+pub const MIN_BOND_HARD_FLOOR: u128 = 10_000 * DECIMAL_FACTOR;
+
+/// Hard cap on the validator bond (ADR 0038). Immutable — prevents governance from
+/// pricing out new validators by inflating the bond requirement.
+pub const MAX_BOND_HARD_CAP: u128 = 100_000_000 * DECIMAL_FACTOR;
+
+/// Maximum bond change per governance action, in basis points of the current value
+/// (2 500 bps = 25%). Immutable. Limits how fast the bond can be moved in either
+/// direction — an attacker controlling governance needs ~37 steps × 7-day cooldown
+/// to go from 100 000 VinX to 1 VinX, giving the community time to react.
+pub const BOND_STEP_BPS: u128 = 2_500;
+
+/// Minimum real-time gap between two bond governance modifications (7 days). Immutable.
+pub const BOND_COOLDOWN_SECS: u64 = 7 * 24 * 3_600;
 
 /// Unbonding delay: withdrawn bond returns to the balance only after this much
 /// **real time** (3 days), measured on block timestamps. During this window the
 /// funds remain slashable, so a validator cannot equivocate then exit before the
 /// evidence lands.
 pub const UNBONDING_SECS: u64 = 3 * 24 * 3_600;
+
+// ─── Open PoA — active set (ADR 0038) ─────────────────────────────────────────
+
+/// Default number of validators in the active signing set (ADR 0038). Governable
+/// within [MIN_ACTIVE_SET_SIZE, MAX_ACTIVE_SET_SIZE], in steps of ACTIVE_SET_STEP.
+pub const DEFAULT_ACTIVE_SET_SIZE: u32 = 21;
+
+/// Hard floor on the active set size (ADR 0038). Immutable — below 5 the BFT
+/// safety threshold (⌈2n/3⌉ = 4) has no tolerance for faults.
+/// Activated once the validator pool reaches 5 entries; below that the set equals
+/// the pool size.
+pub const MIN_ACTIVE_SET_SIZE: u32 = 5;
+
+/// Hard cap on the active set size (ADR 0038). Immutable. Above 101, Ed25519
+/// individual co-signatures per block stress the gossip layer; BLS (ADR 0029) is
+/// required for larger committees.
+pub const MAX_ACTIVE_SET_SIZE: u32 = 101;
+
+/// Active-set size changes are limited to this step per governance action (ADR 0038).
+/// Prevents an attacker from jumping from 21 to 3 in a single transaction.
+pub const ACTIVE_SET_STEP: u32 = 2;
+
+/// Minimum real-time gap between two active-set-size governance modifications (7 days).
+/// Immutable. Combined with ACTIVE_SET_STEP, going from 21 to the floor of 5 takes
+/// 8 steps × 7 days = 56 days of sustained governance control (ADR 0038).
+pub const ACTIVE_SET_COOLDOWN_SECS: u64 = 7 * 24 * 3_600;
+
+/// Sliding window over which the validator reliability score is computed (7 days).
+/// score(v) = co_signatures(v) / finalized_blocks_where_v_was_in_active_set
+/// over the last VALIDATOR_SCORE_WINDOW_SECS of real time (ADR 0038).
+pub const VALIDATOR_SCORE_WINDOW_SECS: u64 = 7 * 24 * 3_600;
+
+/// Number of complete epochs a newly bonded validator must observe and co-sign before
+/// being eligible for the active set (ADR 0038). Prevents an unoperational node from
+/// displacing a veteran by entering at the 50%-start score sentinel.
+pub const VALIDATOR_WARMUP_EPOCHS: u32 = 3;
 
 /// Basis-point denominator (10_000 = 100%).
 pub const BPS_DENOM: u128 = 10_000;
@@ -111,14 +165,6 @@ pub const MAX_NONCE_AHEAD: u64 = 64;
 /// inatteignable, p. ex. trop de validateurs hors-ligne). Généreux pour absorber des
 /// retards transitoires de co-signatures sans stopper une chaîne saine.
 pub const MAX_UNFINALIZED_DEPTH: u64 = 64;
-
-/// Heartbeat block interval when the mempool is empty: at least one (possibly
-/// empty) block every 10 minutes of real time (ADR 0038). Kills the incentive to
-/// force blocks with junk self-transactions to capture accrued emission (it will
-/// be forged at the next heartbeat anyway), bounds the MTP protocol-clock lag,
-/// matures unbonds/upgrades on time, and keeps a permanent liveness signal —
-/// for ~15-30 MB/year of empty-block data.
-pub const HEARTBEAT_INTERVAL_SECS: u64 = 600;
 
 /// Batch window after the first transaction arrives before sealing a block.
 /// Allows concurrent submissions to be grouped into a single block.
