@@ -34,13 +34,13 @@ Les validateurs sont rémunérés par le protocole lui-même (émission progress
 |---|---|
 | **Consensus** | PoA Threshold — >66 % des validateurs co-signent chaque bloc |
 | **Finalité** | Déterministe — un bloc quorum-signé n'est jamais réorganisé |
-| **Cadence** | Adaptative — silence quand le réseau est vide, accélère sous charge |
-| **Capacité** | 10 000 tx/bloc · plusieurs milliers de TPS |
+| **Cadence** | Fixe à 12 s — un bloc produit toutes les 12 secondes |
+| **Capacité** | Jusqu'à 10 000 tx/bloc · ~833 TPS max (configurable) |
 | **Frais** | Forfait fixe × congestion (×1–3) · **100 % au validateur producteur** |
 | **Cryptographie** | Ed25519 · BLS12-381 · SHA-256 · Bech32 (`vinx1`) |
 | **Supply** | 100 milliards VINX · fixe · **sans pre-mine · sans burn** |
 | **Émission** | Décroissance exponentielle continue · demi-vie ~20 ans · puis fees-only |
-| **Validateurs** | Bond minimum 100 000 VINX · Open PoA · slash équivocation 100 % |
+| **Validateurs** | Bond minimum 100 000 VINX · slash équivocation 100 % · jailing sur downtime |
 | **Staking** | Bond de sécurité uniquement — **aucun rendement passif** |
 
 ---
@@ -83,7 +83,7 @@ L'état est sauvegardé automatiquement (`devnet/`) et migré à chaque montée 
 - **100 milliards VINX**, supply fixe et immuable.
 - **Aucun pre-mine, aucune réserve, aucune allocation fondateur.** Les premiers VINX n'existent qu'au moment où le premier bloc est produit.
 - **Émission par le travail** : les VINX sont mintés progressivement en rémunération des blocs produits, selon une courbe de décroissance exponentielle continue (`R₀ · e^(−λt)`, demi-vie ~20 ans). Le total de cette courbe vaut exactement 100 milliards.
-- **Égalité entre validateurs** : la rémunération est distribuée par époque entre proposeurs et co-signataires, **sans pondération par le bond** — chaque co-signature a le même poids.
+- **Rémunération par le travail** : aujourd'hui, l'émission va **100 % au producteur du bloc** (frais inclus). Une distribution par époque entre proposeurs et co-signataires est planifiée (Phase 2), **sans pondération par le bond** — chaque co-signature comptera pour le même poids.
 - **Frais** : forfaitaires, **100 % au validateur producteur immédiatement** — ils ne passent pas par le pot d'époque.
 - **Slashing** : équivocation prouvée → 100 % du bond (10 % au rapporteur, 90 % redistribués aux validateurs honnêtes). Aucun token détruit.
 - **Invariant** vérifié à chaque bloc : `circulation + pot_époque + détruits = émis ≤ 100 000 000 000 VINX`.
@@ -107,8 +107,8 @@ Le bond n'est pas un investissement — c'est une **caution de bonne conduite**.
 
 | Phase | Période | Contenu |
 |-------|---------|---------|
-| ✅ **Phase 1 — Fondations** | Terminé | Protocole L1 complet (PoA Threshold, finalité déterministe, fair launch, slashing prouvable, fork-choice, P2P anti-DoS, gouvernance K-of-M, registre de modules, **BLS12-381**, Open PoA) |
-| 🔄 **Phase 2 — Récompenses & fiabilité** | Q3 2026 | Distribution par époque (émission + slash), jailing / rotation active, accountability co-signatures, tx `Unjail` |
+| ✅ **Phase 1 — Fondations** | Terminé | Protocole L1 complet (PoA Threshold, finalité déterministe, fair launch, slashing prouvable, fork-choice, P2P anti-DoS, gouvernance K-of-M, registre de modules, **BLS12-381**, jailing / rotation active) |
+| 🔄 **Phase 2 — Récompenses & ouverture** | Q3 2026 | Distribution par époque (émission + slash entre proposeurs et co-signataires), **Open PoA** (admission sans permission sur bond), accountability co-signatures, tx `Unjail` |
 | 📅 **Phase 3 — Subnets & ancrage** | Q4 2026 | Subnets (escrow + récompense par usage), Data Availability, preuves d'ancre, émission élastique à réservoir |
 | 🔭 **Phase 4 — Décentralisation** | 2027 | Comité VRF, light client, réseau public, documentation multilingue |
 
