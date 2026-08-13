@@ -44,7 +44,11 @@ use zstd;
 ///      `bls_aggregate: Option<[u8;96]>` (None) and `bls_cosigner_pks: Vec<[u8;48]>` ([]).
 ///      `ValidatorPoolEntry` also gains `bls_pub_key` and `bls_pop` (None each), but since
 ///      the pool is expected empty during this alpha migration, no entry-level patching is done.
-const STORAGE_VERSION: u64 = 14;
+/// v15: Module escrow (ADR 0039) — WorldState meta gains `pending_escrows`
+///      (`BTreeMap<Hash32, EscrowEntry>`) and `module_fee_schedules`
+///      (`BTreeMap<Hash32, FeeSchedule>`), both empty by default, appended last.
+///      Migration appends their default encodings via `v15_meta_suffix`.
+const STORAGE_VERSION: u64 = 15;
 
 /// zstd compression level — level 3 is the sweet spot: ~60-70% size reduction,
 /// negligible latency compared to disk I/O.
@@ -195,6 +199,9 @@ impl Storage {
                 12 => Self::append_meta_suffix(tx, &vinx_state::v13_meta_suffix())?,
                 // v13 → v14 (ADR 0046 Phase 2 BLS): append BLS fields to every block row.
                 13 => Self::migrate_v13_block_bls_fields(tx)?,
+                // v14 → v15 (ADR 0039 module escrow): append pending_escrows and
+                // module_fee_schedules (both empty BTreeMaps) to the WorldState meta.
+                14 => Self::append_meta_suffix(tx, &vinx_state::v15_meta_suffix())?,
                 unknown => {
                     return Err(Self::io_err(format!(
                         "no automatic migration from schema v{unknown} to v{STORAGE_VERSION}. \

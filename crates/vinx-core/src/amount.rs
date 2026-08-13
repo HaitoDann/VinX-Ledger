@@ -63,6 +63,18 @@ pub const MIN_MODULE_BOND_ATOMS: u128 = 1_000 * DECIMAL_FACTOR;
 /// coordinated actor could accumulate. Generous for realistic ecosystems.
 pub const MAX_MODULES: usize = 100_000;
 
+// ─── Module escrow (ADR 0039) ────────────────────────────────────────────────────
+
+/// Minimum escrow timeout in seconds (1 hour) — protects the operator from
+/// premature refund before they can prove delivery.
+pub const MODULE_ESCROW_MIN_TIMEOUT_SECS: u64 = 3_600;
+
+/// Maximum escrow timeout in seconds (30 days) — bounds pending_escrows state growth.
+pub const MODULE_ESCROW_MAX_TIMEOUT_SECS: u64 = 2_592_000;
+
+/// Maximum concurrent open escrows per (client, module_id) pair — anti-spam guard.
+pub const MODULE_ESCROW_MAX_OPEN: usize = 10;
+
 // ─── Validator bond & slashing ─────────────────────────────────────────────────
 
 /// Minimum bond required to enter the validator pool (100,000 VinX, governable).

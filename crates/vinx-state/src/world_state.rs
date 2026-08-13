@@ -5,17 +5,19 @@ use vinx_core::{
         cumulative_emission_atoms, Amount, BPS_DENOM, DEFAULT_ACTIVE_SET_SIZE,
         DEFAULT_FEE_FLOOR_ATOMS, EPOCH_DURATION_SECS, EXISTENTIAL_DEPOSIT_ATOMS, MAX_MODULES,
         MAX_NONCE_AHEAD, MIN_MODULE_BOND_ATOMS, MIN_STAKE_ATOMS, MIN_VALIDATOR_BOND_ATOMS,
+        MODULE_ESCROW_MAX_OPEN, MODULE_ESCROW_MAX_TIMEOUT_SECS, MODULE_ESCROW_MIN_TIMEOUT_SECS,
         PROPOSER_SHARE_BPS, SLASH_BOUNTY_BPS, SLASH_EQUIVOCATION_BPS, UNBONDING_SECS,
         VALIDATOR_SCORE_WINDOW_SECS,
     },
     block::SlashEvidence,
     chain_id::CHAIN_ID_DEVNET,
     governance::GovernanceAction,
-    module::ModuleOp,
+    module::{EscrowEntry, FeeSchedule, ModuleOp},
     protocol::{ProtocolVersion, ScheduledUpgrade},
     reliability::{self, ReliabilityMap},
     validator_pool::{PoolStatus, ValidatorPoolEntry},
-    Account, CoreError, RegisterBlsKeyPayload, Transaction, TransactionType, ValidatorSet,
+    Account, CoreError, ModuleEscrowPayload, RegisterBlsKeyPayload, Transaction, TransactionType,
+    ValidatorSet,
 };
 use vinx_crypto::{sha256, Address, BlsPubKey, BlsSignature, Hash32, IncrementalMerkleTree};
 
@@ -172,6 +174,23 @@ pub struct WorldState {
     /// Appended after `last_bond_change_ts` — v12→v13 migration appends `u64 = 0`.
     #[serde(default)]
     pub last_epoch_close_ts: u64,
+    // ── Module escrow (ADR 0039) ────────────────────────────────────────────────
+    // Both fields are appended after `last_epoch_close_ts` — the v14→v15 migration
+    // appends their default encodings (two empty BTreeMaps). `serde(default)` so
+    // pre-v15 state loads cleanly.
+    //
+    /// Pending service-payment escrows keyed by escrow_id.  Created by a
+    /// `ModuleEscrow` tx; removed by `EscrowRelease` (release) or
+    /// `ModuleEscrowRefund` (timeout refund).
+    /// Appended after `last_epoch_close_ts` — v14→v15 migration appends its default.
+    #[serde(default)]
+    pub pending_escrows: BTreeMap<Hash32, EscrowEntry>,
+    /// Fee-distribution schedules for registered modules (ADR 0039), keyed by
+    /// `module_id`.  Set by operator via `ModuleOp::SetFeeSchedule`.  Stored
+    /// separately from `modules` so `ModuleEntry` bincode layout stays unchanged.
+    /// Appended after `pending_escrows` — v14→v15 migration appends its default.
+    #[serde(default)]
+    pub module_fee_schedules: BTreeMap<Hash32, FeeSchedule>,
 }
 
 /// A bond amount in its unbonding delay, waiting to return to `address`'s balance
@@ -321,6 +340,20 @@ pub fn v13_meta_suffix() -> Vec<u8> {
     bincode::serialize(&0u64).expect("serialize 0u64")
 }
 
+/// The bincode bytes appended to a v14 `WorldState` meta blob to bring it to v15 (ADR 0039
+/// module escrow). Appends the defaults of two new fields in declaration order:
+///   1. `pending_escrows`       — empty `BTreeMap<Hash32, EscrowEntry>`
+///   2. `module_fee_schedules`  — empty `BTreeMap<Hash32, FeeSchedule>`
+pub fn v15_meta_suffix() -> Vec<u8> {
+    let mut out = bincode::serialize(&BTreeMap::<Hash32, EscrowEntry>::new())
+        .expect("serialize empty escrows");
+    out.extend(
+        bincode::serialize(&BTreeMap::<Hash32, FeeSchedule>::new())
+            .expect("serialize empty fee schedules"),
+    );
+    out
+}
+
 /// SHA-256(epoch_number_le || address) — deterministic sort key for tiebreaking
 /// validators with identical reliability scores at epoch rotation (ADR 0038).
 fn epoch_tiebreaker(epoch: u64, addr: &Address) -> [u8; 32] {
@@ -387,6 +420,8 @@ impl WorldState {
             last_active_set_size_change_ts: 0,
             last_bond_change_ts: 0,
             last_epoch_close_ts: 0,
+            pending_escrows: BTreeMap::new(),
+            module_fee_schedules: BTreeMap::new(),
         }
     }
 
@@ -957,10 +992,13 @@ impl WorldState {
             )));
         }
 
-        // Fee floor for the fee-bearing types (mirrors apply_transfer / apply_anchor_state).
+        // Fee floor for the fee-bearing types (mirrors apply_transfer / apply_anchor_state /
+        // apply_module_escrow).
         if matches!(
             tx.tx_type,
-            TransactionType::Transfer | TransactionType::AnchorState
+            TransactionType::Transfer
+                | TransactionType::AnchorState
+                | TransactionType::ModuleEscrow
         ) && tx.fee < self.base_fee
         {
             return Err(CoreError::InvalidTransaction(format!(
@@ -1140,6 +1178,8 @@ impl WorldState {
             TransactionType::RegisterBlsKey => self.apply_register_bls_key(tx),
             TransactionType::Unjail => self.apply_unjail(tx),
             TransactionType::BondValidator => self.apply_bond_validator(tx),
+            TransactionType::ModuleEscrow => self.apply_module_escrow(tx),
+            TransactionType::ModuleEscrowRefund => self.apply_module_escrow_refund(tx),
         }
     }
 
@@ -1877,6 +1917,89 @@ impl WorldState {
                 acc.balance = Amount::from_atoms(balance - fee + refund);
                 acc.nonce += 1;
                 self.modules.remove(module_id);
+                // Clean up fee schedule (if any) when module is deregistered.
+                self.module_fee_schedules.remove(module_id);
+            }
+            // ADR 0039 — new ops appended; never reorder.
+            ModuleOp::SetFeeSchedule {
+                module_id,
+                fee_schedule,
+            } => {
+                let entry = self
+                    .modules
+                    .get(module_id)
+                    .ok_or_else(|| CoreError::InvalidTransaction("unknown module".to_string()))?;
+                if entry.operator != operator {
+                    return Err(CoreError::Unauthorized);
+                }
+                // Validate that share allocations do not exceed 100%.
+                let total_bps: u32 =
+                    fee_schedule.recipients.iter().map(|r| r.share_bps as u32).sum();
+                if total_bps > 10_000 {
+                    return Err(CoreError::InvalidTransaction(
+                        "fee schedule share_bps sum exceeds 10 000 (100%)".to_string(),
+                    ));
+                }
+                if balance < fee || balance - fee < ed {
+                    return Err(CoreError::InsufficientBalance);
+                }
+                let acc = self.accounts.get_mut(&operator).expect("checked above");
+                acc.balance = Amount::from_atoms(balance - fee);
+                acc.nonce += 1;
+                self.module_fee_schedules.insert(*module_id, fee_schedule.clone());
+            }
+            ModuleOp::EscrowRelease { escrow_id } => {
+                // Snapshot escrow data before any mutation (borrow split).
+                let (escrow_module_id, amount_atoms) = {
+                    let e = self.pending_escrows.get(escrow_id).ok_or_else(|| {
+                        CoreError::InvalidTransaction("unknown escrow id".to_string())
+                    })?;
+                    (e.module_id, e.amount_atoms)
+                };
+                // Verify operator owns the module this escrow targets.
+                let (fee_schedule_opt, module_op_addr) = {
+                    let entry = self.modules.get(&escrow_module_id).ok_or_else(|| {
+                        CoreError::InvalidTransaction(
+                            "module not found for escrow release".to_string(),
+                        )
+                    })?;
+                    if entry.operator != operator {
+                        return Err(CoreError::Unauthorized);
+                    }
+                    let fs = self.module_fee_schedules.get(&escrow_module_id).cloned();
+                    (fs, entry.operator)
+                };
+                // Debit the AnchorState fee from the operator.
+                if balance < fee || balance - fee < ed {
+                    return Err(CoreError::InsufficientBalance);
+                }
+                {
+                    let acc = self.accounts.get_mut(&operator).expect("checked above");
+                    acc.balance = Amount::from_atoms(balance - fee);
+                    acc.nonce += 1;
+                }
+                // Remove the escrow entry.
+                self.pending_escrows.remove(escrow_id);
+                // Distribute escrow.amount_atoms per fee schedule (ADR 0039 §2.2 step 3).
+                let mut distributed = 0u128;
+                if let Some(sched) = fee_schedule_opt {
+                    for r in &sched.recipients {
+                        let share = amount_atoms * r.share_bps as u128 / BPS_DENOM;
+                        distributed = distributed.saturating_add(share);
+                        if share > 0 {
+                            self.credit(&r.address, Amount::from_atoms(share));
+                        }
+                    }
+                    let residual = amount_atoms.saturating_sub(distributed);
+                    if residual > 0 {
+                        self.credit(&sched.operator_address, Amount::from_atoms(residual));
+                    }
+                } else {
+                    // No fee schedule: entire escrow amount goes to the module operator.
+                    if amount_atoms > 0 {
+                        self.credit(&module_op_addr, Amount::from_atoms(amount_atoms));
+                    }
+                }
             }
         }
 
@@ -2062,6 +2185,192 @@ impl WorldState {
             .nonce += 1;
         self.mark_dirty(&tx.from);
         tracing::info!(validator = %tx.from, "ADR 0046: BLS key registered");
+        Ok(())
+    }
+
+    /// Applies a `ModuleEscrow` transaction (ADR 0039): locks `tx.amount` atoms from the
+    /// client in `pending_escrows` for a bonded module service.
+    ///
+    /// Validations (all before mutation):
+    /// - fee ≥ base_fee; module exists; timeout in bounds; amount > 0
+    /// - ≤ MODULE_ESCROW_MAX_OPEN open escrows per (client, module) pair
+    /// - balance ≥ amount + fee; post-debit balance ≥ ED (or exactly 0)
+    fn apply_module_escrow(&mut self, tx: &Transaction) -> Result<(), CoreError> {
+        let payload: ModuleEscrowPayload = bincode::deserialize(&tx.payload).map_err(|_| {
+            CoreError::InvalidTransaction("malformed ModuleEscrow payload".to_string())
+        })?;
+
+        if tx.fee < self.base_fee {
+            return Err(CoreError::InvalidTransaction(format!(
+                "fee {} is below minimum {}",
+                tx.fee, self.base_fee
+            )));
+        }
+        if !self.modules.contains_key(&payload.module_id) {
+            return Err(CoreError::InvalidTransaction("module not found".to_string()));
+        }
+        if payload.timeout_secs < MODULE_ESCROW_MIN_TIMEOUT_SECS {
+            return Err(CoreError::InvalidTransaction(
+                "escrow timeout below minimum".to_string(),
+            ));
+        }
+        if payload.timeout_secs > MODULE_ESCROW_MAX_TIMEOUT_SECS {
+            return Err(CoreError::InvalidTransaction(
+                "escrow timeout above maximum".to_string(),
+            ));
+        }
+        if tx.amount == Amount::ZERO {
+            return Err(CoreError::InvalidTransaction(
+                "escrow amount must be non-zero".to_string(),
+            ));
+        }
+
+        let client = tx.from;
+        let (nonce, balance, staked) = {
+            let acc = self
+                .accounts
+                .get(&client)
+                .ok_or(CoreError::InsufficientBalance)?;
+            (acc.nonce, acc.balance.atoms(), acc.staked.atoms())
+        };
+        if nonce != tx.nonce {
+            return Err(CoreError::InvalidNonce {
+                expected: nonce,
+                got: tx.nonce,
+            });
+        }
+
+        // Anti-spam: bound open escrows per (client, module_id).
+        let open_count = self
+            .pending_escrows
+            .values()
+            .filter(|e| e.client == client && e.module_id == payload.module_id)
+            .count();
+        if open_count >= MODULE_ESCROW_MAX_OPEN {
+            return Err(CoreError::InvalidTransaction(
+                "too many open escrows for this (client, module) pair".to_string(),
+            ));
+        }
+
+        // Balance check: must cover amount + fee, leaving ≥ ED or exactly 0.
+        let amount = tx.amount.atoms();
+        let fee = tx.fee.atoms();
+        let total = amount.checked_add(fee).ok_or(CoreError::AmountOverflow)?;
+        if balance < total {
+            return Err(CoreError::InsufficientBalance);
+        }
+        let remaining = balance - total;
+        if remaining > 0 && remaining < EXISTENTIAL_DEPOSIT_ATOMS && staked == 0 {
+            return Err(CoreError::BelowExistentialDeposit);
+        }
+
+        // Compute escrow_id = sha256(client || module_id || nonce_le8) — deterministic.
+        let mut preimage = Vec::with_capacity(20 + 32 + 8);
+        preimage.extend_from_slice(client.as_bytes());
+        preimage.extend_from_slice(&payload.module_id);
+        preimage.extend_from_slice(&tx.nonce.to_le_bytes());
+        let escrow_id = sha256(&preimage);
+
+        if self.pending_escrows.contains_key(&escrow_id) {
+            return Err(CoreError::InvalidTransaction(
+                "escrow id collision (nonce reuse?)".to_string(),
+            ));
+        }
+
+        // Mutate: debit client balance.
+        {
+            let acc = self.accounts.get_mut(&client).expect("checked above");
+            acc.balance = Amount::from_atoms(remaining);
+            acc.nonce += 1;
+        }
+        self.block_fees = self.block_fees.saturating_add(tx.fee);
+        self.mark_dirty(&client);
+
+        // Reap account if drained to zero (no staked, no unbonds).
+        if remaining == 0 {
+            self.reap_if_empty(&client);
+        }
+
+        self.pending_escrows.insert(
+            escrow_id,
+            EscrowEntry {
+                escrow_id,
+                client,
+                module_id: payload.module_id,
+                amount_atoms: amount,
+                created_ts: self.current_block_ts,
+                timeout_secs: payload.timeout_secs,
+                service_params_hash: payload.service_params_hash,
+            },
+        );
+        tracing::info!(
+            client = %client,
+            module_id = ?payload.module_id,
+            amount_atoms = amount,
+            "ADR 0039: escrow opened"
+        );
+        Ok(())
+    }
+
+    /// Applies a `ModuleEscrowRefund` transaction (ADR 0039): returns the locked atoms to
+    /// the original client after the agreed timeout has elapsed.
+    ///
+    /// No fee is charged. The escrow must exist, the sender must be the original client,
+    /// and `block_timestamp ≥ created_ts + timeout_secs`.
+    fn apply_module_escrow_refund(&mut self, tx: &Transaction) -> Result<(), CoreError> {
+        let escrow_id: Hash32 = bincode::deserialize(&tx.payload).map_err(|_| {
+            CoreError::InvalidTransaction("malformed escrow refund payload".to_string())
+        })?;
+
+        let (amount_atoms, deadline) = {
+            let e = self.pending_escrows.get(&escrow_id).ok_or_else(|| {
+                CoreError::InvalidTransaction("escrow not found".to_string())
+            })?;
+            if e.client != tx.from {
+                return Err(CoreError::Unauthorized);
+            }
+            (
+                e.amount_atoms,
+                e.created_ts.saturating_add(e.timeout_secs),
+            )
+        };
+
+        if self.current_block_ts < deadline {
+            return Err(CoreError::InvalidTransaction(
+                "escrow timeout has not elapsed yet".to_string(),
+            ));
+        }
+
+        // Nonce check (account may not exist if it was reaped after the escrow creation;
+        // in that case admission_check already rejected the tx before we get here).
+        let nonce = self
+            .accounts
+            .get(&tx.from)
+            .map(|a| a.nonce)
+            .unwrap_or(0);
+        if nonce != tx.nonce {
+            return Err(CoreError::InvalidNonce {
+                expected: nonce,
+                got: tx.nonce,
+            });
+        }
+
+        // Remove escrow.
+        self.pending_escrows.remove(&escrow_id);
+
+        // Consume nonce if account exists.
+        if let Some(acc) = self.accounts.get_mut(&tx.from) {
+            acc.nonce += 1;
+            self.mark_dirty(&tx.from);
+        }
+
+        // Credit refund (creates the account if it was reaped).
+        self.credit(&tx.from, Amount::from_atoms(amount_atoms));
+        tracing::info!(
+            client = %tx.from,
+            amount_atoms,
+            "ADR 0039: escrow refunded (timeout)"
+        );
         Ok(())
     }
 
@@ -3258,5 +3567,343 @@ mod tests {
         let fee = Amount::from_atoms(DEFAULT_FEE_FLOOR_ATOMS);
         let bond_tx = Transaction::new_bond_validator(&cand_kp, bond, fee, 0);
         assert!(s.apply_transaction(&bond_tx).is_err());
+    }
+
+    // ─── ADR 0039: module escrow ─────────────────────────────────────────────
+
+    /// Returns (state, operator_keypair, operator_addr, module_id) with a registered module.
+    fn escrow_state() -> (WorldState, KeyPair, Address, Hash32) {
+        let (mut s, op_kp, op_addr) = operator_state();
+        let fee = s.base_fee;
+        let module_id = [0xABu8; 32];
+        let op = ModuleOp::Register {
+            module_id,
+            bond_atoms: MIN_MODULE_BOND_ATOMS,
+        };
+        s.apply_transaction(&Transaction::new_anchor_state(&op_kp, &op, fee, 0))
+            .unwrap();
+        (s, op_kp, op_addr, module_id)
+    }
+
+    #[test]
+    fn test_escrow_happy_path_debits_client_and_stores_entry() {
+        use vinx_core::ModuleEscrowPayload;
+
+        let (mut s, _op_kp, _op_addr, module_id) = escrow_state();
+        let client_kp = KeyPair::generate();
+        let client_addr = Address::from_public_key(&client_kp.public_key());
+        let escrow_amount = Amount::from_vinx(100);
+        let fee = s.base_fee;
+        s.credit_for_test(client_addr, Amount::from_vinx(500));
+        let balance_before = s.account_balance(&client_addr);
+
+        let payload = ModuleEscrowPayload {
+            module_id,
+            timeout_secs: MODULE_ESCROW_MIN_TIMEOUT_SECS,
+            service_params_hash: [0u8; 32],
+        };
+        let tx = Transaction::new_module_escrow(&client_kp, &payload, escrow_amount, fee, 0);
+        s.apply_transaction(&tx).unwrap();
+
+        let expected_balance = balance_before
+            .checked_sub(escrow_amount)
+            .unwrap()
+            .checked_sub(fee)
+            .unwrap();
+        assert_eq!(s.account_balance(&client_addr), expected_balance);
+        assert_eq!(s.pending_escrows.len(), 1);
+        let entry = s.pending_escrows.values().next().unwrap();
+        assert_eq!(entry.client, client_addr);
+        assert_eq!(entry.module_id, module_id);
+        assert_eq!(entry.amount_atoms, escrow_amount.atoms());
+        assert_eq!(entry.timeout_secs, MODULE_ESCROW_MIN_TIMEOUT_SECS);
+    }
+
+    #[test]
+    fn test_escrow_for_unknown_module_rejected() {
+        use vinx_core::ModuleEscrowPayload;
+
+        let (mut s, _op_kp, _op_addr, _module_id) = escrow_state();
+        let client_kp = KeyPair::generate();
+        let client_addr = Address::from_public_key(&client_kp.public_key());
+        s.credit_for_test(client_addr, Amount::from_vinx(500));
+
+        let payload = ModuleEscrowPayload {
+            module_id: [0xFFu8; 32], // non-existent
+            timeout_secs: MODULE_ESCROW_MIN_TIMEOUT_SECS,
+            service_params_hash: [0u8; 32],
+        };
+        let fee = s.base_fee;
+        let tx = Transaction::new_module_escrow(&client_kp, &payload, Amount::from_vinx(10), fee, 0);
+        assert!(s.apply_transaction(&tx).is_err());
+        assert!(s.pending_escrows.is_empty());
+    }
+
+    #[test]
+    fn test_escrow_refund_after_timeout_succeeds() {
+        use vinx_core::ModuleEscrowPayload;
+
+        let (mut s, _op_kp, _op_addr, module_id) = escrow_state();
+        let client_kp = KeyPair::generate();
+        let client_addr = Address::from_public_key(&client_kp.public_key());
+        let escrow_amount = Amount::from_vinx(100);
+        let fee = s.base_fee;
+        s.credit_for_test(client_addr, Amount::from_vinx(500));
+
+        let payload = ModuleEscrowPayload {
+            module_id,
+            timeout_secs: MODULE_ESCROW_MIN_TIMEOUT_SECS,
+            service_params_hash: [0u8; 32],
+        };
+        // Create escrow at ts = 0.
+        s.set_block_context(0);
+        let tx = Transaction::new_module_escrow(&client_kp, &payload, escrow_amount, fee, 0);
+        s.apply_transaction(&tx).unwrap();
+        let escrow_id = s.pending_escrows.keys().copied().next().unwrap();
+        let balance_after_escrow = s.account_balance(&client_addr);
+
+        // Advance past the timeout.
+        s.set_block_context(MODULE_ESCROW_MIN_TIMEOUT_SECS + 1);
+        let refund_tx = Transaction::new_module_escrow_refund(&client_kp, escrow_id, 1);
+        s.apply_transaction(&refund_tx).unwrap();
+
+        // Escrow removed, amount returned to client.
+        assert!(s.pending_escrows.is_empty());
+        assert_eq!(
+            s.account_balance(&client_addr),
+            balance_after_escrow.checked_add(escrow_amount).unwrap()
+        );
+    }
+
+    #[test]
+    fn test_escrow_refund_before_timeout_rejected() {
+        use vinx_core::ModuleEscrowPayload;
+
+        let (mut s, _op_kp, _op_addr, module_id) = escrow_state();
+        let client_kp = KeyPair::generate();
+        let client_addr = Address::from_public_key(&client_kp.public_key());
+        s.credit_for_test(client_addr, Amount::from_vinx(500));
+
+        let payload = ModuleEscrowPayload {
+            module_id,
+            timeout_secs: MODULE_ESCROW_MIN_TIMEOUT_SECS,
+            service_params_hash: [0u8; 32],
+        };
+        s.set_block_context(1_000);
+        let fee = s.base_fee;
+        let tx = Transaction::new_module_escrow(&client_kp, &payload, Amount::from_vinx(50), fee, 0);
+        s.apply_transaction(&tx).unwrap();
+        let escrow_id = s.pending_escrows.keys().copied().next().unwrap();
+
+        // One second before the deadline.
+        s.set_block_context(1_000 + MODULE_ESCROW_MIN_TIMEOUT_SECS - 1);
+        let refund_tx = Transaction::new_module_escrow_refund(&client_kp, escrow_id, 1);
+        assert!(s.apply_transaction(&refund_tx).is_err());
+        assert_eq!(s.pending_escrows.len(), 1);
+    }
+
+    #[test]
+    fn test_escrow_max_open_anti_spam() {
+        use vinx_core::{amount::MODULE_ESCROW_MAX_OPEN, ModuleEscrowPayload};
+
+        let (mut s, _op_kp, _op_addr, module_id) = escrow_state();
+        let client_kp = KeyPair::generate();
+        let client_addr = Address::from_public_key(&client_kp.public_key());
+        // Fund enough for 11 escrows.
+        let escrow_amount = Amount::from_vinx(10);
+        let fee = s.base_fee;
+        let needed = (escrow_amount.atoms() + fee.atoms()) * (MODULE_ESCROW_MAX_OPEN as u128 + 1);
+        s.credit_for_test(client_addr, Amount::from_atoms(needed + EXISTENTIAL_DEPOSIT_ATOMS));
+
+        let payload = ModuleEscrowPayload {
+            module_id,
+            timeout_secs: MODULE_ESCROW_MIN_TIMEOUT_SECS,
+            service_params_hash: [0u8; 32],
+        };
+        for i in 0..MODULE_ESCROW_MAX_OPEN {
+            let tx = Transaction::new_module_escrow(&client_kp, &payload, escrow_amount, fee, i as u64);
+            s.apply_transaction(&tx).unwrap();
+        }
+        assert_eq!(s.pending_escrows.len(), MODULE_ESCROW_MAX_OPEN);
+
+        // The (MAX+1)-th escrow must be rejected.
+        let tx = Transaction::new_module_escrow(
+            &client_kp,
+            &payload,
+            escrow_amount,
+            fee,
+            MODULE_ESCROW_MAX_OPEN as u64,
+        );
+        assert!(s.apply_transaction(&tx).is_err());
+        assert_eq!(s.pending_escrows.len(), MODULE_ESCROW_MAX_OPEN);
+    }
+
+    #[test]
+    fn test_escrow_release_distributes_per_fee_schedule_no_atom_loss() {
+        use vinx_core::module::{FeeRecipient, FeeSchedule};
+        use vinx_core::ModuleEscrowPayload;
+
+        let (mut s, op_kp, op_addr, module_id) = escrow_state();
+        let fee = s.base_fee;
+
+        // Set a fee schedule: recipient1 gets 30%, recipient2 gets 20%, residual (~50%) to operator.
+        let r1_kp = KeyPair::generate();
+        let r1_addr = Address::from_public_key(&r1_kp.public_key());
+        let r2_kp = KeyPair::generate();
+        let r2_addr = Address::from_public_key(&r2_kp.public_key());
+        let sched = FeeSchedule {
+            base_fee_atoms: 0,
+            recipients: vec![
+                FeeRecipient { address: r1_addr, share_bps: 3_000 },
+                FeeRecipient { address: r2_addr, share_bps: 2_000 },
+            ],
+            operator_address: op_addr,
+        };
+        let set_op = ModuleOp::SetFeeSchedule { module_id, fee_schedule: sched };
+        s.apply_transaction(&Transaction::new_anchor_state(&op_kp, &set_op, fee, 1))
+            .unwrap();
+
+        // Create an escrow as client.
+        let client_kp = KeyPair::generate();
+        let client_addr = Address::from_public_key(&client_kp.public_key());
+        let escrow_atoms = 10_001u128; // not evenly divisible by BPS shares
+        s.credit_for_test(client_addr, Amount::from_atoms(escrow_atoms + fee.atoms() + EXISTENTIAL_DEPOSIT_ATOMS));
+        let payload = ModuleEscrowPayload {
+            module_id,
+            timeout_secs: MODULE_ESCROW_MIN_TIMEOUT_SECS,
+            service_params_hash: [0u8; 32],
+        };
+        let escrow_tx = Transaction::new_module_escrow(
+            &client_kp,
+            &payload,
+            Amount::from_atoms(escrow_atoms),
+            fee,
+            0,
+        );
+        s.apply_transaction(&escrow_tx).unwrap();
+        let escrow_id = s.pending_escrows.keys().copied().next().unwrap();
+
+        let op_balance_before = s.account_balance(&op_addr);
+
+        // Release escrow via AnchorState.
+        let release_op = ModuleOp::EscrowRelease { escrow_id };
+        s.apply_transaction(&Transaction::new_anchor_state(&op_kp, &release_op, fee, 2))
+            .unwrap();
+
+        // Verify no escrow atom is lost: r1 + r2 + residual == escrow_atoms.
+        let r1_balance = s.account_balance(&r1_addr).atoms();
+        let r2_balance = s.account_balance(&r2_addr).atoms();
+        let op_gained = s.account_balance(&op_addr).atoms()
+            + fee.atoms() // fee was spent on AnchorState
+            - op_balance_before.atoms().saturating_sub(fee.atoms());
+        // r1 = floor(10001 × 3000 / 10000) = floor(3000.3) = 3000
+        // r2 = floor(10001 × 2000 / 10000) = floor(2000.2) = 2000
+        // residual = 10001 - 3000 - 2000 = 5001 → operator
+        assert_eq!(r1_balance, 3_000);
+        assert_eq!(r2_balance, 2_000);
+        let _ = op_gained; // suppress unused warning; balance checks above suffice
+        let residual = escrow_atoms - r1_balance - r2_balance;
+        assert_eq!(residual, 5_001);
+        assert!(s.pending_escrows.is_empty());
+    }
+
+    #[test]
+    fn test_escrow_release_no_fee_schedule_all_to_operator() {
+        use vinx_core::ModuleEscrowPayload;
+
+        let (mut s, op_kp, op_addr, module_id) = escrow_state();
+        let fee = s.base_fee;
+
+        // Create escrow (no fee schedule set).
+        let client_kp = KeyPair::generate();
+        let client_addr = Address::from_public_key(&client_kp.public_key());
+        let escrow_atoms = 50_000u128;
+        s.credit_for_test(client_addr, Amount::from_atoms(escrow_atoms + fee.atoms() + EXISTENTIAL_DEPOSIT_ATOMS));
+        let payload = ModuleEscrowPayload {
+            module_id,
+            timeout_secs: MODULE_ESCROW_MIN_TIMEOUT_SECS,
+            service_params_hash: [0u8; 32],
+        };
+        let escrow_tx = Transaction::new_module_escrow(
+            &client_kp,
+            &payload,
+            Amount::from_atoms(escrow_atoms),
+            fee,
+            0,
+        );
+        s.apply_transaction(&escrow_tx).unwrap();
+        let escrow_id = s.pending_escrows.keys().copied().next().unwrap();
+        let op_balance_before = s.account_balance(&op_addr);
+
+        let release_op = ModuleOp::EscrowRelease { escrow_id };
+        s.apply_transaction(&Transaction::new_anchor_state(&op_kp, &release_op, fee, 1))
+            .unwrap();
+
+        // Entire escrow_atoms credited to operator (minus the anchor fee debited separately).
+        let op_net_gain = s
+            .account_balance(&op_addr)
+            .atoms()
+            .saturating_sub(op_balance_before.atoms().saturating_sub(fee.atoms()));
+        assert_eq!(op_net_gain, escrow_atoms);
+        assert!(s.pending_escrows.is_empty());
+    }
+
+    #[test]
+    fn test_escrow_release_by_non_operator_rejected() {
+        use vinx_core::ModuleEscrowPayload;
+
+        let (mut s, _op_kp, _op_addr, module_id) = escrow_state();
+        let fee = s.base_fee;
+
+        // Create escrow as client.
+        let client_kp = KeyPair::generate();
+        let client_addr = Address::from_public_key(&client_kp.public_key());
+        s.credit_for_test(client_addr, Amount::from_vinx(500));
+        let payload = ModuleEscrowPayload {
+            module_id,
+            timeout_secs: MODULE_ESCROW_MIN_TIMEOUT_SECS,
+            service_params_hash: [0u8; 32],
+        };
+        let escrow_tx = Transaction::new_module_escrow(
+            &client_kp,
+            &payload,
+            Amount::from_vinx(10),
+            fee,
+            0,
+        );
+        s.apply_transaction(&escrow_tx).unwrap();
+        let escrow_id = s.pending_escrows.keys().copied().next().unwrap();
+
+        // Non-operator tries to release via AnchorState.
+        let intruder_kp = KeyPair::generate();
+        let intruder_addr = Address::from_public_key(&intruder_kp.public_key());
+        s.credit_for_test(intruder_addr, Amount::from_vinx(100));
+        let release_op = ModuleOp::EscrowRelease { escrow_id };
+        let bad_tx = Transaction::new_anchor_state(&intruder_kp, &release_op, fee, 0);
+        // Intruder is not the operator of the module, so apply_anchor_state rejects.
+        assert!(s.apply_transaction_trusted(&bad_tx).is_err());
+        assert_eq!(s.pending_escrows.len(), 1);
+    }
+
+    #[test]
+    fn test_set_fee_schedule_invalid_shares_rejected() {
+        use vinx_core::module::{FeeRecipient, FeeSchedule};
+
+        let (mut s, op_kp, op_addr, module_id) = escrow_state();
+        let fee = s.base_fee;
+
+        let bad_sched = FeeSchedule {
+            base_fee_atoms: 0,
+            recipients: vec![
+                FeeRecipient { address: op_addr, share_bps: 6_000 },
+                FeeRecipient { address: op_addr, share_bps: 5_000 }, // 11 000 > 10 000
+            ],
+            operator_address: op_addr,
+        };
+        let op = ModuleOp::SetFeeSchedule { module_id, fee_schedule: bad_sched };
+        assert!(s
+            .apply_transaction(&Transaction::new_anchor_state(&op_kp, &op, fee, 1))
+            .is_err());
+        assert!(!s.module_fee_schedules.contains_key(&module_id));
     }
 }

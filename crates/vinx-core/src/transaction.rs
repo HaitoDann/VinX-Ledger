@@ -33,6 +33,15 @@ pub enum TransactionType {
     /// Bond is moved from `balance` → `staked` and the address enters the pool in
     /// `Warmup` status. Eligible for the active set after VALIDATOR_WARMUP_EPOCHS.
     BondValidator,
+    /// Client locks payment in escrow for a bonded module service (ADR 0039).
+    /// `amount` = atoms to lock; standard fee required.
+    /// `payload` = bincode(ModuleEscrowPayload).
+    /// Appended after `BondValidator` to preserve all prior discriminants.
+    ModuleEscrow,
+    /// Client reclaims an expired escrow after `timeout_secs` have elapsed (ADR 0039).
+    /// No amount, no fee. `payload` = bincode(escrow_id: Hash32).
+    /// Appended after `ModuleEscrow` to preserve all prior discriminants.
+    ModuleEscrowRefund,
 }
 
 impl TransactionType {
@@ -51,6 +60,8 @@ impl TransactionType {
             TransactionType::RegisterBlsKey => 0x0A,
             TransactionType::Unjail => 0x0B,
             TransactionType::BondValidator => 0x0C,
+            TransactionType::ModuleEscrow => 0x0D,
+            TransactionType::ModuleEscrowRefund => 0x0E,
         }
     }
 }
@@ -92,6 +103,19 @@ pub struct Transaction {
     pub sponsor_signature: Option<VinxSignature>,
 }
 
+/// Payload for a `ModuleEscrow` transaction (ADR 0039).
+/// Specifies the target module, agreed timeout, and a hash of the off-chain service
+/// parameters the client commits to. The escrow amount is carried in `tx.amount`.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ModuleEscrowPayload {
+    pub module_id: Hash32,
+    /// Seconds the client agrees to wait for delivery.
+    /// Must be in `[MODULE_ESCROW_MIN_TIMEOUT_SECS, MODULE_ESCROW_MAX_TIMEOUT_SECS]`.
+    pub timeout_secs: u64,
+    /// SHA-256 of the off-chain service-parameter blob the client committed to.
+    pub service_params_hash: Hash32,
+}
+
 /// Payload for a `RegisterBlsKey` transaction (ADR 0046).
 /// Both fields are serialized as length-prefixed byte vectors (bincode default).
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -131,6 +155,10 @@ impl Transaction {
                 }
             }
             TransactionType::Stake => self.amount.atoms().saturating_add(self.fee.atoms()),
+            // Escrow: client locks `amount` atoms + pays the protocol fee.
+            TransactionType::ModuleEscrow => {
+                self.amount.atoms().saturating_add(self.fee.atoms())
+            }
             _ => self.fee.atoms(),
         }
     }
@@ -511,6 +539,64 @@ impl Transaction {
         self.sponsor_pub_key = Some(keypair.public_key());
         self.sponsor_signature = Some(keypair.sign(&self.signing_bytes()));
         self
+    }
+
+    /// Constructs and signs a `ModuleEscrow` transaction (ADR 0039).
+    /// `amount` is locked in escrow; `fee` is the standard protocol fee.
+    pub fn new_module_escrow(
+        keypair: &KeyPair,
+        payload: &ModuleEscrowPayload,
+        amount: Amount,
+        fee: Amount,
+        nonce: u64,
+    ) -> Self {
+        let pk = keypair.public_key();
+        let from = Address::from_public_key(&pk);
+        let raw = bincode::serialize(payload).expect("ModuleEscrowPayload serialization infallible");
+        let mut tx = Self {
+            tx_type: TransactionType::ModuleEscrow,
+            from,
+            to: from,
+            amount,
+            fee,
+            nonce,
+            chain_id: CHAIN_ID_DEVNET,
+            expires_at_height: None,
+            payload: raw,
+            pub_key: Some(pk),
+            signature: None,
+            sponsor: None,
+            sponsor_pub_key: None,
+            sponsor_signature: None,
+        };
+        tx.signature = Some(keypair.sign(&tx.signing_bytes()));
+        tx
+    }
+
+    /// Constructs and signs a `ModuleEscrowRefund` transaction (ADR 0039).
+    /// No amount, no fee — reclaims the locked atoms after the timeout has elapsed.
+    pub fn new_module_escrow_refund(keypair: &KeyPair, escrow_id: Hash32, nonce: u64) -> Self {
+        let pk = keypair.public_key();
+        let from = Address::from_public_key(&pk);
+        let raw = bincode::serialize(&escrow_id).expect("Hash32 serialization infallible");
+        let mut tx = Self {
+            tx_type: TransactionType::ModuleEscrowRefund,
+            from,
+            to: from,
+            amount: Amount::ZERO,
+            fee: Amount::ZERO,
+            nonce,
+            chain_id: CHAIN_ID_DEVNET,
+            expires_at_height: None,
+            payload: raw,
+            pub_key: Some(pk),
+            signature: None,
+            sponsor: None,
+            sponsor_pub_key: None,
+            sponsor_signature: None,
+        };
+        tx.signature = Some(keypair.sign(&tx.signing_bytes()));
+        tx
     }
 }
 
