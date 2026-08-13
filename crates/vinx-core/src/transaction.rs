@@ -24,6 +24,15 @@ pub enum TransactionType {
     /// themselves; no admin authorization required. Appended last to preserve bincode/borsh
     /// discriminants of all prior variants.
     RegisterBlsKey,
+    /// Jailed validator self-unjails after the cooldown period has elapsed (ADR 0027).
+    /// No amount, no fee — nonce consumed only on success. The sender must be jailed
+    /// and `block_height >= jailed_until` (UNJAIL_COOLDOWN_HEIGHTS blocks since jailing).
+    Unjail,
+    /// Validator self-bonds to enter the Open PoA admission queue (ADR 0038).
+    /// `amount` = bond (≥ MIN_VALIDATOR_BOND_ATOMS); standard fee required.
+    /// Bond is moved from `balance` → `staked` and the address enters the pool in
+    /// `Warmup` status. Eligible for the active set after VALIDATOR_WARMUP_EPOCHS.
+    BondValidator,
 }
 
 impl TransactionType {
@@ -40,6 +49,8 @@ impl TransactionType {
             TransactionType::AdminAction => 0x08,
             TransactionType::AnchorState => 0x09,
             TransactionType::RegisterBlsKey => 0x0A,
+            TransactionType::Unjail => 0x0B,
+            TransactionType::BondValidator => 0x0C,
         }
     }
 }
@@ -417,6 +428,57 @@ impl Transaction {
             chain_id: CHAIN_ID_DEVNET,
             expires_at_height: None,
             payload: raw,
+            pub_key: Some(pk),
+            signature: None,
+            sponsor: None,
+            sponsor_pub_key: None,
+            sponsor_signature: None,
+        };
+        tx.signature = Some(keypair.sign(&tx.signing_bytes()));
+        tx
+    }
+
+    /// Constructs and signs an Unjail transaction (ADR 0027).
+    /// The sender must be jailed and past the cooldown. No amount, no fee.
+    pub fn new_unjail(keypair: &KeyPair, nonce: u64) -> Self {
+        let pk = keypair.public_key();
+        let from = Address::from_public_key(&pk);
+        let mut tx = Self {
+            tx_type: TransactionType::Unjail,
+            from,
+            to: from,
+            amount: Amount::ZERO,
+            fee: Amount::ZERO,
+            nonce,
+            chain_id: CHAIN_ID_DEVNET,
+            expires_at_height: None,
+            payload: vec![],
+            pub_key: Some(pk),
+            signature: None,
+            sponsor: None,
+            sponsor_pub_key: None,
+            sponsor_signature: None,
+        };
+        tx.signature = Some(keypair.sign(&tx.signing_bytes()));
+        tx
+    }
+
+    /// Constructs and signs a BondValidator transaction (ADR 0038 Open PoA).
+    /// `bond` = amount to lock as validator bond (≥ MIN_VALIDATOR_BOND_ATOMS).
+    /// `fee` = standard protocol fee paid to the block producer.
+    pub fn new_bond_validator(keypair: &KeyPair, bond: Amount, fee: Amount, nonce: u64) -> Self {
+        let pk = keypair.public_key();
+        let from = Address::from_public_key(&pk);
+        let mut tx = Self {
+            tx_type: TransactionType::BondValidator,
+            from,
+            to: from,
+            amount: bond,
+            fee,
+            nonce,
+            chain_id: CHAIN_ID_DEVNET,
+            expires_at_height: None,
+            payload: vec![],
             pub_key: Some(pk),
             signature: None,
             sponsor: None,
