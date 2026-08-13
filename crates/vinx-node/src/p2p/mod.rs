@@ -844,15 +844,28 @@ async fn dispatch_message(
                     debug!(height, "BLS co-signed block");
                 }
 
-                let mut c = chain.write().await;
-                c.record_signature(local_addr, height, block_hash);
-                let finalized = c.add_co_signature(height, sig, &vs);
-                if finalized {
-                    c.advance_finality(&vs); // ADR 0002
-                                             // ADR 0031 — le snapshot finalisé suit la finalité (base de rejeu des réorgs).
-                    let mut snap = fork_choice.finalized_state.write().await;
-                    crate::reorg::advance_snapshot(&mut snap, &c);
-                    info!(height, "Block finalized after co-signing");
+                let cosigners_new_block: Vec<Address> = {
+                    let mut c = chain.write().await;
+                    c.record_signature(local_addr, height, block_hash);
+                    let finalized = c.add_co_signature(height, sig, &vs);
+                    if finalized {
+                        let new_fin = c.advance_finality(&vs); // ADR 0002
+                        if new_fin >= height {
+                            // ADR 0031 — le snapshot finalisé suit la finalité.
+                            let mut snap = fork_choice.finalized_state.write().await;
+                            crate::reorg::advance_snapshot(&mut snap, &c);
+                            info!(height, "Block finalized after co-signing");
+                            c.cosigners_at(height)
+                        } else {
+                            vec![]
+                        }
+                    } else {
+                        vec![]
+                    }
+                };
+                // ADR 0027 R2: update cosign windows after releasing chain lock.
+                if !cosigners_new_block.is_empty() {
+                    state.write().await.record_block_cosigns(&cosigners_new_block);
                 }
             }
         }
@@ -887,19 +900,66 @@ async fn dispatch_message(
                 warn!(height, validator = %signature.validator, "P2P co-sig invalid crypto");
                 return;
             }
-            // Double-sign (equivocation) detection
-            let mut c = chain.write().await;
-            if c.record_signature(&signature.validator, height, block_hash) {
-                warn!(height, validator = %signature.validator, "EQUIVOCATION: double-sign detected, dropping");
+            // ADR 0030: record full co-sig and detect co-signer equivocation.
+            // ADR 0027 R2: collect cosigners at finalization; update pool windows after
+            //   releasing chain lock (lock ordering: chain then state, never state-while-chain).
+            let target = signature.validator;
+            let (maybe_conflict, cosigners_cosig): (Option<(Hash32, BlockSignature)>, Vec<Address>) =
+            {
+                let mut c = chain.write().await;
+                if let Some((conflict_hash, conflict_sig)) =
+                    c.record_cosig(signature.clone(), height, block_hash)
+                {
+                    (Some((conflict_hash, conflict_sig)), vec![])
+                } else {
+                    let finalized = c.add_co_signature(height, signature.clone(), &vs);
+                    if finalized {
+                        let new_fin = c.advance_finality(&vs); // ADR 0002
+                        if new_fin >= height {
+                            // ADR 0031
+                            let mut snap = fork_choice.finalized_state.write().await;
+                            crate::reorg::advance_snapshot(&mut snap, &c);
+                            info!(height, "Block finalized via co-signatures");
+                            (None, c.cosigners_at(height))
+                        } else {
+                            (None, vec![])
+                        }
+                    } else {
+                        (None, vec![])
+                    }
+                }
+            };
+            if let Some((conflict_hash, conflict_sig)) = maybe_conflict {
+                warn!(
+                    height,
+                    validator = %target,
+                    "ADR 0030: co-signer equivocation detected (signed two competing blocks)"
+                );
+                let slash_evidence = {
+                    let c = chain.read().await;
+                    c.get_block_header_at_hash(height, conflict_hash)
+                        .and_then(|ha| {
+                            c.get_block_header_at_hash(height, block_hash).map(|hb| {
+                                SlashEvidence {
+                                    header_a: ha.clone(),
+                                    header_b: hb.clone(),
+                                    sig_a: conflict_sig,
+                                    sig_b: signature,
+                                }
+                            })
+                        })
+                };
+                if let Some(evidence) = slash_evidence {
+                    report_equivocation(
+                        target, evidence, &mempool, &state, &vs, local_kp, local_addr, swarm,
+                    )
+                    .await;
+                }
                 return;
             }
-            let finalized = c.add_co_signature(height, signature, &vs);
-            if finalized {
-                c.advance_finality(&vs); // ADR 0002
-                                         // ADR 0031 — maintenir le snapshot finalisé (base de rejeu des réorgs).
-                let mut snap = fork_choice.finalized_state.write().await;
-                crate::reorg::advance_snapshot(&mut snap, &c);
-                info!(height, "Block finalized via co-signatures");
+            // ADR 0027 R2: update cosign windows after chain lock is released.
+            if !cosigners_cosig.is_empty() {
+                state.write().await.record_block_cosigns(&cosigners_cosig);
             }
         }
 
@@ -983,7 +1043,10 @@ async fn dispatch_message(
                 }
             };
             let agg_count = pks.len();
-            {
+            // ADR 0027 R2: resolve BLS pubkeys → addresses before acquiring chain write
+            // (state read is released before chain write — respects lock ordering).
+            let bls_cosigner_addrs = state.read().await.resolve_bls_cosigners(&pks);
+            let bls_finalized = {
                 let mut c = chain.write().await;
                 c.set_block_bls(height, agg.0.to_vec(), pks);
                 let fin = c.advance_finality(&vs);
@@ -991,9 +1054,16 @@ async fn dispatch_message(
                     let mut snap = fork_choice.finalized_state.write().await;
                     crate::reorg::advance_snapshot(&mut snap, &c);
                     info!(height, cosigners = agg_count, "Block finalized via BLS aggregate");
+                    true
+                } else {
+                    false
                 }
-            }
+            };
             pending_bls.remove(&(height, our_block_hash));
+            // ADR 0027 R2: update cosign windows after releasing chain lock.
+            if bls_finalized && !bls_cosigner_addrs.is_empty() {
+                state.write().await.record_block_cosigns(&bls_cosigner_addrs);
+            }
         }
 
         // Respond to sync requests with our stored blocks
@@ -1127,13 +1197,21 @@ async fn dispatch_message(
                     // un nœud qui rattrape par sync voit `finalized_height` figé (révélé par le
                     // banc n=3 : hauteur qui monte, finalité à 0). Prefix-closed → ne finalise
                     // que les blocs ayant réellement le quorum.
+                    // ADR 0027 R2: collect cosigners before block is moved into chain.
+                    let sync_cosigners: Vec<Address> =
+                        block.signatures.iter().map(|s| s.validator).collect();
                     let vs = validator_set.read().await.clone();
-                    let mut c = chain.write().await;
-                    c.note_quorum(height, pre_quorum); // ADR 0002/0027 — quorum historique
-                    c.push(block);
-                    c.advance_finality(&vs);
-                    drop(c);
+                    let sync_fin = {
+                        let mut c = chain.write().await;
+                        c.note_quorum(height, pre_quorum); // ADR 0002/0027 — quorum historique
+                        c.push(block);
+                        c.advance_finality(&vs)
+                    };
                     info!(height, "Block applied via P2P sync");
+                    // ADR 0027 R2: update cosign windows after releasing chain lock.
+                    if sync_fin >= height && !sync_cosigners.is_empty() {
+                        state.write().await.record_block_cosigns(&sync_cosigners);
+                    }
                 } else {
                     break;
                 }

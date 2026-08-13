@@ -1,7 +1,7 @@
 use ahash::{AHashMap, AHashSet};
 
 use serde::{Deserialize, Serialize};
-use vinx_core::{block::GENESIS_PREV_HASH, Block, BlockHeader, Transaction};
+use vinx_core::{block::GENESIS_PREV_HASH, Block, BlockHeader, BlockSignature, Transaction};
 use vinx_crypto::{Address, Hash32};
 
 #[derive(Serialize, Deserialize)]
@@ -48,6 +48,12 @@ pub struct Chain {
     /// dessous). **Tranche 2a : stockage + choix canonique seulement — aucune réorg encore.**
     #[serde(skip)]
     candidates: AHashMap<u64, Vec<Block>>,
+    /// ADR 0030 — table d'évidence pour la détection de double-signature des co-signataires.
+    /// Stocke le premier `BlockSignature` reçu pour `(validateur, hauteur)`. Si un second
+    /// hash différent arrive, l'équivocation est prouvée. Non persisté : reconstruit depuis
+    /// le gossip en mémoire uniquement.
+    #[serde(skip)]
+    cosig_evidence: AHashMap<Address, AHashMap<u64, (Hash32, BlockSignature)>>,
 }
 
 impl Chain {
@@ -78,6 +84,7 @@ impl Chain {
             dirty_heights: AHashSet::from_iter([0]),
             quorum_schedule: Vec::new(),
             candidates: AHashMap::new(),
+            cosig_evidence: AHashMap::new(),
         };
         (chain, genesis)
     }
@@ -95,6 +102,7 @@ impl Chain {
             dirty_heights: AHashSet::new(),
             quorum_schedule: Vec::new(),
             candidates: AHashMap::new(),
+            cosig_evidence: AHashMap::new(),
         }
     }
 
@@ -542,6 +550,52 @@ impl Chain {
         }
         hashes.insert(block_hash);
         false
+    }
+
+    /// ADR 0030 — enregistre un co-sig P2P entrant et détecte l'équivocation (même validateur,
+    /// même hauteur, hash différent). Retourne `Some((hash_précédent, sig_précédent))` si une
+    /// équivocation est prouvée ; `None` sinon (premier sig ou doublon identique).
+    pub fn record_cosig(
+        &mut self,
+        sig: BlockSignature,
+        height: u64,
+        block_hash: Hash32,
+    ) -> Option<(Hash32, BlockSignature)> {
+        let by_height = self.cosig_evidence.entry(sig.validator).or_default();
+        if let Some((prev_hash, prev_sig)) = by_height.get(&height) {
+            if *prev_hash != block_hash {
+                return Some((*prev_hash, prev_sig.clone()));
+            }
+            return None; // même hash → doublon inoffensif
+        }
+        by_height.insert(height, (block_hash, sig));
+        None
+    }
+
+    /// Retourne les adresses de tous les co-signataires du bloc canonique à `height`
+    /// (inclut le proposeur). Utilisé pour mettre à jour les fenêtres de co-signature.
+    pub fn cosigners_at(&self, height: u64) -> Vec<Address> {
+        self.blocks
+            .get(height as usize)
+            .map(|(_, b)| b.signatures.iter().map(|s| s.validator).collect())
+            .unwrap_or_default()
+    }
+
+    /// Cherche l'en-tête correspondant à `hash` à la hauteur `height`, d'abord dans le
+    /// bloc canonique puis dans les candidats de fork-choice (ADR 0031). Utilisé pour
+    /// assembler un `SlashEvidence` complet (ADR 0030).
+    pub fn get_block_header_at_hash(&self, height: u64, hash: Hash32) -> Option<&BlockHeader> {
+        if let Some((stored_hash, block)) = self.blocks.get(height as usize) {
+            if *stored_hash == hash {
+                return Some(&block.header);
+            }
+        }
+        self.candidates.get(&height).and_then(|cands| {
+            cands
+                .iter()
+                .find(|b| b.hash() == hash)
+                .map(|b| &b.header)
+        })
     }
 
     /// Time-based pruning: drops tx and signature data from blocks whose timestamp is

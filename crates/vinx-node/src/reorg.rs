@@ -14,6 +14,7 @@
 //! l'appelant (node/p2p) et éprouvés au banc n=3.
 
 use vinx_core::{Block, ValidatorSet};
+use vinx_crypto::Address;
 use vinx_state::WorldState;
 
 use crate::chain::Chain;
@@ -54,6 +55,9 @@ pub(crate) fn replay_block(
     state.block_height = height;
     state.check_upgrade_activation();
     let _ = state.settle_block(&block.header.validator, height, protocol_ts);
+    // ADR 0027 R2: cosign window tracking for replayed blocks (reorg path).
+    let cosigners: Vec<Address> = block.signatures.iter().map(|s| s.validator).collect();
+    state.record_block_cosigns(&cosigners);
     if !state.supply_invariant_holds() {
         return Err(format!(
             "réorg: invariant de supply rompu au rejeu (h={height})"

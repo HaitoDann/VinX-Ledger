@@ -284,12 +284,12 @@ impl Node {
         // ADR 0002: advance the finalized pointer. On a single-validator chain the
         // proposer's own signature already meets quorum, so the block is final at once;
         // with more validators it becomes final once quorum co-signs (via P2P).
-        chain.advance_finality(&state.validator_set);
+        let new_fin = chain.advance_finality(&state.validator_set);
 
-        // ADR 0038 — update pool co-signature window for the produced block.
-        // On a single-validator chain the block is immediately finalized; on multi-validator
-        // chains the full cosigner set arrives via P2P co-signatures.
-        {
+        // ADR 0027 R2 — record cosign window only when the block is actually finalized.
+        // On n=1 this is immediate; on n>1 finalization comes via P2P co-signatures and
+        // is handled in the BlockCoSignature / BlockBlsCoSignature handlers.
+        if new_fin >= block.header.height {
             let cosigners: Vec<vinx_crypto::Address> = block
                 .signatures
                 .iter()

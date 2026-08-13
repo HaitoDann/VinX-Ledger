@@ -587,6 +587,21 @@ impl WorldState {
         }
     }
 
+    /// Résout des clés publiques BLS (octets G1 compressés, 48 octets) en adresses de
+    /// validateurs en cherchant dans le pool. Utilisé pour enregistrer les co-signatures
+    /// BLS (ADR 0046 / ADR 0027 R2).
+    pub fn resolve_bls_cosigners(&self, bls_pks: &[Vec<u8>]) -> Vec<Address> {
+        bls_pks
+            .iter()
+            .filter_map(|pk_bytes| {
+                self.validator_pool
+                    .iter()
+                    .find(|(_, e)| e.bls_pub_key.as_deref() == Some(pk_bytes.as_slice()))
+                    .map(|(addr, _)| *addr)
+            })
+            .collect()
+    }
+
     /// Closes the current epoch: decays score windows, ticks warmup, rotates the active
     /// set by score (SHA-256 tiebreaker), distributes the epoch pot, and updates
     /// `validator_set` to the new active set (ADR 0028 + ADR 0038).
