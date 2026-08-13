@@ -1024,6 +1024,8 @@ mod tests {
             header,
             transactions: vec![],
             signatures: vec![sig],
+            bls_aggregate: None,
+            bls_cosigner_pks: vec![],
         }
     }
 

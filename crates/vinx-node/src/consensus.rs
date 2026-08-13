@@ -136,6 +136,8 @@ mod tests {
             },
             transactions: vec![],
             signatures: vec![],
+            bls_aggregate: None,
+            bls_cosigner_pks: vec![],
         }
     }
 

@@ -65,6 +65,8 @@ impl Chain {
             },
             transactions: vec![],
             signatures: vec![],
+            bls_aggregate: None,
+            bls_cosigner_pks: vec![],
         };
         let hash = genesis.hash();
         let chain = Self {
@@ -707,6 +709,8 @@ mod tests {
             header,
             transactions: vec![],
             signatures,
+            bls_aggregate: None,
+            bls_cosigner_pks: vec![],
         }
     }
 
@@ -1000,6 +1004,8 @@ mod tests {
                 },
                 transactions: vec![],
                 signatures: vec![],
+                bls_aggregate: None,
+                bls_cosigner_pks: vec![],
             };
             chain.push(block);
         }
@@ -1044,6 +1050,8 @@ mod tests {
                 },
                 transactions: vec![],
                 signatures: vec![],
+                bls_aggregate: None,
+                bls_cosigner_pks: vec![],
             };
             chain.push(block);
         }

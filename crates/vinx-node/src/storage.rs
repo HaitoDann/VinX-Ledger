@@ -40,7 +40,11 @@ use zstd;
 ///      appended after `reliability`. Migration appends their default encodings.
 /// v13: Epoch close (ADR 0028/0038) — `last_epoch_close_ts` appended after
 ///      `last_bond_change_ts`. Migration appends `u64 = 0`.
-const STORAGE_VERSION: u64 = 13;
+/// v14: BLS co-signatures (ADR 0046 Phase 2) — each Block row gains two trailing fields:
+///      `bls_aggregate: Option<[u8;96]>` (None) and `bls_cosigner_pks: Vec<[u8;48]>` ([]).
+///      `ValidatorPoolEntry` also gains `bls_pub_key` and `bls_pop` (None each), but since
+///      the pool is expected empty during this alpha migration, no entry-level patching is done.
+const STORAGE_VERSION: u64 = 14;
 
 /// zstd compression level — level 3 is the sweet spot: ~60-70% size reduction,
 /// negligible latency compared to disk I/O.
@@ -189,6 +193,8 @@ impl Storage {
                 11 => Self::append_meta_suffix(tx, &vinx_state::v12_meta_suffix())?,
                 // v12 → v13 (ADR 0028 epoch close): append last_epoch_close_ts (u64 = 0).
                 12 => Self::append_meta_suffix(tx, &vinx_state::v13_meta_suffix())?,
+                // v13 → v14 (ADR 0046 Phase 2 BLS): append BLS fields to every block row.
+                13 => Self::migrate_v13_block_bls_fields(tx)?,
                 unknown => {
                     return Err(Self::io_err(format!(
                         "no automatic migration from schema v{unknown} to v{STORAGE_VERSION}. \
@@ -261,6 +267,37 @@ impl Storage {
                 .insert("world_state_meta", recompressed.as_slice())
                 .map_err(Self::io_err)?;
         }
+        Ok(())
+    }
+
+    /// v13 → v14 (ADR 0046 Phase 2 BLS): appends two new trailing fields to each Block's
+    /// bincode data in the BLOCKS table. Each Block gains:
+    ///   `bls_aggregate: Option<[u8; 96]>` = None   → 1 byte  (bincode discriminant 0)
+    ///   `bls_cosigner_pks: Vec<[u8; 48]>` = []     → 8 bytes (bincode u64 length = 0)
+    /// Total suffix per block: 9 bytes. Decompress → append → recompress in place.
+    fn migrate_v13_block_bls_fields(tx: &redb::WriteTransaction) -> io::Result<()> {
+        // bincode v1: None<Option<T>> = 0u8 (1 byte); empty Vec<T> = 0u64 LE (8 bytes).
+        const SUFFIX: [u8; 9] = [0u8; 9];
+        let rows: Vec<(u64, Vec<u8>)> = {
+            let tbl = tx.open_table(BLOCKS).map_err(Self::io_err)?;
+            tbl.iter()
+                .map_err(Self::io_err)?
+                .map(|r| {
+                    r.map(|(k, v)| (k.value(), v.value().to_vec()))
+                        .map_err(Self::io_err)
+                })
+                .collect::<io::Result<_>>()?
+        };
+        let count = rows.len() as u64;
+        let mut tbl = tx.open_table(BLOCKS).map_err(Self::io_err)?;
+        for (height, compressed) in rows {
+            let mut data = Self::decompress(&compressed)?;
+            data.extend_from_slice(&SUFFIX);
+            let recompressed = Self::compress(&data)?;
+            tbl.insert(height, recompressed.as_slice())
+                .map_err(Self::io_err)?;
+        }
+        tracing::info!(blocks = count, "v14 migration: BLS fields appended to block rows");
         Ok(())
     }
 
@@ -759,6 +796,8 @@ mod tests {
             },
             transactions: vec![tx],
             signatures: vec![],
+            bls_aggregate: None,
+            bls_cosigner_pks: vec![],
         };
         chain.push(block);
 
@@ -876,6 +915,8 @@ mod tests {
             },
             transactions: vec![],
             signatures: vec![],
+            bls_aggregate: None,
+            bls_cosigner_pks: vec![],
         }
     }
 
