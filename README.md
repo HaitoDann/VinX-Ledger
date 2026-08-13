@@ -1,5 +1,5 @@
 <p align="center">
-  <img src="./assets/vinx-logo.png" alt="VinX" width="140" />
+  <img src="./assets/vinx-logo.png" alt="VinX" width="540" />
 </p>
 
 <h1 align="center">VinX Ledger</h1>
