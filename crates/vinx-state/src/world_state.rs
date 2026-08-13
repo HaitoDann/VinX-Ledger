@@ -9,6 +9,9 @@ use vinx_core::{
         MODULE_ESCROW_MAX_OPEN, MODULE_ESCROW_MAX_TIMEOUT_SECS,
         MODULE_ESCROW_MIN_TIMEOUT_SECS, PROPOSER_SHARE_BPS, SLASH_BOUNTY_BPS,
         SLASH_EQUIVOCATION_BPS, UNBONDING_SECS, VALIDATOR_SCORE_WINDOW_SECS,
+        // ADR 0038 governance guard constants (immutable hard floors/caps)
+        ACTIVE_SET_COOLDOWN_SECS, ACTIVE_SET_STEP, BOND_COOLDOWN_SECS, BOND_STEP_BPS,
+        MAX_BOND_HARD_CAP, MIN_ACTIVE_SET_SIZE, MIN_BOND_HARD_FLOOR,
     },
     block::SlashEvidence,
     chain_id::CHAIN_ID_DEVNET,
@@ -204,6 +207,15 @@ pub struct WorldState {
     /// Appended after `module_fee_schedules` — v15→v16 migration appends empty-vec default.
     #[serde(default)]
     pub validator_exit_queue: Vec<Address>,
+
+    // ── Governable bond floor (ADR 0038) ────────────────────────────────────────
+    // Appended after `validator_exit_queue` — v16→v17 migration appends the default
+    // u128 = MIN_VALIDATOR_BOND_ATOMS. `serde(default)` so pre-v17 state loads cleanly.
+    /// Current minimum validator bond in atoms (ADR 0038). Governable via
+    /// `UpdateMinValidatorBond` within [MIN_BOND_HARD_FLOOR, MAX_BOND_HARD_CAP] and
+    /// ±BOND_STEP_BPS per modification with BOND_COOLDOWN_SECS between changes.
+    #[serde(default = "default_min_validator_bond")]
+    pub min_validator_bond_atoms: u128,
 }
 
 /// A bond amount in its unbonding delay, waiting to return to `address`'s balance
@@ -373,6 +385,12 @@ pub fn v16_meta_suffix() -> Vec<u8> {
     bincode::serialize(&Vec::<Address>::new()).expect("serialize empty exit queue")
 }
 
+/// v17 migration suffix (ADR 0038): `WorldState` meta gains `min_validator_bond_atoms`
+/// (`u128`), governable bond floor defaulting to `MIN_VALIDATOR_BOND_ATOMS`.
+pub fn v17_meta_suffix() -> Vec<u8> {
+    bincode::serialize(&MIN_VALIDATOR_BOND_ATOMS).expect("serialize default min validator bond")
+}
+
 /// SHA-256(epoch_number_le || address) — deterministic sort key for tiebreaking
 /// validators with identical reliability scores at epoch rotation (ADR 0038).
 fn epoch_tiebreaker(epoch: u64, addr: &Address) -> [u8; 32] {
@@ -392,6 +410,10 @@ fn default_chain_id() -> u32 {
 
 fn default_active_set_size() -> u32 {
     DEFAULT_ACTIVE_SET_SIZE
+}
+
+fn default_min_validator_bond() -> u128 {
+    MIN_VALIDATOR_BOND_ATOMS
 }
 
 impl Default for WorldState {
@@ -442,6 +464,7 @@ impl WorldState {
             pending_escrows: BTreeMap::new(),
             module_fee_schedules: BTreeMap::new(),
             validator_exit_queue: Vec::new(),
+            min_validator_bond_atoms: MIN_VALIDATOR_BOND_ATOMS,
         }
     }
 
@@ -665,7 +688,12 @@ impl WorldState {
             .collect();
         for addr in active_addrs {
             if let Some(entry) = self.validator_pool.get_mut(&addr) {
-                entry.record_block(true, cosigners.contains(&addr));
+                let did_cosign = cosigners.contains(&addr);
+                entry.record_block(true, did_cosign);
+                // ADR 0028: track per-epoch cosign count for proportional distribution.
+                if did_cosign {
+                    entry.record_epoch_cosigned();
+                }
             }
         }
     }
@@ -736,8 +764,10 @@ impl WorldState {
             }
         }
 
-        // 5. Distribute epoch pot — ADR 0028 split: PROPOSER_SHARE_BPS to proposers
-        //    (weighted by blocks proposed this epoch), remainder equally to active set.
+        // 5. Distribute epoch pot — ADR 0028 split:
+        //    PROPOSER_SHARE_BPS → proposers, weighted by blocks proposed this epoch.
+        //    Remainder → co-signers, proportional to epoch_cosigned count (ADR 0028 §2.3).
+        //    If no cosign data (e.g. genesis / pool just populated), fall back to equal share.
         if !new_active.is_empty() {
             let pot = self.epoch_dist_emission_pot;
             if pot > Amount::ZERO {
@@ -746,22 +776,25 @@ impl WorldState {
                     v.sort();
                     v
                 };
-                let n = sorted.len() as u128;
 
-                // Copy epoch_proposed counts before any mutation (avoids borrow conflict).
+                // Snapshot per-epoch counters before any mutation.
                 let proposed: Vec<u32> = sorted
                     .iter()
                     .map(|a| self.validator_pool.get(a).map(|e| e.epoch_proposed).unwrap_or(0))
                     .collect();
+                let cosigned: Vec<u32> = sorted
+                    .iter()
+                    .map(|a| self.validator_pool.get(a).map(|e| e.epoch_cosigned).unwrap_or(0))
+                    .collect();
                 let total_proposed: u128 = proposed.iter().map(|&c| c as u128).sum();
+                let total_cosigned: u128 = cosigned.iter().map(|&c| c as u128).sum();
+                let n = sorted.len() as u128;
 
-                // If no proposer tracked this epoch (e.g. genesis or pool just populated),
-                // fold the proposer share into the equal distribution.
                 let proposer_pot =
                     if total_proposed > 0 { pot.atoms() * PROPOSER_SHARE_BPS / BPS_DENOM } else { 0 };
-                let equal_pot = pot.atoms().saturating_sub(proposer_pot);
+                let cosign_pot = pot.atoms().saturating_sub(proposer_pot);
 
-                // Pre-compute each validator's share to avoid mid-loop borrow of self.
+                // Pre-compute each validator's share.
                 let mut shares: Vec<u128> = sorted
                     .iter()
                     .enumerate()
@@ -771,15 +804,28 @@ impl WorldState {
                         } else {
                             0
                         };
-                        let equal_share = equal_pot / n;
-                        proposer_share + equal_share
+                        // Proportional to epoch_cosigned; fall back to equal if nobody cosigned.
+                        let cosign_share = if total_cosigned > 0 {
+                            cosign_pot * cosigned[i] as u128 / total_cosigned
+                        } else {
+                            cosign_pot / n
+                        };
+                        proposer_share + cosign_share
                     })
                     .collect();
 
-                // Assign integer-division remainder to the first validator (deterministic).
+                // Integer-division remainder → validator with the most co-signs (deterministic).
+                // On a tie, the first in sorted order wins (stable, canonical).
                 let allocated: u128 = shares.iter().sum();
-                if let Some(first) = shares.first_mut() {
-                    *first = first.saturating_add(pot.atoms().saturating_sub(allocated));
+                let remainder = pot.atoms().saturating_sub(allocated);
+                if remainder > 0 {
+                    let best_idx = cosigned
+                        .iter()
+                        .enumerate()
+                        .max_by_key(|&(_, &c)| c)
+                        .map(|(i, _)| i)
+                        .unwrap_or(0);
+                    shares[best_idx] = shares[best_idx].saturating_add(remainder);
                 }
 
                 // Distribute — all shares pre-computed, no outstanding borrows.
@@ -1883,6 +1929,73 @@ impl WorldState {
                 self.pending_governance.clear();
                 tracing::info!(threshold, "Admin: committee policy set");
             }
+            GovernanceAction::UpdateMinValidatorBond { atoms } => {
+                // ADR 0038: hard bounds first (immutable guard rails).
+                if atoms < MIN_BOND_HARD_FLOOR {
+                    return Err(CoreError::InvalidTransaction(format!(
+                        "bond floor {atoms} is below the immutable hard floor {MIN_BOND_HARD_FLOOR}"
+                    )));
+                }
+                if atoms > MAX_BOND_HARD_CAP {
+                    return Err(CoreError::InvalidTransaction(format!(
+                        "bond floor {atoms} exceeds the immutable hard cap {MAX_BOND_HARD_CAP}"
+                    )));
+                }
+                // Rate-limit: change must be within ±BOND_STEP_BPS (25 %) of current value.
+                let current = self.min_validator_bond_atoms;
+                let min_allowed = current - current * BOND_STEP_BPS / 10_000;
+                let max_allowed = current + current * BOND_STEP_BPS / 10_000;
+                if atoms < min_allowed || atoms > max_allowed {
+                    return Err(CoreError::InvalidTransaction(format!(
+                        "bond change from {current} to {atoms} exceeds the ±{BOND_STEP_BPS} bps step limit"
+                    )));
+                }
+                // Cooldown between modifications.
+                if self.current_block_ts < self.last_bond_change_ts + BOND_COOLDOWN_SECS {
+                    let remaining = (self.last_bond_change_ts + BOND_COOLDOWN_SECS)
+                        .saturating_sub(self.current_block_ts);
+                    return Err(CoreError::InvalidTransaction(format!(
+                        "bond cooldown not elapsed — {remaining}s remaining"
+                    )));
+                }
+                self.min_validator_bond_atoms = atoms;
+                self.last_bond_change_ts = self.current_block_ts;
+                tracing::info!(atoms, "Admin: min validator bond updated (ADR 0038)");
+            }
+            GovernanceAction::UpdateActiveSetSize { new_size } => {
+                // ADR 0038: hard floor (immutable).
+                if new_size < MIN_ACTIVE_SET_SIZE {
+                    return Err(CoreError::InvalidTransaction(format!(
+                        "active set size {new_size} is below the immutable floor {MIN_ACTIVE_SET_SIZE}"
+                    )));
+                }
+                // Change limited to exactly ±ACTIVE_SET_STEP.
+                let current = self.active_set_size;
+                let diff = current.abs_diff(new_size);
+                if diff == 0 {
+                    return Err(CoreError::InvalidTransaction(
+                        "active set size is unchanged".to_string(),
+                    ));
+                }
+                if diff != ACTIVE_SET_STEP {
+                    return Err(CoreError::InvalidTransaction(format!(
+                        "active set size change must be exactly ±{ACTIVE_SET_STEP} (requested {diff})"
+                    )));
+                }
+                // Cooldown between modifications.
+                if self.current_block_ts
+                    < self.last_active_set_size_change_ts + ACTIVE_SET_COOLDOWN_SECS
+                {
+                    let remaining = (self.last_active_set_size_change_ts + ACTIVE_SET_COOLDOWN_SECS)
+                        .saturating_sub(self.current_block_ts);
+                    return Err(CoreError::InvalidTransaction(format!(
+                        "active set size cooldown not elapsed — {remaining}s remaining"
+                    )));
+                }
+                self.active_set_size = new_size;
+                self.last_active_set_size_change_ts = self.current_block_ts;
+                tracing::info!(new_size, "Admin: active set size updated (ADR 0038)");
+            }
         }
         Ok(())
     }
@@ -2143,10 +2256,12 @@ impl WorldState {
     /// set, and must not be permanently banned.  After VALIDATOR_WARMUP_EPOCHS epochs the
     /// entry becomes eligible for the active set during the next `tick_epoch_close`.
     fn apply_bond_validator(&mut self, tx: &Transaction) -> Result<(), CoreError> {
-        if tx.amount.atoms() < MIN_VALIDATOR_BOND_ATOMS {
-            return Err(CoreError::InvalidTransaction(
-                "bond below minimum validator bond".to_string(),
-            ));
+        // ADR 0038: bond floor is now governable; use the current runtime value.
+        if tx.amount.atoms() < self.min_validator_bond_atoms {
+            return Err(CoreError::InvalidTransaction(format!(
+                "bond below minimum validator bond ({} atoms)",
+                self.min_validator_bond_atoms
+            )));
         }
         let expected_fee = Amount::from_atoms(DEFAULT_FEE_FLOOR_ATOMS);
         if tx.fee < expected_fee {
@@ -4279,5 +4394,223 @@ mod tests {
             0,
             "nonce must not be consumed when payload exceeds MAX_PAYLOAD_BYTES"
         );
+    }
+
+    // ─── ADR 0028: proportional epoch cosign distribution ────────────────────
+
+    #[test]
+    fn test_epoch_cosign_distribution_is_proportional() {
+        use vinx_core::amount::MIN_VALIDATOR_BOND_ATOMS;
+        use vinx_core::validator_pool::ValidatorPoolEntry;
+
+        // Build a pool of 2 validators, put them Active, and inject different cosign counts.
+        let mut s = WorldState::new();
+        let (_, val1) = kp_addr();
+        let (_, val2) = kp_addr();
+
+        s.validator_pool.insert(
+            val1,
+            ValidatorPoolEntry {
+                bond_atoms: MIN_VALIDATOR_BOND_ATOMS,
+                bonded_since_ts: 0,
+                status: vinx_core::validator_pool::PoolStatus::Active,
+                cosign_count_in_window: 3,
+                eligible_blocks_in_window: 3,
+                bls_pub_key: None,
+                bls_pop: None,
+                epoch_proposed: 0,
+                epoch_cosigned: 3, // val1 co-signed 3 blocks
+            },
+        );
+        s.validator_pool.insert(
+            val2,
+            ValidatorPoolEntry {
+                bond_atoms: MIN_VALIDATOR_BOND_ATOMS,
+                bonded_since_ts: 0,
+                status: vinx_core::validator_pool::PoolStatus::Active,
+                cosign_count_in_window: 1,
+                eligible_blocks_in_window: 3,
+                bls_pub_key: None,
+                bls_pop: None,
+                epoch_proposed: 0,
+                epoch_cosigned: 1, // val2 co-signed only 1 block
+            },
+        );
+        s.validator_set = ValidatorSet::new(vec![val1, val2]);
+        s.active_set_size = 2;
+
+        // Inject 4 VinX into the epoch pot and close the epoch directly.
+        let pot = Amount::from_vinx(4);
+        s.epoch_dist_emission_pot = pot;
+        // PROPOSER_SHARE_BPS = 0 here since epoch_proposed = 0 for both.
+        // All 4 VinX go to co-signers proportional to epoch_cosigned: 3:1 ratio.
+        // Call tick_epoch_close() directly to avoid settle_block's work emission.
+        s.tick_epoch_close();
+
+        // val1: 3/(3+1) * 4 VinX = 3 VinX; val2: 1/4 * 4 VinX = 1 VinX.
+        assert_eq!(s.account_balance(&val1), Amount::from_vinx(3));
+        assert_eq!(s.account_balance(&val2), Amount::from_vinx(1));
+        assert_eq!(s.epoch_dist_emission_pot, Amount::ZERO);
+    }
+
+    #[test]
+    fn test_epoch_cosign_fallback_to_equal_when_no_cosigns() {
+        use vinx_core::amount::MIN_VALIDATOR_BOND_ATOMS;
+        use vinx_core::validator_pool::ValidatorPoolEntry;
+
+        // Two validators with zero epoch_cosigned — should fall back to equal split.
+        let mut s = WorldState::new();
+        let (_, val1) = kp_addr();
+        let (_, val2) = kp_addr();
+
+        for &v in &[val1, val2] {
+            s.validator_pool.insert(
+                v,
+                ValidatorPoolEntry {
+                    bond_atoms: MIN_VALIDATOR_BOND_ATOMS,
+                    bonded_since_ts: 0,
+                    status: vinx_core::validator_pool::PoolStatus::Active,
+                    cosign_count_in_window: 0,
+                    eligible_blocks_in_window: 0,
+                    bls_pub_key: None,
+                    bls_pop: None,
+                    epoch_proposed: 0,
+                    epoch_cosigned: 0,
+                },
+            );
+        }
+        s.validator_set = ValidatorSet::new(vec![val1, val2]);
+        s.active_set_size = 2;
+        s.epoch_dist_emission_pot = Amount::from_vinx(4);
+        // Call tick_epoch_close() directly to avoid settle_block's work emission.
+        s.tick_epoch_close();
+
+        // Equal split: each gets 2 VinX.
+        assert_eq!(s.account_balance(&val1), Amount::from_vinx(2));
+        assert_eq!(s.account_balance(&val2), Amount::from_vinx(2));
+    }
+
+    // ─── ADR 0038: governance — UpdateMinValidatorBond + UpdateActiveSetSize ──
+
+    #[test]
+    fn test_update_min_validator_bond_happy_path() {
+        use vinx_core::amount::{BOND_COOLDOWN_SECS, MIN_VALIDATOR_BOND_ATOMS};
+        let (mut s, admin_kp, admin_addr) = admin_state();
+        let initial = s.min_validator_bond_atoms;
+        assert_eq!(initial, MIN_VALIDATOR_BOND_ATOMS);
+
+        // Decrease by 25% (at exactly the step limit).
+        let new_bond = initial - initial * 2500 / 10_000;
+        s.current_block_ts = BOND_COOLDOWN_SECS; // cooldown satisfied
+        let nonce = s.accounts[&admin_addr].nonce;
+        s.apply_transaction(&Transaction::new_admin_action(
+            &admin_kp,
+            &GovernanceAction::UpdateMinValidatorBond { atoms: new_bond },
+            nonce,
+        ))
+        .unwrap();
+        assert_eq!(s.min_validator_bond_atoms, new_bond);
+        assert_eq!(s.last_bond_change_ts, BOND_COOLDOWN_SECS);
+    }
+
+    #[test]
+    fn test_update_min_validator_bond_hard_floor_enforced() {
+        use vinx_core::amount::{BOND_COOLDOWN_SECS, MIN_BOND_HARD_FLOOR};
+        let (mut s, admin_kp, admin_addr) = admin_state();
+        s.current_block_ts = BOND_COOLDOWN_SECS;
+        // Attempt to set below the hard floor.
+        let result = s.apply_transaction(&Transaction::new_admin_action(
+            &admin_kp,
+            &GovernanceAction::UpdateMinValidatorBond { atoms: MIN_BOND_HARD_FLOOR - 1 },
+            s.accounts[&admin_addr].nonce,
+        ));
+        assert!(result.is_err(), "below hard floor must be rejected");
+    }
+
+    #[test]
+    fn test_update_min_validator_bond_cooldown_enforced() {
+        use vinx_core::amount::MIN_VALIDATOR_BOND_ATOMS;
+        let (mut s, admin_kp, admin_addr) = admin_state();
+        // No time has passed — cooldown not satisfied.
+        let new_bond = MIN_VALIDATOR_BOND_ATOMS - MIN_VALIDATOR_BOND_ATOMS * 100 / 10_000;
+        let result = s.apply_transaction(&Transaction::new_admin_action(
+            &admin_kp,
+            &GovernanceAction::UpdateMinValidatorBond { atoms: new_bond },
+            s.accounts[&admin_addr].nonce,
+        ));
+        assert!(result.is_err(), "cooldown not elapsed must be rejected");
+    }
+
+    #[test]
+    fn test_update_min_validator_bond_step_limit_enforced() {
+        use vinx_core::amount::{BOND_COOLDOWN_SECS, MIN_VALIDATOR_BOND_ATOMS};
+        let (mut s, admin_kp, admin_addr) = admin_state();
+        s.current_block_ts = BOND_COOLDOWN_SECS;
+        // Attempt to drop by 50% (exceeds 25% step limit).
+        let new_bond = MIN_VALIDATOR_BOND_ATOMS / 2;
+        let result = s.apply_transaction(&Transaction::new_admin_action(
+            &admin_kp,
+            &GovernanceAction::UpdateMinValidatorBond { atoms: new_bond },
+            s.accounts[&admin_addr].nonce,
+        ));
+        assert!(result.is_err(), "step limit exceeded must be rejected");
+    }
+
+    #[test]
+    fn test_update_active_set_size_happy_path() {
+        use vinx_core::amount::{ACTIVE_SET_COOLDOWN_SECS, DEFAULT_ACTIVE_SET_SIZE};
+        let (mut s, admin_kp, admin_addr) = admin_state();
+        assert_eq!(s.active_set_size, DEFAULT_ACTIVE_SET_SIZE);
+        s.current_block_ts = ACTIVE_SET_COOLDOWN_SECS;
+        let nonce = s.accounts[&admin_addr].nonce;
+        // Increase by ACTIVE_SET_STEP (2).
+        s.apply_transaction(&Transaction::new_admin_action(
+            &admin_kp,
+            &GovernanceAction::UpdateActiveSetSize { new_size: DEFAULT_ACTIVE_SET_SIZE + 2 },
+            nonce,
+        ))
+        .unwrap();
+        assert_eq!(s.active_set_size, DEFAULT_ACTIVE_SET_SIZE + 2);
+        assert_eq!(s.last_active_set_size_change_ts, ACTIVE_SET_COOLDOWN_SECS);
+    }
+
+    #[test]
+    fn test_update_active_set_size_floor_enforced() {
+        use vinx_core::amount::{ACTIVE_SET_COOLDOWN_SECS, MIN_ACTIVE_SET_SIZE};
+        let (mut s, admin_kp, admin_addr) = admin_state();
+        // Force active_set_size to exactly floor + STEP so one step down hits the floor.
+        s.active_set_size = MIN_ACTIVE_SET_SIZE + 2;
+        s.current_block_ts = ACTIVE_SET_COOLDOWN_SECS;
+        // Going to exactly MIN_ACTIVE_SET_SIZE is allowed.
+        s.apply_transaction(&Transaction::new_admin_action(
+            &admin_kp,
+            &GovernanceAction::UpdateActiveSetSize { new_size: MIN_ACTIVE_SET_SIZE },
+            s.accounts[&admin_addr].nonce,
+        ))
+        .unwrap();
+        assert_eq!(s.active_set_size, MIN_ACTIVE_SET_SIZE);
+
+        // Going one below is rejected.
+        s.current_block_ts += ACTIVE_SET_COOLDOWN_SECS;
+        let result = s.apply_transaction(&Transaction::new_admin_action(
+            &admin_kp,
+            &GovernanceAction::UpdateActiveSetSize { new_size: MIN_ACTIVE_SET_SIZE - 1 },
+            s.accounts[&admin_addr].nonce,
+        ));
+        assert!(result.is_err(), "below hard floor must be rejected");
+    }
+
+    #[test]
+    fn test_update_active_set_size_wrong_step_rejected() {
+        use vinx_core::amount::{ACTIVE_SET_COOLDOWN_SECS, DEFAULT_ACTIVE_SET_SIZE};
+        let (mut s, admin_kp, admin_addr) = admin_state();
+        s.current_block_ts = ACTIVE_SET_COOLDOWN_SECS;
+        // Step of 1 (not ACTIVE_SET_STEP = 2) is rejected.
+        let result = s.apply_transaction(&Transaction::new_admin_action(
+            &admin_kp,
+            &GovernanceAction::UpdateActiveSetSize { new_size: DEFAULT_ACTIVE_SET_SIZE + 1 },
+            s.accounts[&admin_addr].nonce,
+        ));
+        assert!(result.is_err(), "step ≠ ACTIVE_SET_STEP must be rejected");
     }
 }

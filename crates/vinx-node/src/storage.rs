@@ -51,7 +51,10 @@ use zstd;
 /// v16: Validator churn bounds (ADR 0036) — WorldState meta gains `validator_exit_queue`
 ///      (`Vec<Address>`), empty by default, appended last.
 ///      Migration appends its default encoding via `v16_meta_suffix`.
-const STORAGE_VERSION: u64 = 16;
+/// v17: Governable bond floor (ADR 0038) — WorldState meta gains `min_validator_bond_atoms`
+///      (`u128 = MIN_VALIDATOR_BOND_ATOMS`), appended after `validator_exit_queue`.
+///      Migration appends its default encoding via `v17_meta_suffix`.
+const STORAGE_VERSION: u64 = 17;
 
 /// zstd compression level — level 3 is the sweet spot: ~60-70% size reduction,
 /// negligible latency compared to disk I/O.
@@ -208,6 +211,9 @@ impl Storage {
                 // v15 → v16 (ADR 0036 validator churn): append validator_exit_queue
                 // (empty Vec<Address>) to the WorldState meta.
                 15 => Self::append_meta_suffix(tx, &vinx_state::v16_meta_suffix())?,
+                // v16 → v17 (ADR 0038 governable bond floor): append min_validator_bond_atoms
+                // (u128 = MIN_VALIDATOR_BOND_ATOMS) to the WorldState meta.
+                16 => Self::append_meta_suffix(tx, &vinx_state::v17_meta_suffix())?,
                 unknown => {
                     return Err(Self::io_err(format!(
                         "no automatic migration from schema v{unknown} to v{STORAGE_VERSION}. \

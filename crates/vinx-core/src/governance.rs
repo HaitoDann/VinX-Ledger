@@ -21,12 +21,25 @@ pub enum GovernanceAction {
     /// Replace the admin authority with a K-of-M committee (ADR 0011): `threshold`
     /// signatures among `signers` are required to enact any governance action. A single
     /// signer with `threshold == 1` is equivalent to the legacy single admin key.
-    ///
-    /// Appended last so existing bincode discriminants (0..=4) are unchanged — the encoding
-    /// is consensus-critical (it enters the signed `AdminAction` payload).
     SetAdminPolicy {
         signers: Vec<Address>,
         threshold: u16,
+    },
+    /// Update the minimum validator bond (ADR 0038). Governable within
+    /// [MIN_BOND_HARD_FLOOR, MAX_BOND_HARD_CAP], changes capped at ±BOND_STEP_BPS (25 %)
+    /// per modification, with BOND_COOLDOWN_SECS (7 days) between modifications.
+    ///
+    /// Appended after discriminant 5 (SetAdminPolicy) — discriminant 6.
+    UpdateMinValidatorBond {
+        atoms: u128,
+    },
+    /// Update the target active-set size N (ADR 0038). Changes limited to ±ACTIVE_SET_STEP
+    /// per modification, with ACTIVE_SET_COOLDOWN_SECS (7 days) between modifications.
+    /// N must remain ≥ MIN_ACTIVE_SET_SIZE (5).
+    ///
+    /// Appended after UpdateMinValidatorBond — discriminant 7.
+    UpdateActiveSetSize {
+        new_size: u32,
     },
 }
 
@@ -55,6 +68,8 @@ mod tests {
                 signers: vec![addr, Address::from_bytes([0x22; 20])],
                 threshold: 2,
             },
+            GovernanceAction::UpdateMinValidatorBond { atoms: 123_456 },
+            GovernanceAction::UpdateActiveSetSize { new_size: 23 },
         ];
         for a in actions {
             let bytes = bincode::serialize(&a).unwrap();
@@ -75,7 +90,7 @@ mod tests {
         // cross-implementation signature verification of the AdminAction payload.
         let a = Address::from_bytes([0x11; 20]);
         let b = Address::from_bytes([0x22; 20]);
-        let cases: [(GovernanceAction, &str); 6] = [
+        let cases: [(GovernanceAction, &str); 8] = [
             (
                 GovernanceAction::AddValidator(a),
                 "000000001111111111111111111111111111111111111111",
@@ -105,6 +120,14 @@ mod tests {
                     threshold: 2,
                 },
                 "050000000200000000000000111111111111111111111111111111111111111122222222222222222222222222222222222222220200",
+            ),
+            (
+                GovernanceAction::UpdateMinValidatorBond { atoms: 123_456 },
+                "0600000040e20100000000000000000000000000",
+            ),
+            (
+                GovernanceAction::UpdateActiveSetSize { new_size: 23 },
+                "0700000017000000",
             ),
         ];
         for (action, hex_want) in cases {

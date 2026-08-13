@@ -47,9 +47,14 @@ pub struct ValidatorPoolEntry {
     pub bls_pop: Option<Vec<u8>>,
     /// Blocks proposed by this validator in the current epoch (ADR 0028).
     /// Reset to 0 at each epoch close. Used to split the epoch pot between
-    /// proposers (PROPOSER_SHARE_BPS) and the equal co-signer base share.
+    /// proposers (PROPOSER_SHARE_BPS) and the co-signer share.
     #[serde(default)]
     pub epoch_proposed: u32,
+    /// Blocks co-signed by this validator in the current epoch (ADR 0028).
+    /// Reset to 0 at each epoch close. Used to distribute the co-signer
+    /// portion of the epoch pot proportionally to participation.
+    #[serde(default)]
+    pub epoch_cosigned: u32,
 }
 
 impl ValidatorPoolEntry {
@@ -66,6 +71,7 @@ impl ValidatorPoolEntry {
             bls_pub_key: None,
             bls_pop: None,
             epoch_proposed: 0,
+            epoch_cosigned: 0,
         }
     }
 
@@ -74,9 +80,15 @@ impl ValidatorPoolEntry {
         self.epoch_proposed = self.epoch_proposed.saturating_add(1);
     }
 
+    /// Record that this validator co-signed a block in the current epoch (ADR 0028).
+    pub fn record_epoch_cosigned(&mut self) {
+        self.epoch_cosigned = self.epoch_cosigned.saturating_add(1);
+    }
+
     /// Reset per-epoch counters at epoch close (ADR 0028).
     pub fn reset_epoch_counters(&mut self) {
         self.epoch_proposed = 0;
+        self.epoch_cosigned = 0;
     }
 
     /// Score in [0, 10_000] basis points (10_000 = 100 % co-signature rate).
