@@ -18,7 +18,7 @@ use vinx_core::{
     governance::GovernanceAction,
     module::{EscrowEntry, FeeSchedule, ModuleOp},
     protocol::{ProtocolVersion, ScheduledUpgrade},
-    reliability::{self, ReliabilityMap},
+    reliability::{self, CosignWindowMap, ReliabilityMap},
     validator_pool::{PoolStatus, ValidatorPoolEntry},
     Account, CoreError, ModuleEscrowPayload, RegisterBlsKeyPayload, Transaction, TransactionType,
     ValidatorSet,
@@ -216,6 +216,16 @@ pub struct WorldState {
     /// ±BOND_STEP_BPS per modification with BOND_COOLDOWN_SECS between changes.
     #[serde(default = "default_min_validator_bond")]
     pub min_validator_bond_atoms: u128,
+
+    // ── Co-signature windows (ADR 0027 règle 2) ─────────────────────────────────
+    // Appended after `min_validator_bond_atoms` — v17→v18 migration appends the default
+    // empty BTreeMap. `serde(default)` so pre-v18 state loads cleanly.
+    /// Per-epoch co-signature participation counters (ADR 0027 règle 2).
+    /// Reset at each epoch close after checking participation against
+    /// `MIN_COSIGN_PARTICIPATION_BPS`. Stored separately from `reliability` to avoid
+    /// breaking its bincode layout.
+    #[serde(default)]
+    pub cosign_windows: CosignWindowMap,
 }
 
 /// A bond amount in its unbonding delay, waiting to return to `address`'s balance
@@ -391,6 +401,12 @@ pub fn v17_meta_suffix() -> Vec<u8> {
     bincode::serialize(&MIN_VALIDATOR_BOND_ATOMS).expect("serialize default min validator bond")
 }
 
+/// v18 migration suffix (ADR 0027 règle 2): `WorldState` meta gains `cosign_windows`
+/// (`CosignWindowMap`), defaulting to an empty `BTreeMap`.
+pub fn v18_meta_suffix() -> Vec<u8> {
+    bincode::serialize(&CosignWindowMap::new()).expect("serialize empty cosign windows")
+}
+
 /// SHA-256(epoch_number_le || address) — deterministic sort key for tiebreaking
 /// validators with identical reliability scores at epoch rotation (ADR 0038).
 fn epoch_tiebreaker(epoch: u64, addr: &Address) -> [u8; 32] {
@@ -465,6 +481,7 @@ impl WorldState {
             module_fee_schedules: BTreeMap::new(),
             validator_exit_queue: Vec::new(),
             min_validator_bond_atoms: MIN_VALIDATOR_BOND_ATOMS,
+            cosign_windows: CosignWindowMap::new(),
         }
     }
 
@@ -675,11 +692,16 @@ impl WorldState {
 
     /// Records which validators co-signed a finalized block.
     ///
-    /// Updates `cosign_count_in_window` and `eligible_blocks_in_window` for every
-    /// validator currently in the Active status. Call once per finalized block,
-    /// after the block's co-signature set is known.
+    /// - Updates `cosign_count_in_window` and `eligible_blocks_in_window` for every
+    ///   validator currently in the `Active` pool status (Open PoA score, ADR 0028).
+    /// - Updates `cosign_windows` for the classic validator set (ADR 0027 règle 2):
+    ///   increments eligible + count for each non-jailed active validator.
+    ///
+    /// Call once per finalized block, after the co-signature set is known.
     pub fn record_block_cosigns(&mut self, cosigner_addrs: &[Address]) {
         let cosigners: HashSet<Address> = cosigner_addrs.iter().copied().collect();
+
+        // ── Open PoA pool (ADR 0028) ──────────────────────────────────────────
         let active_addrs: Vec<Address> = self
             .validator_pool
             .iter()
@@ -690,12 +712,15 @@ impl WorldState {
             if let Some(entry) = self.validator_pool.get_mut(&addr) {
                 let did_cosign = cosigners.contains(&addr);
                 entry.record_block(true, did_cosign);
-                // ADR 0028: track per-epoch cosign count for proportional distribution.
                 if did_cosign {
                     entry.record_epoch_cosigned();
                 }
             }
         }
+
+        // ── Classic validator set (ADR 0027 règle 2) ──────────────────────────
+        let active_classic = reliability::active_validators(&self.validator_set, &self.reliability);
+        reliability::on_block_cosigns(&mut self.cosign_windows, &active_classic, &cosigners);
     }
 
     /// Résout des clés publiques BLS (octets G1 compressés, 48 octets) en adresses de
@@ -849,6 +874,23 @@ impl WorldState {
             self.validator_set = ValidatorSet::new(new_vs_addrs);
         }
         // If the pool is empty (e.g. genesis before any bonds), leave validator_set as-is.
+
+        // 7. ADR 0027 règle 2 : check co-signature participation over the past epoch.
+        //    Validators whose cosign rate fell below MIN_COSIGN_PARTICIPATION_BPS are jailed.
+        //    cosign_windows is reset to zero for all validators in the set.
+        let height = self.block_height;
+        let jailed_r2 = reliability::check_and_jail_cosign(
+            &mut self.cosign_windows,
+            &mut self.reliability,
+            &self.validator_set,
+            height,
+        );
+        if jailed_r2 {
+            tracing::warn!(
+                height,
+                "ADR 0027 règle 2 : validateur(s) jailé(s) pour taux de co-signature insuffisant"
+            );
+        }
 
         self.last_epoch_close_ts = self.current_block_ts;
     }
@@ -2624,7 +2666,7 @@ mod tests {
     }
 
     // ─── Fair launch: emission, fees, bond, unbonding, slashing ──────────────
-    use vinx_core::amount::{cumulative_emission_atoms, EMISSION_T_HALF_SECS, MAX_SUPPLY_ATOMS};
+    use vinx_core::amount::{cumulative_emission_atoms, EMISSION_T_HALF_SECS};
     use vinx_core::block::GENESIS_PREV_HASH;
     use vinx_core::{BlockHeader, BlockSignature, SlashEvidence};
 
@@ -3709,6 +3751,70 @@ mod tests {
         assert!(s.apply_transaction(&tx).is_err());
     }
 
+    // ─── ADR 0027 règle 2 : co-signature participation jailing ───────────────
+
+    #[test]
+    fn test_cosign_participation_jails_absent_validator() {
+        use vinx_core::reliability::MIN_COSIGN_CHECK_ELIGIBLE;
+        use vinx_core::ValidatorSet;
+        let (_kp, addr) = kp_addr();
+        let mut s = WorldState::new();
+        // Put the validator in the classic set.
+        s.validator_set = ValidatorSet::single(addr);
+
+        // Simulate MIN_COSIGN_CHECK_ELIGIBLE blocks where the validator never co-signs.
+        for _ in 0..MIN_COSIGN_CHECK_ELIGIBLE {
+            s.record_block_cosigns(&[]);
+        }
+
+        // Close the epoch — should jail the validator for 0% co-sign rate.
+        s.tick_epoch_close();
+        assert!(
+            s.reliability.get(&addr).map_or(false, |r| r.is_jailed()),
+            "validator should be jailed after 0% co-sign rate over the epoch"
+        );
+    }
+
+    #[test]
+    fn test_cosign_participation_no_jail_above_threshold() {
+        use vinx_core::reliability::MIN_COSIGN_CHECK_ELIGIBLE;
+        use vinx_core::ValidatorSet;
+        let (_kp, addr) = kp_addr();
+        let mut s = WorldState::new();
+        s.validator_set = ValidatorSet::single(addr);
+
+        // Simulate MIN_COSIGN_CHECK_ELIGIBLE blocks where the validator always co-signs.
+        for _ in 0..MIN_COSIGN_CHECK_ELIGIBLE {
+            s.record_block_cosigns(&[addr]);
+        }
+
+        s.tick_epoch_close();
+        assert!(
+            !s.reliability.get(&addr).map_or(false, |r| r.is_jailed()),
+            "validator should NOT be jailed after 100% co-sign rate"
+        );
+    }
+
+    #[test]
+    fn test_cosign_participation_no_jail_below_min_eligible() {
+        use vinx_core::reliability::MIN_COSIGN_CHECK_ELIGIBLE;
+        use vinx_core::ValidatorSet;
+        let (_kp, addr) = kp_addr();
+        let mut s = WorldState::new();
+        s.validator_set = ValidatorSet::single(addr);
+
+        // Fewer blocks than the minimum — not enough data to jail.
+        for _ in 0..(MIN_COSIGN_CHECK_ELIGIBLE - 1) {
+            s.record_block_cosigns(&[]);
+        }
+
+        s.tick_epoch_close();
+        assert!(
+            !s.reliability.get(&addr).map_or(false, |r| r.is_jailed()),
+            "validator should NOT be jailed when window has fewer than MIN_COSIGN_CHECK_ELIGIBLE blocks"
+        );
+    }
+
     // ─── ADR 0038: BondValidator ─────────────────────────────────────────────
 
     fn bond_state() -> (WorldState, KeyPair, Address) {
@@ -3772,7 +3878,7 @@ mod tests {
     #[test]
     fn test_bond_validator_admin_admitted_rejected() {
         use vinx_core::GovernanceAction;
-        let (mut s, admin_kp, admin_addr) = admin_state();
+        let (mut s, admin_kp, _admin_addr) = admin_state();
         let (cand_kp, cand_addr) = kp_addr();
         // Give candidate bond and credit.
         s.set_staked_for_test(&cand_addr, Amount::from_atoms(MIN_VALIDATOR_BOND_ATOMS));
