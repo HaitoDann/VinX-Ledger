@@ -21,6 +21,8 @@ struct NodeConfigFile {
     admin_key_file: Option<PathBuf>,
     sync_peer_rpc: Option<String>,
     admin_token: Option<String>,
+    /// Chain ID : 1 = mainnet, 7 = testnet, 42 = devnet.
+    chain_id: Option<u32>,
     /// Path to a JSON key file for the faucet account. If the file doesn't
     /// exist it is generated automatically (the account still needs funding).
     faucet_key_file: Option<PathBuf>,
@@ -74,9 +76,9 @@ struct Args {
     /// RPC URL of a trusted peer to sync from on startup, e.g. http://1.2.3.4:8545
     #[arg(long)]
     sync_peer: Option<String>,
-    /// Chain ID: 1=mainnet, 7=testnet, 42=devnet (default: 42)
-    #[arg(long, default_value_t = CHAIN_ID_DEVNET)]
-    chain_id: u32,
+    /// Chain ID: 1=mainnet, 7=testnet, 42=devnet (default: 42 or value from config.toml)
+    #[arg(long)]
+    chain_id: Option<u32>,
     /// Hardcoded bootstrap peers (repeatable, in addition to --peers)
     #[arg(long, num_args = 0..)]
     bootstrap_peers: Vec<String>,
@@ -177,7 +179,7 @@ async fn main() {
         file_cfg.peers.unwrap_or_default()
     };
     let bootstrap_peers = args.bootstrap_peers;
-    let chain_id = args.chain_id;
+    let chain_id = args.chain_id.or(file_cfg.chain_id).unwrap_or(CHAIN_ID_DEVNET);
     let max_block_txs = file_cfg.max_block_txs.unwrap_or(3_000);
     let max_mempool_size = file_cfg.max_mempool_size.unwrap_or(100_000);
     let sync_peer_rpc = args.sync_peer.or(file_cfg.sync_peer_rpc);

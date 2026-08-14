@@ -279,6 +279,24 @@ impl Chain {
     fn prune_candidates_final(&mut self) {
         let f = self.finalized_height;
         self.candidates.retain(|&h, _| h > f);
+        self.purge_cosig_evidence(); // ADR 0030
+    }
+
+    /// ADR 0030 — purge la table d'évidence des co-signatures pour les hauteurs finalisées.
+    /// Une hauteur finalisée ne peut plus être réorganisée : l'évidence n'a plus d'utilité.
+    /// Évite un bloat mémoire proportionnel au nombre de blocs non finalisés.
+    pub fn purge_cosig_evidence(&mut self) {
+        let f = self.finalized_height;
+        self.cosig_evidence.retain(|_, by_height| {
+            by_height.retain(|&h, _| h > f);
+            !by_height.is_empty()
+        });
+    }
+
+    /// Nombre total d'entrées dans la table d'évidence cosig (exposé pour les tests).
+    #[cfg(test)]
+    pub fn cosig_evidence_count(&self) -> usize {
+        self.cosig_evidence.values().map(|m| m.len()).sum()
     }
 
     /// Height of the latest block (0 = only genesis exists).
@@ -724,6 +742,14 @@ mod tests {
         Address::from_public_key(&KeyPair::generate().public_key())
     }
 
+    fn make_block_sig(kp: &KeyPair, msg: &Hash32) -> BlockSignature {
+        BlockSignature {
+            validator: Address::from_public_key(&kp.public_key()),
+            pub_key: kp.public_key(),
+            signature: kp.sign(msg),
+        }
+    }
+
     #[test]
     fn test_genesis_height_is_zero() {
         let (chain, _) = Chain::new_with_genesis(validator(), 0);
@@ -1138,5 +1164,79 @@ mod tests {
         assert!(chain.get_block(0).is_some());
         assert!(chain.get_block(4).is_some());
         assert_eq!(chain.tip_height(), 5);
+    }
+
+    // ── ADR 0030 — détection de co-signatures conflictuelles ──────────────────
+
+    #[test]
+    fn test_record_cosig_first_sig_returns_none() {
+        let mut chain = Chain::from_parts(vec![], 0);
+        let kp = KeyPair::generate();
+        let hash = [1u8; 32];
+        let sig = make_block_sig(&kp, &hash);
+        assert!(chain.record_cosig(sig, 5, hash).is_none());
+    }
+
+    #[test]
+    fn test_record_cosig_duplicate_same_hash_is_idempotent() {
+        let mut chain = Chain::from_parts(vec![], 0);
+        let kp = KeyPair::generate();
+        let hash = [1u8; 32];
+        let sig = make_block_sig(&kp, &hash);
+        chain.record_cosig(sig.clone(), 5, hash);
+        assert!(
+            chain.record_cosig(sig, 5, hash).is_none(),
+            "même hash = pas de conflit"
+        );
+    }
+
+    #[test]
+    fn test_record_cosig_different_hash_detects_equivocation() {
+        let mut chain = Chain::from_parts(vec![], 0);
+        let kp = KeyPair::generate();
+        let addr = Address::from_public_key(&kp.public_key());
+        let hash_a = [1u8; 32];
+        let hash_b = [2u8; 32];
+        let sig_a = make_block_sig(&kp, &hash_a);
+        let sig_b = make_block_sig(&kp, &hash_b);
+        assert!(chain.record_cosig(sig_a, 5, hash_a).is_none());
+        let conflict = chain.record_cosig(sig_b, 5, hash_b);
+        assert!(conflict.is_some(), "hash différent = équivocation détectée");
+        let (prev_hash, prev_sig) = conflict.unwrap();
+        assert_eq!(prev_hash, hash_a);
+        assert_eq!(prev_sig.validator, addr);
+    }
+
+    #[test]
+    fn test_record_cosig_independent_validators_no_conflict() {
+        let mut chain = Chain::from_parts(vec![], 0);
+        let kp_a = KeyPair::generate();
+        let kp_b = KeyPair::generate();
+        let hash_a = [1u8; 32];
+        let hash_b = [2u8; 32];
+        let sig_a = make_block_sig(&kp_a, &hash_a);
+        let sig_b = make_block_sig(&kp_b, &hash_b);
+        assert!(chain.record_cosig(sig_a, 5, hash_a).is_none());
+        assert!(
+            chain.record_cosig(sig_b, 5, hash_b).is_none(),
+            "validateurs différents = pas de conflit"
+        );
+    }
+
+    #[test]
+    fn test_cosig_evidence_purged_below_finality() {
+        // Chain avec finalized_height = 3 établi via from_parts.
+        let mut chain = Chain::from_parts(vec![], 3);
+        let kp = KeyPair::generate();
+        // Enregistrer des cosigs à des hauteurs autour de la finalité.
+        for h in [1u64, 2, 3, 4, 5] {
+            let hash = [h as u8; 32];
+            let sig = make_block_sig(&kp, &hash);
+            chain.record_cosig(sig, h, hash);
+        }
+        assert_eq!(chain.cosig_evidence_count(), 5);
+        // Après purge : seules les hauteurs > 3 restent (4 et 5).
+        chain.purge_cosig_evidence();
+        assert_eq!(chain.cosig_evidence_count(), 2);
     }
 }

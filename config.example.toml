@@ -2,6 +2,11 @@
 # Copiez ce fichier en config.toml et adaptez les valeurs.
 # Toutes les valeurs sont optionnelles : les défauts sont indiqués en commentaire.
 
+# ─── Réseau / identité de chaîne ─────────────────────────────────────────────
+# Identifiant du réseau : 1 = mainnet, 7 = testnet, 42 = devnet.
+# Peut aussi être passé via --chain-id. Défaut : 42 (devnet).
+# chain_id = 7
+
 # ─── Répertoire de données ────────────────────────────────────────────────────
 # Contient les fichiers de clés, l'état de la chaîne et le snapshot.
 # Défaut : "devnet"
@@ -53,3 +58,17 @@
 # URL RPC d'un pair de confiance depuis lequel rattraper les blocs au démarrage.
 # Utile pour rejoindre un testnet existant sans télécharger le snapshot complet.
 # sync_peer_rpc = "http://192.168.1.10:8545"
+
+# ─── Faucet (testnet seulement) ───────────────────────────────────────────────
+# Désactivé par défaut. Décommentez et renseignez faucet_key_file pour l'activer.
+# Le fichier est généré automatiquement s'il n'existe pas — pensez à le financer.
+#
+# faucet_key_file = "testnet/faucet.json"
+#
+# Montant distribué par requête en atoms (1 VinX = 10¹⁸ atoms).
+# Défaut : 100 VinX = 100_000_000_000_000_000_000
+# faucet_amount_atoms = 100000000000000000000
+#
+# Délai minimal entre deux requêtes d'une même adresse, en secondes.
+# Défaut : 86400 (24 h)
+# faucet_cooldown_secs = 86400

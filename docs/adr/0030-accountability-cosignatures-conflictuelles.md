@@ -1,6 +1,6 @@
 # ADR 0030 — Accountability des co-signatures conflictuelles (sûreté de finalité)
 
-- **Statut :** Proposé
+- **Statut :** Implémenté
 - **Catégorie :** Sécurité / Consensus & finalité · **Priorité :** 🔴 haute (propriété de
   sûreté, pas une amélioration)
 - **Date :** Juillet 2026
