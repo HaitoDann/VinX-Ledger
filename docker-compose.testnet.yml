@@ -1,0 +1,109 @@
+# VinX Ledger — Testnet 3 nœuds (genèse partagée)
+#
+# Prérequis : exécuter scripts/testnet-init.sh en premier.
+#
+# Démarrage :
+#   docker compose -f docker-compose.testnet.yml up -d
+#
+# Logs temps réel :
+#   docker compose -f docker-compose.testnet.yml logs -f
+#
+# Arrêt :
+#   docker compose -f docker-compose.testnet.yml down
+#
+# Reset complet (efface toutes les données) :
+#   docker compose -f docker-compose.testnet.yml down
+#   sudo rm -rf deploy/
+#   ./scripts/testnet-init.sh && docker compose -f docker-compose.testnet.yml up -d
+
+services:
+
+  # ── Nœud 1 — validateur genesis + faucet ────────────────────────────────
+  node1:
+    build: .
+    image: vinx-testnet
+    container_name: vinx-node1
+    restart: unless-stopped
+    volumes:
+      - ./deploy/node1:/data
+      - ./deploy/genesis.json:/genesis.json:ro
+    environment:
+      - VINX_GENESIS_SPEC=/genesis.json
+      - RUST_LOG=info
+    ports:
+      - "8545:8545"    # RPC + explorateur intégré
+      - "9001:9000"    # P2P libp2p
+    command:
+      - "--data-dir=/data"
+      - "--rpc-listen=0.0.0.0:8545"
+      - "--p2p-listen=/ip4/0.0.0.0/tcp/9000"
+      - "--block-time=3"
+      - "--chain-id=7"
+      - "--config=/data/config.toml"
+    healthcheck:
+      test: ["CMD", "wget", "-qO-", "http://localhost:8545/health"]
+      interval: 5s
+      timeout: 3s
+      retries: 12
+    networks:
+      - vinxnet
+
+  # ── Nœud 2 — observateur ────────────────────────────────────────────────
+  node2:
+    image: vinx-testnet
+    container_name: vinx-node2
+    restart: unless-stopped
+    volumes:
+      - ./deploy/node2:/data
+      - ./deploy/genesis.json:/genesis.json:ro
+    environment:
+      - VINX_GENESIS_SPEC=/genesis.json
+      - RUST_LOG=info
+    ports:
+      - "8546:8545"
+      - "9002:9000"
+    command:
+      - "--data-dir=/data"
+      - "--rpc-listen=0.0.0.0:8545"
+      - "--p2p-listen=/ip4/0.0.0.0/tcp/9000"
+      - "--peers=/ip4/node1/tcp/9000"
+      - "--sync-peer=http://node1:8545"
+      - "--block-time=3"
+      - "--chain-id=7"
+    depends_on:
+      node1:
+        condition: service_healthy
+    networks:
+      - vinxnet
+
+  # ── Nœud 3 — observateur ────────────────────────────────────────────────
+  node3:
+    image: vinx-testnet
+    container_name: vinx-node3
+    restart: unless-stopped
+    volumes:
+      - ./deploy/node3:/data
+      - ./deploy/genesis.json:/genesis.json:ro
+    environment:
+      - VINX_GENESIS_SPEC=/genesis.json
+      - RUST_LOG=info
+    ports:
+      - "8547:8545"
+      - "9003:9000"
+    command:
+      - "--data-dir=/data"
+      - "--rpc-listen=0.0.0.0:8545"
+      - "--p2p-listen=/ip4/0.0.0.0/tcp/9000"
+      - "--peers=/ip4/node1/tcp/9000"
+      - "--sync-peer=http://node1:8545"
+      - "--block-time=3"
+      - "--chain-id=7"
+    depends_on:
+      node1:
+        condition: service_healthy
+    networks:
+      - vinxnet
+
+networks:
+  vinxnet:
+    driver: bridge
