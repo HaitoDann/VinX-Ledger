@@ -42,7 +42,7 @@ VinX Ledger est implémenté sans framework blockchain tiers. Ce choix garantit 
 - **Alignement avec la vision** — une monnaie artisanale mérite une implémentation artisanale
 - **Stabilité à long terme** — aucune dépendance upstream susceptible de casser l'API
 
-Les briques P2P (libp2p Rust), consensus PoA Threshold et mises à jour forkless sont développées nativement dans le projet.
+Les briques P2P (libp2p Rust), consensus PoS Algorand-style (comité VRF, BLS12-381) et mises à jour forkless sont développées nativement dans le projet.
 
 ---
 
@@ -167,72 +167,53 @@ Dans un réseau **PoS permissionless**, la sécurité vient du bond économique 
   - **10 %** → prime au **rapporteur** (pour rendre la surveillance rentable et inciter la vigilance).
   - **90 %** → versés dans le **pot d'époque** (ADR 0028), distribués aux validateurs honnêtes actifs à la clôture de l'époque, proportionnellement à leur participation. Le slash récompense collectivement ceux qui maintiennent le réseau sûr.
   - **Aucun token détruit** — le slash est une redistribution, pas une destruction. La supply en circulation reste inchangée à court terme.
-- **Downtime** : un validateur hors-ligne au-delà d'un seuil est **suspendu** du round-robin (il ne produit plus, donc ne gagne plus) — mais **sans slash économique**, car l'absence n'est pas prouvablement malveillante.
+- **Downtime** : un validateur hors-ligne au-delà d'un seuil **sort du set actif** à la prochaine rotation d'époque (il ne produit plus, donc ne gagne plus) — mais **sans slash économique**, car l'absence n'est pas prouvablement malveillante.
 
 ---
 
 ## 6. Infrastructure : Validateurs & Full Nodes
 
-### 6.1 Validateurs Core (PoA Threshold — Open PoA)
+### 6.1 Validateurs Core (PoS Algorand-style — Open PoS)
 
 Nœuds qui produisent et co-signent les blocs, responsables de la sécurité du réseau.
 
 **Rôle** : proposer et co-signer les blocs, maintenir le consensus, garantir la disponibilité du réseau.
 
-**Mécanisme** : Proof of Authority Threshold — à chaque bloc, le validateur désigné (rotation déterministe) propose un bloc. Ce bloc est finalisé lorsque **plus de 66 % des validateurs actifs** l'ont co-signé. La finalité est déterministe : un bloc quorum-signé ne peut jamais être réorganisé.
+**Mécanisme** : PoS Algorand-style (architecture cible, ADR 0029) — un **comité de n≈100 validateurs** est sélectionné à chaque bloc par **ECVRF RFC 9381** (tirage uniforme parmi les bondés). Le leader est le validateur avec la sortie VRF la plus faible (imprévisible jusqu'au dernier moment — résistance DoS). Le bloc est finalisé lorsque **≥ 67 % du comité** l'ont co-signé (BLS12-381 agrégé). La finalité est BFT déterministe : un bloc quorum-signé ne peut jamais être réorganisé.
 
-**Tolérance aux pannes** : le réseau reste opérationnel tant que 66 % des validateurs sont en ligne.
+**Tolérance aux pannes** : le réseau reste opérationnel tant que 67 % du comité sont en ligne.
 
-**Admission — Open PoA :** à partir de la Phase 2, n'importe qui peut candidater en postant le bond requis — sans approbation admin individuelle. Les validateurs existants peuvent opposer un veto collectif (>66 %, fenêtre 7 jours). L'admin fixe seulement le montant du bond via gouvernance. Le set s'élargit en **trois phases automatiques et immuables**, gravées à la genèse :
-- Phase 1 (bootstrap) : 3–5 validateurs, admission gouvernance-gated le temps d'éprouver le consensus.
-- Phase 2 : 10–21 validateurs, Open PoA.
-- Phase 3 : 50–101 validateurs, Open PoA.
+**Admission — Open PoS :** n'importe qui peut rejoindre le pool en postant le bond requis — sans approbation admin individuelle, sans veto collectif. Warmup de 3 époques avant d'être éligible au comité. L'admin fixe seulement le montant du bond via gouvernance, dans des bornes immuables (`[10 000, 100 000 000]` VINX). La taille du comité actif (N) est gouvernable (ADR 0038).
 
 **Rémunération** : par leur **travail** uniquement — l'émission distribuée par époque (proposeurs + co-signataires) puis les frais immédiats. Pour candidater, un validateur poste un **bond** (§5) ; ce bond le sécurise, il ne le rémunère pas.
 
-**Score S_perf** : l'attribution des slots suit un score basé sur le taux de co-signature et de proposition réussie, 100 % déterministe et on-chain. Pas de délégation DPoS, pas de pondération par le bond.
+**Sélection VRF** : la sélection du comité par VRF est uniforme et imprévisible. Pas de pondération par le bond (le bond sécurise, ne vote pas), pas de délégation DPoS. Score de co-signature = seul critère pour rester dans le pool actif (rotation époque).
 
-### 6.2 Modules — Services hors-nœud ancrés et rémunérés
+### 6.2 Appchains — Surcouches ZK hors-L1
 
-Un **module** est un service off-chain (stockage décentralisé, oracle, calcul, relai…) dont
-l'opérateur poste un **bond VINX** pour s'enregistrer sur la L1. La L1 n'exécute jamais la
-logique du module — elle ancre des **racines Merkle** prouvant l'état du service, et route
-les **paiements** de façon déterministe.
+Une **Appchain** est une chaîne applicative (DEX, lending, identité, stockage…) qui s'exécute
+entièrement hors-L1. L'opérateur poste un **bond VINX** pour enregistrer l'Appchain sur le L1.
+La L1 n'exécute jamais la logique de l'Appchain — elle **vérifie des preuves ZK** (SP1 Groth16,
+ADR 0050) prouvant la validité de chaque transition d'état, et route les **settlements** de façon
+déterministe.
 
-**Cycle de vie d'un paiement de module :**
+**Modèle de confiance par l'Appchain :**
 
-```
-1. Client → ModuleEscrow (tx 0x0A) : bloque N VINX on-chain pour une commande de service.
-2. Module livre le service off-chain.
-3. Module ancre une preuve (AnchorState + EscrowRelease) : preuve Merkle de livraison.
-4. L1 détecte la preuve → distribue atomiquement selon le fee_schedule du module :
-      - Bénéficiaires enregistrés  (ex. 3 providers × 30 %)
-      - Résidu à l'opérateur       (ex. 10 %)
-5. Si pas de preuve avant timeout → client réclame le remboursement (ModuleEscrowRefund, tx 0x0B).
-```
-
-**Exemple concret** — module de stockage décentralisé, 100 Go, 100 VINX :
-
-| Bénéficiaire | Part | Montant |
+| Mode | Mécanisme | Niveau de confiance |
 |---|---|---|
-| Provider A | 30 % | 30 VINX |
-| Provider B | 30 % | 30 VINX |
-| Provider C | 30 % | 30 VINX |
-| Opérateur (coordinateur) | 10 % | 10 VINX |
+| Bonded | Bond seul (pas de preuve ZK) | Niveau 1 — économique |
+| ZK-verified | Preuve SP1 Groth16 vérifiée on-chain | Niveau 3 — cryptographique |
 
-La structure interne du module (qui sont les providers, comment le coordinateur les rémunère)
-est **entièrement off-chain** — la L1 ne voit que des adresses et des pourcentages. C'est un
-**marché libre** : chaque module fixe son prix et sa structure de partage dans son
-enregistrement. La concurrence entre modules régule naturellement les prix.
+**Garanties pour les utilisateurs :**
+- **ForceExit (ADR 0048)** : si le séquenceur censure ou disparaît, l'utilisateur peut retirer ses fonds directement sur le L1 via une `MerkleProof` de son solde Appchain — sans permission.
+- **Clearinghouse (ADR 0049)** : transferts inter-Appchains via message passing asynchrone sur le L1, avec timeout et remboursement automatique.
+- **Celestia DA (ADR 0034)** : les données de l'Appchain sont publiées sur Celestia — vérifiables par n'importe qui via sampling.
 
-Le bond de l'opérateur est sa caution : un module qui ne livre pas répétitivement risque le
-slashing (ADR 0023, à venir). Un timeout simple rembourse le client sans slash (distinction
-entre défaut intentionnel prouvable et simple incident).
+Le bond de l'opérateur est sa caution : une Appchain qui censure ou produit des preuves invalides risque le slashing (ADR 0023). La vérification ZK rend la fraude d'exécution *impossible* (et non juste *punie*).
 
-> **Aucune émission secondaire pour les modules.** Les modules sont rémunérés par leurs
-> utilisateurs, pas par le protocole. VinX refuse les systèmes qui « force à transacter »
-> pour capturer de l'émission — toute récompense protocolaire reste réservée au travail
-> du consensus.
+> **Aucune émission secondaire pour les Appchains.** Les Appchains sont rémunérées par leurs
+> utilisateurs (frais), pas par le protocole L1. VinX refuse les systèmes qui « forcent à transacter »
+> pour capturer de l'émission — toute récompense protocolaire reste réservée au travail du consensus.
 
 ### 6.3 Full Nodes Communautaires
 

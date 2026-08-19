@@ -59,7 +59,7 @@ Elle n'exécute, ne valide et ne comprend **rien** de la logique interne d'un mo
             ▼                           ▼
    ┌───────────────────────────────────────────────────────┐
    │  COUCHE 1 — VinX monnaie pure (Rust / PoA Threshold)   │
-   │  • Comptes VINX, consensus, Fonderie, bond/slashing    │
+   │  • Comptes VINX, consensus, émission, bond/slashing    │
    │  • + Registre de modules { operator, bond, anchor_head}│
    │  • + 1 type de tx : AnchorState (écrit un hash)        │
    │  • 0 exécution de logique de module                    │
@@ -81,7 +81,7 @@ Trois ajouts, et pas un de plus :
 
 3. **Dépôts / retraits = transferts VINX normaux.** Pas de primitive nouvelle : les
    VINX entrent et sortent d'un module via des `Transfer` vers/depuis le compte L1 du
-   module. La Fonderie, les frais, le consensus : **inchangés**.
+   module. L'émission, les frais, le consensus : **inchangés**.
 
 Le **bond** réutilise tel quel le mécanisme construit pour les validateurs (mise en
 gage + slashing sur preuve). Un opérateur malhonnête est slashable par gouvernance.
@@ -176,7 +176,7 @@ L1 ne sait même pas ce qu'est « ACME ».**
 
 **Positives**
 - Monnaie pure inviolable : un exploit dans un module ne met en danger ni les VINX ni la
-  Fonderie sur la L1.
+  émission sur la L1.
 - Surface L1 minimale (1 type de tx + 1 registre) ; cœur intact.
 - Débit L1 préservé : aucun calcul applicatif ne ralentit les transferts.
 - Réduction (pas suppression) de la surface réglementaire : la L1 reste un protocole de

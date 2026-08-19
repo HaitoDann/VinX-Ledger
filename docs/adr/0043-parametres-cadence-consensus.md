@@ -28,8 +28,8 @@ sur les standards éprouvés (Ethereum & Bittensor : 12 s ; Substrate/Polkadot :
 | **Block time** | 5 s | **12 s** (défaut) | marge large : propagation (~2 Mo) + validation (~10 000 vérifs de signatures ≈ 0,5–1 s) « 12 s → forks rares. Aligné Ethereum/Bittensor. |
 | **Accélération à la demande** | oui (`gap → 0` en saturation) | **retirée — plancher fixe à `block_time`** | tue les blocs dos-à-dos, le générateur #1 de forks. La congestion est absorbée par le **base-fee** (ADR type EIP-1559), pas par des blocs plus rapprochés. |
 | **Poids max de bloc** | 10 000 tx | **10 000 tx (≈ 2 Mo)** | ~200 o/tx → le plafond de 10 000 vaut ≈ 2 Mo. Reste la borne effective de taille (voir §4). |
-| **Heartbeat** | 10 min | **10 min (inchangé)** | l'émission étant intégrée sur le temps, la fréquence du heartbeat est **neutre pour le supply** ; 10 min garde l'horloge MTP et la liveness au repos sans blocs vides superflus. |
-| **Blocs vides au repos** | non (skip + heartbeat) | **inchangé** | gratuit : l'émission suit le temps, produire des blocs vides au repos n'apporte rien (contrairement à Substrate/Aura). |
+| **Heartbeat** | 10 min | **Aboli (ADR 0045)** | la cadence fixe 12 s rend le heartbeat superflu — chaque slot est un tick régulier. |
+| **Blocs vides au repos** | non (skip + heartbeat) | **Aboli (ADR 0045)** : blocs produits à cadence fixe 12 s, vides ou non — pas de skip-empty, pas de heartbeat. |
 
 ## 3. Justification
 

@@ -44,7 +44,7 @@ vinx-node \
 Le nœud :
 - génère automatiquement une clé validateur dans `./data-node1/`
 - expose le RPC sur `http://127.0.0.1:8545`
-- produit des blocs **à la demande** : aucun bloc au repos, ~`block-time` sous activité légère, et l'écart se resserre jusqu'au dos-à-dos quand le mempool se remplit
+- produit des blocs à **cadence fixe 12 s** (ADR 0045) : un bloc toutes les 12 s, vide ou non — la congestion passe par le base-fee dynamique
 
 La bannière de démarrage affiche l'adresse du validateur et la commande curl de base.
 
@@ -54,7 +54,7 @@ La bannière de démarrage affiche l'adresse du validateur et la commande curl d
 # Santé : statut, hauteur, mempool, chain_id
 curl http://127.0.0.1:8545/health | jq
 
-# Statistiques économiques : base_fee, Fonderie, circulation, admin
+# Statistiques économiques : base_fee, émission, circulation, admin
 curl http://127.0.0.1:8545/network/stats | jq
 ```
 
@@ -63,17 +63,17 @@ Réponse attendue de `/health` :
 { "status": "ok", "height": 12, "mempool_pending": 0, "chain_id": 42 }
 ```
 
-Réponse attendue de `/network/stats` (au démarrage : **aucun pre-mine** — 0 en circulation, 100 Md scellés dans La Fonderie, la réserve d'émission) :
+Réponse attendue de `/network/stats` (au démarrage : **aucun pre-mine** — 0 émis, 0 en circulation) :
 ```json
 {
   "base_fee_atoms": "100000000000000",
-  "foundry": "100000000000.00 VINX",
+  "emitted_atoms": "0",
   "circulating_supply": "0.00 VINX",
   "admin_address": "vinx1..."
 }
 ```
 
-> Les VINX apparaissent en circulation **au fur et à mesure** que les validateurs produisent des blocs (émission par le travail). Après quelques blocs, `circulating_supply` devient positif et `foundry` diminue d'autant — leur somme reste toujours égale à 100 Md.
+> Les VINX apparaissent en circulation **au fur et à mesure** que les validateurs produisent des blocs (émission par le travail — minting progressif, ADR 0040). Il n'y a pas de réserve pré-allouée : les tokens n'existent pas avant d'être mintés.
 
 ### 2.3 Activer le faucet (optionnel pour tests)
 
@@ -214,7 +214,7 @@ curl http://127.0.0.1:8545/metrics
 vinx_chain_height 42
 vinx_mempool_size 0
 vinx_base_fee 100000000000000
-vinx_foundry <proche de 100 Md, décroît avec l'émission>
+vinx_emitted_atoms <tokens émis depuis la genèse, croît avec le temps>
 vinx_circulating_supply <part déjà émise aux validateurs, croît avec le temps>
 vinx_validator_count 1
 vinx_blocks_produced_total 42
@@ -222,7 +222,7 @@ vinx_tx_submitted_total{status="ok"} 5
 vinx_tx_in_block_total 5
 ```
 
-> `vinx_foundry` et `vinx_circulating_supply` évoluent avec l'**émission par le travail** (calculée sur le temps réel écoulé) ; leur somme reste toujours égale à 100 Md.
+> `vinx_emitted_atoms` et `vinx_circulating_supply` évoluent avec l'**émission par le travail** (calculée sur le temps réel écoulé). Invariant garanti : `circulating + epoch_pot + destroyed = emitted ≤ 100 Md`.
 
 ---
 
@@ -232,7 +232,7 @@ Ouvrir dans un navigateur : **http://127.0.0.1:8545/**
 
 Fonctionnalités :
 - Statut réseau en temps réel (SSE)
-- Carte économie : base_fee, supply circulante, **La Fonderie** (réserve d'émission qui décroît), faucet intégré
+- Carte économie : base_fee, supply circulante, émission progressive, faucet intégré
 - Graphique des frais des 30 derniers blocs
 - Recherche universelle (adresse / hash de TX / numéro de bloc)
 - Historique de TX paginé par compte
@@ -306,7 +306,7 @@ cargo test -p vinx-node --test integration
 ### Proptest (invariants de conservation)
 
 ```bash
-# Invariants : conservation de supply, fees→Fonderie, Merkle, nonces
+# Invariants : conservation de supply, émission, Merkle, nonces
 cargo test -p vinx-state --test property_tests
 ```
 
@@ -368,7 +368,7 @@ vinx-wallet balance $BOB --node $NODE
 
 echo "=== 7. État de la chaîne ==="
 curl -s $NODE/health | jq '{height, mempool_pending}'
-curl -s $NODE/network/stats | jq '{base_fee_atoms, foundry, circulating_supply}'
+curl -s $NODE/network/stats | jq '{base_fee_atoms, emitted_atoms, circulating_supply}'
 
 echo "=== OK — test terminé ==="
 kill $NODE_PID
