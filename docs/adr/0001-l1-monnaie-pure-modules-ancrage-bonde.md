@@ -58,7 +58,7 @@ Elle n'exécute, ne valide et ne comprend **rien** de la logique interne d'un mo
             │  règle des VINX           │
             ▼                           ▼
    ┌───────────────────────────────────────────────────────┐
-   │  COUCHE 1 — VinX monnaie pure (Rust / PoA Threshold)   │
+   │  COUCHE 1 — VinX monnaie pure (Rust / PoS Algorand-style) │
    │  • Comptes VINX, consensus, émission, bond/slashing    │
    │  • + Registre de modules { operator, bond, anchor_head}│
    │  • + 1 type de tx : AnchorState (écrit un hash)        │

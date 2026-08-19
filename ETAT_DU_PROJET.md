@@ -225,7 +225,7 @@ Modules internes :
 
 ## 3. Le protocole en détail
 
-### Consensus PoA Threshold
+### Consensus PoA Threshold *(implémenté — cible PoS Algorand-style VRF, ADR 0029)*
 
 1. Les validateurs sont listés dans le `ValidatorSet` (triés par adresse)
 2. Le leader du slot `height` = `active_validators[height % n_actif]` — la rotation saute les validateurs **jailés** (ADR 0027) ; sur slot-skip, un backup produit après timeout (tout validateur enregistré peut proposer, aligné sur `validate_block`)
