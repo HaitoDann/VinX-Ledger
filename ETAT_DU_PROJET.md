@@ -7,26 +7,29 @@
 
 > ## 🧭 Où en est le projet (lis ceci en premier)
 >
-> **Le socle est solide et le consensus multi-validateur est désormais éprouvé en réel.** Le **banc n=3 multi-process** (`scripts/bench-n3.sh`) valide, avec de vraies co-signatures P2P : liveness (finalité en lockstep), tolérance à 1 panne (2/3 finalise), et **sûreté** (à 1/3 la finalité gèle, le tip continue). Sur ce socle : **fair launch v6** (ADR 0040 ✅ : émission progressive, T_half ~20 ans, minting pur), état anti-bloat, P2P durci, gouvernance K-of-M, modules bondés. `cargo test --workspace` **vert** (~309 tests), clippy `-D warnings` & fmt propres. Stockage **schéma v11**.
+> **Le socle L1 est solide** (banc n=3 éprouvé, 309 tests verts, clippy propre). **L'architecture cible est désormais décidée** : VinX est un **settlement layer ZK-natif** avec consensus **PoS Algorand-style** (comité VRF n≈100, BLS agrégé) et un écosystème d'**Appchains** générant des preuves SP1.
 >
-> **La source de vérité de la feuille de route, c'est [`docs/adr/README.md`](./docs/adr/README.md)** — l'index de tous les ADR (Décisions d'Architecture), avec pour chacun son statut (✅ implémenté / Proposé / 🚧 brouillon). Ce document-ci décrit le **code tel qu'il tourne** ; l'index ADR décrit **ce qui est décidé et ce qui reste**.
+> **Deux pivots architecturaux actés en août 2026 :**
+> 1. **PoA Threshold → PoS Algorand** : le consensus cible est le comité VRF (ADR 0029, promu Accepté). Le pool de validateurs devient permissionless (ADR 0038). La sélection par score est remplacée par la sélection par VRF.
+> 2. **Modules bondés → Appchains ZK** : les modules hors-L1 génèrent des preuves SP1 soumises au L1 (ADR 0050). Le L1 passe du niveau 1 (bond + réputation) au niveau 3 (vérification cryptographique). ForceExit (ADR 0048) et Clearinghouse (ADR 0049) complètent l'écosystème.
+>
+> **La source de vérité de la feuille de route, c'est [`docs/adr/README.md`](./docs/adr/README.md).** Ce document-ci décrit le **code tel qu'il tourne** ; l'index ADR décrit **ce qui est décidé et ce qui reste**.
 >
 > ### Implémenté dans la tranche consensus (avec ADR dédié)
-> - **ADR 0002 — Finalité au quorum** : pointeur `finalized_height` explicite, **prefix-closed**, évalué contre le **quorum historique à chaque hauteur** (`Chain::note_quorum`/`quorum_at`, corrige le blocage du préfixe après changement de set) ; avancé aussi sur les chemins de sync (P2P + HTTP). **+ Refus de bâtir dans le vide** (`MAX_UNFINALIZED_DEPTH = 64`).
-> - **ADR 0027 — Jailing (t1+t2a+t2b)** : cœur pur déterministe (`vinx-core::reliability`), état câblé dans `settle_block` (`WorldState.reliability`, migration meta **v10→v11**), et **rotation** leader/backup sur le **set actif** (jailés sautés). ⚠️ **Sûreté :** le quorum de finalité **reste sur le set complet bondé** — jamais réduit par le jailing (le banc a montré que le réduire casse la sûreté sous partition ; seule la gouvernance réduit `n`).
-> - **ADR 0031 — Fork-choice (t1 + t2a + t2b)** : `consensus::canonical_head` (fonction pure) **câblé de bout en bout** — candidats concurrents, mécanisme de réorg par snapshot+rejeu (`reorg`), et déclenchement vivant dans le handler P2P. **Convergence indépendante de l'ordre d'arrivée prouvée au banc n=3.** Reste : soak multi-nœuds réseau réel.
-> - **ADR 0005 — Horloge protocole sur MTP** : émission/déliaison/upgrade comparent au Median Time Past incluant le bloc, sur les 3 chemins (prod/P2P/sync).
-> - **Heartbeat 10 min** : au moins un bloc toutes les 600 s (`HEARTBEAT_INTERVAL_SECS`), supprime l'incitation à forcer des blocs par fausses tx, borne le retard du MTP.
-> - **ADR 0040 — Émission progressive sans La Fonderie** : minting pur (`emitted_atoms`), `T_half` ~20 ans, slash 90 % → `epoch_dist_emission_pot`, invariant `circ + pot + détruits = émis ≤ MAX` garanti à chaque bloc. Migration `STORAGE_VERSION` v9→v10. Cadence fixe **12 s**, **3 000 tx/bloc** max (~250 TPS).
+> - **ADR 0002 — Finalité au quorum** : pointeur `finalized_height` prefix-closed, quorum historique par hauteur, refus de bâtir dans le vide (`MAX_UNFINALIZED_DEPTH = 64`). Éprouvé au banc n=3.
+> - **ADR 0027 — Jailing (t1+t2a+t2b)** : cœur pur déterministe, état câblé dans `settle_block`, rotation leader/backup sur le set actif. Sûreté : quorum de finalité sur le set complet bondé (jamais réduit par le jailing).
+> - **ADR 0031 — Fork-choice (t1+t2a+t2b)** : `canonical_head` pure + réorg snapshot+rejeu, câblé dans le handler P2P. Convergence prouvée au banc n=3.
+> - **ADR 0046 — BLS12-381 agrégé** : implémentation complète (`vinx-crypto/bls.rs`), co-signatures BLS dans les blocs. Base de l'agrégation pour le comité VRF.
+> - **ADR 0040 — Émission progressive** : minting pur, T_half ~20 ans, invariant garanti. Cadence fixe 12 s, 3 000 tx/bloc.
 >
-> ### Implémenté antérieurement (durcissement & extensions)
-> **0015** (vérif parallèle des signatures) · **0026** (dépôt existentiel + reaping) · **0022** (durcissement P2P anti-DoS) · **0011** (gouvernance K-of-M) · **0010** (registre de modules bondés) · **0020** (vecteurs dorés canoniques). Plus un lot sécurité : routes admin fail-closed + comparaison constant-time, sync HTTP vérifiée (proposeur/quorum/state_root), keystore wallet chiffré (argon2 + AES-GCM), rate-limiter borné, persistance incrémentale de la chaîne par hauteur.
+> ### Implémenté antérieurement
+> **0015** (vérif parallèle signatures) · **0026** (dépôt existentiel) · **0022** (P2P anti-DoS) · **0011** (gouvernance K-of-M) · **0010** (registre modules bondés) · **0020** (sérialisation canonique) · **0005** (MTP) · **0043** (cadence fixe 12 s) · **0045** (abolition heartbeat).
 >
-> ### Proposé / à faire (design rédigé, non implémenté) — voir l'index ADR
-> Consensus & sûreté : **0030** (accountability co-sign), **0036** (churn validateurs), reste de **0002** (view-change) et **0031** (soak réseau réel), **0027** (tx `Unjail`, règle 2). Économie : **0028** (récompenses par époque — Accepté), **0033** (bootstrap §1 : genèse multi-validateurs). Admission validateur : **0038** (Open PoA — Accepté). Modules : **0039** (rémunération par escrow — Accepté), **0034** (DA & preuve d'ancre), **0023** (slashing de fraude). Gouvernance : **0032** (garde-fous, 🚧 à discuter). Scaling : **0029** (BLS + comité VRF), **0035** (bornes de ressources), **0037** (blocs compacts). Divers : **0012** (clés HSM), **0013** (rent d'état), **0014** (light client), **0016** (post-quantique), **0017** (halt), **0018** (SLO), **0019** (TLS).
+> ### Architecture cible décidée — à implémenter
+> **PoS Algorand (🔴 priorité haute) :** comité VRF ECVRF RFC 9381 (ADR 0029), admission permissionless PoS (ADR 0038). **Appchains ZK (🔴 priorité haute) :** SP1 proof verification L1 (ADR 0050), ForceExit/Escape Hatch (ADR 0048), Clearinghouse cross-chain (ADR 0049), Celestia DA (ADR 0034). **Économie (🟠) :** récompenses par époque (ADR 0028), rémunération modules escrow (ADR 0039). **Sûreté (🟠) :** accountability co-sign (ADR 0030), churn validateurs (ADR 0036), bornes ressources tx (ADR 0035).
 >
-> ### ⚠️ Le chemin critique
-> Le banc n=3 et le wiring reorg du fork-choice (0031 t2b) sont **faits** (convergence prouvée au banc n=3). **Chemin critique désormais :** tx `Unjail` (0027), règle 2 (co-signatures absentes), **0030** (accountability), **soak fork-choice n=3 sur réseau réel** (0031). En parallèle : **récompenses par époque** (0028 — distribuer `epoch_dist_emission_pot` + émission entre proposeurs et co-signataires) puis **Open PoA** (0038) et **rémunération modules** (0039).
+> ### ⚠️ Chemin critique
+> **Court terme :** tx `Unjail` + règle 2 co-signatures (ADR 0027) ; accountability co-sign (ADR 0030). **Moyen terme :** comité VRF (ADR 0029) — prérequis de tout le reste ; admission PoS (ADR 0038) ; récompenses époque (ADR 0028). **Long terme :** SP1 proof verification (ADR 0050) ; ForceExit (ADR 0048) ; Clearinghouse (ADR 0049) ; Celestia (ADR 0034).
 
 ---
 
@@ -477,13 +480,18 @@ sync_peer_rpc = "http://1.2.3.4:8545"  # Sync depuis un pair au démarrage
 | 🔴 **Haute** | **Jailing — finir** : tx `Unjail` (opérateur, après cooldown) + règle 2 (co-signatures absentes) | 0027 |
 | 🔴 Haute | **Accountability co-sign** (détection des co-signatures conflictuelles → finalité *accountable*) ; reste de la finalité (view-change formel) | 0030, 0002 |
 | 🔴 Haute | **Soak fork-choice n=3** sur réseau réel (convergence prouvée au banc ; reste la validation réseau) | 0031 |
+| 🔴 Haute | **Comité VRF Algorand-style** — ECVRF RFC 9381, sélection uniforme parmi les bondés, leader = VRF le plus faible, finalité BFT ≥ 67 % du comité ; n=100 | 0029 (Accepté) |
+| 🔴 Haute | **Open PoS** — admission permissionless par bond, warmup 3 époques, rotation époque top-N par score, bond gouvernable dans bornes immuables | 0038 (Accepté) |
+| 🔴 Haute | **SP1 proof verification L1** — vérification Groth16 on-chain des preuves ZK Appchain, `AnchorState` étendu, deux modes (Bonded / ZK-verified) | 0050 (Accepté) |
+| 🔴 Haute | **ForceExit / Escape Hatch** — tx `0x0B` + MerkleProof solde Appchain, timeout 10 blocs, slash séquenceur si ignoré | 0048 (Accepté) |
+| 🔴 Haute | **Clearinghouse cross-Appchain** — LOCK → CrossMsg L1 → MINT → ACK, timeout + remboursement | 0049 (Accepté) |
+| 🔴 Haute | **Celestia DA** — engagement `DaCommitment` dans `AnchorState`, blobs publiés sur Celestia V1 | 0034 (Accepté) |
 | 🟠 Moyenne | **Récompenses par époque** — distribuer `epoch_dist_emission_pot` + émission entre proposeurs + co-signataires (1 h, `PROPOSER_SHARE_BPS=20 %`) ; frais restent immédiats au producteur | 0028 (Accepté) |
-| 🟠 Moyenne | **Open PoA** — admission permissionless par bond, veto collectif >66 % (7 j), S_perf scoring, expansion phasée immuable (3-5 → 10-21 → 50-101) | 0038 (Accepté) |
 | 🟠 Moyenne | **Rémunération des modules par escrow** — `ModuleEscrow`/`ModuleEscrowRefund`, partage via `fee_schedule`, preuve de livraison via `AnchorState` | 0039 (Accepté) |
 | 🟠 Moyenne | **Bootstrap §1** (genèse multi-validateurs + `genesis_hash`), **garde-fous de gouvernance** (🚧 à discuter), **bornes de churn** & **de ressources par tx** | 0033§1, 0032, 0036, 0035 |
-| 🟠 Moyenne | **Modules : DA & preuve d'ancre** puis **slashing de fraude** | 0034, 0023 |
-| 🟢 Future | **Décentralisation à l'échelle** (BLS + comité VRF), **blocs compacts** | 0029, 0037 |
-| 🟢 Future | Light client (0014), rent d'état (0013), clés HSM (0012), halt d'urgence (0017), TLS natif (0019), post-quantique (0016), SLO (0018) | — |
+| 🟠 Moyenne | **Slashing de fraude** (prérequis DA Celestia) | 0023 |
+| 🟠 Moyenne | **Tokenomics Appchains** : répartition par usage/melt, époque de règlement, garde-fous d'équité, émission élastique | 0041, 0042, 0044, 0047 |
+| 🟢 Future | **Blocs compacts**, light client, rent d'état, clés HSM, halt d'urgence, TLS natif, post-quantique, SLO | 0037, 0014, 0013, 0012, 0017, 0019, 0016, 0018 |
 
 ### Déjà fait (historique)
 
@@ -494,7 +502,12 @@ sync_peer_rpc = "http://1.2.3.4:8545"  # Sync depuis un pair au démarrage
 
 ### 🧭 Reprendre le travail (prochaine session)
 
-Le **fork-choice (ADR 0031 t2a+t2b) est câblé** et la convergence est prouvée au banc n=3. Les prochains chantiers par priorité : **(1)** tx `Unjail` + règle 2 co-signatures absentes (ADR 0027) ; **(2)** accountability co-sign (ADR 0030) ; **(3)** soak fork-choice n=3 sur réseau réel ; **(4)** récompenses par époque (ADR 0028 : distribuer `epoch_dist_emission_pot` + émission entre proposeurs et co-signataires).
+**Architecture cible décidée en août 2026 :** VinX = settlement layer ZK-natif, consensus PoS Algorand-style (comité VRF n≈100, BLS agrégé), Appchains ZK (SP1 + Celestia DA).
+
+Le **socle L1 est solide** (banc n=3, 309 tests). Les prochains chantiers par priorité :
+1. **(Court terme)** tx `Unjail` + règle 2 co-signatures absentes (ADR 0027) ; accountability co-sign (ADR 0030) ; soak fork-choice n=3 réseau réel.
+2. **(Moyen terme — PoS Algorand)** Comité VRF ECVRF RFC 9381 (ADR 0029) — **prérequis de tout le reste** ; admission PoS permissionless (ADR 0038) ; récompenses par époque (ADR 0028).
+3. **(Long terme — Appchains ZK)** SP1 proof verification L1 (ADR 0050) ; ForceExit (ADR 0048) ; Clearinghouse (ADR 0049) ; Celestia DA (ADR 0034).
 
 ---
 

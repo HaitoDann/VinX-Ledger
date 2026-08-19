@@ -1,8 +1,8 @@
 # ADR 0001 — L1 monnaie pure + surcouches par ancrage bondé
 
-- **Statut :** Accepté (décision de design) — **non implémenté** à ce jour.
-- **Date :** Juillet 2026
-- **Portée :** Architecture d'extensibilité de VinX Ledger.
+- **Statut :** Accepté — **partiellement implémenté** (registre bondé + ancrage Merkle) ; vérification ZK SP1 = ADR 0050 (architecture cible).
+- **Date :** Juillet 2026 · Révisé août 2026
+- **Portée :** Architecture d'extensibilité de VinX Ledger — doctrine fondatrice.
 - **Décideur :** VinX Labs.
 
 ---
@@ -41,9 +41,10 @@ Elle n'exécute, ne valide et ne comprend **rien** de la logique interne d'un mo
   consensus ou fuir de la mémoire. Cela **contredit** l'objectif « ne pas salir le
   cœur » à moins d'un bac à sable WASM métré — soit exactement la complexité de VM que
   VinX refuse. **Interdit par cette ADR.**
-- **Reporté — appchains / subnets (Cosmos/Avalanche).** Isolation propre mais nécessite
-  tout un framework de lancement de chaînes + messagerie inter-chaînes. Trop lourd pour
-  l'étape actuelle. Reste possible **par-dessus** l'ancrage, plus tard.
+- **Retenu (V1+) — appchains / subnets.** Les Appchains sont des modules hors-L1 qui génèrent
+  des preuves SP1 et les soumettent à la L1 pour vérification + settlement. La messagerie
+  inter-chaînes passe par le Clearinghouse L1 (ADR 0049). C'est la direction choisie —
+  la primitive d'ancrage bondé en est le socle.
 - **Retenu — ancrage d'état + règlement (rollup/sidechain minimaliste).** Le module
   tourne dans un **autre programme** : un bug chez lui ne peut littéralement pas toucher
   le nœud. Surface L1 minuscule. C'est le socle ; les appchains pourront s'y greffer.
@@ -98,15 +99,18 @@ logique applicative. Les utilisateurs d'un module font confiance à **l'opérate
 module** (adossé à son bond), pas magiquement à VinX.
 
 **Sortie de fonds (le vrai point dur), par ordre de robustesse croissante :**
-1. **Bond + réputation** (réaliste maintenant) : l'opérateur bonde ; une fraude prouvée
-   le slashe. Simple, mais pas trustless.
-2. **Preuves de fraude** (rollup optimiste, plus tard) : n'importe qui peut prouver une
+1. **Bond + réputation** (mode « Bondé » — disponible) : l'opérateur bonde ; une fraude prouvée
+   le slashe. Simple, mais pas trustless. Pour les modules légers / expérimentation.
+2. **Preuves de fraude** (rollup optimiste, futur) : n'importe qui peut prouver une
    transition invalide contre une ancre → slash automatique.
-3. **Preuves de validité** (zk, horizon lointain) : l'ancre est accompagnée d'une preuve
-   que l'état est correct.
+3. **Preuves de validité SP1** (zkVM RISC-V — **architecture cible V1, ADR 0050**) : l'ancre
+   est accompagnée d'une preuve Groth16 que l'état est cryptographiquement correct. Le L1
+   vérifie la preuve sans exécuter la logique. C'est ce qui fait de VinX un **settlement
+   layer ZK-natif**.
 
-Cette ADR acte le **niveau 1** comme point de départ, et garde 2 et 3 ouverts sans
-changer la primitive L1 (c'est toujours « un hash + un bond »).
+Cette ADR acte le **niveau 1** comme point de départ accessible, et le **niveau 3** comme
+architecture cible sans changer la primitive L1 (« un hash + un bond + une preuve optionnelle »).
+Les deux modes coexistent — voir ADR 0050 pour les détails d'implémentation.
 
 ## 5. Exemple travaillé — le module « Token Factory »
 

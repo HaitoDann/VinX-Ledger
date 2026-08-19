@@ -36,9 +36,11 @@ Rien ci-dessous n'est décidé — ce sont des propositions à instruire une par
   *Problème :* aucun mécanisme pour écarter un validateur lent/hors-ligne (distinct du slashing d'équivocation) ; un leader mort dégrade la liveness à chaque tour.
   *Fait (t1) :* `vinx-core::reliability` — fonctions **pures et déterministes** (attribution des manquements, jailing au seuil, set actif, quorum ajusté, unjail, plancher de liveness ; 5 tests). *Fait (t2a) :* **état câblé dans la transition** — champ `WorldState.reliability` (dernier champ sérialisé), **migration meta v10→v11** (append map vide, testée), mis à jour déterministiquement dans `settle_block` (hook universel : production/backup/P2P/sync) avec le proposeur effectif → table identique sur tous les nœuds. *Fait (t2b) :* la **rotation** leader (`produce_block`) et la file de **backup** (`try_backup_production`) opèrent sur le **set actif** (`active_leader_at`/`active_validators`, jailés sautés). **⚠️ Correction de sûreté (révélée par le banc n=3) :** le **quorum de finalité reste sur le set complet bondé** (`⌈2n/3⌉`), **jamais** réduit par le jailing — la table `reliability` est dérivée/subjective sous partition ; la réduire laisserait une minorité (split 1│2) jailer la majorité dans sa vue, tomber à quorum 1 et finaliser une branche rivale (double-finalité). Seule la gouvernance (`RemoveValidator`, committée) réduit `n`. Banc : à 1/3 vivant la finalité **gèle**, à 2/3 elle avance. *Reste :* tx `Unjail` (opérateur, après cooldown), règle 2 (co-signatures absentes).
 
-- **0029 — [Décentralisation à grande échelle : agrégation & comité dynamique](./0029-agregation-signatures-comite-dynamique.md)** 🟢 **— Proposé** (évolution majeure du consensus)
-  *Problème :* le round-robin + *tous* co-signent est O(N) → plafonne à des dizaines de validateurs.
-  *Direction (phasée) :* **phase 1** agrégation **BLS** (N signatures → 1 agrégat + bitmap, blocs bornés, centaines de validateurs) ; **phase 2** **échantillonnage de comité par VRF** (tirage uniforme parmi les bondés, leader imprévisible anti-DoS, milliers de validateurs). Étend (ne remplace pas) le quorum ; intègre 0027/0028 ; exige 0014 (weak subjectivity) avant la phase 2.
+- **0046 — [BLS12-381 : agrégation des co-signatures](./0046-bls-aggregate-cosignatures.md)** 🔴 **— ✅ implémenté** (`vinx-crypto/bls.rs`)
+  *Fait :* BLS12-381 agrégé via `blst` — N co-signatures → 1 agrégat + bitmap, vérification O(1). Base cryptographique du comité VRF (ADR 0029).
+
+- **0029 — [Comité VRF Algorand-style : agrégation BLS & sélection VRF](./0029-agregation-signatures-comite-dynamique.md)** 🔴 **— Accepté — Architecture cible du consensus (non implémenté)**
+  *Architecture cible :* comité n=100 sélectionné par **ECVRF RFC 9381** parmi les validateurs bondés ; BLS12-381 agrégé (`blst`) pour les co-signatures — 100 sigs → 1 agrégat, vérification O(1) ; leader = validateur avec la sortie VRF la plus faible (imprévisible jusqu'au dernier moment, anti-DoS). Finalité BFT déterministe (≥ 67 % du comité). **BLS déjà implémenté (ADR 0046).** Complémentaire d'ADR 0038 : 0029 = sélection du comité ; 0038 = admission dans le pool.
 
 - **0030 — [Accountability des co-signatures conflictuelles](./0030-accountability-cosignatures-conflictuelles.md)** 🔴 **— Proposé** (sûreté)
   *Problème :* la primitive de slashing on-chain punit **déjà** tout validateur signant deux en-têtes conflictuels à la même hauteur, mais le P2P ne **détecte** que la double-*proposition*, pas les **co-signatures** conflictuelles → la finalité n'est pas *accountable* (une double-finalité resterait impunie).
@@ -84,9 +86,9 @@ Rien ci-dessous n'est décidé — ce sont des propositions à instruire une par
   *Problème :* 100 % de l'émission va au seul proposeur ; la co-signature (qui donne la finalité) est un travail non payé, les revenus sont en grumeaux, et le *winner-take-all* amplifie la concentration early et l'incitation à retarder. À grande échelle (set jusqu'à 101), créditer N validateurs par bloc est prohibitif.
   *Direction :* **modèle par époque** — l'émission s'accumule dans un pot sur une fenêtre `EPOCH_DURATION_SECS` (ex. 1 h), puis est distribuée en une seule passe : `PROPOSER_SHARE_BPS` (gouvernable) aux proposeurs au prorata de leurs blocs, le reste proportionnellement aux co-signatures valides de l'époque. Les frais restent au producteur immédiatement (hors époque). **Ne touche pas la courbe** (ADR 0021 immuable). À `n=1` : inchangé.
 
-- **0038 — [Admission permissionless au set de validateurs (Open PoA)](./0038-open-poa-admission.md)** 🟠 **— Accepté (design, non implémenté)**
+- **0038 — [Admission permissionless au pool de validateurs (Open PoS)](./0038-open-poa-admission.md)** 🔴 **— Accepté (design, non implémenté)**
   *Problème :* l'admission gouvernance-gatée crée une contradiction avec le fair launch — l'admin choisit les individus → l'admin choisit qui gagne l'émission.
-  *Direction :* **Open PoA** — le bond suffit à entrer dans la file (pas d'approbation admin individuelle) ; veto collectif des validateurs existants (>66 %, fenêtre 7 jours) ; l'admin ne fixe que le montant du bond. Score `S_perf` uniquement (taux de co-signature et de proposition, 100 % déterministe on-chain, pas de DPoS/W_stake). Expansion phasée **automatique et immuable depuis la genèse** : Phase 1 (3–5, gouvernance-gated pendant le bootstrap) → Phase 2 (10–21, Open PoA) → Phase 3 (50–101, Open PoA). **Prérequis** : ADR 0002/0027/0031 éprouvés avant Phase 2.
+  *Direction :* **Open PoS** — le bond suffit à entrer dans le pool (pas d'approbation individuelle, pas de veto) ; warmup 3 époques ; rotation par époque (top-N par score de co-signature, tiebreaker SHA-256). Bond gouvernable dans des bornes immuables (`[10 000, 100 000 000]` VinX). **Note : 0038 = qui peut être dans le pool ; ADR 0029 = qui est dans le comité du bloc.** **Prérequis** : ADR 0002/0027/0031 éprouvés.
 
 - **0040 — [Émission progressive sans La Fonderie](./0040-emission-progressive-sans-fonderie.md)** 🔴 **— ✅ implémenté** (`STORAGE_VERSION` 10, commit `f044bc4`)
   *Problème :* « La Fonderie » (100 Md pré-alloués à la genèse) ressemble à un pre-mine visible ; le « melt » réintroduit une émission dépendante du taux de slashing ; la demi-vie de 8 ans front-load 50 % de la supply trop tôt.
@@ -95,6 +97,18 @@ Rien ci-dessous n'est décidé — ce sont des propositions à instruire une par
 - **0039 — [Rémunération des opérateurs de modules](./0039-remuneration-operateurs-modules.md)** 🟠 **— Accepté (design, non implémenté)**
   *Problème :* ADR 0010 crée le registre de modules bondés mais ne définit aucune rémunération — sans revenu, les opérateurs n'ont aucune raison économique de bonger.
   *Direction :* **escrow on-chain + partage automatique** — le client crée un `ModuleEscrow` (tx `0x0A`) qui bloque N VINX ; le module livre le service off-chain et ancre une preuve via `AnchorState` (`EscrowRelease`) ; le L1 distribue atomiquement selon le `fee_schedule` du module (tableau `recipients: Vec<(Address, bps)>`, résidu à l'opérateur). Timeout → `ModuleEscrowRefund` (tx `0x0B`). **Aucune émission secondaire** — revenu 100 % issu des utilisateurs. Prérequis : ADR 0034 pour les preuves vérifiables (phase 2 du durcissement).
+
+- **0041 — [Répartition de l'émission entre Appchains par usage (melt)](./0041-repartition-emission-usage-melt.md)** 🔴 **— Proposé**
+  *Direction :* l'émission est dirigée vers les Appchains proportionnellement au VINX « melté » (brûlé) par leurs utilisateurs. Lien entre usage réel et récompense d'émission.
+
+- **0042 — [L'époque de règlement de l'émission](./0042-epoque-reglement-emission.md)** 🔴 **— Proposé**
+  *Direction :* formaliser le cycle époque / règlement / distribution — articulation avec ADR 0028 (récompenses validateurs) et ADR 0041 (répartition Appchains).
+
+- **0044 — [Garde-fous d'équité et amorçage de l'émission](./0044-garde-fous-equite-amorcage-emission.md)** 🔴 **— Proposé**
+  *Direction :* bornes constitutionnelles sur la répartition de l'émission entre Appchains (anti-capture, anti-spam). Décision constitutionnelle avant mainnet.
+
+- **0047 — [Émission élastique à réservoir](./0047-emission-elastique-reservoir.md)** 🔴 **— Proposé**
+  *Direction :* mécanisme d'émission élastique (réservoir tampon) pour lisser les variations de demande. Décision constitutionnelle avant mainnet.
 
 - **0033 — [Genèse & bootstrap de fair-launch](./0033-genese-bootstrap-fair-launch.md)** 🟠 **— Partiellement supersédé**
   *Statut :* §1 (genèse multi-validateurs + `genesis_hash`) reste valide et à implémenter ; §2 (admission permissionless) → ADR 0038 ; §3 (lissage émission early) → ADR 0040.
@@ -111,8 +125,8 @@ Rien ci-dessous n'est décidé — ce sont des propositions à instruire une par
 - **0021 — Immutabilité de la courbe d'émission** 🟠 **— Accepté — révisé (ADR 0040)**
   *Principe :* la courbe est **immuable après la genèse** — ni l'admin, ni une `GovernanceAction` ne peut la modifier. Le `T_half` a été mis à jour avant le lancement (8 ans → ~20 ans, ADR 0040) ; cela respecte l'esprit (le changement précède la genèse). Gravé dans le `GenesisConfig` + test constitutionnel.
 
-- **[Heartbeat périodique](./0038-bloc-heartbeat-periodique.md)** 🟠 **— ✅ implémenté** (voir `0038-bloc-heartbeat-periodique.md`)
-  *Fait :* **au moins un bloc toutes les 10 min** (`HEARTBEAT_INTERVAL_SECS = 600`), même vide (~15-30 Mo/an). Supprime l'incitation au spam pour capturer l'accrual ; borne le retard du MTP ; fait mûrir déliaisons/upgrades.
+- **0045 — [Cadence fixe 12 s : abolition du heartbeat](./0045-cadence-fixe-abolition-heartbeat.md)** 🔴 **— ✅ implémenté**
+  *Fait :* cadence fixe **12 s** ; heartbeat périodique **aboli** (la cadence fixe rend le bloc vide toutes les 10 min superflu). Complète et supersède l'ancienne conception heartbeat.
 
 - **[Cadence de consensus fixe 12 s](./0043-parametres-cadence-consensus.md)** 🔴 **— ✅ accepté (appliqué)** (voir `0043-parametres-cadence-consensus.md`)
   *Fait :* **block time 5 → 12 s**, accélération dos-à-dos retirée — **plancher fixe anti-fork**. Débit max **3 000 tx/bloc** (~250 TPS). La congestion passe par le base-fee, pas par des blocs rapprochés. Complémentaire de 0031 : réduit les collisions.
@@ -171,9 +185,8 @@ Rien ci-dessous n'est décidé — ce sont des propositions à instruire une par
   *Fait :* type de tx `AnchorState` (0x09) portant un `ModuleOp` (Register/Anchor/Deregister), registre `modules: BTreeMap<Hash32, ModuleEntry {operator, bond, anchor_head, anchored_count}>`. La L1 n'exécute **jamais** la logique de module — elle n'ancre que des commitments bondés. Bond verrouillé (neutralité de circulation, ADR 0004), min-bond + `MAX_MODULES` anti-bloat, opérateur ≥ ED (jamais reapé). Migration in-place v8→v9.
   *Différé :* adjudication de fraude / slashing du bond (**→ ADR 0023**), délai de déliaison du bond, métadonnées & commande wallet dédiée.
 
-- **0034 — [Disponibilité des données & vérification d'ancre](./0034-disponibilite-donnees-verification-ancre.md)** 🟠 **— Proposé**
-  *Problème :* 0010 ancre une **racine** mais la L1 ne stocke pas les données — **où** sont-elles, et **comment** un tiers vérifie une ancre ? Sans ça, un opérateur ancre un nombre opaque et l'ADR 0023 (slashing de fraude) n'a rien sur quoi s'appuyer.
-  *Direction :* standardiser un **engagement de disponibilité** (hash du blob + backend DA, on-chain borné vs externe) et un **format de preuve d'inclusion** Merkle unique (réutilise la brique du state_root, aligné 0014). La L1 stocke l'engagement, jamais les données. Tranche 1 = engagement + preuve d'inclusion ; tranche 2 = contestation d'indisponibilité (érasure-coding). **Prérequis d'ADR 0023.**
+- **0034 — [Disponibilité des données — Celestia DA (V1)](./0034-disponibilite-donnees-verification-ancre.md)** 🔴 **— Accepté — V1 : Celestia externe (non implémenté)**
+  *Décision (août 2026) :* les Appchains publient leurs blobs sur **Celestia**. L'`AnchorState` contient un `DaCommitment { celestia_height, namespace, data_root }`. La L1 stocke l'engagement, jamais les données. V2 : DA embarquée optionnelle. **Prérequis d'ADR 0023 et d'ADR 0048 (ForceExit).**
 
 - **0023 — Adjudication du slashing de module** 🟢
   *Direction :* comment une fraude d'opérateur de module est prouvée et sanctionnée (bond → réputation → preuves de fraude → zk), sans jamais exécuter la logique du module sur la L1. **Dépend d'ADR 0034** (DA + preuve pour qu'une fraude soit prouvable).
@@ -181,6 +194,17 @@ Rien ci-dessous n'est décidé — ce sont des propositions à instruire une par
 - **0039 — [Infrastructure de subnets : escrow bondé + racine de récompense](./0039-infrastructure-subnets-escrow-recompense.md)** 🟠 **— Proposé**
   *Problème :* un module 0010 est **mono-opérateur** (il ancre un nombre) ; pour héberger un vrai subnet — plusieurs participants qui font un travail et **gagnent des VINX** — il manque le paiement **sans confiance** de participants multiples, jugé hors-chaîne.
   *Direction :* un subnet = module bondé + **escrow VINX** + **racine de récompense cumulative** + **réclamation par preuve Merkle** (`Deposit`/`SetRewardRoot`/`Claim`, appendés à `ModuleOp`). La L1 ne juge jamais le travail ; dommage max borné par l'escrow ; aucune émission détournée (rejette le modèle Bittensor). Premier subnet de démo : **balise d'aléa VRF** (honnête par construction, synergie 0029). **Prérequis :** 0034 (preuves), 0023 (fraude), banc n≥3.
+
+### Appchains ZK (architecture cible — non implémenté)
+
+- **0050 — [Vérification des preuves SP1 sur le L1](./0050-sp1-proof-verification-l1.md)** 🔴 **— Accepté (design, non implémenté)**
+  *Direction :* le L1 vérifie les preuves ZK Groth16 des Appchains via `verify_sp1_proof(proof, vk, public_values)`. `AnchorState` étendu : `sp1_proof: Option<Sp1Proof>`, `state_diff: Vec<(Address, BalanceDelta)>`, `da_commitment`. Mode Bonded (None) = niveau 1 ; ZK-verified (Some) = niveau 3. `Sp1VerifyingKey` enregistrée à l'inscription. Deps : `sp1-sdk`, `bn254`.
+
+- **0048 — [ForceExit / Escape Hatch](./0048-force-exit-escape-hatch.md)** 🔴 **— Accepté (design, non implémenté)**
+  *Direction :* tx `ForceExit (0x0B)` — un utilisateur soumet une `MerkleProof` de son solde Appchain directement sur le L1 et récupère ses fonds sans passer par le séquenceur. Timeout `T_FORCE_EXIT_TIMEOUT` (10 blocs L1 ≈ 120 s) ; non-traitement → slash du bond séquenceur. `AppchainState` : `Active`, `Dormant` (72 h inactif), `ForceExitViolated`. Nullifier : `force_exited: BTreeSet<(Hash32, Address)>`. Prérequis : ADR 0050.
+
+- **0049 — [Clearinghouse cross-Appchain](./0049-clearinghouse-cross-appchain.md)** 🔴 **— Accepté (design, non implémenté)**
+  *Direction :* transferts inter-Appchains via message passing asynchrone sur le L1. Flux 4 étapes : LOCK sur A → L1 enregistre `CrossMsg` → MINT sur B → ACK clôture. `CrossMsgStatus` : Pending / Delivered / Expired / Refunded. Timeout + `CrossMsgExpire (0x0C)` → remboursement automatique. Pas d'atomicité synchrone — trade-off assumé.
 
 ### Robustesse & exploitation
 

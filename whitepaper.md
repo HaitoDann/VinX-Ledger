@@ -25,7 +25,7 @@ Cohérent avec cette philosophie, VinX est développé sur un **protocole Rust e
 ## 2. Architecture Technique
 
 - **Langage** : Rust, implémentation propriétaire de bout en bout
-- **Vitesse** : Cadence de bloc à **fixe à 12 s** (ADR 0043) — un bloc produit toutes les 12 secondes, même vide (pas de skip-empty ; la congestion est absorbée par le base-fee, pas par des blocs rapprochés). Finalité déterministe **au quorum** (prefix-closed) via le consensus PoA Threshold — immédiate à validateur unique, elle suit les co-signatures à n≥2
+- **Vitesse** : Cadence de bloc fixe à **12 s** (ADR 0043) — un bloc produit toutes les 12 secondes, même vide. Finalité déterministe **au quorum** (prefix-closed) via le consensus **PoS Algorand-style** (comité VRF n ≈ 100, BLS agrégé) — immédiate à validateur unique, elle suit les co-signatures à n≥2
 - **Capacité** : jusqu'à **3 000 transactions par bloc** (réglable), mempool de **100 000** transactions
 - **Performance** : ~250 TPS (3 000 tx à 12 s ; l'exécution est séquentielle — une exécution parallèle serait requise pour dépasser)
 - **Précision** : 18 décimales internes, 2 décimales affichées à l'utilisateur
@@ -153,7 +153,7 @@ Le frais et l'émission **ne quittent jamais la circulation** — ils changent s
 
 ## 5. Le staking — un bond de validateur, pas un rendement
 
-Dans un réseau **PoA permissionné**, la sécurité vient de l'identité légale des validateurs et du seuil de co-signatures, **pas** d'un jeton. Le staking n'a donc de sens que pour une chose : poser une **caution** — la peau dans le jeu qu'un validateur perd s'il triche.
+Dans un réseau **PoS permissionless**, la sécurité vient du bond économique des validateurs et de la vérification cryptographique (ZK), **pas** d'une liste d'identités autorisées. Le staking n'a donc de sens que pour une chose : poser une **caution** — la peau dans le jeu qu'un validateur perd s'il triche.
 
 - **Le staking retail est supprimé.** Il n'existe plus de « récompenses de staking » pour des détenteurs passifs. Un utilisateur lambda garde du VINX pour **l'utiliser comme cash**, point.
 - **Bond minimum : `100 000 VinX`** (gouvernable) — requis pour être ajouté au set des validateurs. Le validateur défini à la genèse est **dispensé** (bootstrap : il démarre sans jeton et accumule son bond via l'émission).
@@ -289,7 +289,7 @@ Les éléments suivants sont les **piliers de conception** de VinX :
 4. **Invariant** : `circulation + pot_époque + escrows + poussière_détruite = émis ≤ 100 Md` à chaque bloc
 5. **Émission décroissante continue puis relais aux frais** — jamais un robinet discrétionnaire ; jamais d'événement discret
 6. **Le bond sécurise, le travail rémunère** — le stake ne produit aucun rendement ; le slash punit et récompense collectivement les honnêtes
-7. **Consensus permissionné** (pas de switch vers PoW anonyme ou PoS ouvert)
+7. **Consensus PoS natif avec comité VRF** (tirage uniforme parmi les validateurs bondés, comité n ≈ 100, finalité BFT déterministe — ADR 0029/0038)
 8. **Propriété inconditionnelle des comptes** (aucun gel)
 9. **La L1 n'exécute jamais de logique applicative** — les fonctionnalités complexes vivent dans des surcouches **hors-nœud**, reliées à VinX par ancrage bondé et rémunérées par escrow on-chain. Voir [ADR 0001](docs/adr/0001-l1-monnaie-pure-modules-ancrage-bonde.md) et [ADR 0039](docs/adr/0039-remuneration-operateurs-modules.md).
 10. **Courbe d'émission immuable après la genèse** — le total (100 Md), la demi-vie (~20 ans) et la forme exponentielle continue ne sont gouvernables par **personne** (ni admin, ni action de gouvernance). Nul ne décide de la création monétaire. Voir [ADR 0021](docs/adr/0021-immutabilite-emission.md) et [ADR 0040](docs/adr/0040-emission-progressive-sans-fonderie.md).
@@ -334,8 +334,8 @@ VinX Ledger n'a pas de pression d'agenda. Le projet avance à son rythme.
 | Cadence de bloc | Fixe **12 s** (ADR 0043) — un bloc toutes les 12 s, même vide (pas de skip-empty ; congestion via base-fee) |
 | Référence de temps | Timestamp des blocs (temps réel), pas la hauteur |
 | Capacité | 3 000 tx/bloc (réglable) · ~250 TPS · mempool 100 000 |
-| Consensus | PoA Threshold, quorum `⌈2n/3⌉` sur le set complet, finalité prefix-closed déterministe (éprouvée au banc n=3) |
-| Validateurs | permissionnés, **bond requis** ; rotation leader/backup sur le set actif (jailing, ADR 0027) |
+| Consensus | **PoS Algorand-style** — comité VRF n ≈ 100, BLS agrégé, finalité BFT déterministe (ADR 0029) |
+| Validateurs | **permissionless** — bond requis, admission libre, sélection par VRF (ADR 0038/0029) |
 | Full nodes | Ouverts à tous |
 | Supply totale | 100 milliards VinX (immuable, no burn) |
 | **Genèse** | **0 émis, 0 en circulation — aucun pre-mine, aucune réserve pré-allouée** |

@@ -1,12 +1,11 @@
 # ADR 0029 — Décentralisation à grande échelle : agrégation de signatures & comité dynamique
 
-- **Statut :** Proposé
-- **Catégorie :** Consensus & finalité · **Priorité :** 🟢 future (évolution majeure du
-  consensus)
-- **Date :** Juillet 2026
+- **Statut :** Accepté — **Architecture cible du consensus** (non implémenté)
+- **Catégorie :** Consensus & finalité · **Priorité :** 🔴 haute
+- **Date :** Juillet 2026 · Révisé août 2026 (décision architecture VinX PoS)
 - **Liens :** étend la finalité (ADR 0002) ; généralise la rémunération (ADR 0028) et le
-  jailing (ADR 0027) ; renforce l'exigence de light-client / weak subjectivity (ADR 0014) ;
-  intègre la sélection VRF de leader.
+  jailing (ADR 0027) ; aligne l'admission PoS permissionless (ADR 0038) ; prérequis des
+  Appchains (ADR 0050).
 
 ## Contexte
 
@@ -121,9 +120,30 @@ signatures reste un travail réseau O(N)). On **échantillonne** :
   grande partie du bénéfice à risque bien moindre ; la phase 2 (comité + beacon) est le morceau
   réellement risqué et doit être isolée.
 
-## Critères de déclenchement
+## Décision architecturale (août 2026)
 
-Instruire ce ADR seulement quand : (1) la finalité formelle (ADR 0002) et le jailing (ADR 0027)
-sont en place et éprouvés au banc ; (2) le nombre de validateurs **réels** approche la limite
-du all-sign Ed25519 (quelques dizaines) ; (3) un standard light-client / weak subjectivity
-(ADR 0014) existe. Avant cela, agrégation et comité sont un risque net sans bénéfice mesurable.
+Ce ADR passe de « future » à **architecture cible** du consensus VinX. Le comité VRF avec
+agrégation BLS est la direction choisie pour le réseau principal. Les raisons :
+
+1. Le consensus PoA round-robin plafonnerait le set à ~20 validateurs — incompatible avec
+   un réseau ouvert et décentralisé.
+2. Le modèle Algorand (VRF + comité réduit + BLS) offre finalité déterministe, résistance
+   DoS (leader imprévisible), et passage à l'échelle.
+3. BLS est déjà implémenté (ADR 0046, `vinx-crypto/bls.rs`) — la phase 1 est faisable sans
+   nouvelle dépendance cryptographique.
+
+**Paramètres cibles :**
+
+| Paramètre | Valeur cible | Justification |
+|-----------|-------------|---------------|
+| Taille du comité `k` | 100 | O(k²) = 10 000 messages — gérable ; sécurité probabiliste élevée |
+| Algorithme VRF | **ECVRF RFC 9381** | Standard IETF, crate Rust disponible (`vrf-rs`) |
+| Agrégation | **BLS12-381 via `blst`** | Déjà implémenté, audit Ethereum |
+| Sélection | **Uniforme parmi les bondés** | Pas pondéré par stake — égalitarisme VinX |
+| Leader | **Validateur avec la sortie VRF la plus faible** | Déterministe, vérifiable |
+| Finalité | **BFT : 1 bloc, ≥ 67 % du comité** | Déterministe (pas probabiliste) |
+
+**Prérequis avant implémentation :**
+- ADR 0002 (finalité) et ADR 0027 (jailing) éprouvés au banc n=3 ✅ (déjà fait)
+- ADR 0038 (admission PoS permissionless) décidé ✅ (déjà accepté)
+- Spec formelle du beacon d'aléa (seed de l'époque) à rédiger

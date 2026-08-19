@@ -1,10 +1,25 @@
 # ADR 0034 — Disponibilité des données & vérification d'ancre (modules)
 
-- **Statut :** Proposé
-- **Catégorie :** Modules (par-dessus l'ADR 0001) · **Priorité :** 🟠 moyenne
-- **Date :** Juillet 2026
-- **Liens :** complète la primitive d'ancrage (ADR 0010) ; prérequis de l'adjudication de
-  fraude (ADR 0023) ; s'appuie sur le standard light-client (ADR 0014).
+- **Statut :** Accepté — **V1 : Celestia externe ; V2 : DA embarquée optionnelle** (non implémenté)
+- **Catégorie :** Modules / Appchains · **Priorité :** 🔴 haute
+- **Date :** Juillet 2026 · Révisé août 2026 (choix Celestia pour V1)
+- **Liens :** complète la primitive d'ancrage SP1 (ADR 0050) ; requis pour ForceExit (ADR 0048) ; prérequis de l'adjudication de fraude (ADR 0023).
+
+## 0. Décision (août 2026)
+
+Le choix pour V1 est **Celestia** comme couche DA externe :
+- Les Appchains publient leurs blobs de données (state diffs + historique de tx) sur Celestia.
+- L'`AnchorState` soumis au L1 VinX contient un `DaCommitment { celestia_height, namespace, data_root }`.
+- Les clients peuvent vérifier la disponibilité via le light client Celestia (sampling aléatoire).
+
+**Pourquoi Celestia plutôt qu'une DA embarquée :**
+- L1 reste ultra-léger (ne stocke pas les données des Appchains).
+- Celestia est production-grade, Rust-friendly, et séparation propre DA/exécution.
+- Évite une décision irréversible sur le format de DA avant que les Appchains existent.
+
+**V2 :** option de DA embarquée (blobs bornés) pour les Appchains qui préfèrent l'auto-suffisance.
+
+---
 
 ## Contexte
 

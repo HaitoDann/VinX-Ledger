@@ -4,44 +4,74 @@
 
 <h1 align="center">VinX Ledger</h1>
 
-<p align="center"><strong>Envoyer de l'argent devrait être aussi simple que d'envoyer un message.</strong></p>
+<p align="center"><strong>Settlement layer ZK-natif — rapide, souverain, sans intermédiaire.</strong></p>
 
-<p align="center">L1 de paiement souverain — rapide, transparent, sans intermédiaire.</p>
-
----
-
-## Pourquoi VinX ?
-
-Aujourd'hui, envoyer de l'argent implique des banques, des frais cachés, des délais, et des tiers qui peuvent bloquer, censurer ou geler ton compte. VinX est une alternative : **une monnaie numérique qui fonctionne comme du cash** — tu l'envoies directement à qui tu veux, elle arrive en quelques secondes, et personne ne peut t'en empêcher.
-
-Pas de smart contracts. Pas de spéculation. Une seule promesse : **des paiements du quotidien, vite, pas cher, et sous ton contrôle.**
-
-VinX est entièrement construit en Rust, sans dépendance à un framework blockchain tiers. Chaque ligne de code, chaque règle du protocole est lisible et auditable.
+<p align="center">L1 de paiement avec finalité déterministe, consensus Algorand-style et écosystème d'Appchains ZK.</p>
 
 ---
 
-## Comment ça marche (en simple)
+## Vision
 
-Imagine un registre public partagé entre plusieurs serveurs indépendants (les **validateurs**). Quand tu envoies du VINX, ta transaction est vérifiée par plus de 66 % de ces validateurs simultanément. Une fois signée par ce quorum, elle est **définitive** — personne ne peut l'annuler, ni la réorganiser.
+VinX est ce qu'Ethereum essaie de devenir : un **settlement layer ZK-natif**, sans la dette technique de l'EVM. Il fait exactement trois choses sur le L1 :
 
-Les validateurs sont rémunérés par le protocole lui-même (émission progressive) et par les frais de transaction. Plus le réseau est utilisé, plus les frais suffisent — jusqu'au jour où l'émission s'éteint et les frais prennent entièrement le relais.
+1. **Arithmétique de solde** — transferts, comptes, bonds de validateurs
+2. **Vérification de preuves ZK SP1** — les Appchains prouvent leur état, le L1 vérifie
+3. **Consensus BFT** — finalité déterministe, un bloc, aucune réorganisation
+
+Pas d'EVM. Pas de WASM. Pas de logique applicative sur L1. Plus minimaliste qu'Ethereum L1.
 
 ---
 
-## Caractéristiques clés
+## Architecture
 
-| | |
-|---|---|
-| **Consensus** | PoA Threshold — >66 % des validateurs co-signent chaque bloc |
-| **Finalité** | Déterministe — un bloc quorum-signé n'est jamais réorganisé |
-| **Cadence** | Fixe à 12 s — un bloc produit toutes les 12 secondes |
-| **Capacité** | 3 000 tx/bloc · ~250 TPS (configurable) |
-| **Frais** | Forfait fixe × congestion (×1–3) · **100 % au validateur producteur** |
-| **Cryptographie** | Ed25519 · BLS12-381 · SHA-256 · Bech32 (`vinx1`) |
-| **Supply** | 100 milliards VINX · fixe · **sans pre-mine · sans burn** |
-| **Émission** | Décroissance exponentielle continue · demi-vie ~20 ans · puis fees-only |
-| **Validateurs** | Bond minimum 100 000 VINX · slash équivocation 100 % · jailing sur downtime |
-| **Staking** | Bond de sécurité uniquement — **aucun rendement passif** |
+```
+┌──────────────────────────────────────────────────────────────────┐
+│  Appchains (hors-L1, permissionless)                              │
+│  DEX · Lending · Identité · etc.                                  │
+│  → génèrent des preuves SP1 → soumettent au L1                   │
+└────────────────────────────┬─────────────────────────────────────┘
+                             │ AnchorState + SP1 proof
+                             ▼
+┌──────────────────────────────────────────────────────────────────┐
+│  VinX L1 — settlement layer ZK-natif                              │
+│  • Comptes VINX · bond/slashing · frais                           │
+│  • Vérification preuves SP1 Groth16 (ADR 0050)                   │
+│  • Clearinghouse cross-Appchain (ADR 0049)                        │
+│  • ForceExit / Escape Hatch (ADR 0048)                            │
+│  • Consensus : PoS Algorand-style, comité VRF n≈100, BLS agrégé  │
+└──────────────────────────────────────────────────────────────────┘
+                             │ DA (state diffs)
+                             ▼
+                         Celestia
+```
+
+---
+
+## Consensus — PoS Algorand-style
+
+Le consensus VinX est un **PoS pur avec comité réduit à sélection VRF** :
+
+| Propriété | Valeur |
+|-----------|--------|
+| **Sélection** | VRF ECVRF (RFC 9381) — tirage uniforme parmi les bondés |
+| **Comité** | n ≈ 100 validateurs par bloc |
+| **Signatures** | BLS12-381 agrégé — 100 signatures → 1, vérification O(1) |
+| **Finalité** | BFT déterministe (1 bloc, ≥ 67 % du comité) |
+| **Admission** | Permissionless — bond suffit, pas d'approbation admin |
+| **Leader** | Validateur avec la sortie VRF la plus faible (imprévisible) |
+
+**Résistance DoS** : le leader est imprévisible jusqu'au dernier moment — contrairement au round-robin, un attaquant ne sait pas qui cibler.
+
+---
+
+## Appchains
+
+Les Appchains s'exécutent hors-L1, génèrent des preuves SP1, et les soumettent pour vérification + settlement :
+
+- **Permissionless** : n'importe qui peut déployer une Appchain avec un bond
+- **Sécurité cryptographique** : ZK proof = L1 ne fait pas confiance au séquenceur pour l'exécution
+- **Séquenceur unique + Escape Hatch** : si le séquenceur censure ou tombe, le `ForceExit` (ADR 0048) permet de récupérer ses fonds directement sur le L1
+- **Cross-chain** : le Clearinghouse L1 (ADR 0049) gère les transferts inter-Appchains via message passing asynchrone
 
 ---
 
@@ -67,12 +97,8 @@ cargo run -p vinx-wallet -- balance <VOTRE_ADRESSE>
 ```
 
 Le nœud expose **http://localhost:8545** :
-- **`/`** — explorateur de blocs + wallet web (la clé privée ne quitte jamais ton navigateur)
-- **`/admin`** — console d'administration (dashboard, validateurs, upgrades)
-
-Une **application desktop** (Tauri) est disponible dans [`apps/vinx-desktop`](./apps/vinx-desktop) — même wallet + console admin, 100 % local.
-
-L'état est sauvegardé automatiquement (`devnet/`) et migré à chaque montée de version — aucun wipe nécessaire.
+- **`/`** — explorateur de blocs + wallet web
+- **`/admin`** — console d'administration
 
 > Guide complet : [GUIDE.md](./GUIDE.md)
 
@@ -81,25 +107,12 @@ L'état est sauvegardé automatiquement (`devnet/`) et migré à chaque montée 
 ## Tokenomics — Fair launch
 
 - **100 milliards VINX**, supply fixe et immuable.
-- **Aucun pre-mine, aucune réserve, aucune allocation fondateur.** Les premiers VINX n'existent qu'au moment où le premier bloc est produit.
-- **Émission par le travail** : les VINX sont mintés progressivement en rémunération des blocs produits, selon une courbe de décroissance exponentielle continue (`R₀ · e^(−λt)`, demi-vie ~20 ans). Le total de cette courbe vaut exactement 100 milliards.
-- **Rémunération par le travail** : aujourd'hui, l'émission va **100 % au producteur du bloc** (frais inclus). Une distribution par époque entre proposeurs et co-signataires est planifiée (Phase 2), **sans pondération par le bond** — chaque co-signature comptera pour le même poids.
-- **Frais** : forfaitaires, **100 % au validateur producteur immédiatement** — ils ne passent pas par le pot d'époque.
-- **Slashing** : équivocation prouvée → 100 % du bond (10 % au rapporteur, 90 % redistribués aux validateurs honnêtes). Aucun token détruit.
-- **Invariant** vérifié à chaque bloc : `circulation + pot_époque + détruits = émis ≤ 100 000 000 000 VINX`.
+- **Aucun pre-mine, aucune réserve.** Les premiers VINX n'existent qu'au moment où le premier bloc est produit.
+- **Émission par le travail** : minting progressif, décroissance exponentielle continue, demi-vie ~20 ans.
+- **Validateurs = fees only (cible)** : à terme, l'émission va aux Appchains via usage réel (melt), les validateurs vivent des frais de transaction.
+- **Invariant** : `circulation + pot_époque + détruits = émis ≤ 100 Md` — garanti à chaque bloc.
 
-> Whitepaper complet : [whitepaper.md](./whitepaper.md)
-
----
-
-## Staking = caution, pas rendement
-
-Le bond n'est pas un investissement — c'est une **caution de bonne conduite**. Un validateur qui triche perd son bond. Un validateur qui travaille honnêtement est rémunéré par l'émission et les frais.
-
-- Bond minimum : **100 000 VINX** (gouvernable)
-- Déliaison : **3 jours** de temps réel (reste saisissable en cas d'équivocation)
-- Downtime : suspension du round-robin, sans slash
-- Un utilisateur lambda ne stake pas — il garde son VINX pour **l'utiliser comme cash**.
+> Whitepaper : [whitepaper.md](./whitepaper.md)
 
 ---
 
@@ -107,10 +120,10 @@ Le bond n'est pas un investissement — c'est une **caution de bonne conduite**.
 
 | Phase | Période | Contenu |
 |-------|---------|---------|
-| ✅ **Phase 1 — Fondations** | Terminé | Protocole L1 complet (PoA Threshold, finalité déterministe, fair launch, slashing prouvable, fork-choice, P2P anti-DoS, gouvernance K-of-M, registre de modules, **BLS12-381**, jailing / rotation active) |
-| 🔄 **Phase 2 — Récompenses & ouverture** | Q3 2026 | Distribution par époque (émission + slash entre proposeurs et co-signataires), **Open PoA** (admission sans permission sur bond), accountability co-signatures, tx `Unjail` |
-| 📅 **Phase 3 — Subnets & ancrage** | Q4 2026 | Subnets (escrow + récompense par usage), Data Availability, preuves d'ancre, émission élastique à réservoir |
-| 🔭 **Phase 4 — Décentralisation** | 2027 | Comité VRF, light client, réseau public, documentation multilingue |
+| ✅ **Phase 1 — Fondations** | Terminé | L1 complet (consensus PoA Threshold → base PoS), finalité BFT, fair launch, BLS12-381, jailing, fork-choice, P2P anti-DoS, gouvernance K-of-M, modules bondés |
+| 🔄 **Phase 2 — PoS Algorand** | Q4 2026 | Comité VRF (ECVRF RFC 9381), sélection par VRF, admission PoS permissionless (ADR 0029/0038) |
+| 📅 **Phase 3 — Appchains ZK** | Q1 2027 | SP1 proof verification (ADR 0050), ForceExit / Escape Hatch (ADR 0048), Clearinghouse (ADR 0049), Celestia DA (ADR 0034) |
+| 🔭 **Phase 4 — Écosystème** | 2027+ | Appchains communautaires, émission élastique (ADR 0047), light client, réseau public |
 
 > Index complet des décisions d'architecture : [docs/adr/README.md](./docs/adr/README.md)
 
@@ -131,7 +144,7 @@ apps/
 sdk/
 └── vinx-sdk/           SDK TypeScript
 docs/
-└── adr/                Décisions d'architecture (ADR 0001 → ...)
+└── adr/                Décisions d'architecture (ADR 0001 → 0050)
 ```
 
 ---
