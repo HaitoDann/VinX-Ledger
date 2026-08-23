@@ -400,66 +400,95 @@ vinx_tx_in_block_total
 
 ## 17. Index des ADRs
 
-### Acceptés et implémentés ✅
+### Phase 1 — Socle L1 ✅ Vérifié / Implémenté
 
 | ADR | Titre résumé |
 |---|---|
+| 0051 | Primitives crypto : Ed25519, Bech32 `vinx1...`, SHA-256, Merkle |
+| 0052 | Keystore wallet — Argon2id + AES-256-GCM |
+| 0053 | Anti-replay : nonce, chain_id, expiry_height |
+| 0054 | Types de transactions fondamentaux (0x01–0x0A) |
+| 0055 | Modèle de frais forfaitaire (flat fee) |
+| 0056 | Bond & queue de déliaison (staking, 3 jours unbonding) |
+| 0057 | Mempool (100 000 tx, nonce ordering, staged/drain) |
+| 0058 | Couche P2P de base (libp2p + gossipsub) |
+| 0059 | API RPC REST (routes publiques + admin fail-closed + faucet) |
+| 0060 | Explorateur de blocs embarqué (UI HTML statique) |
+| 0061 | Stockage persistant (STORAGE_VERSION=14, migrations auto) |
+| 0062 | WorldState — structure BTreeMap canonique |
+| 0063 | Consensus PoA Threshold initial (round-robin + quorum BFT) |
 | 0002 | Finalité au quorum (prefix-closed, `⌈2n/3⌉`) |
-| 0004 | Invariant de conservation de supply |
+| 0003 | Slashing automatique de l'équivocation |
 | 0005 | Temps réseau (MTP — Median Time Past) |
-| 0006 | Mises à jour forkless (AnnounceUpgrade) |
-| 0007 | Unification gouvernance (AdminAction) |
-| 0008 | Chain ID sûr |
-| 0009 | Frais stake/unstake — plafond déliaisons |
-| 0010 | Registre de modules bondés (AnchorState) |
-| 0011 | Gouvernance K-of-M |
-| 0015 | Vérification parallèle des signatures |
-| 0020 | Sérialisation canonique (vecteurs dorés) |
+| 0006 | Mises à jour forkless (AnnounceUpgrade, timestamp) |
+| 0007 | Unification gouvernance (AdminAction seul) |
+| 0008 | Chain ID sûr (pas de défaut silencieux) |
+| 0009 | Frais stake/unstake — plafond déliaisons anti-spam |
+| 0010 | Registre de modules bondés (AnchorState 0x09) |
+| 0011 | Gouvernance K-of-M (multisig) |
+| 0015 | Vérification parallèle des signatures (multi-cœurs) |
+| 0020 | Sérialisation canonique (vecteurs dorés BTreeMap) |
 | 0021 | Immutabilité de la courbe d'émission |
-| 0022 | P2P anti-DoS |
+| 0022 | P2P anti-DoS (guard, rate-limit, borne zstd) |
 | 0026 | Dépôt existentiel + reaping |
 | 0027 | Jailing / fiabilité des validateurs |
 | 0031 | Règle de fork-choice (canonical_head) |
-| 0040 | Émission progressive (sans prémine, sans burn) |
-| 0043 | Cadence fixe 12 s |
+| 0040 | Émission progressive (T_half≈20 ans, sans prémine) |
+| 0043 | Cadence fixe 12 s, 3 000 tx/bloc |
 | 0045 | Abolition du heartbeat |
 | 0046 | BLS12-381 agrégé (co-signatures) |
 
-### Acceptés — Architecture cible (à implémenter) 🔴
+### Phase 2 — PoS Algorand-style 📐 Acceptés (architecture cible)
 
 | ADR | Titre résumé |
 |---|---|
-| 0028 | Récompenses par époque (PROPOSER_SHARE_BPS = 20 %) |
 | 0029 | Comité VRF Algorand-style (ECVRF RFC 9381, n≈100) |
-| 0034 | Disponibilité des données — Celestia |
 | 0038 | Open PoS — pool permissionless, warmup, rotation |
+| 0028 | Récompenses par époque (PROPOSER_SHARE_BPS = 20 %) |
+
+### Phase 3 — Appchains ZK 📐 Acceptés (architecture cible)
+
+| ADR | Titre résumé |
+|---|---|
+| 0050 | Vérification SP1 Groth16 on-chain |
+| 0034 | Disponibilité des données — Celestia |
 | 0048 | ForceExit / Escape Hatch (0x0B) |
 | 0049 | Clearinghouse cross-Appchain (0x0C) |
-| 0050 | Vérification SP1 Groth16 on-chain |
 
-### Proposés (en discussion) 🟠
+### Proposés (en discussion) 💡
 
-| ADR | Titre résumé |
-|---|---|
-| 0023 | Slashing de fraude (prérequis DA) |
-| 0030 | Accountability des co-signatures conflictuelles |
-| 0033 | Genèse et bootstrap fair launch |
-| 0035 | Bornes de ressources par transaction |
-| 0036 | Churn des validateurs |
-| 0039 | Escrow et racine de récompense (infrastructure Appchains) |
-| 0041 | Répartition émission par melt (Appchains) |
-| 0042 | Époque de règlement de l'émission |
-| 0044 | Garde-fous d'équité et amorçage |
-| 0047 | Émission élastique à réservoir |
+| ADR | Titre résumé | Phase |
+|---|---|---|
+| 0023 | Adjudication slashing de module (fraude opérateur) | 3 |
+| 0024 | Infrastructure subnets : escrow bondé + racine récompense | 3 |
+| 0030 | Accountability des co-signatures conflictuelles | 2 |
+| 0032 | Garde-fous de gouvernance | 2 |
+| 0033 | Genèse et bootstrap fair launch | 1 |
+| 0035 | Bornes de ressources par transaction | 1 |
+| 0036 | Churn des validateurs | 2 |
+| 0037 | Propagation compacte des blocs (CompactBlock) | — |
+| 0039 | Rémunération opérateurs modules (escrow + fee_schedule) | 4 |
+| 0041 | Répartition émission par melt (Appchains) | 4 |
+| 0042 | Époque de règlement de l'émission | 4 |
+| 0044 | Garde-fous d'équité et amorçage | 4 |
+| 0047 | Émission élastique à réservoir | 4 |
+| 0012 | Gestion clés validateur (remote signer) | 5 |
+| 0013 | Cycle de vie de l'état (loyer) | 5 |
+| 0014 | Standard light-client (balance proof) | 3 |
+| 0016 | Posture post-quantique (ML-DSA) | 5 |
+| 0017 | Arrêt d'urgence & reprise | — |
+| 0018 | Observabilité & SLO | 5 |
+| 0019 | TLS natif rustls | 5 |
 
 ### Obsolètes / remplacés
 
 | ADR | Remplacé par |
 |---|---|
-| 0038 (v1, veto collectif) | ADR 0038 v2 (Open PoS) |
+| 0004 (Invariant de supply) | ADR 0040 (nouvelle formule sans La Fonderie) |
 | Heartbeat 10 min | ADR 0045 (cadence fixe) |
 | Block-on-demand | ADR 0043/0045 (cadence fixe) |
 | La Fonderie | ADR 0040 (émission progressive) |
+| 0039 (Infrastructure subnets — ex-doublon) | Renommé ADR 0024 |
 
 ---
 
