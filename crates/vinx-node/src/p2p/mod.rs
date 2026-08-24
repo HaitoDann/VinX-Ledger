@@ -302,7 +302,7 @@ async fn run_event_loop(
     local_addr: Address,
     metrics: NodeMetrics,
     fork_choice: ForkChoiceCtx,
-    bls_sk: Option<vinx_crypto::BlsSecretKey>,
+    bls_sk: vinx_crypto::BlsSecretKey,
 ) {
     let mut guard = guard::PeerGuard::new();
     // ADR 0029 Phase 1: pending BLS co-signatures keyed by (height, block_hash).
@@ -348,7 +348,7 @@ async fn handle_swarm_event(
     guard: &mut guard::PeerGuard,
     metrics: &NodeMetrics,
     fork_choice: &ForkChoiceCtx,
-    bls_sk: &Option<vinx_crypto::BlsSecretKey>,
+    bls_sk: &vinx_crypto::BlsSecretKey,
     pending_bls: &mut HashMap<(u64, Hash32), Vec<(usize, [u8; 96])>>,
 ) {
     match event {
@@ -577,7 +577,7 @@ async fn dispatch_message(
     swarm: &mut libp2p::Swarm<VinxBehaviour>,
     metrics: &NodeMetrics,
     fork_choice: &ForkChoiceCtx,
-    bls_sk: &Option<vinx_crypto::BlsSecretKey>,
+    bls_sk: &vinx_crypto::BlsSecretKey,
     pending_bls: &mut HashMap<(u64, Hash32), Vec<(usize, [u8; 96])>>,
 ) {
     match msg {
@@ -830,8 +830,8 @@ async fn dispatch_message(
 
                 // ADR 0029 Phase 1: broadcast BLS co-signature with validator address
                 // (not raw PK) so the receiver looks up the registered key from the registry.
-                if let Some(sk) = bls_sk {
-                    let bls_sig = sk.sign(&block_hash);
+                {
+                    let bls_sig = bls_sk.sign(&block_hash);
                     let bls_msg = P2pMessage::BlockBlsCoSignature {
                         height,
                         block_hash: block_hash.to_vec(),

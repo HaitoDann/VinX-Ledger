@@ -190,7 +190,8 @@ pub fn produce_block(
 
     // ADR 0029 Phase 1 — BLS co-signature: the proposer contributes its own BLS sig.
     // The aggregate starts as a single-sig aggregate; P2P gossip adds more sigs via gossip.
-    if let Some(bls_sk) = &config.bls_secret_key {
+    {
+        let bls_sk = &config.bls_secret_key;
         let bls_sig = bls_sk.sign(&header_hash);
         match bls_aggregate(&[bls_sig]) {
             Ok(agg) => {
@@ -338,7 +339,8 @@ fn produce_block_inner(
         pub_key: config.validator_keypair.public_key(),
         signature: config.validator_keypair.sign(&header_hash),
     });
-    if let Some(bls_sk) = &config.bls_secret_key {
+    {
+        let bls_sk = &config.bls_secret_key;
         let bls_sig = bls_sk.sign(&header_hash);
         if let Ok(agg) = bls_aggregate(&[bls_sig]) {
             block.bls_aggregate = Some(agg.0.to_vec());

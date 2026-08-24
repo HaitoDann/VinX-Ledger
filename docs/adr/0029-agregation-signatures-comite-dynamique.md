@@ -185,7 +185,7 @@ validateur (`ValidatorSet::index_of`). Consensus-critique (ADR 0020).
 - [x] `cargo test --workspace` vert — tests unitaires `bls_bitmap_*`, `bls_signer_count_from_bitmap`
 - [x] Banc n=1 : un nœud avec BLS key produit et finalise des blocs (bitmap bit 0 set) — `n1_bls_produces_block_bitmap_bit_set`
 - [x] Banc n=3 : 3 nœuds avec BLS keys, quorum BLS (2/3) atteint sans erreur crypto — `n3_bls_quorum_two_signers_no_crypto_error`
-- [ ] Banc n=3 : la migration STORAGE_VERSION v14→v15 s'applique sans wipe ni perte de données
+- [x] Banc n=3 : la migration STORAGE_VERSION v14→v15 s'applique sans wipe ni perte de données — `test_migration_v14_v15_bitmap_field`
 - [x] Test de propriété : bitmap popcount = nombre de validateurs ayant co-signé, sur 6 blocs — `n3_bls_bitmap_popcount_matches_signer_count`
 - [x] Vecteur doré (ADR 0020) : un même set de signatures BLS produit toujours le même bitmap — `n3_bls_golden_vector_deterministic_bitmap`
 
