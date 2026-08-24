@@ -15,7 +15,7 @@
 //!    la co-signature tardive (chemin P2P réel) fait rattraper la finalité d'un coup.
 
 use vinx_core::{Block, BlockHeader, BlockSignature, ValidatorSet};
-use vinx_crypto::{Address, Hash32, KeyPair};
+use vinx_crypto::{Address, BlsSecretKey, Hash32, KeyPair};
 use vinx_node::chain::Chain;
 use vinx_node::config::NodeConfig;
 use vinx_node::consensus;
@@ -299,5 +299,168 @@ fn n3_fork_choice_converges_regardless_of_arrival_order() {
     assert_eq!(
         tip_ab, canonical,
         "la tête retenue est bien le bloc canonique"
+    );
+}
+
+// ─── ADR 0029 Phase 1 — Agrégation BLS + bitmap ───────────────────────────────
+
+/// Builds an `indexed_bls_pks` registry from a parallel list of BLS secret keys
+/// and validator addresses. Index `i` corresponds to `ValidatorSet::index_of(addrs[i])`.
+fn indexed_pks(bls_sks: &[BlsSecretKey], addrs: &[Address], vs: &ValidatorSet) -> Vec<Option<[u8; 48]>> {
+    let mut pks = vec![None; vs.len()];
+    for (i, bls_sk) in bls_sks.iter().enumerate() {
+        if let Some(idx) = vs.index_of(&addrs[i]) {
+            pks[idx] = Some(bls_sk.public_key().0);
+        }
+    }
+    pks
+}
+
+/// Aggregates BLS signatures from a subset of validators onto `block`, then sets
+/// the corresponding bitmap bits. Returns the `indexed_bls_pks` registry.
+fn bls_cosign(
+    block: &mut Block,
+    signer_indices: &[usize],
+    bls_sks: &[BlsSecretKey],
+    addrs: &[Address],
+    vs: &ValidatorSet,
+) -> Vec<Option<[u8; 48]>> {
+    for &i in signer_indices {
+        vinx_node::consensus::sign_block_bls(block, &bls_sks[i])
+            .expect("BLS sign must succeed");
+        if let Some(vidx) = vs.index_of(&addrs[i]) {
+            block.set_bls_bitmap_bit(vidx);
+        }
+    }
+    indexed_pks(bls_sks, addrs, vs)
+}
+
+// ─── 7. n=1 : bloc produit avec BLS, bitmap bit 0 set ─────────────────────────
+
+#[test]
+fn n1_bls_produces_block_bitmap_bit_set() {
+    let kp = KeyPair::generate();
+    let addr = addr(&kp);
+    let bls_sk = BlsSecretKey::generate();
+    let vs = ValidatorSet::new(vec![addr]);
+
+    let (chain, _) = Chain::new_with_genesis(addr, 0);
+    let mut block = make_block(1, chain.tip_hash(), addr);
+
+    let registry = bls_cosign(&mut block, &[0], &[bls_sk], &[addr], &vs);
+
+    assert!(block.bls_aggregate.is_some(), "aggregate must be set");
+    assert!(block.bls_bitmap_has(0), "bit 0 set for the sole validator");
+    assert_eq!(block.bls_bitmap_popcount(), 1);
+
+    let count = block
+        .bls_signer_count_from_bitmap(&registry)
+        .expect("bitmap verification must pass");
+    assert_eq!(count, 1, "one signer counted from bitmap");
+}
+
+// ─── 8. n=3 : quorum BLS 2/3 atteint sans erreur crypto ──────────────────────
+
+#[test]
+fn n3_bls_quorum_two_signers_no_crypto_error() {
+    let (kps, addrs, vs) = three_validators();
+    let bls_sks: Vec<BlsSecretKey> = (0..3).map(|_| BlsSecretKey::generate()).collect();
+    let (chain, _) = Chain::new_with_genesis(addrs[0], 0);
+
+    let mut block = make_block(1, chain.tip_hash(), *vs.leader_at(1));
+
+    // Validators 0 and 1 sign (= quorum 2/3); validator 2 is offline.
+    let registry = bls_cosign(&mut block, &[0, 1], &bls_sks, &addrs, &vs);
+
+    assert_eq!(block.bls_bitmap_popcount(), 2, "two bits set");
+    assert!(block.bls_bitmap_has(0));
+    assert!(block.bls_bitmap_has(1));
+    assert!(!block.bls_bitmap_has(2), "absent validator has no bit");
+
+    let count = block
+        .bls_signer_count_from_bitmap(&registry)
+        .expect("aggregate must verify");
+    assert_eq!(count, 2);
+    assert!(
+        count >= vs.quorum(),
+        "2 signers ≥ quorum {} — block is finalizable",
+        vs.quorum()
+    );
+
+    // Ed25519 quorum is also satisfied to go through validate_block.
+    cosign(&mut block, &kps.iter().collect::<Vec<_>>(), &vs);
+    vinx_node::consensus::validate_block(&block, &vs).expect("block must be valid");
+}
+
+// ─── 9. popcount = nombre de co-signataires sur 6 blocs ───────────────────────
+
+#[test]
+fn n3_bls_bitmap_popcount_matches_signer_count() {
+    let (_kps, addrs, vs) = three_validators();
+    let bls_sks: Vec<BlsSecretKey> = (0..3).map(|_| BlsSecretKey::generate()).collect();
+    let registry = indexed_pks(&bls_sks, &addrs, &vs);
+    let (mut chain, _) = Chain::new_with_genesis(addrs[0], 0);
+
+    // Alternate between 2-signer and 3-signer rounds across 6 blocks.
+    for h in 1..=6u64 {
+        let leader = *vs.leader_at(h);
+        let mut block = make_block(h, chain.tip_hash(), leader);
+
+        // Odd heights: all 3 sign; even heights: only validators 0 and 1.
+        let signers: &[usize] = if h % 2 == 1 { &[0, 1, 2] } else { &[0, 1] };
+        let expected = signers.len();
+
+        bls_cosign(&mut block, signers, &bls_sks, &addrs, &vs);
+
+        assert_eq!(
+            block.bls_bitmap_popcount(),
+            expected,
+            "h={h}: popcount must equal signer count"
+        );
+        let verified = block
+            .bls_signer_count_from_bitmap(&registry)
+            .expect("aggregate must verify");
+        assert_eq!(verified, expected, "h={h}: verified count matches");
+
+        chain.push(block);
+    }
+}
+
+// ─── 10. Vecteur doré (ADR 0020) : bitmap déterministe pour un set donné ──────
+
+#[test]
+fn n3_bls_golden_vector_deterministic_bitmap() {
+    let (_kps, addrs, vs) = three_validators();
+    let bls_sks: Vec<BlsSecretKey> = (0..3).map(|_| BlsSecretKey::generate()).collect();
+    let (chain, _) = Chain::new_with_genesis(addrs[0], 0);
+    let prev = chain.tip_hash();
+
+    // Build the same block twice with the same signers — bitmap must be identical.
+    let bitmap_a = {
+        let mut b = make_block(1, prev, addrs[0]);
+        bls_cosign(&mut b, &[0, 2], &bls_sks, &addrs, &vs);
+        b.bls_bitmap.clone()
+    };
+    let bitmap_b = {
+        let mut b = make_block(1, prev, addrs[0]);
+        bls_cosign(&mut b, &[0, 2], &bls_sks, &addrs, &vs);
+        b.bls_bitmap.clone()
+    };
+
+    assert_eq!(
+        bitmap_a, bitmap_b,
+        "same signers in canonical order → identical bitmap (ADR 0020 golden vector)"
+    );
+    assert!(
+        bitmap_a[0] & 0b0000_0001 != 0,
+        "bit 0 set (validator index 0 signed)"
+    );
+    assert!(
+        bitmap_a[0] & 0b0000_0100 != 0,
+        "bit 2 set (validator index 2 signed)"
+    );
+    assert!(
+        bitmap_a[0] & 0b0000_0010 == 0,
+        "bit 1 clear (validator index 1 did not sign)"
     );
 }
