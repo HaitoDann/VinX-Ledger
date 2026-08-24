@@ -112,7 +112,7 @@ impl BlockResponse {
             tx_count: block.header.tx_count,
             state_root: hash_to_hex(&block.header.state_root),
             base_fee: block.header.base_fee,
-            signatures_count: block.valid_signer_count(validator_set),
+            signatures_count: block.bls_signer_count().unwrap_or(0),
             finalized: block.is_finalized(validator_set),
             transactions: block.transactions.iter().map(TxResponse::from_tx).collect(),
         }

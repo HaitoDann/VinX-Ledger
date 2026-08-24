@@ -44,7 +44,9 @@ use zstd;
 ///      `bls_aggregate: Option<[u8;96]>` (None) and `bls_cosigner_pks: Vec<[u8;48]>` ([]).
 ///      `ValidatorPoolEntry` also gains `bls_pub_key` and `bls_pop` (None each), but since
 ///      the pool is expected empty during this alpha migration, no entry-level patching is done.
-const STORAGE_VERSION: u64 = 14;
+/// v15: BLS bitmap (ADR 0029 Phase 1) — each Block row gains `bls_bitmap: Vec<u8>` ([]).
+///      8 bytes appended per block row (bincode empty Vec<u8> = 0u64 LE).
+const STORAGE_VERSION: u64 = 15;
 
 /// zstd compression level — level 3 is the sweet spot: ~60-70% size reduction,
 /// negligible latency compared to disk I/O.
@@ -195,6 +197,8 @@ impl Storage {
                 12 => Self::append_meta_suffix(tx, &vinx_state::v13_meta_suffix())?,
                 // v13 → v14 (ADR 0046 Phase 2 BLS): append BLS fields to every block row.
                 13 => Self::migrate_v13_block_bls_fields(tx)?,
+                // v14 → v15 (ADR 0029 Phase 1 bitmap): append bls_bitmap (empty Vec<u8>) to every block row.
+                14 => Self::migrate_v14_block_bitmap_field(tx)?,
                 unknown => {
                     return Err(Self::io_err(format!(
                         "no automatic migration from schema v{unknown} to v{STORAGE_VERSION}. \
@@ -298,6 +302,33 @@ impl Storage {
                 .map_err(Self::io_err)?;
         }
         tracing::info!(blocks = count, "v14 migration: BLS fields appended to block rows");
+        Ok(())
+    }
+
+    /// v14 → v15 (ADR 0029 Phase 1 bitmap): appends `bls_bitmap: Vec<u8>` (empty) to each
+    /// Block's bincode data. bincode encodes an empty `Vec<u8>` as `0u64` LE (8 bytes).
+    fn migrate_v14_block_bitmap_field(tx: &redb::WriteTransaction) -> io::Result<()> {
+        const SUFFIX: [u8; 8] = [0u8; 8]; // bincode empty Vec<u8> = 0u64 LE
+        let rows: Vec<(u64, Vec<u8>)> = {
+            let tbl = tx.open_table(BLOCKS).map_err(Self::io_err)?;
+            tbl.iter()
+                .map_err(Self::io_err)?
+                .map(|r| {
+                    r.map(|(k, v)| (k.value(), v.value().to_vec()))
+                        .map_err(Self::io_err)
+                })
+                .collect::<io::Result<_>>()?
+        };
+        let count = rows.len() as u64;
+        let mut tbl = tx.open_table(BLOCKS).map_err(Self::io_err)?;
+        for (height, compressed) in rows {
+            let mut data = Self::decompress(&compressed)?;
+            data.extend_from_slice(&SUFFIX);
+            let recompressed = Self::compress(&data)?;
+            tbl.insert(height, recompressed.as_slice())
+                .map_err(Self::io_err)?;
+        }
+        tracing::info!(blocks = count, "v15 migration: bls_bitmap field appended to block rows");
         Ok(())
     }
 
@@ -795,9 +826,9 @@ mod tests {
                 receipts_root: [0u8; 32],
             },
             transactions: vec![tx],
-            signatures: vec![],
             bls_aggregate: None,
             bls_cosigner_pks: vec![],
+            bls_bitmap: vec![],
         };
         chain.push(block);
 
@@ -833,6 +864,110 @@ mod tests {
             loaded_chain.get_tx_by_hash(&tx_hash).is_some(),
             "tx index must be rebuilt after migration"
         );
+    }
+
+    /// Strips the last 8 bytes from every block row in the BLOCKS table, simulating the
+    /// v14 on-disk format (no `bls_bitmap` field) so the v14→v15 migration can be tested.
+    fn downgrade_blocks_to_v14(dir: &Path) {
+        const BLS_BITMAP_SUFFIX_LEN: usize = 8; // bincode empty Vec<u8> = 0u64 LE
+        let db = Database::create(dir.join("vinx.redb")).unwrap();
+        let tx = db.begin_write().unwrap();
+        {
+            let rows: Vec<(u64, Vec<u8>)> = {
+                let tbl = tx.open_table(BLOCKS).unwrap();
+                tbl.iter()
+                    .unwrap()
+                    .map(|r| r.map(|(k, v)| (k.value(), v.value().to_vec())).unwrap())
+                    .collect()
+            };
+            let mut tbl = tx.open_table(BLOCKS).unwrap();
+            for (height, compressed) in rows {
+                let mut data = zstd::decode_all(&compressed[..]).unwrap();
+                assert!(
+                    data.len() >= BLS_BITMAP_SUFFIX_LEN,
+                    "block row too short to strip"
+                );
+                data.truncate(data.len() - BLS_BITMAP_SUFFIX_LEN);
+                let recompressed = zstd::encode_all(&data[..], ZSTD_LEVEL).unwrap();
+                tbl.insert(height, recompressed.as_slice()).unwrap();
+            }
+        }
+        tx.commit().unwrap();
+    }
+
+    // ADR 0029 Phase 1 — Storage migration v14→v15: bls_bitmap field appended to blocks.
+    #[test]
+    fn test_migration_v14_v15_bitmap_field() {
+        use vinx_core::{Block, BlockHeader};
+        use vinx_crypto::{Address, KeyPair};
+        use vinx_state::{create_genesis_state, GenesisConfig};
+
+        let tmp = Tmp::new();
+        let validator = Address::from_public_key(&KeyPair::generate().public_key());
+        let admin = Address::from_public_key(&KeyPair::generate().public_key());
+
+        let mut state = create_genesis_state(&GenesisConfig {
+            chain_id: vinx_core::CHAIN_ID_DEVNET,
+            admin_address: admin,
+            validator_address: validator,
+        });
+        let (mut chain, _) = Chain::new_with_genesis(validator, 0);
+
+        // Push 3 blocks (v15 format, bls_bitmap = vec![]).
+        for h in 1..=3u64 {
+            let block = Block {
+                header: BlockHeader {
+                    height: h,
+                    prev_hash: chain.tip_hash(),
+                    timestamp: h,
+                    validator,
+                    tx_count: 0,
+                    state_root: [0u8; 32],
+                    base_fee: 0,
+                    receipts_root: [0u8; 32],
+                },
+                transactions: vec![],
+                bls_aggregate: None,
+                bls_cosigner_pks: vec![],
+                bls_bitmap: vec![],
+            };
+            chain.push(block);
+        }
+
+        // Save at STORAGE_VERSION (v15).
+        {
+            let storage = Storage::open(&tmp.0).unwrap();
+            storage.save(&mut state, &mut chain).unwrap();
+        }
+
+        // Simulate v14 on-disk: strip bls_bitmap from each block row, downgrade version marker.
+        downgrade_blocks_to_v14(&tmp.0);
+        set_version(&tmp.0, 14);
+
+        // Reopen → migration v14→v15 runs automatically.
+        let loaded_chain = {
+            let storage = Storage::open(&tmp.0).expect("v14 must auto-migrate to v15, not wipe");
+            let (_, chain) = storage.load().expect("data must survive v14→v15 migration");
+            chain
+        }; // storage dropped here so read_version can reopen the file
+
+        assert_eq!(
+            read_version(&tmp.0),
+            Some(STORAGE_VERSION),
+            "version marker bumped to current after migration"
+        );
+        assert_eq!(loaded_chain.tip_height(), 3, "chain height preserved");
+
+        for h in 0..=3u64 {
+            let block = loaded_chain
+                .get_block(h)
+                .unwrap_or_else(|| panic!("block {h} must exist after migration"));
+            assert_eq!(
+                block.bls_bitmap,
+                Vec::<u8>::new(),
+                "h={h}: bls_bitmap defaults to [] after v14→v15 migration"
+            );
+        }
     }
 
     // ADR 0026: a reaped account must be *erased* from the store, not merely dropped from
@@ -914,9 +1049,9 @@ mod tests {
                 receipts_root: [0u8; 32],
             },
             transactions: vec![],
-            signatures: vec![],
             bls_aggregate: None,
             bls_cosigner_pks: vec![],
+            bls_bitmap: vec![],
         }
     }
 

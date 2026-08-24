@@ -3,8 +3,8 @@
 //! Le doc d'état et l'index ADR posent ce banc comme **chemin critique** : rien du
 //! backlog consensus (0002 finalité, 0027 jailing, 0031 fork-choice) n'a de valeur
 //! tant que le multi-validateur n'est pas éprouvé. Ce test pilote le **vrai code**
-//! (`consensus::sign_block`, `consensus::validate_block`, `Chain::advance_finality`,
-//! `Chain::add_co_signature`, `ValidatorSet::{leader_at, quorum}`) sur un set de 3
+//! (`consensus::sign_block_bls`, `consensus::validate_block`, `Chain::advance_finality`,
+//! `ValidatorSet::{leader_at, quorum}`) sur un set de 3
 //! et vérifie les propriétés que ces ADR tiennent pour acquises :
 //!
 //! 1. **Quorum** — n=3 ⇒ `quorum = ⌈2·3/3⌉ = 2`.
@@ -14,8 +14,8 @@
 //! 5. **Finalité prefix-closed + reprise** — un trou non finalisé bloque l'avancée ;
 //!    la co-signature tardive (chemin P2P réel) fait rattraper la finalité d'un coup.
 
-use vinx_core::{Block, BlockHeader, BlockSignature, ValidatorSet};
-use vinx_crypto::{Address, Hash32, KeyPair};
+use vinx_core::{Block, BlockHeader, ValidatorSet};
+use vinx_crypto::{Address, BlsSecretKey, Hash32, KeyPair};
 use vinx_node::chain::Chain;
 use vinx_node::config::NodeConfig;
 use vinx_node::consensus;
@@ -29,11 +29,13 @@ fn addr(kp: &KeyPair) -> Address {
 }
 
 /// Trois validateurs dans un ordre fixe (round-robin = ordre d'insertion).
-fn three_validators() -> (Vec<KeyPair>, Vec<Address>, ValidatorSet) {
+/// Retourne (kps Ed25519, bls_sks BLS, adresses, ValidatorSet).
+fn three_validators() -> (Vec<KeyPair>, Vec<BlsSecretKey>, Vec<Address>, ValidatorSet) {
     let kps: Vec<KeyPair> = (0..3).map(|_| KeyPair::generate()).collect();
+    let bls_sks: Vec<BlsSecretKey> = (0..3).map(|_| BlsSecretKey::generate()).collect();
     let addrs: Vec<Address> = kps.iter().map(addr).collect();
     let vs = ValidatorSet::new(addrs.clone());
-    (kps, addrs, vs)
+    (kps, bls_sks, addrs, vs)
 }
 
 /// Bloc non signé à `height`, chaîné sur `prev`, proposé par `proposer`.
@@ -50,17 +52,9 @@ fn make_block(height: u64, prev: Hash32, proposer: Address) -> Block {
             receipts_root: [0u8; 32],
         },
         transactions: vec![],
-        signatures: vec![],
         bls_aggregate: None,
         bls_cosigner_pks: vec![],
-    }
-}
-
-/// Fait co-signer `block` par chaque validateur de `signers` via le vrai chemin
-/// `consensus::sign_block` (qui refuse un signataire hors du set).
-fn cosign(block: &mut Block, signers: &[&KeyPair], vs: &ValidatorSet) {
-    for kp in signers {
-        consensus::sign_block(block, kp, vs).expect("signataire dans le set");
+        bls_bitmap: vec![],
     }
 }
 
@@ -68,7 +62,7 @@ fn cosign(block: &mut Block, signers: &[&KeyPair], vs: &ValidatorSet) {
 
 #[test]
 fn n3_quorum_is_two() {
-    let (_, _, vs) = three_validators();
+    let (_, _, _, vs) = three_validators();
     assert_eq!(vs.len(), 3);
     assert_eq!(vs.quorum(), 2, "n=3 → quorum = ceil(2*3/3) = 2 (67%)");
 }
@@ -77,7 +71,7 @@ fn n3_quorum_is_two() {
 
 #[test]
 fn n3_round_robin_and_finality_full_participation() {
-    let (kps, addrs, vs) = three_validators();
+    let (_, bls_sks, addrs, vs) = three_validators();
     let (mut chain, _g) = Chain::new_with_genesis(addrs[0], 0);
     assert_eq!(chain.finalized_height(), 0, "genèse finale");
 
@@ -88,7 +82,7 @@ fn n3_round_robin_and_finality_full_participation() {
         led[leader_idx] += 1;
 
         let mut b = make_block(h, chain.tip_hash(), leader);
-        cosign(&mut b, &kps.iter().collect::<Vec<_>>(), &vs); // 3/3 co-signent
+        bls_cosign(&mut b, &[0, 1, 2], &bls_sks, &addrs, &vs); // 3/3 co-signent
         consensus::validate_block(&b, &vs).expect("proposeur enregistré + quorum atteint");
         chain.push(b);
         chain.advance_finality(&vs);
@@ -108,7 +102,7 @@ fn n3_round_robin_and_finality_full_participation() {
 
 #[test]
 fn n3_finality_survives_one_validator_down() {
-    let (kps, addrs, vs) = three_validators();
+    let (_, bls_sks, addrs, vs) = three_validators();
     let (mut chain, _g) = Chain::new_with_genesis(addrs[0], 0);
 
     const OFFLINE: usize = 2; // le validateur d'index 2 est éteint tout du long
@@ -122,8 +116,8 @@ fn n3_finality_survives_one_validator_down() {
 
         let mut b = make_block(h, chain.tip_hash(), leader);
         // Les deux validateurs en ligne co-signent → 2/3 = quorum.
-        let present: Vec<&KeyPair> = (0..3).filter(|&i| i != OFFLINE).map(|i| &kps[i]).collect();
-        cosign(&mut b, &present, &vs);
+        let present: Vec<usize> = (0..3).filter(|&i| i != OFFLINE).collect();
+        bls_cosign(&mut b, &present, &bls_sks, &addrs, &vs);
         consensus::validate_block(&b, &vs).expect("2/3 atteint le quorum");
         chain.push(b);
         chain.advance_finality(&vs);
@@ -140,14 +134,14 @@ fn n3_finality_survives_one_validator_down() {
 
 #[test]
 fn n3_no_finality_below_quorum() {
-    let (kps, addrs, vs) = three_validators();
+    let (_, bls_sks, addrs, vs) = three_validators();
     let (mut chain, _g) = Chain::new_with_genesis(addrs[0], 0);
 
     // Un seul validateur signe (1/3) — 2 des 3 sont tombés.
+    let leader_idx = vs.leader_idx_at(1);
     let leader = *vs.leader_at(1);
-    let leader_kp = kps.iter().find(|k| addr(k) == leader).unwrap();
     let mut b = make_block(1, chain.tip_hash(), leader);
-    cosign(&mut b, &[leader_kp], &vs);
+    bls_cosign(&mut b, &[leader_idx], &bls_sks, &addrs, &vs);
 
     assert!(
         consensus::validate_block(&b, &vs).is_err(),
@@ -166,24 +160,24 @@ fn n3_no_finality_below_quorum() {
 
 #[test]
 fn n3_prefix_closed_finality_and_recovery() {
-    let (kps, addrs, vs) = three_validators();
+    let (_, bls_sks, addrs, vs) = three_validators();
     let (mut chain, _g) = Chain::new_with_genesis(addrs[0], 0);
 
     // h1 : 2/3 → final.
     let mut b1 = make_block(1, chain.tip_hash(), *vs.leader_at(1));
-    cosign(&mut b1, &[&kps[0], &kps[1]], &vs);
+    bls_cosign(&mut b1, &[0, 1], &bls_sks, &addrs, &vs);
     chain.push(b1);
     chain.advance_finality(&vs);
     assert_eq!(chain.finalized_height(), 1);
 
     // h2 : 1/3 seulement → PAS final (un co-signataire manque).
     let mut b2 = make_block(2, chain.tip_hash(), *vs.leader_at(2));
-    cosign(&mut b2, &[&kps[0]], &vs);
+    bls_cosign(&mut b2, &[0], &bls_sks, &addrs, &vs);
     chain.push(b2);
 
     // h3 : 2/3 → final en soi, mais un trou non finalisé le précède.
     let mut b3 = make_block(3, chain.tip_hash(), *vs.leader_at(3));
-    cosign(&mut b3, &[&kps[0], &kps[1]], &vs);
+    bls_cosign(&mut b3, &[0, 1], &bls_sks, &addrs, &vs);
     chain.push(b3);
 
     chain.advance_finality(&vs);
@@ -193,14 +187,23 @@ fn n3_prefix_closed_finality_and_recovery() {
         "prefix-closed : h2 non final bloque la finalisation de h3"
     );
 
-    // Reprise : un 2ᵉ validateur co-signe h2 en retard (chemin P2P réel).
-    let hash2 = chain.get_block(2).unwrap().hash();
-    let late = BlockSignature {
-        validator: addr(&kps[1]),
-        pub_key: kps[1].public_key(),
-        signature: kps[1].sign(&hash2),
-    };
-    let now_final = chain.add_co_signature(2, late, &vs);
+    // Reprise : re-signer h2 avec les deux validateurs (chemin P2P réel : le nœud
+    // reçoit la co-signature tardive et reconstruit l'agrégat BLS complet).
+    let b2_stored = chain.get_block(2).unwrap();
+    let mut b2_updated = make_block(2, b2_stored.header.prev_hash, b2_stored.header.validator);
+    bls_cosign(&mut b2_updated, &[0, 1], &bls_sks, &addrs, &vs);
+    chain.set_block_bls(
+        2,
+        b2_updated.bls_aggregate.unwrap(),
+        b2_updated.bls_cosigner_pks,
+        b2_updated.bls_bitmap,
+    );
+
+    let now_final = chain
+        .get_block(2)
+        .unwrap()
+        .bls_signer_count()
+        .is_ok_and(|c| c >= vs.quorum());
     assert!(now_final, "h2 atteint 2/3 après la co-signature tardive");
 
     chain.advance_finality(&vs);
@@ -230,7 +233,7 @@ fn n3_fork_choice_converges_regardless_of_arrival_order() {
     // le cas de collision que l'ADR 0031 doit résoudre). On vérifie que deux nœuds qui les
     // reçoivent dans des ordres OPPOSÉS convergent vers la même tête et le même état — via le
     // VRAI chemin de production, de fork-choice et de réorg (aucune simulation).
-    let (kps, addrs, vs) = three_validators();
+    let (kps, _bls_sks, addrs, vs) = three_validators();
 
     let leader_addr = *vs.leader_at(1);
     let backup_addr = *addrs.iter().find(|a| **a != leader_addr).unwrap();
@@ -298,5 +301,164 @@ fn n3_fork_choice_converges_regardless_of_arrival_order() {
     assert_eq!(
         tip_ab, canonical,
         "la tête retenue est bien le bloc canonique"
+    );
+}
+
+// ─── ADR 0029 Phase 1 — Agrégation BLS + bitmap ───────────────────────────────
+
+/// Builds an `indexed_bls_pks` registry from a parallel list of BLS secret keys
+/// and validator addresses. Index `i` corresponds to `ValidatorSet::index_of(addrs[i])`.
+fn indexed_pks(bls_sks: &[BlsSecretKey], addrs: &[Address], vs: &ValidatorSet) -> Vec<Option<[u8; 48]>> {
+    let mut pks = vec![None; vs.len()];
+    for (i, bls_sk) in bls_sks.iter().enumerate() {
+        if let Some(idx) = vs.index_of(&addrs[i]) {
+            pks[idx] = Some(bls_sk.public_key().0);
+        }
+    }
+    pks
+}
+
+/// Aggregates BLS signatures from a subset of validators onto `block`, then sets
+/// the corresponding bitmap bits. Returns the `indexed_bls_pks` registry.
+fn bls_cosign(
+    block: &mut Block,
+    signer_indices: &[usize],
+    bls_sks: &[BlsSecretKey],
+    addrs: &[Address],
+    vs: &ValidatorSet,
+) -> Vec<Option<[u8; 48]>> {
+    for &i in signer_indices {
+        vinx_node::consensus::sign_block_bls(block, &bls_sks[i])
+            .expect("BLS sign must succeed");
+        if let Some(vidx) = vs.index_of(&addrs[i]) {
+            block.set_bls_bitmap_bit(vidx);
+        }
+    }
+    indexed_pks(bls_sks, addrs, vs)
+}
+
+// ─── 7. n=1 : bloc produit avec BLS, bitmap bit 0 set ─────────────────────────
+
+#[test]
+fn n1_bls_produces_block_bitmap_bit_set() {
+    let kp = KeyPair::generate();
+    let addr = addr(&kp);
+    let bls_sk = BlsSecretKey::generate();
+    let vs = ValidatorSet::new(vec![addr]);
+
+    let (chain, _) = Chain::new_with_genesis(addr, 0);
+    let mut block = make_block(1, chain.tip_hash(), addr);
+
+    let registry = bls_cosign(&mut block, &[0], &[bls_sk], &[addr], &vs);
+
+    assert!(block.bls_aggregate.is_some(), "aggregate must be set");
+    assert!(block.bls_bitmap_has(0), "bit 0 set for the sole validator");
+    assert_eq!(block.bls_bitmap_popcount(), 1);
+
+    let count = block
+        .bls_signer_count_from_bitmap(&registry)
+        .expect("bitmap verification must pass");
+    assert_eq!(count, 1, "one signer counted from bitmap");
+}
+
+// ─── 8. n=3 : quorum BLS 2/3 atteint sans erreur crypto ──────────────────────
+
+#[test]
+fn n3_bls_quorum_two_signers_no_crypto_error() {
+    let (_, _, addrs, vs) = three_validators();
+    let bls_sks: Vec<BlsSecretKey> = (0..3).map(|_| BlsSecretKey::generate()).collect();
+    let (chain, _) = Chain::new_with_genesis(addrs[0], 0);
+
+    let mut block = make_block(1, chain.tip_hash(), *vs.leader_at(1));
+
+    // Validators 0 and 1 sign (= quorum 2/3); validator 2 is offline.
+    let registry = bls_cosign(&mut block, &[0, 1], &bls_sks, &addrs, &vs);
+
+    assert_eq!(block.bls_bitmap_popcount(), 2, "two bits set");
+    assert!(block.bls_bitmap_has(0));
+    assert!(block.bls_bitmap_has(1));
+    assert!(!block.bls_bitmap_has(2), "absent validator has no bit");
+
+    let count = block
+        .bls_signer_count_from_bitmap(&registry)
+        .expect("aggregate must verify");
+    assert_eq!(count, 2);
+    assert!(
+        count >= vs.quorum(),
+        "2 signers ≥ quorum {} — block is finalizable",
+        vs.quorum()
+    );
+
+    vinx_node::consensus::validate_block(&block, &vs).expect("block must be valid");
+}
+
+// ─── 9. popcount = nombre de co-signataires sur 6 blocs ───────────────────────
+
+#[test]
+fn n3_bls_bitmap_popcount_matches_signer_count() {
+    let (_, bls_sks, addrs, vs) = three_validators();
+    let registry = indexed_pks(&bls_sks, &addrs, &vs);
+    let (mut chain, _) = Chain::new_with_genesis(addrs[0], 0);
+
+    // Alternate between 2-signer and 3-signer rounds across 6 blocks.
+    for h in 1..=6u64 {
+        let leader = *vs.leader_at(h);
+        let mut block = make_block(h, chain.tip_hash(), leader);
+
+        // Odd heights: all 3 sign; even heights: only validators 0 and 1.
+        let signers: &[usize] = if h % 2 == 1 { &[0, 1, 2] } else { &[0, 1] };
+        let expected = signers.len();
+
+        bls_cosign(&mut block, signers, &bls_sks, &addrs, &vs);
+
+        assert_eq!(
+            block.bls_bitmap_popcount(),
+            expected,
+            "h={h}: popcount must equal signer count"
+        );
+        let verified = block
+            .bls_signer_count_from_bitmap(&registry)
+            .expect("aggregate must verify");
+        assert_eq!(verified, expected, "h={h}: verified count matches");
+
+        chain.push(block);
+    }
+}
+
+// ─── 10. Vecteur doré (ADR 0020) : bitmap déterministe pour un set donné ──────
+
+#[test]
+fn n3_bls_golden_vector_deterministic_bitmap() {
+    let (_, bls_sks, addrs, vs) = three_validators();
+    let (chain, _) = Chain::new_with_genesis(addrs[0], 0);
+    let prev = chain.tip_hash();
+
+    // Build the same block twice with the same signers — bitmap must be identical.
+    let bitmap_a = {
+        let mut b = make_block(1, prev, addrs[0]);
+        bls_cosign(&mut b, &[0, 2], &bls_sks, &addrs, &vs);
+        b.bls_bitmap.clone()
+    };
+    let bitmap_b = {
+        let mut b = make_block(1, prev, addrs[0]);
+        bls_cosign(&mut b, &[0, 2], &bls_sks, &addrs, &vs);
+        b.bls_bitmap.clone()
+    };
+
+    assert_eq!(
+        bitmap_a, bitmap_b,
+        "same signers in canonical order → identical bitmap (ADR 0020 golden vector)"
+    );
+    assert!(
+        bitmap_a[0] & 0b0000_0001 != 0,
+        "bit 0 set (validator index 0 signed)"
+    );
+    assert!(
+        bitmap_a[0] & 0b0000_0100 != 0,
+        "bit 2 set (validator index 2 signed)"
+    );
+    assert!(
+        bitmap_a[0] & 0b0000_0010 == 0,
+        "bit 1 clear (validator index 1 did not sign)"
     );
 }

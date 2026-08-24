@@ -22,59 +22,9 @@ use messages::P2pMessage;
 use rayon::prelude::*;
 use std::collections::HashMap;
 use std::sync::atomic::Ordering;
-use vinx_core::{Block, BlockSignature, SlashEvidence, Transaction, ValidatorSet};
+use vinx_core::{Block, Transaction, ValidatorSet};
 use vinx_crypto::{Address, Hash32};
 use vinx_state::WorldState;
-
-/// Returns the proposer's own co-signature on `block` (the one whose validator is the
-/// block's proposer), if present. Used to assemble equivocation evidence.
-fn proposer_signature(block: &Block) -> Option<&BlockSignature> {
-    block
-        .signatures
-        .iter()
-        .find(|s| s.validator == block.header.validator)
-}
-
-/// Auto-reports a proven equivocation (ADR 0003): builds a `SlashValidator` transaction
-/// carrying the two-header evidence, submits it to the local mempool, and gossips it so
-/// any validator can include it. Only registered validators report (the reporter must
-/// have an on-chain account to be `from` and collect the bounty).
-#[allow(clippy::too_many_arguments)]
-async fn report_equivocation(
-    target: Address,
-    evidence: SlashEvidence,
-    mempool: &Arc<RwLock<Mempool>>,
-    state: &Arc<RwLock<WorldState>>,
-    vs: &ValidatorSet,
-    local_kp: &vinx_crypto::KeyPair,
-    local_addr: &Address,
-    swarm: &mut libp2p::Swarm<VinxBehaviour>,
-) {
-    if !vs.contains(local_addr) {
-        debug!(%target, "Equivocation observed but this node is not a validator — not reporting");
-        return;
-    }
-    // Bind the slash transaction to the node's real chain id and nonce.
-    let (chain_id, nonce) = {
-        let s = state.read().await;
-        (
-            s.chain_id,
-            s.get_account(local_addr).map(|a| a.nonce).unwrap_or(0),
-        )
-    };
-    let mut tx = Transaction::new_slash_validator(local_kp, target, &evidence, nonce);
-    tx.chain_id = chain_id;
-    tx.sign(local_kp); // re-sign so the signature commits to the real chain id
-
-    if mempool.write().await.add(tx.clone()).is_ok() {
-        let out = P2pMessage::NewTransaction(tx);
-        let topic = IdentTopic::new(out.topic());
-        let _ = swarm.behaviour_mut().gossipsub.publish(topic, out.encode());
-        warn!(%target, "EQUIVOCATION — slash transaction submitted and gossiped");
-    } else {
-        debug!(%target, "Equivocation slash tx not admitted (already pending?)");
-    }
-}
 
 #[allow(clippy::large_enum_variant)]
 pub enum P2pCommand {
@@ -101,27 +51,19 @@ impl P2pHandle {
                 tx.clone(),
             )));
     }
-    pub fn broadcast_signature(&self, height: u64, signature: BlockSignature) {
-        let _ = self
-            .cmd_tx
-            .send(P2pCommand::Broadcast(P2pMessage::BlockCoSignature {
-                height,
-                signature,
-            }));
-    }
     pub fn broadcast_bls_cosig(
         &self,
         height: u64,
         block_hash: Vec<u8>,
         bls_sig: Vec<u8>,
-        bls_pk: Vec<u8>,
+        validator_addr: Vec<u8>,
     ) {
         let _ = self.cmd_tx.send(P2pCommand::Broadcast(
             P2pMessage::BlockBlsCoSignature {
                 height,
                 block_hash,
                 bls_sig,
-                bls_pk,
+                validator_addr,
             },
         ));
     }
@@ -140,7 +82,6 @@ struct VinxBehaviour {
 const TOPICS: &[&str] = &[
     "vinx/blocks/1",
     "vinx/txs/1",
-    "vinx/sigs/1",
     "vinx/bls/1",
     "vinx/sync/1",
 ];
@@ -302,12 +243,13 @@ async fn run_event_loop(
     local_addr: Address,
     metrics: NodeMetrics,
     fork_choice: ForkChoiceCtx,
-    bls_sk: Option<vinx_crypto::BlsSecretKey>,
+    bls_sk: vinx_crypto::BlsSecretKey,
 ) {
     let mut guard = guard::PeerGuard::new();
-    // ADR 0046: pending BLS co-signatures keyed by (height, block_hash).
-    // Entries are pruned below the finalized height and drained once quorum is reached.
-    let mut pending_bls: HashMap<(u64, Hash32), Vec<(Vec<u8>, Vec<u8>)>> = HashMap::new();
+    // ADR 0029 Phase 1: pending BLS co-signatures keyed by (height, block_hash).
+    // Each entry maps to Vec<(validator_idx, bls_sig)> sorted by validator_idx for canonical
+    // aggregation. Pruned below finality; drained once quorum is reached.
+    let mut pending_bls: HashMap<(u64, Hash32), Vec<(usize, [u8; 96])>> = HashMap::new();
 
     loop {
         tokio::select! {
@@ -347,8 +289,8 @@ async fn handle_swarm_event(
     guard: &mut guard::PeerGuard,
     metrics: &NodeMetrics,
     fork_choice: &ForkChoiceCtx,
-    bls_sk: &Option<vinx_crypto::BlsSecretKey>,
-    pending_bls: &mut HashMap<(u64, Hash32), Vec<(Vec<u8>, Vec<u8>)>>,
+    bls_sk: &vinx_crypto::BlsSecretKey,
+    pending_bls: &mut HashMap<(u64, Hash32), Vec<(usize, [u8; 96])>>,
 ) {
     match event {
         SwarmEvent::NewListenAddr { address, .. } => {
@@ -456,19 +398,6 @@ fn verify_block_tx_signatures_parallel(txs: &[Transaction]) -> bool {
         .all(|tx| WorldState::verify_tx_signature_pure(tx).is_ok())
 }
 
-/// Verifies all co-signatures on a block in parallel (rayon).
-/// Returns `true` only if every signature has a valid pubkey→address binding
-/// and a valid ed25519 signature over `block_hash`.
-/// The proposer signature is included in the same pass.
-fn verify_block_signatures_parallel(sigs: &[BlockSignature], block_hash: &Hash32) -> bool {
-    sigs.par_iter().all(|sig| {
-        if Address::from_public_key(&sig.pub_key) != sig.validator {
-            return false;
-        }
-        sig.pub_key.verify(block_hash, &sig.signature).is_ok()
-    })
-}
-
 /// ADR 0031 — traite un bloc **concurrent** (collision leader/backup) à une hauteur non
 /// finalisée : le valide (proposeur ∈ set + signatures, comme le chemin normal), puis lance
 /// l'orchestration de fork-choice **partagée** avec le banc n=3 (`reorg::consider_candidate`).
@@ -492,25 +421,6 @@ async fn consider_competing_block(
         debug!(
             height,
             "Fork-choice: bloc concurrent d'un non-validateur, ignoré"
-        );
-        return;
-    }
-    let block_hash = block.hash();
-    if !block
-        .signatures
-        .iter()
-        .any(|s| s.validator == block.header.validator)
-    {
-        debug!(
-            height,
-            "Fork-choice: bloc concurrent sans signature de proposeur"
-        );
-        return;
-    }
-    if !verify_block_signatures_parallel(&block.signatures, &block_hash) {
-        warn!(
-            height,
-            "Fork-choice: bloc concurrent à signature(s) invalide(s)"
         );
         return;
     }
@@ -571,13 +481,13 @@ async fn dispatch_message(
     mempool: &Arc<RwLock<Mempool>>,
     state: &Arc<RwLock<WorldState>>,
     validator_set: &Arc<RwLock<ValidatorSet>>,
-    local_kp: &vinx_crypto::KeyPair,
+    _local_kp: &vinx_crypto::KeyPair,
     local_addr: &Address,
     swarm: &mut libp2p::Swarm<VinxBehaviour>,
     metrics: &NodeMetrics,
     fork_choice: &ForkChoiceCtx,
-    bls_sk: &Option<vinx_crypto::BlsSecretKey>,
-    pending_bls: &mut HashMap<(u64, Hash32), Vec<(Vec<u8>, Vec<u8>)>>,
+    bls_sk: &vinx_crypto::BlsSecretKey,
+    pending_bls: &mut HashMap<(u64, Hash32), Vec<(usize, [u8; 96])>>,
 ) {
     match msg {
         P2pMessage::NewTransaction(tx) => {
@@ -600,52 +510,6 @@ async fn dispatch_message(
             // set actif — le jailing dérivé est subjectif sous partition et casserait la
             // sûreté). Capturé avant les changements de set par gouvernance de ce bloc.
             let pre_quorum = vs.quorum();
-
-            // 0. Equivocation detection (ADR 0003): a *different* block by the same
-            //    proposer at a height we already hold — with a valid proposer signature
-            //    on each — is a provable double-proposal. Assemble the evidence while we
-            //    still hold both headers, then auto-report a SlashValidator transaction.
-            let equivocation: Option<SlashEvidence> = {
-                let chain_guard = chain.read().await;
-                if height <= chain_guard.tip_height() {
-                    chain_guard.get_block(height).and_then(|ours| {
-                        let hb = block.hash();
-                        let ha = ours.hash();
-                        if ours.header.validator != block.header.validator || ha == hb {
-                            return None;
-                        }
-                        let sig_a = proposer_signature(ours)?.clone();
-                        let sig_b = proposer_signature(&block)?.clone();
-                        // Both proposer signatures must be cryptographically valid over
-                        // their respective headers, else it's just a bogus block.
-                        let valid = Address::from_public_key(&sig_b.pub_key)
-                            == block.header.validator
-                            && sig_b.pub_key.verify(&hb, &sig_b.signature).is_ok()
-                            && sig_a.pub_key.verify(&ha, &sig_a.signature).is_ok();
-                        valid.then(|| SlashEvidence {
-                            header_a: ours.header.clone(),
-                            header_b: block.header.clone(),
-                            sig_a,
-                            sig_b,
-                        })
-                    })
-                } else {
-                    None
-                }
-            };
-            if let Some(evidence) = equivocation {
-                report_equivocation(
-                    block.header.validator,
-                    evidence,
-                    mempool,
-                    state,
-                    &vs,
-                    local_kp,
-                    local_addr,
-                    swarm,
-                )
-                .await;
-            }
 
             // 1. Height and prev_hash linkage
             {
@@ -731,22 +595,7 @@ async fn dispatch_message(
                 return;
             }
 
-            // 3. Signature verification — proposer must be present; all sigs verified in parallel.
-            let block_hash = block.hash();
-            if !block
-                .signatures
-                .iter()
-                .any(|s| s.validator == block.header.validator)
-            {
-                warn!(height, "P2P block missing proposer sig");
-                return;
-            }
-            if !verify_block_signatures_parallel(&block.signatures, &block_hash) {
-                warn!(height, "P2P block has invalid signature(s)");
-                return;
-            }
-            // ADR 0015: verify every transaction signature in parallel up front, then apply
-            // state sequentially with the trusted path (which skips re-verification).
+            // 3. Transaction signatures verified in parallel; state applied sequentially.
             if !verify_block_tx_signatures_parallel(&block.transactions) {
                 warn!(height, "P2P block has invalid transaction signature(s)");
                 return;
@@ -808,98 +657,25 @@ async fn dispatch_message(
             info!(height, "P2P: block validated and applied");
             metrics.p2p_blocks_recv.fetch_add(1, Ordering::Relaxed);
 
-            // 6. Co-sign if we're a validator
+            // 6. BLS co-sign if we're a validator (ADR 0029 Phase 1).
             let vs = validator_set.read().await.clone();
             if vs.contains(local_addr) {
-                let sig = BlockSignature {
-                    validator: *local_addr,
-                    pub_key: local_kp.public_key(),
-                    signature: local_kp.sign(&block_hash),
-                };
-                let co_msg = P2pMessage::BlockCoSignature {
+                let block_hash = block.hash();
+                let bls_sig = bls_sk.sign(&block_hash);
+                let bls_msg = P2pMessage::BlockBlsCoSignature {
                     height,
-                    signature: sig.clone(),
+                    block_hash: block_hash.to_vec(),
+                    bls_sig: bls_sig.0.to_vec(),
+                    validator_addr: local_addr.as_bytes().to_vec(),
                 };
-                let topic = IdentTopic::new(co_msg.topic());
+                let bls_topic = IdentTopic::new(bls_msg.topic());
                 let _ = swarm
                     .behaviour_mut()
                     .gossipsub
-                    .publish(topic, co_msg.encode());
-                debug!(height, "Co-signed block");
-
-                // ADR 0046: broadcast BLS co-signature when a BLS key is configured.
-                if let Some(sk) = bls_sk {
-                    let bls_sig = sk.sign(&block_hash);
-                    let bls_msg = P2pMessage::BlockBlsCoSignature {
-                        height,
-                        block_hash: block_hash.to_vec(),
-                        bls_sig: bls_sig.0.to_vec(),
-                        bls_pk: sk.public_key().0.to_vec(),
-                    };
-                    let bls_topic = IdentTopic::new(bls_msg.topic());
-                    let _ = swarm
-                        .behaviour_mut()
-                        .gossipsub
-                        .publish(bls_topic, bls_msg.encode());
-                    debug!(height, "BLS co-signed block");
-                }
-
+                    .publish(bls_topic, bls_msg.encode());
+                debug!(height, "BLS co-signed block");
                 let mut c = chain.write().await;
                 c.record_signature(local_addr, height, block_hash);
-                let finalized = c.add_co_signature(height, sig, &vs);
-                if finalized {
-                    c.advance_finality(&vs); // ADR 0002
-                                             // ADR 0031 — le snapshot finalisé suit la finalité (base de rejeu des réorgs).
-                    let mut snap = fork_choice.finalized_state.write().await;
-                    crate::reorg::advance_snapshot(&mut snap, &c);
-                    info!(height, "Block finalized after co-signing");
-                }
-            }
-        }
-
-        P2pMessage::BlockCoSignature { height, signature } => {
-            // Pubkey/address consistency
-            if Address::from_public_key(&signature.pub_key) != signature.validator {
-                warn!(height, "P2P co-sig pubkey mismatch");
-                return;
-            }
-            let vs = validator_set.read().await.clone();
-            if !vs.contains(&signature.validator) {
-                debug!(height, "P2P co-sig from non-validator");
-                return;
-            }
-            // Get block hash for sig verification
-            let block_hash = {
-                let c = chain.read().await;
-                match c.get_block(height) {
-                    Some(b) => b.hash(),
-                    None => {
-                        debug!(height, "P2P co-sig for unknown height");
-                        return;
-                    }
-                }
-            };
-            if signature
-                .pub_key
-                .verify(&block_hash, &signature.signature)
-                .is_err()
-            {
-                warn!(height, validator = %signature.validator, "P2P co-sig invalid crypto");
-                return;
-            }
-            // Double-sign (equivocation) detection
-            let mut c = chain.write().await;
-            if c.record_signature(&signature.validator, height, block_hash) {
-                warn!(height, validator = %signature.validator, "EQUIVOCATION: double-sign detected, dropping");
-                return;
-            }
-            let finalized = c.add_co_signature(height, signature, &vs);
-            if finalized {
-                c.advance_finality(&vs); // ADR 0002
-                                         // ADR 0031 — maintenir le snapshot finalisé (base de rejeu des réorgs).
-                let mut snap = fork_choice.finalized_state.write().await;
-                crate::reorg::advance_snapshot(&mut snap, &c);
-                info!(height, "Block finalized via co-signatures");
             }
         }
 
@@ -908,10 +684,10 @@ async fn dispatch_message(
             height,
             block_hash,
             bls_sig,
-            bls_pk,
+            validator_addr,
         } => {
             // Size guards — reject malformed frames early.
-            if bls_pk.len() != 48 || bls_sig.len() != 96 || block_hash.len() != 32 {
+            if validator_addr.len() != 20 || bls_sig.len() != 96 || block_hash.len() != 32 {
                 warn!(height, "P2P BLS cosig: wrong byte lengths");
                 return;
             }
@@ -930,13 +706,39 @@ async fn dispatch_message(
                 warn!(height, "P2P BLS cosig: block_hash mismatch");
                 return;
             }
-            // Verify BLS signature cryptographically.
-            let pk_arr: [u8; 48] = bls_pk.as_slice().try_into().unwrap();
+            // ADR 0029 Phase 1: resolve the sender's validator index and registered BLS PK
+            // from the on-chain registry. Reject if the sender is not a registered validator
+            // or has not registered a BLS key — never trust the claimed PK from the wire.
+            let addr_arr: [u8; 20] = validator_addr.as_slice().try_into().unwrap();
+            let sender_addr = Address::from_bytes(addr_arr);
+            let vs = validator_set.read().await.clone();
+            let validator_idx = match vs.index_of(&sender_addr) {
+                Some(idx) => idx,
+                None => {
+                    debug!(height, "P2P BLS cosig: sender not in validator set");
+                    return;
+                }
+            };
             let sig_arr: [u8; 96] = bls_sig.as_slice().try_into().unwrap();
+            let registered_pk = {
+                let st = state.read().await;
+                st.validator_pool
+                    .get(&sender_addr)
+                    .and_then(|e| e.bls_pub_key.as_deref())
+                    .and_then(|b| <[u8; 48]>::try_from(b).ok())
+            };
+            let pk_arr = match registered_pk {
+                Some(arr) => arr,
+                None => {
+                    debug!(height, "P2P BLS cosig: sender has no registered BLS key");
+                    return;
+                }
+            };
+            // Verify BLS signature against the REGISTERED key (anti-rogue-key).
             let bls_pub = match vinx_crypto::BlsPubKey::from_bytes(&pk_arr) {
                 Ok(p) => p,
                 Err(_) => {
-                    warn!(height, "P2P BLS cosig: invalid pubkey");
+                    warn!(height, "P2P BLS cosig: registry contains invalid BLS PK");
                     return;
                 }
             };
@@ -950,30 +752,32 @@ async fn dispatch_message(
                 let fin = chain.read().await.finalized_height();
                 pending_bls.retain(|(h, _), _| *h > fin);
             }
-            // Accumulate, deduplicating by BLS public key.
+            // Accumulate, deduplicating by validator index.
             let count = {
                 let entry = pending_bls.entry((height, our_block_hash)).or_default();
-                if entry.iter().any(|(pk, _)| pk.as_slice() == bls_pk.as_slice()) {
-                    debug!(height, "P2P BLS cosig: duplicate pubkey, ignoring");
+                if entry.iter().any(|(idx, _)| *idx == validator_idx) {
+                    debug!(height, validator_idx, "P2P BLS cosig: duplicate validator, ignoring");
                     return;
                 }
-                entry.push((bls_pk, bls_sig));
+                entry.push((validator_idx, sig_arr));
                 entry.len()
             };
             debug!(height, count, "P2P BLS cosig accumulated");
             // Check quorum — aggregate and update block when met.
-            let vs = validator_set.read().await.clone();
             if count < vs.quorum() {
                 return;
             }
-            let (pks, raw_sigs): (Vec<Vec<u8>>, Vec<Vec<u8>>) =
-                match pending_bls.get(&(height, our_block_hash)) {
-                    Some(v) => v.iter().cloned().unzip(),
-                    None => return,
-                };
-            let bls_sigs: Vec<vinx_crypto::BlsSignature> = raw_sigs
+            // Build aggregate in canonical (validator-index) order.
+            let pending = match pending_bls.get_mut(&(height, our_block_hash)) {
+                Some(v) => {
+                    v.sort_unstable_by_key(|(idx, _)| *idx);
+                    v.clone()
+                }
+                None => return,
+            };
+            let bls_sigs: Vec<vinx_crypto::BlsSignature> = pending
                 .iter()
-                .map(|s| vinx_crypto::BlsSignature(s.as_slice().try_into().unwrap()))
+                .map(|(_, s)| vinx_crypto::BlsSignature(*s))
                 .collect();
             let agg = match vinx_crypto::bls_aggregate(&bls_sigs) {
                 Ok(a) => a,
@@ -982,10 +786,32 @@ async fn dispatch_message(
                     return;
                 }
             };
-            let agg_count = pks.len();
+            // Collect canonical PKs and build bitmap.
+            let st = state.read().await;
+            let canonical_pks: Vec<Vec<u8>> = pending
+                .iter()
+                .filter_map(|(idx, _)| {
+                    vs.validators()
+                        .get(*idx)
+                        .and_then(|addr| st.validator_pool.get(addr))
+                        .and_then(|e| e.bls_pub_key.clone())
+                })
+                .collect();
+            drop(st);
+            let mut bitmap = vec![];
+            for (idx, _) in &pending {
+                // Reuse Block's logic via a temporary helper.
+                let byte_idx = idx / 8;
+                let bit_pos = idx % 8;
+                if bitmap.len() <= byte_idx {
+                    bitmap.resize(byte_idx + 1, 0u8);
+                }
+                bitmap[byte_idx] |= 1 << bit_pos;
+            }
+            let agg_count = pending.len();
             {
                 let mut c = chain.write().await;
-                c.set_block_bls(height, agg.0.to_vec(), pks);
+                c.set_block_bls(height, agg.0.to_vec(), canonical_pks, bitmap);
                 let fin = c.advance_finality(&vs);
                 if fin >= height {
                     let mut snap = fork_choice.finalized_state.write().await;
@@ -1057,14 +883,6 @@ async fn dispatch_message(
                 // ADR 0005: timestamps must be monotonic even for historical blocks.
                 if block.header.timestamp <= chain.read().await.tip_timestamp() {
                     warn!(height, "SyncResponse block timestamp not monotonic");
-                    break;
-                }
-                // Verify all bundled co-signatures in parallel before applying state.
-                let block_hash = block.hash();
-                if !block.signatures.is_empty()
-                    && !verify_block_signatures_parallel(&block.signatures, &block_hash)
-                {
-                    warn!(height, "SyncResponse block has invalid signature(s)");
                     break;
                 }
                 // ADR 0015: parallel transaction-signature verification, then sequential
@@ -1139,72 +957,5 @@ async fn dispatch_message(
                 }
             }
         }
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-    use vinx_core::block::GENESIS_PREV_HASH;
-    use vinx_core::BlockHeader;
-    use vinx_crypto::KeyPair;
-
-    fn signed_block(kp: &KeyPair, validator: Address, height: u64, tag: u8) -> Block {
-        let header = BlockHeader {
-            height,
-            prev_hash: GENESIS_PREV_HASH,
-            timestamp: 0,
-            validator,
-            tx_count: 0,
-            state_root: [tag; 32],
-            base_fee: 0,
-            receipts_root: [0u8; 32],
-        };
-        let sig = BlockSignature {
-            validator,
-            pub_key: kp.public_key(),
-            signature: kp.sign(&header.hash()),
-        };
-        Block {
-            header,
-            transactions: vec![],
-            signatures: vec![sig],
-            bls_aggregate: None,
-            bls_cosigner_pks: vec![],
-        }
-    }
-
-    #[test]
-    fn test_proposer_signature_found() {
-        let kp = KeyPair::generate();
-        let v = Address::from_public_key(&kp.public_key());
-        let b = signed_block(&kp, v, 5, 0xAA);
-        assert_eq!(proposer_signature(&b).unwrap().validator, v);
-    }
-
-    #[test]
-    fn test_equivocation_evidence_is_well_formed() {
-        // Two different blocks at the same height, both signed by the same proposer,
-        // assemble into evidence whose signatures verify over their own header hashes.
-        let kp = KeyPair::generate();
-        let v = Address::from_public_key(&kp.public_key());
-        let a = signed_block(&kp, v, 5, 0xAA);
-        let b = signed_block(&kp, v, 5, 0xBB);
-        assert_eq!(a.header.height, b.header.height);
-        assert_ne!(a.hash(), b.hash());
-
-        let sig_a = proposer_signature(&a).unwrap().clone();
-        let sig_b = proposer_signature(&b).unwrap().clone();
-        assert!(sig_a.pub_key.verify(&a.hash(), &sig_a.signature).is_ok());
-        assert!(sig_b.pub_key.verify(&b.hash(), &sig_b.signature).is_ok());
-
-        let evidence = SlashEvidence {
-            header_a: a.header.clone(),
-            header_b: b.header.clone(),
-            sig_a,
-            sig_b,
-        };
-        assert_eq!(evidence.header_a.height, evidence.header_b.height);
-        assert_ne!(evidence.header_a.hash(), evidence.header_b.hash());
     }
 }
