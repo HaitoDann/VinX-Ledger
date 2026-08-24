@@ -103,6 +103,7 @@ fn test_storage_roundtrip_preserves_typed_tx_index() {
         signatures: vec![],
         bls_aggregate: None,
         bls_cosigner_pks: vec![],
+        bls_bitmap: vec![],
     };
     chain.push(block);
 

@@ -114,14 +114,14 @@ impl P2pHandle {
         height: u64,
         block_hash: Vec<u8>,
         bls_sig: Vec<u8>,
-        bls_pk: Vec<u8>,
+        validator_addr: Vec<u8>,
     ) {
         let _ = self.cmd_tx.send(P2pCommand::Broadcast(
             P2pMessage::BlockBlsCoSignature {
                 height,
                 block_hash,
                 bls_sig,
-                bls_pk,
+                validator_addr,
             },
         ));
     }
@@ -305,9 +305,10 @@ async fn run_event_loop(
     bls_sk: Option<vinx_crypto::BlsSecretKey>,
 ) {
     let mut guard = guard::PeerGuard::new();
-    // ADR 0046: pending BLS co-signatures keyed by (height, block_hash).
-    // Entries are pruned below the finalized height and drained once quorum is reached.
-    let mut pending_bls: HashMap<(u64, Hash32), Vec<(Vec<u8>, Vec<u8>)>> = HashMap::new();
+    // ADR 0029 Phase 1: pending BLS co-signatures keyed by (height, block_hash).
+    // Each entry maps to Vec<(validator_idx, bls_sig)> sorted by validator_idx for canonical
+    // aggregation. Pruned below finality; drained once quorum is reached.
+    let mut pending_bls: HashMap<(u64, Hash32), Vec<(usize, [u8; 96])>> = HashMap::new();
 
     loop {
         tokio::select! {
@@ -348,7 +349,7 @@ async fn handle_swarm_event(
     metrics: &NodeMetrics,
     fork_choice: &ForkChoiceCtx,
     bls_sk: &Option<vinx_crypto::BlsSecretKey>,
-    pending_bls: &mut HashMap<(u64, Hash32), Vec<(Vec<u8>, Vec<u8>)>>,
+    pending_bls: &mut HashMap<(u64, Hash32), Vec<(usize, [u8; 96])>>,
 ) {
     match event {
         SwarmEvent::NewListenAddr { address, .. } => {
@@ -577,7 +578,7 @@ async fn dispatch_message(
     metrics: &NodeMetrics,
     fork_choice: &ForkChoiceCtx,
     bls_sk: &Option<vinx_crypto::BlsSecretKey>,
-    pending_bls: &mut HashMap<(u64, Hash32), Vec<(Vec<u8>, Vec<u8>)>>,
+    pending_bls: &mut HashMap<(u64, Hash32), Vec<(usize, [u8; 96])>>,
 ) {
     match msg {
         P2pMessage::NewTransaction(tx) => {
@@ -827,14 +828,15 @@ async fn dispatch_message(
                     .publish(topic, co_msg.encode());
                 debug!(height, "Co-signed block");
 
-                // ADR 0046: broadcast BLS co-signature when a BLS key is configured.
+                // ADR 0029 Phase 1: broadcast BLS co-signature with validator address
+                // (not raw PK) so the receiver looks up the registered key from the registry.
                 if let Some(sk) = bls_sk {
                     let bls_sig = sk.sign(&block_hash);
                     let bls_msg = P2pMessage::BlockBlsCoSignature {
                         height,
                         block_hash: block_hash.to_vec(),
                         bls_sig: bls_sig.0.to_vec(),
-                        bls_pk: sk.public_key().0.to_vec(),
+                        validator_addr: local_addr.as_bytes().to_vec(),
                     };
                     let bls_topic = IdentTopic::new(bls_msg.topic());
                     let _ = swarm
@@ -908,10 +910,10 @@ async fn dispatch_message(
             height,
             block_hash,
             bls_sig,
-            bls_pk,
+            validator_addr,
         } => {
             // Size guards — reject malformed frames early.
-            if bls_pk.len() != 48 || bls_sig.len() != 96 || block_hash.len() != 32 {
+            if validator_addr.len() != 20 || bls_sig.len() != 96 || block_hash.len() != 32 {
                 warn!(height, "P2P BLS cosig: wrong byte lengths");
                 return;
             }
@@ -930,13 +932,39 @@ async fn dispatch_message(
                 warn!(height, "P2P BLS cosig: block_hash mismatch");
                 return;
             }
-            // Verify BLS signature cryptographically.
-            let pk_arr: [u8; 48] = bls_pk.as_slice().try_into().unwrap();
+            // ADR 0029 Phase 1: resolve the sender's validator index and registered BLS PK
+            // from the on-chain registry. Reject if the sender is not a registered validator
+            // or has not registered a BLS key — never trust the claimed PK from the wire.
+            let addr_arr: [u8; 20] = validator_addr.as_slice().try_into().unwrap();
+            let sender_addr = Address::from_bytes(addr_arr);
+            let vs = validator_set.read().await.clone();
+            let validator_idx = match vs.index_of(&sender_addr) {
+                Some(idx) => idx,
+                None => {
+                    debug!(height, "P2P BLS cosig: sender not in validator set");
+                    return;
+                }
+            };
             let sig_arr: [u8; 96] = bls_sig.as_slice().try_into().unwrap();
+            let registered_pk = {
+                let st = state.read().await;
+                st.validator_pool
+                    .get(&sender_addr)
+                    .and_then(|e| e.bls_pub_key.as_deref())
+                    .and_then(|b| <[u8; 48]>::try_from(b).ok())
+            };
+            let pk_arr = match registered_pk {
+                Some(arr) => arr,
+                None => {
+                    debug!(height, "P2P BLS cosig: sender has no registered BLS key");
+                    return;
+                }
+            };
+            // Verify BLS signature against the REGISTERED key (anti-rogue-key).
             let bls_pub = match vinx_crypto::BlsPubKey::from_bytes(&pk_arr) {
                 Ok(p) => p,
                 Err(_) => {
-                    warn!(height, "P2P BLS cosig: invalid pubkey");
+                    warn!(height, "P2P BLS cosig: registry contains invalid BLS PK");
                     return;
                 }
             };
@@ -950,30 +978,32 @@ async fn dispatch_message(
                 let fin = chain.read().await.finalized_height();
                 pending_bls.retain(|(h, _), _| *h > fin);
             }
-            // Accumulate, deduplicating by BLS public key.
+            // Accumulate, deduplicating by validator index.
             let count = {
                 let entry = pending_bls.entry((height, our_block_hash)).or_default();
-                if entry.iter().any(|(pk, _)| pk.as_slice() == bls_pk.as_slice()) {
-                    debug!(height, "P2P BLS cosig: duplicate pubkey, ignoring");
+                if entry.iter().any(|(idx, _)| *idx == validator_idx) {
+                    debug!(height, validator_idx, "P2P BLS cosig: duplicate validator, ignoring");
                     return;
                 }
-                entry.push((bls_pk, bls_sig));
+                entry.push((validator_idx, sig_arr));
                 entry.len()
             };
             debug!(height, count, "P2P BLS cosig accumulated");
             // Check quorum — aggregate and update block when met.
-            let vs = validator_set.read().await.clone();
             if count < vs.quorum() {
                 return;
             }
-            let (pks, raw_sigs): (Vec<Vec<u8>>, Vec<Vec<u8>>) =
-                match pending_bls.get(&(height, our_block_hash)) {
-                    Some(v) => v.iter().cloned().unzip(),
-                    None => return,
-                };
-            let bls_sigs: Vec<vinx_crypto::BlsSignature> = raw_sigs
+            // Build aggregate in canonical (validator-index) order.
+            let pending = match pending_bls.get_mut(&(height, our_block_hash)) {
+                Some(v) => {
+                    v.sort_unstable_by_key(|(idx, _)| *idx);
+                    v.clone()
+                }
+                None => return,
+            };
+            let bls_sigs: Vec<vinx_crypto::BlsSignature> = pending
                 .iter()
-                .map(|s| vinx_crypto::BlsSignature(s.as_slice().try_into().unwrap()))
+                .map(|(_, s)| vinx_crypto::BlsSignature(*s))
                 .collect();
             let agg = match vinx_crypto::bls_aggregate(&bls_sigs) {
                 Ok(a) => a,
@@ -982,10 +1012,32 @@ async fn dispatch_message(
                     return;
                 }
             };
-            let agg_count = pks.len();
+            // Collect canonical PKs and build bitmap.
+            let st = state.read().await;
+            let canonical_pks: Vec<Vec<u8>> = pending
+                .iter()
+                .filter_map(|(idx, _)| {
+                    vs.validators()
+                        .get(*idx)
+                        .and_then(|addr| st.validator_pool.get(addr))
+                        .and_then(|e| e.bls_pub_key.clone())
+                })
+                .collect();
+            drop(st);
+            let mut bitmap = vec![];
+            for (idx, _) in &pending {
+                // Reuse Block's logic via a temporary helper.
+                let byte_idx = idx / 8;
+                let bit_pos = idx % 8;
+                if bitmap.len() <= byte_idx {
+                    bitmap.resize(byte_idx + 1, 0u8);
+                }
+                bitmap[byte_idx] |= 1 << bit_pos;
+            }
+            let agg_count = pending.len();
             {
                 let mut c = chain.write().await;
-                c.set_block_bls(height, agg.0.to_vec(), pks);
+                c.set_block_bls(height, agg.0.to_vec(), canonical_pks, bitmap);
                 let fin = c.advance_finality(&vs);
                 if fin >= height {
                     let mut snap = fork_choice.finalized_state.write().await;
@@ -1171,6 +1223,7 @@ mod tests {
             signatures: vec![sig],
             bls_aggregate: None,
             bls_cosigner_pks: vec![],
+            bls_bitmap: vec![],
         }
     }
 

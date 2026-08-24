@@ -1,6 +1,6 @@
 # ADR 0029 — Décentralisation à grande échelle : agrégation de signatures & comité dynamique
 
-- **Statut :** Accepté — **Architecture cible du consensus** (non implémenté)
+- **Statut :** En cours — Phase 1 (agrégation BLS + bitmap) implémentée, Phase 2 (VRF comité) planifiée
 - **Catégorie :** Consensus & finalité · **Priorité :** 🔴 haute
 - **Date :** Juillet 2026 · Révisé août 2026 (décision architecture VinX PoS)
 - **Liens :** étend la finalité (ADR 0002) ; généralise la rémunération (ADR 0028) et le
@@ -147,3 +147,52 @@ agrégation BLS est la direction choisie pour le réseau principal. Les raisons 
 - ADR 0002 (finalité) et ADR 0027 (jailing) éprouvés au banc n=3 ✅ (déjà fait)
 - ADR 0038 (admission PoS permissionless) décidé ✅ (déjà accepté)
 - Spec formelle du beacon d'aléa (seed de l'époque) à rédiger
+
+## Phase 1 — Décisions d'architecture (août 2026)
+
+Décisions validées avec l'équipe et encodées dans l'implémentation :
+
+| Paramètre | Décision retenue | Justification |
+|-----------|-----------------|---------------|
+| Beacon d'aléa (Phase 2) | **Epoch nonce 2/3 freeze (Cardano-style)** : `nonce[n+1] = hash(VRF_outputs[0..2n/3])` | Résistance au grinding : le dernier 1/3 de l'époque ne peut pas influencer le nonce suivant |
+| Rotation du comité (Phase 2) | **Par bloc (Algorand-style)** : comité de 100 membres tiré à chaque hauteur | Imprévisibilité maximale, pas de fenêtre d'attaque |
+| Ordre d'implémentation | **Phase 1 d'abord** : BLS + bitmap, tous les validateurs signent | Livraison incrémentale, débloque centaines de validateurs sans VRF |
+| KES (Key Evolving Signatures) | **Reporté à la Phase 5 (mainnet)** | Complexité non justifiée au stade alpha |
+
+### Spécification Phase 1 (implémentée)
+
+**Structure `Block` (ADR 0029 Phase 1)** :
+```
+Block {
+    bls_aggregate:   Option<Vec<u8>>,  // G2 96 bytes, aggregate over all signers
+    bls_cosigner_pks: Vec<Vec<u8>>,    // G1 48 bytes each, canonical registry-sourced PKs
+    bls_bitmap:      Vec<u8>,          // bit i = validator[i] signed (canonical order)
+}
+```
+
+**Sécurité anti-rogue-key** : le message P2P `BlockBlsCoSignature` transporte `validator_addr`
+(20 bytes) au lieu de `bls_pk` (48 bytes). Le récepteur résout la clé publique depuis le
+registre on-chain (`validator_pool`) — clé vérifiée par preuve de possession à l'enregistrement.
+Un acteur malveillant ne peut pas injecter une fausse clé via le réseau.
+
+**Ordonnancement canonique** : les clés sont extraites dans l'ordre croissant d'index de
+validateur (`ValidatorSet::index_of`). Consensus-critique (ADR 0020).
+
+**STORAGE_VERSION** : bumpe de 14 → 15 (migration : 8 octets vides ajoutés à chaque row de bloc).
+
+### Critères de validation Phase 1
+
+- [ ] `cargo test --workspace` vert — tests unitaires `bls_bitmap_*`, `bls_signer_count_from_bitmap`
+- [ ] Banc n=1 : un nœud avec BLS key produit et finalise des blocs (bitmap bit 0 set)
+- [ ] Banc n=3 : 3 nœuds avec BLS keys, quorum BLS (2/3) atteint sans erreur crypto
+- [ ] Banc n=3 : la migration STORAGE_VERSION v14→v15 s'applique sans wipe ni perte de données
+- [ ] Test de propriété : bitmap popcount = nombre de validateurs ayant co-signé, sur 100 blocs
+- [ ] Vecteur doré (ADR 0020) : un même set de signatures BLS produit toujours le même bitmap
+
+### Critères de validation Phase 2 (à venir)
+
+- [ ] Banc n=1 : tirage VRF dégénère correctement à n=1 (un seul leader possible)
+- [ ] Banc n=3 : les 3 leaders sont distincts sur 100 blocs consécutifs (rotation VRF effective)
+- [ ] Banc n=3 : si 1 nœud tombe, finalité gèle mais ne bifurque pas
+- [ ] Test de propriété : aucun validateur n'est leader plus de 2× la moyenne sur 1 000 blocs
+- [ ] PROTOCOL_SPEC.md §8.2 correspond à l'implémentation Phase 2

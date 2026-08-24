@@ -44,7 +44,9 @@ use zstd;
 ///      `bls_aggregate: Option<[u8;96]>` (None) and `bls_cosigner_pks: Vec<[u8;48]>` ([]).
 ///      `ValidatorPoolEntry` also gains `bls_pub_key` and `bls_pop` (None each), but since
 ///      the pool is expected empty during this alpha migration, no entry-level patching is done.
-const STORAGE_VERSION: u64 = 14;
+/// v15: BLS bitmap (ADR 0029 Phase 1) — each Block row gains `bls_bitmap: Vec<u8>` ([]).
+///      8 bytes appended per block row (bincode empty Vec<u8> = 0u64 LE).
+const STORAGE_VERSION: u64 = 15;
 
 /// zstd compression level — level 3 is the sweet spot: ~60-70% size reduction,
 /// negligible latency compared to disk I/O.
@@ -195,6 +197,8 @@ impl Storage {
                 12 => Self::append_meta_suffix(tx, &vinx_state::v13_meta_suffix())?,
                 // v13 → v14 (ADR 0046 Phase 2 BLS): append BLS fields to every block row.
                 13 => Self::migrate_v13_block_bls_fields(tx)?,
+                // v14 → v15 (ADR 0029 Phase 1 bitmap): append bls_bitmap (empty Vec<u8>) to every block row.
+                14 => Self::migrate_v14_block_bitmap_field(tx)?,
                 unknown => {
                     return Err(Self::io_err(format!(
                         "no automatic migration from schema v{unknown} to v{STORAGE_VERSION}. \
@@ -298,6 +302,33 @@ impl Storage {
                 .map_err(Self::io_err)?;
         }
         tracing::info!(blocks = count, "v14 migration: BLS fields appended to block rows");
+        Ok(())
+    }
+
+    /// v14 → v15 (ADR 0029 Phase 1 bitmap): appends `bls_bitmap: Vec<u8>` (empty) to each
+    /// Block's bincode data. bincode encodes an empty `Vec<u8>` as `0u64` LE (8 bytes).
+    fn migrate_v14_block_bitmap_field(tx: &redb::WriteTransaction) -> io::Result<()> {
+        const SUFFIX: [u8; 8] = [0u8; 8]; // bincode empty Vec<u8> = 0u64 LE
+        let rows: Vec<(u64, Vec<u8>)> = {
+            let tbl = tx.open_table(BLOCKS).map_err(Self::io_err)?;
+            tbl.iter()
+                .map_err(Self::io_err)?
+                .map(|r| {
+                    r.map(|(k, v)| (k.value(), v.value().to_vec()))
+                        .map_err(Self::io_err)
+                })
+                .collect::<io::Result<_>>()?
+        };
+        let count = rows.len() as u64;
+        let mut tbl = tx.open_table(BLOCKS).map_err(Self::io_err)?;
+        for (height, compressed) in rows {
+            let mut data = Self::decompress(&compressed)?;
+            data.extend_from_slice(&SUFFIX);
+            let recompressed = Self::compress(&data)?;
+            tbl.insert(height, recompressed.as_slice())
+                .map_err(Self::io_err)?;
+        }
+        tracing::info!(blocks = count, "v15 migration: bls_bitmap field appended to block rows");
         Ok(())
     }
 
@@ -798,6 +829,7 @@ mod tests {
             signatures: vec![],
             bls_aggregate: None,
             bls_cosigner_pks: vec![],
+            bls_bitmap: vec![],
         };
         chain.push(block);
 
@@ -917,6 +949,7 @@ mod tests {
             signatures: vec![],
             bls_aggregate: None,
             bls_cosigner_pks: vec![],
+            bls_bitmap: vec![],
         }
     }
 

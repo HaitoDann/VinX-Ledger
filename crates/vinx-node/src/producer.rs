@@ -177,6 +177,7 @@ pub fn produce_block(
         signatures: Vec::new(),
         bls_aggregate: None,
         bls_cosigner_pks: vec![],
+        bls_bitmap: vec![],
     };
 
     // Proposer signs the block header hash (counts as one co-signature)
@@ -187,14 +188,17 @@ pub fn produce_block(
         signature: config.validator_keypair.sign(&header_hash),
     });
 
-    // ADR 0046 Phase 2 — BLS co-signature: the proposer contributes its own BLS sig.
-    // The aggregate starts as a single-sig aggregate; P2P gossip adds more sigs in Phase 3.
+    // ADR 0029 Phase 1 — BLS co-signature: the proposer contributes its own BLS sig.
+    // The aggregate starts as a single-sig aggregate; P2P gossip adds more sigs via gossip.
     if let Some(bls_sk) = &config.bls_secret_key {
         let bls_sig = bls_sk.sign(&header_hash);
         match bls_aggregate(&[bls_sig]) {
             Ok(agg) => {
                 block.bls_aggregate = Some(agg.0.to_vec());
                 block.bls_cosigner_pks = vec![bls_sk.public_key().0.to_vec()];
+                if let Some(idx) = validator_set.index_of(&config.validator_address) {
+                    block.set_bls_bitmap_bit(idx);
+                }
             }
             Err(e) => tracing::warn!("BLS aggregate init failed: {e}"),
         }
@@ -326,6 +330,7 @@ fn produce_block_inner(
         signatures: Vec::new(),
         bls_aggregate: None,
         bls_cosigner_pks: vec![],
+        bls_bitmap: vec![],
     };
     let header_hash = block.hash();
     block.signatures.push(BlockSignature {
@@ -338,6 +343,9 @@ fn produce_block_inner(
         if let Ok(agg) = bls_aggregate(&[bls_sig]) {
             block.bls_aggregate = Some(agg.0.to_vec());
             block.bls_cosigner_pks = vec![bls_sk.public_key().0.to_vec()];
+            if let Some(idx) = validator_set.index_of(&config.validator_address) {
+                block.set_bls_bitmap_bit(idx);
+            }
         }
     }
     // ADR 0002/0027 — quorum du set COMPLET pré-bloc (même raison que le chemin leader).

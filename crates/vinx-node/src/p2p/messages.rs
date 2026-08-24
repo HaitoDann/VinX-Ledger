@@ -54,16 +54,21 @@ pub enum P2pMessage {
         height: u64,
         signature: BlockSignature,
     },
-    /// A single BLS12-381 co-signature on a block, gossiped by validators (ADR 0046).
+    /// A single BLS12-381 co-signature on a block, gossiped by validators (ADR 0029 Phase 1).
+    ///
+    /// Receivers look up the sender's BLS public key from the on-chain registry keyed by
+    /// `validator_addr`. This prevents rogue-key attacks: only the REGISTERED key can verify
+    /// the aggregate, so a malicious actor cannot inject a fake key over the wire.
     BlockBlsCoSignature {
         height: u64,
-        /// SHA-256 hash of the signed block header (96-byte message). Carried in the
-        /// message so recipients can verify the signature before doing a chain lookup.
+        /// SHA-256 hash of the signed block header. Carried so recipients can verify the
+        /// signature before doing a chain lookup.
         block_hash: Vec<u8>,
         /// BLS G2 compressed signature (96 bytes).
         bls_sig: Vec<u8>,
-        /// BLS G1 compressed public key (48 bytes).
-        bls_pk: Vec<u8>,
+        /// Ed25519 address (20 bytes) of the signing validator. Recipients use this to
+        /// look up the registered BLS G1 public key from the validator pool.
+        validator_addr: Vec<u8>,
     },
     /// Request blocks starting from `from_height` (sent when a node detects it's behind).
     SyncRequest { from_height: u64, limit: u32 },
@@ -159,6 +164,7 @@ mod tests {
             signatures: vec![],
             bls_aggregate: None,
             bls_cosigner_pks: vec![],
+            bls_bitmap: vec![],
         }
     }
 
@@ -264,18 +270,22 @@ mod tests {
         let sk = BlsSecretKey::generate();
         let msg_hash = [0xABu8; 32];
         let bls_sig = sk.sign(&msg_hash);
-        let bls_pk = sk.public_key();
+        let validator_addr = [0x11u8; 20];
         let msg = P2pMessage::BlockBlsCoSignature {
             height: 7,
             block_hash: msg_hash.to_vec(),
             bls_sig: bls_sig.0.to_vec(),
-            bls_pk: bls_pk.0.to_vec(),
+            validator_addr: validator_addr.to_vec(),
         };
         let decoded = P2pMessage::decode(&msg.encode()).unwrap();
         match decoded {
-            P2pMessage::BlockBlsCoSignature { height, bls_pk: pk, .. } => {
+            P2pMessage::BlockBlsCoSignature {
+                height,
+                validator_addr: addr,
+                ..
+            } => {
                 assert_eq!(height, 7);
-                assert_eq!(pk.len(), 48);
+                assert_eq!(addr.len(), 20);
             }
             _ => panic!("expected BlockBlsCoSignature"),
         }
@@ -301,7 +311,7 @@ mod tests {
                 height: 1,
                 block_hash: vec![0u8; 32],
                 bls_sig: vec![0u8; 96],
-                bls_pk: vec![0u8; 48],
+                validator_addr: vec![0u8; 20],
             }
             .topic(),
             "vinx/bls/1"

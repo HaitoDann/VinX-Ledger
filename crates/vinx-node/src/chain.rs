@@ -67,6 +67,7 @@ impl Chain {
             signatures: vec![],
             bls_aggregate: None,
             bls_cosigner_pks: vec![],
+            bls_bitmap: vec![],
         };
         let hash = genesis.hash();
         let chain = Self {
@@ -518,10 +519,12 @@ impl Chain {
         height: u64,
         bls_aggregate: Vec<u8>,
         bls_cosigner_pks: Vec<Vec<u8>>,
+        bls_bitmap: Vec<u8>,
     ) {
         if let Some((_, block)) = self.blocks.get_mut(height as usize) {
             block.bls_aggregate = Some(bls_aggregate);
             block.bls_cosigner_pks = bls_cosigner_pks;
+            block.bls_bitmap = bls_bitmap;
             self.dirty_heights.insert(height);
         }
     }
@@ -734,6 +737,7 @@ mod tests {
             signatures,
             bls_aggregate: None,
             bls_cosigner_pks: vec![],
+            bls_bitmap: vec![],
         }
     }
 
@@ -1029,6 +1033,7 @@ mod tests {
                 signatures: vec![],
                 bls_aggregate: None,
                 bls_cosigner_pks: vec![],
+                bls_bitmap: vec![],
             };
             chain.push(block);
         }
@@ -1075,6 +1080,7 @@ mod tests {
                 signatures: vec![],
                 bls_aggregate: None,
                 bls_cosigner_pks: vec![],
+                bls_bitmap: vec![],
             };
             chain.push(block);
         }
