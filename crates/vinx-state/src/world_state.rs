@@ -5,7 +5,8 @@ use vinx_core::{
         cumulative_emission_atoms, Amount, BPS_DENOM, DEFAULT_ACTIVE_SET_SIZE,
         DEFAULT_FEE_FLOOR_ATOMS, EPOCH_DURATION_SECS, EXISTENTIAL_DEPOSIT_ATOMS, MAX_MODULES,
         MAX_NONCE_AHEAD, MIN_MODULE_BOND_ATOMS, MIN_STAKE_ATOMS, MIN_VALIDATOR_BOND_ATOMS,
-        SLASH_BOUNTY_BPS, SLASH_EQUIVOCATION_BPS, UNBONDING_SECS, VALIDATOR_SCORE_WINDOW_SECS,
+        PROPOSER_SHARE_BPS, SLASH_BOUNTY_BPS, SLASH_EQUIVOCATION_BPS, UNBONDING_SECS,
+        VALIDATOR_SCORE_WINDOW_SECS,
     },
     block::SlashEvidence,
     chain_id::CHAIN_ID_DEVNET,
@@ -638,26 +639,62 @@ impl WorldState {
             }
         }
 
-        // 5. Distribute epoch pot equally among the new active set.
+        // 5. Distribute epoch pot proportionally by co-signature participation (ADR 0028).
+        // Weight = cosign_count_in_window; equal fallback for validators with zero count.
         if !new_active.is_empty() {
             let pot = self.epoch_dist_emission_pot;
             if pot > Amount::ZERO {
-                let count = new_active.len() as u128;
-                let share_atoms = pot.atoms() / count;
-                let remainder_atoms = pot.atoms() % count;
-                // Sorted for a deterministic remainder recipient.
+                // Sorted for deterministic remainder recipient.
                 let mut sorted: Vec<Address> = new_active.iter().copied().collect();
                 sorted.sort();
-                for &addr in &sorted {
-                    if share_atoms > 0 {
-                        self.distribute_from_epoch_pot(&addr, Amount::from_atoms(share_atoms));
+
+                let weights: Vec<(Address, u64)> = sorted
+                    .iter()
+                    .map(|a| {
+                        let w = self
+                            .validator_pool
+                            .get(a)
+                            .map(|e| e.cosign_count_in_window)
+                            .unwrap_or(0);
+                        (*a, w)
+                    })
+                    .collect();
+                let total_weight: u64 = weights.iter().map(|(_, w)| *w).sum();
+
+                if total_weight == 0 {
+                    // No participation data yet — equal split.
+                    let count = sorted.len() as u128;
+                    let share_atoms = pot.atoms() / count;
+                    let remainder_atoms = pot.atoms() % count;
+                    for &addr in &sorted {
+                        if share_atoms > 0 {
+                            self.distribute_from_epoch_pot(&addr, Amount::from_atoms(share_atoms));
+                        }
                     }
-                }
-                if remainder_atoms > 0 {
-                    self.distribute_from_epoch_pot(
-                        &sorted[0],
-                        Amount::from_atoms(remainder_atoms),
-                    );
+                    if remainder_atoms > 0 {
+                        self.distribute_from_epoch_pot(
+                            &sorted[0],
+                            Amount::from_atoms(remainder_atoms),
+                        );
+                    }
+                } else {
+                    let total_w = total_weight as u128;
+                    let mut distributed = 0u128;
+                    for (i, (addr, weight)) in weights.iter().enumerate() {
+                        let share_atoms = if i + 1 < weights.len() {
+                            pot.atoms() * (*weight as u128) / total_w
+                        } else {
+                            // Last recipient gets the remainder to avoid rounding loss.
+                            pot.atoms() - distributed
+                        };
+                        if share_atoms > 0 {
+                            self.distribute_from_epoch_pot(
+                                addr,
+                                Amount::from_atoms(share_atoms),
+                            );
+                            distributed += share_atoms;
+                        }
+                    }
                 }
             }
         }
@@ -733,8 +770,24 @@ impl WorldState {
         if to_emit == 0 {
             return Amount::ZERO;
         }
+        // ADR 0028: 20% directly to the proposer (circulating), 80% into the epoch pot.
+        let proposer_atoms = to_emit * PROPOSER_SHARE_BPS / BPS_DENOM;
+        let pot_atoms = to_emit - proposer_atoms;
         let minted = Amount::from_atoms(to_emit);
-        self.mint_emission(producer, minted);
+        // Mint proposer share into the producer's balance (circulating).
+        if proposer_atoms > 0 {
+            self.mint_emission(producer, Amount::from_atoms(proposer_atoms));
+        }
+        // Mint pot share directly into emitted_atoms + epoch_dist_emission_pot (never circulating).
+        if pot_atoms > 0 {
+            self.emitted_atoms = self
+                .emitted_atoms
+                .saturating_add(pot_atoms)
+                .min(vinx_core::amount::MAX_SUPPLY_ATOMS);
+            self.epoch_dist_emission_pot = self
+                .epoch_dist_emission_pot
+                .saturating_add(Amount::from_atoms(pot_atoms));
+        }
         minted
     }
 
@@ -1082,6 +1135,7 @@ impl WorldState {
             TransactionType::AdminAction => self.apply_admin_action(tx),
             TransactionType::AnchorState => self.apply_anchor_state(tx),
             TransactionType::RegisterBlsKey => self.apply_register_bls_key(tx),
+            TransactionType::Unjail => self.apply_unjail(tx),
         }
     }
 
@@ -1409,36 +1463,40 @@ impl WorldState {
             ));
         }
 
-        // 2. Both signatures must name the target validator, with matching pubkeys.
-        if evidence.sig_a.validator != *target || evidence.sig_b.validator != *target {
+        // 2. Both headers must name the target as proposer.
+        if evidence.header_a.validator != *target || evidence.header_b.validator != *target {
             return Err(CoreError::InvalidTransaction(
-                "evidence validator mismatch".to_string(),
-            ));
-        }
-        if Address::from_public_key(&evidence.sig_a.pub_key) != *target
-            || Address::from_public_key(&evidence.sig_b.pub_key) != *target
-        {
-            return Err(CoreError::InvalidTransaction(
-                "evidence pubkey/address mismatch".to_string(),
+                "evidence headers do not name target as proposer".to_string(),
             ));
         }
 
-        // 3. THE crucial check: both signatures must be cryptographically valid over
-        //    their respective block-header hashes. Only the target could have produced
-        //    both — this is what makes a slash provable and forgery impossible.
-        if evidence
-            .sig_a
-            .pub_key
-            .verify(&hash_a, &evidence.sig_a.signature)
-            .is_err()
-            || evidence
-                .sig_b
-                .pub_key
-                .verify(&hash_b, &evidence.sig_b.signature)
-                .is_err()
+        // 3. THE crucial check: both BLS signatures must verify against the target's
+        //    registered BLS key (ADR 0046). Only the target could have produced both —
+        //    forging evidence requires forging a BLS signature over a real header.
+        let bls_pk_bytes = self
+            .validator_pool
+            .get(target)
+            .and_then(|e| e.bls_pub_key.as_deref())
+            .and_then(|b| <[u8; 48]>::try_from(b).ok())
+            .ok_or_else(|| {
+                CoreError::InvalidTransaction(
+                    "target has no registered BLS key — cannot verify equivocation".to_string(),
+                )
+            })?;
+        let bls_pk = BlsPubKey::from_bytes(&bls_pk_bytes).map_err(|_| {
+            CoreError::InvalidTransaction("target BLS public key is malformed".to_string())
+        })?;
+        let sig_a_arr: [u8; 96] = evidence.bls_sig_a.as_slice().try_into().map_err(|_| {
+            CoreError::InvalidTransaction("bls_sig_a must be 96 bytes".to_string())
+        })?;
+        let sig_b_arr: [u8; 96] = evidence.bls_sig_b.as_slice().try_into().map_err(|_| {
+            CoreError::InvalidTransaction("bls_sig_b must be 96 bytes".to_string())
+        })?;
+        if vinx_crypto::bls_verify(&bls_pk, &BlsSignature(sig_a_arr), &hash_a).is_err()
+            || vinx_crypto::bls_verify(&bls_pk, &BlsSignature(sig_b_arr), &hash_b).is_err()
         {
             return Err(CoreError::InvalidTransaction(
-                "invalid equivocation signature".to_string(),
+                "BLS equivocation proof does not verify".to_string(),
             ));
         }
 
@@ -1900,6 +1958,32 @@ impl WorldState {
         Ok(())
     }
 
+    fn apply_unjail(&mut self, tx: &Transaction) -> Result<(), CoreError> {
+        let account = self
+            .accounts
+            .get(&tx.from)
+            .ok_or(CoreError::InsufficientBalance)?;
+        if account.nonce != tx.nonce {
+            return Err(CoreError::InvalidNonce {
+                expected: account.nonce,
+                got: tx.nonce,
+            });
+        }
+        let height = self.block_height;
+        if !reliability::try_unjail(&mut self.reliability, &tx.from, height) {
+            return Err(CoreError::InvalidTransaction(
+                "unjail failed: validator is not jailed or cooldown has not elapsed".to_string(),
+            ));
+        }
+        self.accounts
+            .get_mut(&tx.from)
+            .expect("existence checked above")
+            .nonce += 1;
+        self.mark_dirty(&tx.from);
+        tracing::info!(validator = %tx.from, height, "ADR 0027: validator unjailed");
+        Ok(())
+    }
+
     #[cfg(test)]
     fn set_staked_for_test(&mut self, address: &Address, staked: Amount) {
         let acc = self
@@ -1943,9 +2027,9 @@ mod tests {
     }
 
     // ─── Fair launch: emission, fees, bond, unbonding, slashing ──────────────
-    use vinx_core::amount::{cumulative_emission_atoms, EMISSION_T_HALF_SECS, MAX_SUPPLY_ATOMS};
+    use vinx_core::amount::{cumulative_emission_atoms, EMISSION_T_HALF_SECS};
     use vinx_core::block::GENESIS_PREV_HASH;
-    use vinx_core::{BlockHeader, BlockSignature, SlashEvidence};
+    use vinx_core::{BlockHeader, SlashEvidence};
 
     #[test]
     fn test_supply_invariant_detects_corruption() {
@@ -1980,10 +2064,11 @@ mod tests {
         let (_, emission) = s.settle_block(&producer, 2, EMISSION_T_HALF_SECS);
         let expected = cumulative_emission_atoms(EMISSION_T_HALF_SECS);
         assert_eq!(emission.atoms(), expected);
-        assert_eq!(s.accounts[&producer].balance.atoms(), expected);
+        // ADR 0028: producer gets 20%, 80% goes to epoch pot.
+        let producer_share = expected * PROPOSER_SHARE_BPS / BPS_DENOM;
+        assert_eq!(s.accounts[&producer].balance.atoms(), producer_share);
         assert_eq!(s.emitted_atoms, expected);
-        // Supply invariant: circulating == emitted (no pot, no destroyed).
-        assert_eq!(s.circulating_supply.atoms(), s.emitted_atoms);
+        // Supply invariant: circulating + pot == emitted.
         assert!(s.supply_invariant_holds());
     }
 
@@ -1995,7 +2080,9 @@ mod tests {
         s.settle_block(&producer, 1, 0);
         let (_, emission) = s.settle_block(&producer, 2, EMISSION_T_HALF_SECS / 20); // ~1 year
         assert!(emission > Amount::ZERO);
-        assert_eq!(s.accounts[&producer].balance, emission);
+        // ADR 0028: producer receives PROPOSER_SHARE_BPS (20%) of the emission.
+        let expected_balance = Amount::from_atoms(emission.atoms() * PROPOSER_SHARE_BPS / BPS_DENOM);
+        assert_eq!(s.accounts[&producer].balance, expected_balance);
     }
 
     #[test]
@@ -2591,13 +2678,14 @@ mod tests {
         assert!(s.apply_transaction(&bad).is_err());
     }
 
-    // Builds a signed header at `height` with a distinguishing `state_root`.
-    fn signed_header(
-        kp: &KeyPair,
+    // Builds a BLS-signed header at `height` with a distinguishing `state_root`.
+    // Returns (header, bls_sig_bytes) — the 96-byte G2 individual BLS signature.
+    fn bls_signed_header(
+        bls_sk: &vinx_crypto::BlsSecretKey,
         validator: Address,
         height: u64,
         tag: u8,
-    ) -> (BlockHeader, BlockSignature) {
+    ) -> (BlockHeader, Vec<u8>) {
         let header = BlockHeader {
             height,
             prev_hash: GENESIS_PREV_HASH,
@@ -2608,39 +2696,50 @@ mod tests {
             base_fee: 0,
             receipts_root: [0u8; 32],
         };
-        let sig = BlockSignature {
-            validator,
-            pub_key: kp.public_key(),
-            signature: kp.sign(&header.hash()),
-        };
-        (header, sig)
+        let sig = bls_sk.sign(&header.hash());
+        (header, sig.0.to_vec())
+    }
+
+    // Registers a BLS key for `addr` in the validator_pool (bypasses PoP check for tests).
+    fn register_bls_key_for_test(
+        s: &mut WorldState,
+        addr: Address,
+        bls_sk: &vinx_crypto::BlsSecretKey,
+    ) {
+        use vinx_core::validator_pool::ValidatorPoolEntry;
+        let bls_pk = bls_sk.public_key();
+        let entry = s
+            .validator_pool
+            .entry(addr)
+            .or_insert_with(|| ValidatorPoolEntry::new(MIN_VALIDATOR_BOND_ATOMS, 0));
+        entry.bls_pub_key = Some(bls_pk.0.to_vec());
     }
 
     #[test]
     fn test_slash_rejects_forged_evidence() {
-        // An attacker who does not hold the victim's key cannot fabricate evidence:
-        // the signatures won't verify against the victim's public key.
+        // An attacker who does not hold the victim's BLS key cannot fabricate evidence.
+        use vinx_crypto::BlsSecretKey;
         let (reporter_kp, reporter) = kp_addr();
-        let (victim_kp, victim) = kp_addr();
-        let attacker_kp = KeyPair::generate();
+        let (_, victim) = kp_addr();
+        let attacker_bls_sk = BlsSecretKey::generate();
+        let victim_bls_sk = BlsSecretKey::generate();
         let mut s = WorldState::new();
         s.credit_for_test(reporter, Amount::from_vinx(10));
         s.set_staked_for_test(&victim, Amount::from_vinx(1_000));
+        // Register the victim's actual BLS key — attacker will forge with a different key.
+        register_bls_key_for_test(&mut s, victim, &victim_bls_sk);
         s.validator_set = ValidatorSet::new(vec![victim, reporter]);
 
-        let (header_a, _) = signed_header(&victim_kp, victim, 5, 0xAA);
-        let (header_b, _) = signed_header(&victim_kp, victim, 5, 0xBB);
-        // Forged: claim the victim's pubkey but sign with the attacker's key.
-        let forge = |h: &BlockHeader| BlockSignature {
-            validator: victim,
-            pub_key: victim_kp.public_key(),
-            signature: attacker_kp.sign(&h.hash()),
-        };
+        let (header_a, _) = bls_signed_header(&victim_bls_sk, victim, 5, 0xAA);
+        let (header_b, _) = bls_signed_header(&victim_bls_sk, victim, 5, 0xBB);
+        // Forged: sign headers with the attacker's BLS key, not the victim's.
+        let forge_sig_a = attacker_bls_sk.sign(&header_a.hash()).0.to_vec();
+        let forge_sig_b = attacker_bls_sk.sign(&header_b.hash()).0.to_vec();
         let evidence = SlashEvidence {
-            header_a: header_a.clone(),
-            header_b: header_b.clone(),
-            sig_a: forge(&header_a),
-            sig_b: forge(&header_b),
+            header_a,
+            header_b,
+            bls_sig_a: forge_sig_a,
+            bls_sig_b: forge_sig_b,
         };
         let tx = Transaction::new_slash_validator(&reporter_kp, victim, &evidence, 0);
         assert!(s.apply_transaction(&tx).is_err());
@@ -2651,21 +2750,25 @@ mod tests {
 
     #[test]
     fn test_slash_valid_equivocation_burns_bond() {
+        use vinx_crypto::BlsSecretKey;
         let (reporter_kp, reporter) = kp_addr();
-        let (victim_kp, victim) = kp_addr();
+        let (_, victim) = kp_addr();
+        let victim_bls_sk = BlsSecretKey::generate();
         let mut s = WorldState::new();
         s.credit_for_test(reporter, Amount::from_vinx(10));
         s.set_staked_for_test(&victim, Amount::from_vinx(1_000));
+        // Register victim's BLS key so apply_slash_validator can verify the proof.
+        register_bls_key_for_test(&mut s, victim, &victim_bls_sk);
         s.validator_set = ValidatorSet::new(vec![victim, reporter]);
 
-        // Two genuinely-signed, different headers at the same height = equivocation.
-        let (header_a, sig_a) = signed_header(&victim_kp, victim, 5, 0xAA);
-        let (header_b, sig_b) = signed_header(&victim_kp, victim, 5, 0xBB);
+        // Two genuinely BLS-signed, different headers at the same height = equivocation.
+        let (header_a, bls_sig_a) = bls_signed_header(&victim_bls_sk, victim, 5, 0xAA);
+        let (header_b, bls_sig_b) = bls_signed_header(&victim_bls_sk, victim, 5, 0xBB);
         let evidence = SlashEvidence {
             header_a,
             header_b,
-            sig_a,
-            sig_b,
+            bls_sig_a,
+            bls_sig_b,
         };
         let tx = Transaction::new_slash_validator(&reporter_kp, victim, &evidence, 0);
         s.apply_transaction(&tx).unwrap();
@@ -2676,6 +2779,38 @@ mod tests {
         // 10% bounty to the reporter (100 VINX), 90% (900 VINX) moved to the epoch pot.
         assert_eq!(s.accounts[&reporter].balance, Amount::from_vinx(110));
         assert_eq!(s.epoch_dist_emission_pot, Amount::from_vinx(900));
+    }
+
+    // ─── ADR 0027: unjail ────────────────────────────────────────────────────
+
+    #[test]
+    fn test_unjail_clears_jailed_status_after_cooldown() {
+        use vinx_core::reliability::UNJAIL_COOLDOWN_HEIGHTS;
+        let (kp, addr) = kp_addr();
+        let mut s = WorldState::new();
+        s.credit_for_test(addr, Amount::from_vinx(1));
+        // Jail the validator by simulating missed proposals.
+        let entry = s.reliability.entry(addr).or_default();
+        entry.jailed_until = Some(s.block_height + UNJAIL_COOLDOWN_HEIGHTS + 1);
+        // Before cooldown: unjail should fail.
+        s.block_height = 0;
+        let tx = Transaction::new_unjail(&kp, 0);
+        assert!(s.apply_transaction(&tx).is_err(), "unjail before cooldown must fail");
+        // After cooldown: unjail should succeed.
+        s.block_height = UNJAIL_COOLDOWN_HEIGHTS + 2;
+        let tx = Transaction::new_unjail(&kp, 0);
+        s.apply_transaction(&tx).unwrap();
+        assert!(!s.reliability.get(&addr).map(|r| r.is_jailed()).unwrap_or(false));
+    }
+
+    #[test]
+    fn test_unjail_not_jailed_fails() {
+        let (kp, addr) = kp_addr();
+        let mut s = WorldState::new();
+        s.credit_for_test(addr, Amount::from_vinx(1));
+        // Validator was never jailed.
+        let tx = Transaction::new_unjail(&kp, 0);
+        assert!(s.apply_transaction(&tx).is_err(), "unjail when not jailed must fail");
     }
 
     // ─── protocol upgrades ───────────────────────────────────────────────────

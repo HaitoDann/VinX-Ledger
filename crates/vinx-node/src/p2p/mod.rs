@@ -22,7 +22,7 @@ use messages::P2pMessage;
 use rayon::prelude::*;
 use std::collections::HashMap;
 use std::sync::atomic::Ordering;
-use vinx_core::{Block, Transaction, ValidatorSet};
+use vinx_core::{Block, SlashEvidence, Transaction, ValidatorSet};
 use vinx_crypto::{Address, Hash32};
 use vinx_state::WorldState;
 
@@ -595,6 +595,61 @@ async fn dispatch_message(
                 return;
             }
 
+            // ADR 0003: equivocation detection — check if this proposer already signed a
+            // different block at this height (using the previously stored hash).
+            {
+                let proposer = block.header.validator;
+                let new_hash = block.hash();
+                let equivocation_block = {
+                    let c = chain.read().await;
+                    c.get_block(height).and_then(|existing| {
+                        if existing.header.validator == proposer && existing.hash() != new_hash {
+                            Some(existing.clone())
+                        } else {
+                            None
+                        }
+                    })
+                };
+                if let Some(existing_block) = equivocation_block {
+                    warn!(height, %proposer, "EQUIVOCATION: proposer sent two different blocks");
+                    if let (Some(sig_a), Some(sig_b)) =
+                        (&existing_block.bls_aggregate, &block.bls_aggregate)
+                    {
+                        if sig_a.len() == 96 && sig_b.len() == 96 {
+                            let evidence = SlashEvidence {
+                                header_a: existing_block.header.clone(),
+                                header_b: block.header.clone(),
+                                bls_sig_a: sig_a.clone(),
+                                bls_sig_b: sig_b.clone(),
+                            };
+                            let (chain_id, nonce) = {
+                                let s = state.read().await;
+                                (
+                                    s.chain_id,
+                                    s.get_account(local_addr)
+                                        .map(|a| a.nonce)
+                                        .unwrap_or(0),
+                                )
+                            };
+                            let mut slash_tx = Transaction::new_slash_validator(
+                                _local_kp, proposer, &evidence, nonce,
+                            );
+                            slash_tx.chain_id = chain_id;
+                            slash_tx.sign(_local_kp);
+                            if mempool.write().await.add(slash_tx.clone()).is_ok() {
+                                let out = P2pMessage::NewTransaction(slash_tx);
+                                let topic = IdentTopic::new(out.topic());
+                                let _ = swarm
+                                    .behaviour_mut()
+                                    .gossipsub
+                                    .publish(topic, out.encode());
+                            }
+                        }
+                    }
+                    return; // reject the equivocating block
+                }
+            }
+
             // 3. Transaction signatures verified in parallel; state applied sequentially.
             if !verify_block_tx_signatures_parallel(&block.transactions) {
                 warn!(height, "P2P block has invalid transaction signature(s)");
@@ -809,6 +864,11 @@ async fn dispatch_message(
                 bitmap[byte_idx] |= 1 << bit_pos;
             }
             let agg_count = pending.len();
+            // Resolve cosigner addresses from validator indices (ADR 0028).
+            let cosigner_addrs: Vec<Address> = pending
+                .iter()
+                .filter_map(|(idx, _)| vs.validators().get(*idx).copied())
+                .collect();
             {
                 let mut c = chain.write().await;
                 c.set_block_bls(height, agg.0.to_vec(), canonical_pks, bitmap);
@@ -819,6 +879,8 @@ async fn dispatch_message(
                     info!(height, cosigners = agg_count, "Block finalized via BLS aggregate");
                 }
             }
+            // ADR 0028: record co-signers for proportional epoch distribution.
+            state.write().await.record_block_cosigns(&cosigner_addrs);
             pending_bls.remove(&(height, our_block_hash));
         }
 

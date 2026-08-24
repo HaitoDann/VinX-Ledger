@@ -55,18 +55,25 @@ pub struct BlockSignature {
 }
 
 /// Evidence of validator equivocation: two *different* block headers at the **same
-/// height**, each carrying a valid Ed25519 signature from the same validator.
+/// height**, each carrying a valid BLS12-381 signature (G2, 96 bytes) from the same
+/// validator's registered BLS key (ADR 0046).
 ///
-/// The full headers are included (not just their hashes) so any verifier can
-/// recompute `header_a.hash()` / `header_b.hash()`, confirm the heights match and the
-/// hashes differ, and check both signatures. This is what makes a slash *provable* —
-/// forging evidence would require forging the target's signature over a real header.
+/// The full headers are included so any verifier can recompute `header_a.hash()` /
+/// `header_b.hash()`, confirm the heights match and the hashes differ, then verify both
+/// BLS signatures against the target's registered key in `validator_pool`. Only the
+/// target could have produced both — forging evidence would require forging a BLS sig.
+///
+/// At block production time `bls_aggregate = individual_proposer_sig` (single-element
+/// aggregate), so the initial `bls_aggregate` bytes from each competing block serve
+/// directly as `bls_sig_a` / `bls_sig_b`.
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct SlashEvidence {
     pub header_a: BlockHeader,
     pub header_b: BlockHeader,
-    pub sig_a: BlockSignature,
-    pub sig_b: BlockSignature,
+    /// Proposer's individual BLS G2 signature (96 bytes) over `header_a.hash()`.
+    pub bls_sig_a: Vec<u8>,
+    /// Proposer's individual BLS G2 signature (96 bytes) over `header_b.hash()`.
+    pub bls_sig_b: Vec<u8>,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize, BorshSerialize, BorshDeserialize)]
@@ -317,8 +324,10 @@ mod tests {
         // ADR 0020: SlashEvidence enters the SlashValidator transaction payload —
         // consensus-critical. Pin that its bincode encoding is deterministic and
         // canonical (decode then re-encode is byte-identical).
-        let kp = KeyPair::generate();
-        let v = Address::from_public_key(&kp.public_key());
+        use vinx_crypto::BlsSecretKey;
+        let ed_kp = KeyPair::generate();
+        let v = Address::from_public_key(&ed_kp.public_key());
+        let bls_sk = BlsSecretKey::generate();
         let mk = |tag: u8| {
             let h = BlockHeader {
                 height: 5,
@@ -330,20 +339,16 @@ mod tests {
                 base_fee: 0,
                 receipts_root: [0u8; 32],
             };
-            let sig = BlockSignature {
-                validator: v,
-                pub_key: kp.public_key(),
-                signature: kp.sign(&h.hash()),
-            };
-            (h, sig)
+            let bls_sig = bls_sk.sign(&h.hash()).0.to_vec();
+            (h, bls_sig)
         };
-        let (header_a, sig_a) = mk(0xAA);
-        let (header_b, sig_b) = mk(0xBB);
+        let (header_a, bls_sig_a) = mk(0xAA);
+        let (header_b, bls_sig_b) = mk(0xBB);
         let ev = SlashEvidence {
             header_a,
             header_b,
-            sig_a,
-            sig_b,
+            bls_sig_a,
+            bls_sig_b,
         };
         let bytes = bincode::serialize(&ev).unwrap();
         assert_eq!(bytes, bincode::serialize(&ev).unwrap());

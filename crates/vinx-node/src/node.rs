@@ -286,10 +286,10 @@ impl Node {
         // with more validators it becomes final once quorum co-signs (via P2P).
         chain.advance_finality(&state.validator_set);
 
-        // ADR 0038 — update pool co-signature window for the produced block.
-        // BLS cosigners are recorded when the block is finalized via advance_finality.
+        // ADR 0028 — record the producer as a co-signer of their own block.
+        // Additional co-signers are recorded when quorum BLS sigs arrive via P2P.
         {
-            state.record_block_cosigns(&[]);
+            state.record_block_cosigns(&[block.header.validator]);
         }
 
         // ADR 0031 — maintenir le snapshot d'état finalisé (base de rejeu des réorgs). Verrous
