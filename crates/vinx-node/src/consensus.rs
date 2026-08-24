@@ -1,4 +1,4 @@
-use vinx_core::{Block, BlockSignature, ValidatorSet};
+use vinx_core::{Block, ValidatorSet};
 use vinx_crypto::{Address, BlsSecretKey, KeyPair};
 
 use crate::NodeError;
@@ -23,43 +23,16 @@ pub fn validate_block(block: &Block, validator_set: &ValidatorSet) -> Result<(),
     }
 
     if !block.is_finalized(validator_set) {
-        let (have, scheme) = if block.bls_aggregate.is_some() {
-            (block.bls_signer_count().unwrap_or(0), "BLS")
-        } else {
-            (block.valid_signer_count(validator_set), "Ed25519")
-        };
+        let have = block.bls_signer_count().unwrap_or(0);
         return Err(NodeError::Consensus(format!(
-            "block {} needs {}/{} {} signatures, has {}",
+            "block {} needs {}/{} BLS signatures, has {}",
             block.header.height,
             validator_set.quorum(),
             validator_set.len(),
-            scheme,
             have,
         )));
     }
 
-    Ok(())
-}
-
-/// Signs `block` with `keypair` and appends the signature.
-/// Returns an error if the keypair's address is not in the validator set.
-pub fn sign_block(
-    block: &mut Block,
-    keypair: &KeyPair,
-    validator_set: &ValidatorSet,
-) -> Result<(), NodeError> {
-    let addr = Address::from_public_key(&keypair.public_key());
-    if !validator_set.contains(&addr) {
-        return Err(NodeError::Consensus(
-            "signer is not a registered validator".into(),
-        ));
-    }
-    let header_hash = block.hash();
-    block.signatures.push(BlockSignature {
-        validator: addr,
-        pub_key: keypair.public_key(),
-        signature: keypair.sign(&header_hash),
-    });
     Ok(())
 }
 
@@ -129,14 +102,9 @@ fn is_scheduled_leader(block: &Block, validator_set: &ValidatorSet) -> bool {
     block.header.validator == *validator_set.leader_at(block.header.height)
 }
 
-/// Co-signature weight for fork-choice rule 3 (ADR 0031 + ADR 0046).
-/// Uses BLS signer count when a BLS aggregate is present; Ed25519 count otherwise.
-fn signer_weight(block: &Block, vs: &ValidatorSet) -> usize {
-    if block.bls_aggregate.is_some() {
-        block.bls_signer_count().unwrap_or(0)
-    } else {
-        block.valid_signer_count(vs)
-    }
+/// Co-signature weight for fork-choice rule 3 (ADR 0031).
+fn signer_weight(block: &Block, _vs: &ValidatorSet) -> usize {
+    block.bls_signer_count().unwrap_or(0)
 }
 
 /// Renvoie le plus canonique de deux candidats (règles 3 → 4 → 5 de l'ADR 0031).
@@ -187,7 +155,6 @@ mod tests {
                 receipts_root: [0u8; 32],
             },
             transactions: vec![],
-            signatures: vec![],
             bls_aggregate: None,
             bls_cosigner_pks: vec![],
             bls_bitmap: vec![],
@@ -208,9 +175,8 @@ mod tests {
         let addr = addr_of(&kp);
         let vs = ValidatorSet::single(addr.clone());
 
-        // height 1 % 1 = 0 → kp is the leader
         let mut block = make_block(1, addr);
-        sign_block(&mut block, &kp, &vs).unwrap();
+        sign_block_bls(&mut block, &BlsSecretKey::generate()).unwrap();
         assert!(validate_block(&block, &vs).is_ok());
     }
 
@@ -219,12 +185,10 @@ mod tests {
         let validators = kps(2);
         let vs = ValidatorSet::new(validators.iter().map(addr_of).collect());
 
-        // An outsider (not in the set) cannot propose a block
         let outsider = KeyPair::generate();
         let mut block = make_block(1, addr_of(&outsider));
-        // Give it enough signatures from real validators (quorum met)
-        sign_block(&mut block, &validators[0], &vs).unwrap();
-        sign_block(&mut block, &validators[1], &vs).unwrap();
+        sign_block_bls(&mut block, &BlsSecretKey::generate()).unwrap();
+        sign_block_bls(&mut block, &BlsSecretKey::generate()).unwrap();
 
         assert!(validate_block(&block, &vs).is_err());
     }
@@ -234,12 +198,9 @@ mod tests {
         let validators = kps(3);
         let vs = ValidatorSet::new(validators.iter().map(addr_of).collect());
 
-        // height 1 % 3 = 1 → validators[1] is the scheduled leader.
-        // But in a slot-skip scenario, validators[2] may step in as backup.
-        // As long as validators[2] is in the set and quorum is met, it's valid.
         let mut block = make_block(1, addr_of(&validators[2]));
-        sign_block(&mut block, &validators[0], &vs).unwrap();
-        sign_block(&mut block, &validators[2], &vs).unwrap(); // quorum = 2
+        sign_block_bls(&mut block, &BlsSecretKey::generate()).unwrap();
+        sign_block_bls(&mut block, &BlsSecretKey::generate()).unwrap();
         assert!(validate_block(&block, &vs).is_ok());
     }
 
@@ -249,10 +210,9 @@ mod tests {
         let addrs: Vec<Address> = validators.iter().map(addr_of).collect();
         let vs = ValidatorSet::new(addrs.clone());
 
-        // height 3 % 3 = 0 → validators[0] is leader; quorum = 2
         let mut block = make_block(3, addrs[0].clone());
-        sign_block(&mut block, &validators[0], &vs).unwrap();
-        sign_block(&mut block, &validators[1], &vs).unwrap();
+        sign_block_bls(&mut block, &BlsSecretKey::generate()).unwrap();
+        sign_block_bls(&mut block, &BlsSecretKey::generate()).unwrap();
 
         assert!(validate_block(&block, &vs).is_ok());
     }
@@ -263,11 +223,10 @@ mod tests {
         let addrs: Vec<Address> = validators.iter().map(addr_of).collect();
         let vs = ValidatorSet::new(addrs.clone()); // quorum = 4
 
-        // height 5 % 5 = 0 → validators[0] is leader
         let mut block = make_block(5, addrs[0].clone());
-        // Only 3 signatures (need 4)
-        for v in validators.iter().take(3) {
-            sign_block(&mut block, v, &vs).unwrap();
+        // Only 3 BLS signers (need 4)
+        for _ in 0..3 {
+            sign_block_bls(&mut block, &BlsSecretKey::generate()).unwrap();
         }
         assert!(validate_block(&block, &vs).is_err());
     }
@@ -278,53 +237,37 @@ mod tests {
         let addrs: Vec<Address> = validators.iter().map(addr_of).collect();
         let vs = ValidatorSet::new(addrs.clone()); // quorum = 4
 
-        // height 5 % 5 = 0 → validators[0] is leader
         let mut block = make_block(5, addrs[0].clone());
-        for v in validators.iter().take(4) {
-            sign_block(&mut block, v, &vs).unwrap();
+        for _ in 0..4 {
+            sign_block_bls(&mut block, &BlsSecretKey::generate()).unwrap();
         }
         assert!(validate_block(&block, &vs).is_ok());
     }
 
     #[test]
     fn test_three_validators_one_offline() {
-        // quorum for n=3 is 2 → 1 offline still OK
         let validators = kps(3);
         let addrs: Vec<Address> = validators.iter().map(addr_of).collect();
         let vs = ValidatorSet::new(addrs.clone());
         assert_eq!(vs.quorum(), 2);
 
-        // height 3 % 3 = 0 → validators[0] is leader
         let mut block = make_block(3, addrs[0].clone());
-        sign_block(&mut block, &validators[0], &vs).unwrap();
-        sign_block(&mut block, &validators[1], &vs).unwrap();
-        // validators[2] is offline
+        sign_block_bls(&mut block, &BlsSecretKey::generate()).unwrap();
+        sign_block_bls(&mut block, &BlsSecretKey::generate()).unwrap();
 
         assert!(validate_block(&block, &vs).is_ok());
     }
 
     #[test]
-    fn test_non_validator_cannot_sign() {
-        let kp = KeyPair::generate();
-        let vs = ValidatorSet::single(addr_of(&kp));
-        let outsider = KeyPair::generate();
-
-        let mut block = make_block(1, addr_of(&kp));
-        assert!(sign_block(&mut block, &outsider, &vs).is_err());
-    }
-
-    #[test]
     fn test_nine_validators_three_offline() {
-        // quorum for n=9 is 6 → 3 offline still OK
         let validators = kps(9);
         let addrs: Vec<Address> = validators.iter().map(addr_of).collect();
         let vs = ValidatorSet::new(addrs.clone());
         assert_eq!(vs.quorum(), 6);
 
-        // height 9 % 9 = 0 → validators[0] is leader
         let mut block = make_block(9, addrs[0].clone());
-        for v in validators.iter().take(6) {
-            sign_block(&mut block, v, &vs).unwrap();
+        for _ in 0..6 {
+            sign_block_bls(&mut block, &BlsSecretKey::generate()).unwrap();
         }
         assert!(validate_block(&block, &vs).is_ok());
     }
@@ -410,32 +353,6 @@ mod tests {
     }
 
     #[test]
-    fn test_fork_choice_prefers_more_bls_signers() {
-        use vinx_crypto::BlsSecretKey;
-        let v = kps(3);
-        let a: Vec<Address> = v.iter().map(addr_of).collect();
-        let vs = ValidatorSet::new(a.clone()); // quorum = 2
-
-        // block_a: 2 Ed25519 co-signatures → signer_weight = 2.
-        let block_a = contested_block(1, a[0].clone(), &[&v[0], &v[1]], &vs);
-
-        // block_b: 3 BLS co-signatures → signer_weight = 3 (beats block_a).
-        let mut block_b = make_block(1, a[0].clone());
-        block_b.header.state_root = [0xBBu8; 32]; // different hash from block_a
-        for _ in 0..3 {
-            sign_block_bls(&mut block_b, &BlsSecretKey::generate()).unwrap();
-        }
-
-        let cands = vec![block_a.clone(), block_b.clone()];
-        let head = canonical_head(&cands, &vs).unwrap();
-        assert_eq!(
-            head.hash(),
-            block_b.hash(),
-            "rule 3: 3 BLS signers beats 2 Ed25519 signers"
-        );
-    }
-
-    #[test]
     fn test_fork_choice_bls_vs_bls_by_count() {
         use vinx_crypto::BlsSecretKey;
         let v = kps(3);
@@ -458,16 +375,11 @@ mod tests {
 
     // ─── Fork-choice (ADR 0031) ───────────────────────────────────────────────
 
-    /// Construit un bloc à `height` proposé par `proposer`, co-signé par `signers`.
-    fn contested_block(
-        height: u64,
-        proposer: Address,
-        signers: &[&KeyPair],
-        vs: &ValidatorSet,
-    ) -> Block {
+    /// Builds a block at `height` proposed by `proposer` with `n_sigs` BLS co-signatures.
+    fn contested_block(height: u64, proposer: Address, n_sigs: usize) -> Block {
         let mut b = make_block(height, proposer);
-        for kp in signers {
-            sign_block(&mut b, kp, vs).unwrap();
+        for _ in 0..n_sigs {
+            sign_block_bls(&mut b, &BlsSecretKey::generate()).unwrap();
         }
         b
     }
@@ -477,9 +389,9 @@ mod tests {
         let v = kps(3);
         let a: Vec<Address> = v.iter().map(addr_of).collect();
         let vs = ValidatorSet::new(a.clone());
-        // height 1 → leader = a[1]. Backup = a[2]. Chacun 2 co-sigs (poids égal).
-        let leader = contested_block(1, a[1].clone(), &[&v[0], &v[1]], &vs);
-        let backup = contested_block(1, a[2].clone(), &[&v[0], &v[2]], &vs);
+        // height 1 → leader = a[1]. Backup = a[2]. Each has 2 BLS co-sigs (equal weight).
+        let leader = contested_block(1, a[1].clone(), 2);
+        let backup = contested_block(1, a[2].clone(), 2);
 
         let cands = vec![backup, leader];
         let head = canonical_head(&cands, &vs).unwrap();
@@ -494,9 +406,9 @@ mod tests {
         let v = kps(3);
         let a: Vec<Address> = v.iter().map(addr_of).collect();
         let vs = ValidatorSet::new(a.clone());
-        // Leader (a[1]) avec 1 co-sig vs backup (a[2]) avec 2 co-sigs → le poids prime (règle 3).
-        let leader = contested_block(1, a[1].clone(), &[&v[1]], &vs);
-        let backup = contested_block(1, a[2].clone(), &[&v[0], &v[2]], &vs);
+        // Leader (a[1]) with 1 BLS sig vs backup (a[2]) with 2 BLS sigs → weight wins (rule 3).
+        let leader = contested_block(1, a[1].clone(), 1);
+        let backup = contested_block(1, a[2].clone(), 2);
 
         let cands = vec![leader, backup];
         let head = canonical_head(&cands, &vs).unwrap();
@@ -511,9 +423,9 @@ mod tests {
         let v = kps(3);
         let a: Vec<Address> = v.iter().map(addr_of).collect();
         let vs = ValidatorSet::new(a.clone());
-        // height 1 → leader = a[1]. Deux non-leaders (a[0], a[2]), poids égal → départage par hash.
-        let x = contested_block(1, a[0].clone(), &[&v[0], &v[1]], &vs);
-        let y = contested_block(1, a[2].clone(), &[&v[0], &v[2]], &vs);
+        // height 1 → leader = a[1]. Two non-leaders (a[0], a[2]) with equal weight → hash tiebreak.
+        let x = contested_block(1, a[0].clone(), 2);
+        let y = contested_block(1, a[2].clone(), 2);
         let expected = if x.hash() <= y.hash() {
             x.hash()
         } else {
@@ -530,7 +442,7 @@ mod tests {
         let v = kps(3);
         let a: Vec<Address> = v.iter().map(addr_of).collect();
         let vs = ValidatorSet::new(a.clone());
-        let only = contested_block(1, a[1].clone(), &[&v[0], &v[1]], &vs);
+        let only = contested_block(1, a[1].clone(), 2);
         let only_hash = only.hash();
 
         let one = vec![only];
@@ -544,8 +456,8 @@ mod tests {
         let v = kps(3);
         let a: Vec<Address> = v.iter().map(addr_of).collect();
         let vs = ValidatorSet::new(a.clone());
-        let leader = contested_block(1, a[1].clone(), &[&v[0], &v[1]], &vs);
-        let backup = contested_block(1, a[2].clone(), &[&v[0], &v[2]], &vs);
+        let leader = contested_block(1, a[1].clone(), 2);
+        let backup = contested_block(1, a[2].clone(), 2);
 
         let fwd = vec![leader.clone(), backup.clone()];
         let rev = vec![backup, leader];

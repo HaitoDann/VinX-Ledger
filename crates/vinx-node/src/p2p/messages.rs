@@ -1,6 +1,6 @@
 use borsh::{BorshDeserialize, BorshSerialize};
 use serde::{Deserialize, Serialize};
-use vinx_core::{Block, BlockSignature, Transaction};
+use vinx_core::{Block, Transaction};
 use zstd;
 
 /// Messages plus courts que ce seuil sont envoyés bruts (overhead de compression > gain).
@@ -49,11 +49,6 @@ pub enum P2pMessage {
     NewBlock(Block),
     /// A new transaction submitted by a user.
     NewTransaction(Transaction),
-    /// A co-signature for an already-announced block.
-    BlockCoSignature {
-        height: u64,
-        signature: BlockSignature,
-    },
     /// A single BLS12-381 co-signature on a block, gossiped by validators (ADR 0029 Phase 1).
     ///
     /// Receivers look up the sender's BLS public key from the on-chain registry keyed by
@@ -116,7 +111,6 @@ impl P2pMessage {
         match self {
             P2pMessage::NewBlock(_) => "vinx/blocks/1",
             P2pMessage::NewTransaction(_) => "vinx/txs/1",
-            P2pMessage::BlockCoSignature { .. } => "vinx/sigs/1",
             P2pMessage::BlockBlsCoSignature { .. } => "vinx/bls/1",
             P2pMessage::SyncRequest { .. } | P2pMessage::SyncResponse { .. } => "vinx/sync/1",
         }
@@ -141,7 +135,7 @@ fn decompress_bounded(payload: &[u8], max: usize) -> Option<Vec<u8>> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use vinx_core::{Block, BlockHeader, BlockSignature};
+    use vinx_core::{Block, BlockHeader};
     use vinx_crypto::{Address, KeyPair};
 
     fn dummy_addr() -> Address {
@@ -161,7 +155,6 @@ mod tests {
                 receipts_root: [0u8; 32],
             },
             transactions: vec![],
-            signatures: vec![],
             bls_aggregate: None,
             bls_cosigner_pks: vec![],
             bls_bitmap: vec![],
@@ -173,26 +166,6 @@ mod tests {
         let msg = P2pMessage::NewBlock(dummy_block());
         let decoded = P2pMessage::decode(&msg.encode()).unwrap();
         assert!(matches!(decoded, P2pMessage::NewBlock(_)));
-    }
-
-    #[test]
-    fn test_signature_message_roundtrip() {
-        let kp = KeyPair::generate();
-        let block = dummy_block();
-        let hash = block.hash();
-        let msg = P2pMessage::BlockCoSignature {
-            height: 1,
-            signature: BlockSignature {
-                validator: dummy_addr(),
-                pub_key: kp.public_key(),
-                signature: kp.sign(&hash),
-            },
-        };
-        let decoded = P2pMessage::decode(&msg.encode()).unwrap();
-        assert!(matches!(
-            decoded,
-            P2pMessage::BlockCoSignature { height: 1, .. }
-        ));
     }
 
     #[test]

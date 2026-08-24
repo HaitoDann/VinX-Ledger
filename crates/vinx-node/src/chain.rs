@@ -64,7 +64,6 @@ impl Chain {
                 receipts_root: [0u8; 32],
             },
             transactions: vec![],
-            signatures: vec![],
             bls_aggregate: None,
             bls_cosigner_pks: vec![],
             bls_bitmap: vec![],
@@ -141,12 +140,8 @@ impl Chain {
             // courant — sinon un bloc antérieur à un changement de set (moins de signataires)
             // bloquerait le préfixe.
             let threshold = self.quorum_at(next, fallback);
-            // ADR 0046: BLS aggregate path takes priority when present.
             let is_final = match self.block_row(next) {
-                Some((_, b)) if b.bls_aggregate.is_some() => {
-                    b.bls_signer_count().map(|c| c >= threshold).unwrap_or(false)
-                }
-                Some((_, b)) => b.valid_signer_count(validator_set) >= threshold,
+                Some((_, b)) => b.bls_signer_count().map(|c| c >= threshold).unwrap_or(false),
                 None => break,
             };
             if is_final {
@@ -495,22 +490,6 @@ impl Chain {
         self.blocks.is_empty()
     }
 
-    /// Adds a co-signature to an already-stored block.
-    /// Returns `true` if the block is now finalized (≥ quorum valid signatures).
-    pub fn add_co_signature(
-        &mut self,
-        height: u64,
-        signature: vinx_core::BlockSignature,
-        validator_set: &vinx_core::ValidatorSet,
-    ) -> bool {
-        if let Some((_, block)) = self.blocks.get_mut(height as usize) {
-            block.signatures.push(signature);
-            self.dirty_heights.insert(height);
-            return block.is_finalized(validator_set);
-        }
-        false
-    }
-
     /// Updates the BLS aggregate co-signature on a stored block (ADR 0046).
     /// Called by the P2P handler once ≥ quorum BLS co-signatures have been aggregated.
     /// Marks the block dirty so the persistence layer rewrites it.
@@ -556,17 +535,14 @@ impl Chain {
         let cutoff = now_ts.saturating_sub(retain_secs);
         let mut pruned_blocks = 0usize;
         let mut tx_pruned = 0usize;
-        let mut sig_pruned = 0usize;
 
         for (height, (_, block)) in self.blocks.iter_mut().enumerate() {
             if block.header.timestamp >= cutoff {
                 break; // blocks are monotonically ordered by time
             }
-            if !block.transactions.is_empty() || !block.signatures.is_empty() {
+            if !block.transactions.is_empty() {
                 tx_pruned += block.transactions.len();
-                sig_pruned += block.signatures.len();
                 block.transactions.clear();
-                block.signatures.clear();
                 self.dirty_heights.insert(height as u64);
                 pruned_blocks += 1;
             }
@@ -577,9 +553,8 @@ impl Chain {
             tracing::info!(
                 pruned_blocks,
                 tx_pruned,
-                sig_pruned,
                 cutoff_ts = cutoff,
-                "Chain: time-based tx/sig pruning complete"
+                "Chain: time-based tx pruning complete"
             );
         }
     }
@@ -628,17 +603,12 @@ impl Chain {
         let prune_up_to = (tip - keep_last) as usize;
 
         let mut tx_pruned = 0usize;
-        let mut sig_pruned = 0usize;
 
         for i in 0..prune_up_to {
             if let Some((_, block)) = self.blocks.get_mut(i) {
-                // Same rule as compaction: already-empty blocks stay untouched so
-                // periodic prune passes only re-persist the newly pruned window.
-                if !block.transactions.is_empty() || !block.signatures.is_empty() {
+                if !block.transactions.is_empty() {
                     tx_pruned += block.transactions.len();
                     block.transactions.clear();
-                    sig_pruned += block.signatures.len();
-                    block.signatures.clear();
                     self.dirty_heights.insert(i as u64);
                 }
             }
@@ -658,8 +628,7 @@ impl Chain {
             tip,
             pruned_below = prune_up_to,
             tx_pruned,
-            sig_pruned,
-            "Chain pruned — headers retained, old tx/sig data dropped"
+            "Chain pruned — headers retained, old tx data dropped"
         );
     }
 }
@@ -710,8 +679,9 @@ mod tests {
         assert!(chain.record_signature(&addr, 5, hash_b)); // different hash — EQUIVOCATION
     }
 
-    // Builds a block at `height` signed by each of `signers` (quorum evidence).
-    fn signed_block(height: u64, prev: Hash32, proposer: Address, signers: &[&KeyPair]) -> Block {
+    /// Builds a block at `height` with `n_sigs` BLS co-signatures.
+    fn signed_block(height: u64, prev: Hash32, proposer: Address, n_sigs: usize) -> Block {
+        use vinx_crypto::BlsSecretKey;
         let header = BlockHeader {
             height,
             prev_hash: prev,
@@ -722,23 +692,17 @@ mod tests {
             base_fee: 0,
             receipts_root: [0u8; 32],
         };
-        let hash = header.hash();
-        let signatures = signers
-            .iter()
-            .map(|kp| vinx_core::BlockSignature {
-                validator: Address::from_public_key(&kp.public_key()),
-                pub_key: kp.public_key(),
-                signature: kp.sign(&hash),
-            })
-            .collect();
-        Block {
+        let mut block = Block {
             header,
             transactions: vec![],
-            signatures,
             bls_aggregate: None,
             bls_cosigner_pks: vec![],
             bls_bitmap: vec![],
+        };
+        for _ in 0..n_sigs {
+            crate::consensus::sign_block_bls(&mut block, &BlsSecretKey::generate()).unwrap();
         }
+        block
     }
 
     #[test]
@@ -750,7 +714,7 @@ mod tests {
         let (mut chain, _) = Chain::new_with_genesis(v, 0);
         assert_eq!(chain.finalized_height(), 0);
 
-        let b1 = signed_block(1, chain.tip_hash(), v, &[&kp]);
+        let b1 = signed_block(1, chain.tip_hash(), v, 1);
         chain.push(b1);
         assert_eq!(chain.finalized_height(), 0); // not advanced until we ask
         chain.advance_finality(&vs);
@@ -773,18 +737,18 @@ mod tests {
 
     #[test]
     fn test_record_candidate_dedup_and_below_finality() {
-        let (kps, addrs, vs) = three_validators();
+        let (_, addrs, vs) = three_validators();
         let (mut chain, _) = Chain::new_with_genesis(addrs[0], 0);
         let g = chain.tip_hash();
 
         // Bloc retenu à h=1 (proposeur = leader prévu).
         let leader = *vs.leader_at(1);
-        let a = signed_block(1, g, leader, &[&kps[0]]);
+        let a = signed_block(1, g, leader, 1);
         chain.push(a.clone());
 
         // Un concurrent (proposeur différent, même prev) à h=1.
         let other = addrs.iter().copied().find(|x| *x != leader).unwrap();
-        let b = signed_block(1, g, other, &[&kps[0], &kps[1]]);
+        let b = signed_block(1, g, other, 2);
         assert!(
             chain.record_candidate(b.clone()),
             "nouveau candidat enregistré"
@@ -795,25 +759,25 @@ mod tests {
             "le bloc déjà retenu n'est pas un concurrent"
         );
         // Un bloc à/sous la finalité (genèse h=0 finalisée) : refusé.
-        let below = signed_block(0, GENESIS_PREV_HASH, addrs[0], &[&kps[0]]);
+        let below = signed_block(0, GENESIS_PREV_HASH, addrs[0], 1);
         assert!(!chain.record_candidate(below), "sous la finalité : refusé");
         assert_eq!(chain.candidates_at(1).len(), 1);
     }
 
     #[test]
     fn test_canonical_choice_prefers_more_cosignatures() {
-        let (kps, addrs, vs) = three_validators();
+        let (_, addrs, vs) = three_validators();
         let (mut chain, _) = Chain::new_with_genesis(addrs[0], 0);
         let g = chain.tip_hash();
 
         // Bloc retenu : leader prévu mais 1 seule co-signature.
         let leader = *vs.leader_at(1);
-        let weak = signed_block(1, g, leader, &[&kps[0]]);
+        let weak = signed_block(1, g, leader, 1);
         chain.push(weak);
 
         // Candidat : backup mais 2 co-signatures (plus soutenu par le set).
         let backup = addrs.iter().copied().find(|x| *x != leader).unwrap();
-        let strong = signed_block(1, g, backup, &[&kps[0], &kps[1]]);
+        let strong = signed_block(1, g, backup, 2);
         let strong_hash = strong.hash();
         chain.record_candidate(strong);
 
@@ -830,7 +794,7 @@ mod tests {
 
     #[test]
     fn test_canonical_choice_breaks_tie_by_scheduled_leader() {
-        let (kps, addrs, vs) = three_validators();
+        let (_, addrs, vs) = three_validators();
         let (mut chain, _) = Chain::new_with_genesis(addrs[0], 0);
         let g = chain.tip_hash();
 
@@ -838,9 +802,9 @@ mod tests {
         let backup = addrs.iter().copied().find(|x| *x != leader).unwrap();
 
         // À poids de co-sigs ÉGAL (1 chacun), le bloc du leader prévu doit gagner (règle 4).
-        let backup_block = signed_block(1, g, backup, &[&kps[0]]);
+        let backup_block = signed_block(1, g, backup, 1);
         chain.push(backup_block);
-        let leader_block = signed_block(1, g, leader, &[&kps[0]]);
+        let leader_block = signed_block(1, g, leader, 1);
         let leader_hash = leader_block.hash();
         chain.record_candidate(leader_block);
 
@@ -854,18 +818,18 @@ mod tests {
 
     #[test]
     fn test_reorg_replace_truncates_above_and_swaps() {
-        let (kps, addrs, vs) = three_validators();
+        let (_, addrs, vs) = three_validators();
         let (mut chain, _) = Chain::new_with_genesis(addrs[0], 0);
         let g = chain.tip_hash();
 
         // Chaîne linéaire h=1,2,3 (branche perdante).
-        let b1 = signed_block(1, g, *vs.leader_at(1), &[&kps[0]]);
+        let b1 = signed_block(1, g, *vs.leader_at(1), 1);
         let h1 = b1.hash();
         chain.push(b1);
-        let b2 = signed_block(2, h1, *vs.leader_at(2), &[&kps[0]]);
+        let b2 = signed_block(2, h1, *vs.leader_at(2), 1);
         let h2 = b2.hash();
         chain.push(b2);
-        let b3 = signed_block(3, h2, *vs.leader_at(3), &[&kps[0]]);
+        let b3 = signed_block(3, h2, *vs.leader_at(3), 1);
         chain.push(b3);
         assert_eq!(chain.tip_height(), 3);
 
@@ -875,7 +839,7 @@ mod tests {
             .copied()
             .find(|x| *x != *vs.leader_at(2))
             .unwrap();
-        let b2_alt = signed_block(2, h1, other, &[&kps[0], &kps[1]]);
+        let b2_alt = signed_block(2, h1, other, 2);
         let alt_hash = b2_alt.hash();
         let removed = chain.reorg_replace(2, b2_alt);
 
@@ -895,7 +859,7 @@ mod tests {
 
     #[test]
     fn test_candidates_pruned_below_finality() {
-        let (kps, addrs, _) = three_validators();
+        let (_, addrs, _) = three_validators();
         // Sous-ensemble à 2 validateurs pour un quorum de 2 atteignable ici.
         let vs = vinx_core::ValidatorSet::new(vec![addrs[0], addrs[1]]);
         let (mut chain, _) = Chain::new_with_genesis(addrs[0], 0);
@@ -903,7 +867,7 @@ mod tests {
 
         // Bloc retenu finalisable à h=1 (2 co-sigs = quorum).
         let leader = *vs.leader_at(1);
-        let a = signed_block(1, g, leader, &[&kps[0], &kps[1]]);
+        let a = signed_block(1, g, leader, 2);
         chain.push(a);
         // Un concurrent à h=1.
         let other = if leader == addrs[0] {
@@ -911,7 +875,7 @@ mod tests {
         } else {
             addrs[0]
         };
-        let b = signed_block(1, g, other, &[&kps[0]]);
+        let b = signed_block(1, g, other, 1);
         assert!(chain.record_candidate(b));
         assert_eq!(chain.candidates_at(1).len(), 1);
 
@@ -930,7 +894,7 @@ mod tests {
         let v = Address::from_public_key(&kp.public_key());
         let (mut chain, _) = Chain::new_with_genesis(v, 0); // genesis ts = 0
         for h in 1..=5 {
-            let b = signed_block(h, chain.tip_hash(), v, &[&kp]); // ts = h
+            let b = signed_block(h, chain.tip_hash(), v, 1); // ts = h
             chain.push(b);
         }
         // timestamps {0,1,2,3,4,5} → median (index 3) = 3
@@ -943,7 +907,7 @@ mod tests {
         let v = Address::from_public_key(&kp.public_key());
         let (mut chain, _) = Chain::new_with_genesis(v, 0); // genesis ts = 0
         for h in 1..=5 {
-            let b = signed_block(h, chain.tip_hash(), v, &[&kp]); // ts = h
+            let b = signed_block(h, chain.tip_hash(), v, 1); // ts = h
             chain.push(b);
         }
         // Honest next block (ts = 6): stored {0..=5} + 6 → median (index 3) = 3.
@@ -969,11 +933,11 @@ mod tests {
 
         // Bloc 1 : ère 1-validateur → quorum historique 1, une seule signature.
         chain.note_quorum(1, 1);
-        let b1 = signed_block(1, chain.tip_hash(), v1, &[&kp1]);
+        let b1 = signed_block(1, chain.tip_hash(), v1, 1);
         chain.push(b1);
         // Bloc 2 : set passé à 3 → quorum 2, deux signatures.
         chain.note_quorum(2, 2);
-        let b2 = signed_block(2, chain.tip_hash(), v2, &[&kp1, &kp2]);
+        let b2 = signed_block(2, chain.tip_hash(), v2, 2);
         chain.push(b2);
 
         // Avancer avec le set COURANT (quorum 2). Sans quorum historique, le bloc 1 (1 sig)
@@ -988,7 +952,7 @@ mod tests {
         // Contrôle : sans checkpoint historique, quorum_at retombe sur le fallback (quorum
         // courant) → le bloc 1 (1 sig) ne finaliserait pas.
         let (mut chain2, _) = Chain::new_with_genesis(v1, 0);
-        let b1b = signed_block(1, chain2.tip_hash(), v1, &[&kp1]);
+        let b1b = signed_block(1, chain2.tip_hash(), v1, 1);
         chain2.push(b1b);
         chain2.advance_finality(&vs_now);
         assert_eq!(
@@ -1007,7 +971,7 @@ mod tests {
         let vs = vinx_core::ValidatorSet::new(vec![v, other]);
         let (mut chain, _) = Chain::new_with_genesis(v, 0);
 
-        let b1 = signed_block(1, chain.tip_hash(), v, &[&kp]); // 1 of 2 sigs
+        let b1 = signed_block(1, chain.tip_hash(), v, 1); // 1 of 2 sigs
         chain.push(b1);
         chain.advance_finality(&vs);
         assert_eq!(chain.finalized_height(), 0); // below quorum → not final
@@ -1030,7 +994,6 @@ mod tests {
                     receipts_root: [0u8; 32],
                 },
                 transactions: vec![],
-                signatures: vec![],
                 bls_aggregate: None,
                 bls_cosigner_pks: vec![],
                 bls_bitmap: vec![],
@@ -1077,7 +1040,6 @@ mod tests {
                     receipts_root: [0u8; 32],
                 },
                 transactions: vec![],
-                signatures: vec![],
                 bls_aggregate: None,
                 bls_cosigner_pks: vec![],
                 bls_bitmap: vec![],

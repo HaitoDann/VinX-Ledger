@@ -6,7 +6,7 @@ use crate::{
 };
 use vinx_core::{
     amount::{Amount, MAX_UNFINALIZED_DEPTH},
-    reliability, Block, BlockHeader, BlockSignature, Transaction, ValidatorSet,
+    reliability, Block, BlockHeader, Transaction, ValidatorSet,
 };
 use vinx_crypto::{bls_aggregate, sha256};
 use vinx_state::WorldState;
@@ -174,22 +174,14 @@ pub fn produce_block(
     let mut block = Block {
         header,
         transactions: block_txs,
-        signatures: Vec::new(),
         bls_aggregate: None,
         bls_cosigner_pks: vec![],
         bls_bitmap: vec![],
     };
 
-    // Proposer signs the block header hash (counts as one co-signature)
-    let header_hash = block.hash();
-    block.signatures.push(BlockSignature {
-        validator: config.validator_address,
-        pub_key: config.validator_keypair.public_key(),
-        signature: config.validator_keypair.sign(&header_hash),
-    });
-
     // ADR 0029 Phase 1 — BLS co-signature: the proposer contributes its own BLS sig.
     // The aggregate starts as a single-sig aggregate; P2P gossip adds more sigs via gossip.
+    let header_hash = block.hash();
     {
         let bls_sk = &config.bls_secret_key;
         let bls_sig = bls_sk.sign(&header_hash);
@@ -328,17 +320,11 @@ fn produce_block_inner(
     let mut block = Block {
         header,
         transactions: block_txs,
-        signatures: Vec::new(),
         bls_aggregate: None,
         bls_cosigner_pks: vec![],
         bls_bitmap: vec![],
     };
     let header_hash = block.hash();
-    block.signatures.push(BlockSignature {
-        validator: config.validator_address,
-        pub_key: config.validator_keypair.public_key(),
-        signature: config.validator_keypair.sign(&header_hash),
-    });
     {
         let bls_sk = &config.bls_secret_key;
         let bls_sig = bls_sk.sign(&header_hash);

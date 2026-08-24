@@ -287,15 +287,9 @@ impl Node {
         chain.advance_finality(&state.validator_set);
 
         // ADR 0038 — update pool co-signature window for the produced block.
-        // On a single-validator chain the block is immediately finalized; on multi-validator
-        // chains the full cosigner set arrives via P2P co-signatures.
+        // BLS cosigners are recorded when the block is finalized via advance_finality.
         {
-            let cosigners: Vec<vinx_crypto::Address> = block
-                .signatures
-                .iter()
-                .map(|s| s.validator)
-                .collect();
-            state.record_block_cosigns(&cosigners);
+            state.record_block_cosigns(&[]);
         }
 
         // ADR 0031 — maintenir le snapshot d'état finalisé (base de rejeu des réorgs). Verrous
