@@ -2,11 +2,12 @@ use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, HashMap, HashSet};
 use vinx_core::{
     amount::{
-        cumulative_emission_atoms, Amount, BPS_DENOM, DEFAULT_ACTIVE_SET_SIZE,
-        DEFAULT_FEE_FLOOR_ATOMS, EPOCH_DURATION_SECS, EXISTENTIAL_DEPOSIT_ATOMS, MAX_MODULES,
-        MAX_NONCE_AHEAD, MIN_MODULE_BOND_ATOMS, MIN_STAKE_ATOMS, MIN_VALIDATOR_BOND_ATOMS,
-        PROPOSER_SHARE_BPS, SLASH_BOUNTY_BPS, SLASH_EQUIVOCATION_BPS, UNBONDING_SECS,
-        VALIDATOR_SCORE_WINDOW_SECS,
+        cumulative_emission_atoms, Amount, ACTIVE_SET_COOLDOWN_SECS, ACTIVE_SET_STEP,
+        BOND_COOLDOWN_SECS, BOND_STEP_BPS, BPS_DENOM, DEFAULT_ACTIVE_SET_SIZE,
+        DEFAULT_FEE_FLOOR_ATOMS, EPOCH_DURATION_SECS, EXISTENTIAL_DEPOSIT_ATOMS, MAX_BOND_HARD_CAP,
+        MAX_MODULES, MAX_NONCE_AHEAD, MIN_ACTIVE_SET_SIZE, MIN_BOND_HARD_FLOOR,
+        MIN_MODULE_BOND_ATOMS, MIN_STAKE_ATOMS, MIN_VALIDATOR_BOND_ATOMS, PROPOSER_SHARE_BPS,
+        SLASH_BOUNTY_BPS, SLASH_EQUIVOCATION_BPS, UNBONDING_SECS, VALIDATOR_SCORE_WINDOW_SECS,
     },
     block::SlashEvidence,
     chain_id::CHAIN_ID_DEVNET,
@@ -172,6 +173,21 @@ pub struct WorldState {
     /// Appended after `last_bond_change_ts` — v12→v13 migration appends `u64 = 0`.
     #[serde(default)]
     pub last_epoch_close_ts: u64,
+    // ── ADR 0038 complement ─────────────────────────────────────────────────────
+    /// Governable minimum bond to enter the validator pool (ADR 0038).
+    /// Default: MIN_VALIDATOR_BOND_ATOMS (100 000 VinX). Adjustable within
+    /// [MIN_BOND_HARD_FLOOR, MAX_BOND_HARD_CAP] in steps of ±BOND_STEP_BPS with
+    /// BOND_COOLDOWN_SECS between modifications. Appended after `last_epoch_close_ts`
+    /// — v15→v16 migration appends its default (u128 = MIN_VALIDATOR_BOND_ATOMS).
+    #[serde(default = "default_min_validator_bond")]
+    pub min_validator_bond_atoms: u128,
+    // ── ADR 0029 Phase 2 — epoch beacon ─────────────────────────────────────────
+    /// Epoch beacon for committee selection (ADR 0029 Phase 2, SHA-256 placeholder
+    /// until ECVRF RFC 9381 is integrated). Updated at every epoch close.
+    /// All-zeros until the first epoch close occurs.
+    /// Appended after `min_validator_bond_atoms` — v16→v17 migration appends 32 zeros.
+    #[serde(default)]
+    pub epoch_beacon: Hash32,
 }
 
 /// A bond amount in its unbonding delay, waiting to return to `address`'s balance
@@ -321,6 +337,20 @@ pub fn v13_meta_suffix() -> Vec<u8> {
     bincode::serialize(&0u64).expect("serialize 0u64")
 }
 
+/// The bincode bytes appended to a v15 `WorldState` meta blob to bring it to v16 (ADR 0038
+/// governable bond floor). Appends the default for one new field:
+///   1. `min_validator_bond_atoms` — `u128 = MIN_VALIDATOR_BOND_ATOMS`
+pub fn v16_meta_suffix() -> Vec<u8> {
+    bincode::serialize(&MIN_VALIDATOR_BOND_ATOMS).expect("serialize u128")
+}
+
+/// The bincode bytes appended to a v16 `WorldState` meta blob to bring it to v17 (ADR 0029
+/// Phase 2 epoch beacon). Appends the default for one new field:
+///   1. `epoch_beacon` — `Hash32 = [0u8; 32]`
+pub fn v17_meta_suffix() -> Vec<u8> {
+    bincode::serialize(&[0u8; 32]).expect("serialize Hash32")
+}
+
 /// SHA-256(epoch_number_le || address) — deterministic sort key for tiebreaking
 /// validators with identical reliability scores at epoch rotation (ADR 0038).
 fn epoch_tiebreaker(epoch: u64, addr: &Address) -> [u8; 32] {
@@ -340,6 +370,10 @@ fn default_chain_id() -> u32 {
 
 fn default_active_set_size() -> u32 {
     DEFAULT_ACTIVE_SET_SIZE
+}
+
+fn default_min_validator_bond() -> u128 {
+    MIN_VALIDATOR_BOND_ATOMS
 }
 
 impl Default for WorldState {
@@ -387,6 +421,8 @@ impl WorldState {
             last_active_set_size_change_ts: 0,
             last_bond_change_ts: 0,
             last_epoch_close_ts: 0,
+            min_validator_bond_atoms: MIN_VALIDATOR_BOND_ATOMS,
+            epoch_beacon: [0u8; 32],
         }
     }
 
@@ -707,7 +743,43 @@ impl WorldState {
         }
         // If the pool is empty (e.g. genesis before any bonds), leave validator_set as-is.
 
+        // 7. Advance the epoch beacon (ADR 0029 Phase 2): chain-of-hashes accumulator.
+        //    beacon' = sha256(beacon || epoch_number_le64 || block_ts_le64)
+        //    SHA-256 placeholder for ECVRF RFC 9381 (integrated in Phase 2b).
+        {
+            let mut buf = [0u8; 32 + 8 + 8];
+            buf[..32].copy_from_slice(&self.epoch_beacon);
+            buf[32..40].copy_from_slice(&epoch_number.to_le_bytes());
+            buf[40..48].copy_from_slice(&self.current_block_ts.to_le_bytes());
+            self.epoch_beacon = sha256(&buf);
+        }
+
         self.last_epoch_close_ts = self.current_block_ts;
+    }
+
+    /// Returns up to `k` validator addresses selected deterministically for `height`
+    /// using the current epoch beacon (ADR 0029 Phase 2).
+    ///
+    /// Candidates are pool members in Active or Benched status (eligible for committee
+    /// duty). Each is ranked by `sha256(beacon || height_le64 || addr_bytes)` — the k
+    /// with the lexicographically smallest hash win the slot.
+    ///
+    /// This is a SHA-256 pseudo-VRF placeholder for ECVRF RFC 9381 (Phase 2b).
+    pub fn committee_for_height(&self, height: u64, k: usize) -> Vec<Address> {
+        let mut candidates: Vec<(Address, [u8; 32])> = self
+            .validator_pool
+            .iter()
+            .filter(|(_, e)| matches!(e.status, PoolStatus::Active | PoolStatus::Benched))
+            .map(|(addr, _)| {
+                let mut buf = [0u8; 32 + 8 + 20];
+                buf[..32].copy_from_slice(&self.epoch_beacon);
+                buf[32..40].copy_from_slice(&height.to_le_bytes());
+                buf[40..60].copy_from_slice(addr.as_bytes());
+                (*addr, sha256(&buf))
+            })
+            .collect();
+        candidates.sort_by_key(|(_, h)| *h);
+        candidates.into_iter().take(k).map(|(a, _)| a).collect()
     }
 
     /// Checks the supply invariant (ADR 0040):
@@ -1270,33 +1342,51 @@ impl WorldState {
                 "stake amount below minimum 1 VINX".to_string(),
             ));
         }
-        let account = self
-            .accounts
-            .get_mut(&tx.from)
-            .ok_or(CoreError::InsufficientBalance)?;
-        if account.nonce != tx.nonce {
-            return Err(CoreError::InvalidNonce {
-                expected: account.nonce,
-                got: tx.nonce,
-            });
-        }
-        if account.balance < tx.amount {
-            return Err(CoreError::InsufficientBalance);
-        }
-        // Bond posting: move balance → staked. No yield, no warm-up — the bond is
-        // pure security collateral. Circulation-neutral (balance −a, staked +a).
-        account.balance = account.balance.checked_sub(tx.amount).unwrap();
-        account.staked = account
-            .staked
-            .checked_add(tx.amount)
-            .ok_or(CoreError::AmountOverflow)?;
-        account.nonce += 1;
+        // Compute new staked total in a scoped borrow so we can modify self.validator_pool after.
+        let new_staked = {
+            let account = self
+                .accounts
+                .get_mut(&tx.from)
+                .ok_or(CoreError::InsufficientBalance)?;
+            if account.nonce != tx.nonce {
+                return Err(CoreError::InvalidNonce {
+                    expected: account.nonce,
+                    got: tx.nonce,
+                });
+            }
+            if account.balance < tx.amount {
+                return Err(CoreError::InsufficientBalance);
+            }
+            // Bond posting: move balance → staked. Circulation-neutral (balance −a, staked +a).
+            account.balance = account.balance.checked_sub(tx.amount).unwrap();
+            account.staked = account
+                .staked
+                .checked_add(tx.amount)
+                .ok_or(CoreError::AmountOverflow)?;
+            account.nonce += 1;
+            account.staked
+        };
         self.mark_dirty(&tx.from);
+        // ADR 0038: auto-enter the validator pool once the bond floor is met.
+        let bond = new_staked.atoms();
+        if bond >= self.min_validator_bond_atoms
+            && !self.banned_validator_keys.contains(&tx.from)
+        {
+            if let Some(entry) = self.validator_pool.get_mut(&tx.from) {
+                entry.bond_atoms = bond;
+            } else {
+                self.validator_pool.insert(
+                    tx.from,
+                    vinx_core::ValidatorPoolEntry::new(bond, self.current_block_ts),
+                );
+                tracing::info!(addr = %tx.from, bond, "ADR 0038: validator auto-entered pool");
+            }
+        }
         Ok(())
     }
 
     fn apply_unstake(&mut self, tx: &Transaction) -> Result<(), CoreError> {
-        let bond_floor = Amount::from_atoms(MIN_VALIDATOR_BOND_ATOMS);
+        let bond_floor = Amount::from_atoms(self.min_validator_bond_atoms);
         let is_active_validator = self.validator_set.contains(&tx.from);
         let unlock_ts = self.current_block_ts.saturating_add(UNBONDING_SECS);
 
@@ -1313,30 +1403,33 @@ impl WorldState {
             ));
         }
 
-        let account = self
-            .accounts
-            .get_mut(&tx.from)
-            .ok_or(CoreError::InsufficientBalance)?;
-        if account.nonce != tx.nonce {
-            return Err(CoreError::InvalidNonce {
-                expected: account.nonce,
-                got: tx.nonce,
-            });
-        }
-        if account.staked < tx.amount {
-            return Err(CoreError::InsufficientBalance);
-        }
-        let remaining = account.staked.checked_sub(tx.amount).unwrap();
-        // A properly bonded, active validator may not drop below the minimum bond
-        // while in the set — it must be removed from the validator set first.
-        // (A grandfathered genesis validator holding less than the bond is exempt.)
-        if is_active_validator && account.staked >= bond_floor && remaining < bond_floor {
-            return Err(CoreError::InvalidTransaction(
-                "active validator cannot unstake below the minimum bond".to_string(),
-            ));
-        }
-        account.staked = remaining;
-        account.nonce += 1;
+        let remaining = {
+            let account = self
+                .accounts
+                .get_mut(&tx.from)
+                .ok_or(CoreError::InsufficientBalance)?;
+            if account.nonce != tx.nonce {
+                return Err(CoreError::InvalidNonce {
+                    expected: account.nonce,
+                    got: tx.nonce,
+                });
+            }
+            if account.staked < tx.amount {
+                return Err(CoreError::InsufficientBalance);
+            }
+            let remaining = account.staked.checked_sub(tx.amount).unwrap();
+            // A properly bonded, active validator may not drop below the minimum bond
+            // while in the set — it must be removed from the validator set first.
+            // (A grandfathered genesis validator holding less than the bond is exempt.)
+            if is_active_validator && account.staked >= bond_floor && remaining < bond_floor {
+                return Err(CoreError::InvalidTransaction(
+                    "active validator cannot unstake below the minimum bond".to_string(),
+                ));
+            }
+            account.staked = remaining;
+            account.nonce += 1;
+            remaining
+        };
         // The withdrawn amount does NOT return to the balance now: it enters the
         // unbonding delay and stays slashable until `unlock_ts`. Circulation-neutral.
         self.pending_unbonds.push(PendingUnbond {
@@ -1345,6 +1438,15 @@ impl WorldState {
             unlock_ts,
         });
         self.mark_dirty(&tx.from);
+        // ADR 0038: update pool entry when bond drops below the governable floor.
+        let new_bond = remaining.atoms();
+        if let Some(entry) = self.validator_pool.get_mut(&tx.from) {
+            entry.bond_atoms = new_bond;
+            if new_bond < self.min_validator_bond_atoms {
+                entry.status = vinx_core::validator_pool::PoolStatus::Unbonding { unlock_ts };
+                tracing::info!(addr = %tx.from, new_bond, "ADR 0038: bond below floor, validator moved to Unbonding");
+            }
+        }
         Ok(())
     }
 
@@ -1695,7 +1797,7 @@ impl WorldState {
                 // Skin in the game: a new validator must have posted the minimum bond.
                 // (The genesis validator enters via create_genesis_state, so it is
                 // grandfathered and exempt.)
-                if self.account_staked(&addr).atoms() < MIN_VALIDATOR_BOND_ATOMS {
+                if self.account_staked(&addr).atoms() < self.min_validator_bond_atoms {
                     return Err(CoreError::InvalidTransaction(
                         "candidate validator has not posted the minimum bond".to_string(),
                     ));
@@ -1750,6 +1852,76 @@ impl WorldState {
                 self.admin_policy = Some(policy);
                 self.pending_governance.clear();
                 tracing::info!(threshold, "Admin: committee policy set");
+            }
+            GovernanceAction::UpdateActiveSetSize { new_size } => {
+                // ADR 0038: governable active-set N — must move by exactly ±ACTIVE_SET_STEP,
+                // stay ≥ MIN_ACTIVE_SET_SIZE, and observe ACTIVE_SET_COOLDOWN_SECS.
+                let current = self.active_set_size;
+                let diff = (new_size as i64 - current as i64).unsigned_abs() as u32;
+                if diff == 0 || diff != ACTIVE_SET_STEP {
+                    return Err(CoreError::InvalidTransaction(format!(
+                        "active_set_size must change by exactly ±{ACTIVE_SET_STEP} (current {current}, requested {new_size})"
+                    )));
+                }
+                if new_size < MIN_ACTIVE_SET_SIZE {
+                    return Err(CoreError::InvalidTransaction(format!(
+                        "active_set_size {new_size} is below the minimum {MIN_ACTIVE_SET_SIZE}"
+                    )));
+                }
+                if self.last_active_set_size_change_ts > 0 {
+                    let elapsed = self
+                        .current_block_ts
+                        .saturating_sub(self.last_active_set_size_change_ts);
+                    if elapsed < ACTIVE_SET_COOLDOWN_SECS {
+                        return Err(CoreError::InvalidTransaction(format!(
+                            "active_set_size was changed {} s ago; cooldown is {} s",
+                            elapsed, ACTIVE_SET_COOLDOWN_SECS
+                        )));
+                    }
+                }
+                self.active_set_size = new_size;
+                self.last_active_set_size_change_ts = self.current_block_ts;
+                tracing::info!(new_size, "Admin: active_set_size updated (ADR 0038)");
+            }
+            GovernanceAction::UpdateMinValidatorBond { atoms } => {
+                // ADR 0038: governable bond floor — within hard bounds, move by at most
+                // BOND_STEP_BPS of the current value, observe BOND_COOLDOWN_SECS.
+                if atoms < MIN_BOND_HARD_FLOOR {
+                    return Err(CoreError::InvalidTransaction(format!(
+                        "bond floor {atoms} is below the hard minimum {MIN_BOND_HARD_FLOOR}"
+                    )));
+                }
+                if atoms > MAX_BOND_HARD_CAP {
+                    return Err(CoreError::InvalidTransaction(format!(
+                        "bond floor {atoms} exceeds the hard cap {MAX_BOND_HARD_CAP}"
+                    )));
+                }
+                let current = self.min_validator_bond_atoms;
+                let max_delta = current * BOND_STEP_BPS / BPS_DENOM;
+                let delta = if atoms > current {
+                    atoms - current
+                } else {
+                    current - atoms
+                };
+                if delta > max_delta {
+                    return Err(CoreError::InvalidTransaction(format!(
+                        "bond change {delta} exceeds BOND_STEP_BPS ({BOND_STEP_BPS} bps) limit {max_delta}"
+                    )));
+                }
+                if self.last_bond_change_ts > 0 {
+                    let elapsed = self
+                        .current_block_ts
+                        .saturating_sub(self.last_bond_change_ts);
+                    if elapsed < BOND_COOLDOWN_SECS {
+                        return Err(CoreError::InvalidTransaction(format!(
+                            "bond floor was changed {} s ago; cooldown is {} s",
+                            elapsed, BOND_COOLDOWN_SECS
+                        )));
+                    }
+                }
+                self.min_validator_bond_atoms = atoms;
+                self.last_bond_change_ts = self.current_block_ts;
+                tracing::info!(atoms, "Admin: min_validator_bond updated (ADR 0038)");
             }
         }
         Ok(())

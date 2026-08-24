@@ -46,7 +46,11 @@ use zstd;
 ///      the pool is expected empty during this alpha migration, no entry-level patching is done.
 /// v15: BLS bitmap (ADR 0029 Phase 1) — each Block row gains `bls_bitmap: Vec<u8>` ([]).
 ///      8 bytes appended per block row (bincode empty Vec<u8> = 0u64 LE).
-const STORAGE_VERSION: u64 = 15;
+/// v16: ADR 0038 governable bond floor — `min_validator_bond_atoms` (u128 =
+///      MIN_VALIDATOR_BOND_ATOMS) appended to WorldState meta.
+/// v17: ADR 0029 Phase 2 epoch beacon — `epoch_beacon` (Hash32 = [0u8; 32]) appended
+///      to WorldState meta.
+const STORAGE_VERSION: u64 = 17;
 
 /// zstd compression level — level 3 is the sweet spot: ~60-70% size reduction,
 /// negligible latency compared to disk I/O.
@@ -199,6 +203,10 @@ impl Storage {
                 13 => Self::migrate_v13_block_bls_fields(tx)?,
                 // v14 → v15 (ADR 0029 Phase 1 bitmap): append bls_bitmap (empty Vec<u8>) to every block row.
                 14 => Self::migrate_v14_block_bitmap_field(tx)?,
+                // v15 → v16 (ADR 0038 governable bond floor): append min_validator_bond_atoms.
+                15 => Self::append_meta_suffix(tx, &vinx_state::v16_meta_suffix())?,
+                // v16 → v17 (ADR 0029 Phase 2 epoch beacon): append epoch_beacon ([0u8;32]).
+                16 => Self::append_meta_suffix(tx, &vinx_state::v17_meta_suffix())?,
                 unknown => {
                     return Err(Self::io_err(format!(
                         "no automatic migration from schema v{unknown} to v{STORAGE_VERSION}. \
