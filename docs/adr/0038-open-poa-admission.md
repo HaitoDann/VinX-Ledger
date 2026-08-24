@@ -1,11 +1,16 @@
-# ADR 0038 — Open PoA : set ranked par score, rotation par époque
+# ADR 0038 — Open PoS : admission permissionless, pool bondé
 
 - **Statut :** Accepté — **non implémenté** à ce jour.
 - **Catégorie :** Consensus & finalité / Tokenomics · **Priorité :** 🔴 haute
 - **Date :** Août 2026 (révision majeure — remplace la version « bond + veto collectif »)
 - **Liens :** concrétise le fair launch (ADR 0021, ADR 0033) ; s'articule avec les récompenses
-  par époque (ADR 0028) ; dépend du consensus multi-validateur éprouvé (ADR 0002/0027/0031)
-  avant d'ouvrir le pool à des tiers.
+  par époque (ADR 0028) ; prérequis du comité VRF (ADR 0029) ; dépend du consensus multi-validateur
+  éprouvé (ADR 0002/0027/0031) avant d'ouvrir le pool.
+
+> **Note (août 2026) :** cet ADR définit le **pool de validateurs éligibles** (admission,
+> bond, warmup, unbonding, slashing). La **sélection pour un bloc donné** (qui signe quoi)
+> n'est plus par score mais par **VRF Algorand-style** (ADR 0029). Les deux ADR sont
+> complémentaires : 0038 = qui peut être dans le pool ; 0029 = qui est dans le comité du bloc.
 
 ---
 

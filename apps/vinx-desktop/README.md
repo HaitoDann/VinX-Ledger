@@ -22,7 +22,7 @@ workspace principal. Seule la coquille Tauri (réseau + UI) est ici.
 
 **Portefeuille** — ouvrir/créer un wallet (format compatible avec `vinx-wallet` CLI),
 adresse + copie (pour recevoir), solde/bond/nonce, envoi de VINX, stake/déstake,
-historique, et l'état du réseau (hauteur, mempool, frais de base, circulation, Fonderie).
+historique, et l'état du réseau (hauteur, mempool, frais de base, circulation, émission progressive).
 
 **Admin** — vérifie que le wallet ouvert est bien l'admin on-chain, liste les
 validateurs (leader / en ligne / suspendu), ajout/retrait de validateur, et

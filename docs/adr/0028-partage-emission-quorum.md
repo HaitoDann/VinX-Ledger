@@ -5,7 +5,7 @@
 - **Date :** Juillet 2026 — révisé Août 2026 (passage au modèle par époque)
 - **Liens :** modifie la distribution (pas la courbe) de l'émission (ADR 0021, respectée) ;
   s'appuie sur la finalité au quorum (ADR 0002) ; adresse la concentration early (contexte
-  fair launch) ; s'articule avec l'admission Open PoA (ADR 0038).
+  fair launch) ; s'articule avec l'admission Open PoS (ADR 0038).
 
 ---
 
@@ -116,7 +116,7 @@ régression au bootstrap.
 - **Réduit l'incitation à retarder** : la manne d'un long silence se dilue sur toute l'époque.
 - **Moins de transactions de crédit** : une seule passe par époque, quelle que soit la taille
   du set (O(1) par époque au lieu de O(N) par bloc).
-- **Synergie avec ADR 0038 (Open PoA)** : plus le set grandit, plus l'époque est efficace.
+- **Synergie avec ADR 0038 (Open PoS)** : plus le set grandit, plus l'époque est efficace.
 
 **Coûts / pièges**
 - **Champs d'état supplémentaires** dans `WorldState` (pot, credits, cosign counts, epoch ts) →
@@ -158,4 +158,4 @@ régression au bootstrap.
 - Tests : conservation (Σ crédits = émission de l'époque), proportionnalité co-signatures,
   `n=1` inchangé, pas de double crédit, bord d'époque à timestamp exact, époques vides,
   idempotence, exemption ED des validateurs (ADR 0026).
-- Dépendances : ADR 0002 (finalité), ADR 0038 (Open PoA, synergique pour l'échelle).
+- Dépendances : ADR 0002 (finalité), ADR 0038 (Open PoS, synergique pour l'échelle).

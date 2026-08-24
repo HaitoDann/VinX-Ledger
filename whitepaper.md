@@ -18,14 +18,14 @@ Cohérent avec cette philosophie, VinX est développé sur un **protocole Rust e
 
 > **Ce qui change en v5.0 :** VinX abandonne le modèle « La Fonderie » (pré-allocation de 100 Md à la genèse, melt/forge) au profit d'un **minting progressif pur** : les tokens n'existent pas avant d'être produits. La courbe d'émission est allongée (~20 ans de demi-vie au lieu de 8) pour réduire le front-loading. Le slash est **redistribué aux validateurs honnêtes** via le pot d'époque — les tokens ne quittent jamais la circulation. Les modules gagnent un mécanisme de **rémunération par escrow on-chain** (ADR 0039). L'émission reste entièrement par le travail du consensus, sans pre-mine, sans robinet discrétionnaire.
 
-> **📍 Direction décidée (post-v4.0, en cours de spécification/implémentation) — l'écosystème de subnets.** Ce document décrit l'économie **implémentée aujourd'hui** (fair launch, émission progressive à demi-vie ~20 ans). La direction actée pour la suite : remplacer le halving par une **émission élastique à réservoir** `E = r·F` (le *melt* recycle vers la Fonderie → l'émission s'auto-régule pour égaler l'usage), et employer cette émission à **financer des subnets** — des surcouches où l'on rend un service réel payé en VINX, l'émission étant dirigée **au prorata de l'usage réel** vers les fournisseurs, sans staking spéculatif. C'est ce qui donne à VinX sa proposition de valeur au-delà du paiement pur. Cette émission est **plafonnée par l'usage réel** (`min(r·F·Δt, k·M)`) pour empêcher un jackpot de démarrage à froid, suit un **canal unique demand-pull** (la valeur = ce que le client paie, jamais jugée par la chaîne), et combine **deux rails** (paiement direct prévisible + subvention-melt décroissante), avec l'invariant gravé **`CAP·k < 1`** qui rend l'auto-dealing non rentable. Dans cette direction, **les validateurs vivent des frais (fee-only PoA)** et l'émission va aux **subnets**, pas aux validateurs ; et comme des jetons doivent exister pour amorcer, **la formule « aucun jeton à la genèse » est remplacée par un *seed float modeste gagné par le travail*** (phase de bootstrap « subnet 0 », puis demand-pull) — l'immense majorité restant distribuée par le travail via les subnets. Détails : ADR [0047](docs/adr/0047-emission-elastique-reservoir.md), [0041](docs/adr/0041-repartition-emission-usage-melt.md), [0039](docs/adr/0039-infrastructure-subnets-escrow-recompense.md), [0042](docs/adr/0042-epoque-reglement-emission.md) (époque de règlement), [0044](docs/adr/0044-garde-fous-equite-amorcage-emission.md) (garde-fous d'équité, modèle & amorçage) ; idées de subnets : [catalogue](docs/subnets/CATALOGUE.md). Tant que ces ADR ne sont pas implémentés, **le modèle en vigueur reste celui décrit ci-dessous.**
+> **📍 Direction décidée (post-v4.0, en cours de spécification/implémentation) — l'écosystème de subnets.** Ce document décrit l'économie **implémentée aujourd'hui** (fair launch, émission progressive à demi-vie ~20 ans). La direction actée pour la suite : remplacer le halving par une **émission élastique à réservoir** `E = r·F` (le *melt* recycle vers la Fonderie → l'émission s'auto-régule pour égaler l'usage), et employer cette émission à **financer des subnets** — des surcouches où l'on rend un service réel payé en VINX, l'émission étant dirigée **au prorata de l'usage réel** vers les fournisseurs, sans staking spéculatif. C'est ce qui donne à VinX sa proposition de valeur au-delà du paiement pur. Cette émission est **plafonnée par l'usage réel** (`min(r·F·Δt, k·M)`) pour empêcher un jackpot de démarrage à froid, suit un **canal unique demand-pull** (la valeur = ce que le client paie, jamais jugée par la chaîne), et combine **deux rails** (paiement direct prévisible + subvention-melt décroissante), avec l'invariant gravé **`CAP·k < 1`** qui rend l'auto-dealing non rentable. Dans cette direction, **les validateurs vivent des frais (fee-only PoS)** et l'émission va aux **subnets**, pas aux validateurs ; et comme des jetons doivent exister pour amorcer, **la formule « aucun jeton à la genèse » est remplacée par un *seed float modeste gagné par le travail*** (phase de bootstrap « subnet 0 », puis demand-pull) — l'immense majorité restant distribuée par le travail via les subnets. Détails : ADR [0047](docs/adr/0047-emission-elastique-reservoir.md), [0041](docs/adr/0041-repartition-emission-usage-melt.md), [0039](docs/adr/0039-infrastructure-subnets-escrow-recompense.md), [0042](docs/adr/0042-epoque-reglement-emission.md) (époque de règlement), [0044](docs/adr/0044-garde-fous-equite-amorcage-emission.md) (garde-fous d'équité, modèle & amorçage) ; idées de subnets : [catalogue](docs/subnets/CATALOGUE.md). Tant que ces ADR ne sont pas implémentés, **le modèle en vigueur reste celui décrit ci-dessous.**
 
 ---
 
 ## 2. Architecture Technique
 
 - **Langage** : Rust, implémentation propriétaire de bout en bout
-- **Vitesse** : Cadence de bloc à **fixe à 12 s** (ADR 0043) — un bloc produit toutes les 12 secondes, même vide (pas de skip-empty ; la congestion est absorbée par le base-fee, pas par des blocs rapprochés). Finalité déterministe **au quorum** (prefix-closed) via le consensus PoA Threshold — immédiate à validateur unique, elle suit les co-signatures à n≥2
+- **Vitesse** : Cadence de bloc fixe à **12 s** (ADR 0043) — un bloc produit toutes les 12 secondes, même vide. Finalité déterministe **au quorum** (prefix-closed) via le consensus **PoS Algorand-style** (comité VRF n ≈ 100, BLS agrégé) — immédiate à validateur unique, elle suit les co-signatures à n≥2
 - **Capacité** : jusqu'à **3 000 transactions par bloc** (réglable), mempool de **100 000** transactions
 - **Performance** : ~250 TPS (3 000 tx à 12 s ; l'exécution est séquentielle — une exécution parallèle serait requise pour dépasser)
 - **Précision** : 18 décimales internes, 2 décimales affichées à l'utilisateur
@@ -42,7 +42,7 @@ VinX Ledger est implémenté sans framework blockchain tiers. Ce choix garantit 
 - **Alignement avec la vision** — une monnaie artisanale mérite une implémentation artisanale
 - **Stabilité à long terme** — aucune dépendance upstream susceptible de casser l'API
 
-Les briques P2P (libp2p Rust), consensus PoA Threshold et mises à jour forkless sont développées nativement dans le projet.
+Les briques P2P (libp2p Rust), consensus PoS Algorand-style (comité VRF, BLS12-381) et mises à jour forkless sont développées nativement dans le projet.
 
 ---
 
@@ -153,7 +153,7 @@ Le frais et l'émission **ne quittent jamais la circulation** — ils changent s
 
 ## 5. Le staking — un bond de validateur, pas un rendement
 
-Dans un réseau **PoA permissionné**, la sécurité vient de l'identité légale des validateurs et du seuil de co-signatures, **pas** d'un jeton. Le staking n'a donc de sens que pour une chose : poser une **caution** — la peau dans le jeu qu'un validateur perd s'il triche.
+Dans un réseau **PoS permissionless**, la sécurité vient du bond économique des validateurs et de la vérification cryptographique (ZK), **pas** d'une liste d'identités autorisées. Le staking n'a donc de sens que pour une chose : poser une **caution** — la peau dans le jeu qu'un validateur perd s'il triche.
 
 - **Le staking retail est supprimé.** Il n'existe plus de « récompenses de staking » pour des détenteurs passifs. Un utilisateur lambda garde du VINX pour **l'utiliser comme cash**, point.
 - **Bond minimum : `100 000 VinX`** (gouvernable) — requis pour être ajouté au set des validateurs. Le validateur défini à la genèse est **dispensé** (bootstrap : il démarre sans jeton et accumule son bond via l'émission).
@@ -167,72 +167,53 @@ Dans un réseau **PoA permissionné**, la sécurité vient de l'identité légal
   - **10 %** → prime au **rapporteur** (pour rendre la surveillance rentable et inciter la vigilance).
   - **90 %** → versés dans le **pot d'époque** (ADR 0028), distribués aux validateurs honnêtes actifs à la clôture de l'époque, proportionnellement à leur participation. Le slash récompense collectivement ceux qui maintiennent le réseau sûr.
   - **Aucun token détruit** — le slash est une redistribution, pas une destruction. La supply en circulation reste inchangée à court terme.
-- **Downtime** : un validateur hors-ligne au-delà d'un seuil est **suspendu** du round-robin (il ne produit plus, donc ne gagne plus) — mais **sans slash économique**, car l'absence n'est pas prouvablement malveillante.
+- **Downtime** : un validateur hors-ligne au-delà d'un seuil **sort du set actif** à la prochaine rotation d'époque (il ne produit plus, donc ne gagne plus) — mais **sans slash économique**, car l'absence n'est pas prouvablement malveillante.
 
 ---
 
 ## 6. Infrastructure : Validateurs & Full Nodes
 
-### 6.1 Validateurs Core (PoA Threshold — Open PoA)
+### 6.1 Validateurs Core (PoS Algorand-style — Open PoS)
 
 Nœuds qui produisent et co-signent les blocs, responsables de la sécurité du réseau.
 
 **Rôle** : proposer et co-signer les blocs, maintenir le consensus, garantir la disponibilité du réseau.
 
-**Mécanisme** : Proof of Authority Threshold — à chaque bloc, le validateur désigné (rotation déterministe) propose un bloc. Ce bloc est finalisé lorsque **plus de 66 % des validateurs actifs** l'ont co-signé. La finalité est déterministe : un bloc quorum-signé ne peut jamais être réorganisé.
+**Mécanisme** : PoS Algorand-style (architecture cible, ADR 0029) — un **comité de n≈100 validateurs** est sélectionné à chaque bloc par **ECVRF RFC 9381** (tirage uniforme parmi les bondés). Le leader est le validateur avec la sortie VRF la plus faible (imprévisible jusqu'au dernier moment — résistance DoS). Le bloc est finalisé lorsque **≥ 67 % du comité** l'ont co-signé (BLS12-381 agrégé). La finalité est BFT déterministe : un bloc quorum-signé ne peut jamais être réorganisé.
 
-**Tolérance aux pannes** : le réseau reste opérationnel tant que 66 % des validateurs sont en ligne.
+**Tolérance aux pannes** : le réseau reste opérationnel tant que 67 % du comité sont en ligne.
 
-**Admission — Open PoA :** à partir de la Phase 2, n'importe qui peut candidater en postant le bond requis — sans approbation admin individuelle. Les validateurs existants peuvent opposer un veto collectif (>66 %, fenêtre 7 jours). L'admin fixe seulement le montant du bond via gouvernance. Le set s'élargit en **trois phases automatiques et immuables**, gravées à la genèse :
-- Phase 1 (bootstrap) : 3–5 validateurs, admission gouvernance-gated le temps d'éprouver le consensus.
-- Phase 2 : 10–21 validateurs, Open PoA.
-- Phase 3 : 50–101 validateurs, Open PoA.
+**Admission — Open PoS :** n'importe qui peut rejoindre le pool en postant le bond requis — sans approbation admin individuelle, sans veto collectif. Warmup de 3 époques avant d'être éligible au comité. L'admin fixe seulement le montant du bond via gouvernance, dans des bornes immuables (`[10 000, 100 000 000]` VINX). La taille du comité actif (N) est gouvernable (ADR 0038).
 
 **Rémunération** : par leur **travail** uniquement — l'émission distribuée par époque (proposeurs + co-signataires) puis les frais immédiats. Pour candidater, un validateur poste un **bond** (§5) ; ce bond le sécurise, il ne le rémunère pas.
 
-**Score S_perf** : l'attribution des slots suit un score basé sur le taux de co-signature et de proposition réussie, 100 % déterministe et on-chain. Pas de délégation DPoS, pas de pondération par le bond.
+**Sélection VRF** : la sélection du comité par VRF est uniforme et imprévisible. Pas de pondération par le bond (le bond sécurise, ne vote pas), pas de délégation DPoS. Score de co-signature = seul critère pour rester dans le pool actif (rotation époque).
 
-### 6.2 Modules — Services hors-nœud ancrés et rémunérés
+### 6.2 Appchains — Surcouches ZK hors-L1
 
-Un **module** est un service off-chain (stockage décentralisé, oracle, calcul, relai…) dont
-l'opérateur poste un **bond VINX** pour s'enregistrer sur la L1. La L1 n'exécute jamais la
-logique du module — elle ancre des **racines Merkle** prouvant l'état du service, et route
-les **paiements** de façon déterministe.
+Une **Appchain** est une chaîne applicative (DEX, lending, identité, stockage…) qui s'exécute
+entièrement hors-L1. L'opérateur poste un **bond VINX** pour enregistrer l'Appchain sur le L1.
+La L1 n'exécute jamais la logique de l'Appchain — elle **vérifie des preuves ZK** (SP1 Groth16,
+ADR 0050) prouvant la validité de chaque transition d'état, et route les **settlements** de façon
+déterministe.
 
-**Cycle de vie d'un paiement de module :**
+**Modèle de confiance par l'Appchain :**
 
-```
-1. Client → ModuleEscrow (tx 0x0A) : bloque N VINX on-chain pour une commande de service.
-2. Module livre le service off-chain.
-3. Module ancre une preuve (AnchorState + EscrowRelease) : preuve Merkle de livraison.
-4. L1 détecte la preuve → distribue atomiquement selon le fee_schedule du module :
-      - Bénéficiaires enregistrés  (ex. 3 providers × 30 %)
-      - Résidu à l'opérateur       (ex. 10 %)
-5. Si pas de preuve avant timeout → client réclame le remboursement (ModuleEscrowRefund, tx 0x0B).
-```
-
-**Exemple concret** — module de stockage décentralisé, 100 Go, 100 VINX :
-
-| Bénéficiaire | Part | Montant |
+| Mode | Mécanisme | Niveau de confiance |
 |---|---|---|
-| Provider A | 30 % | 30 VINX |
-| Provider B | 30 % | 30 VINX |
-| Provider C | 30 % | 30 VINX |
-| Opérateur (coordinateur) | 10 % | 10 VINX |
+| Bonded | Bond seul (pas de preuve ZK) | Niveau 1 — économique |
+| ZK-verified | Preuve SP1 Groth16 vérifiée on-chain | Niveau 3 — cryptographique |
 
-La structure interne du module (qui sont les providers, comment le coordinateur les rémunère)
-est **entièrement off-chain** — la L1 ne voit que des adresses et des pourcentages. C'est un
-**marché libre** : chaque module fixe son prix et sa structure de partage dans son
-enregistrement. La concurrence entre modules régule naturellement les prix.
+**Garanties pour les utilisateurs :**
+- **ForceExit (ADR 0048)** : si le séquenceur censure ou disparaît, l'utilisateur peut retirer ses fonds directement sur le L1 via une `MerkleProof` de son solde Appchain — sans permission.
+- **Clearinghouse (ADR 0049)** : transferts inter-Appchains via message passing asynchrone sur le L1, avec timeout et remboursement automatique.
+- **Celestia DA (ADR 0034)** : les données de l'Appchain sont publiées sur Celestia — vérifiables par n'importe qui via sampling.
 
-Le bond de l'opérateur est sa caution : un module qui ne livre pas répétitivement risque le
-slashing (ADR 0023, à venir). Un timeout simple rembourse le client sans slash (distinction
-entre défaut intentionnel prouvable et simple incident).
+Le bond de l'opérateur est sa caution : une Appchain qui censure ou produit des preuves invalides risque le slashing (ADR 0023). La vérification ZK rend la fraude d'exécution *impossible* (et non juste *punie*).
 
-> **Aucune émission secondaire pour les modules.** Les modules sont rémunérés par leurs
-> utilisateurs, pas par le protocole. VinX refuse les systèmes qui « force à transacter »
-> pour capturer de l'émission — toute récompense protocolaire reste réservée au travail
-> du consensus.
+> **Aucune émission secondaire pour les Appchains.** Les Appchains sont rémunérées par leurs
+> utilisateurs (frais), pas par le protocole L1. VinX refuse les systèmes qui « forcent à transacter »
+> pour capturer de l'émission — toute récompense protocolaire reste réservée au travail du consensus.
 
 ### 6.3 Full Nodes Communautaires
 
@@ -289,7 +270,7 @@ Les éléments suivants sont les **piliers de conception** de VinX :
 4. **Invariant** : `circulation + pot_époque + escrows + poussière_détruite = émis ≤ 100 Md` à chaque bloc
 5. **Émission décroissante continue puis relais aux frais** — jamais un robinet discrétionnaire ; jamais d'événement discret
 6. **Le bond sécurise, le travail rémunère** — le stake ne produit aucun rendement ; le slash punit et récompense collectivement les honnêtes
-7. **Consensus permissionné** (pas de switch vers PoW anonyme ou PoS ouvert)
+7. **Consensus PoS natif avec comité VRF** (tirage uniforme parmi les validateurs bondés, comité n ≈ 100, finalité BFT déterministe — ADR 0029/0038)
 8. **Propriété inconditionnelle des comptes** (aucun gel)
 9. **La L1 n'exécute jamais de logique applicative** — les fonctionnalités complexes vivent dans des surcouches **hors-nœud**, reliées à VinX par ancrage bondé et rémunérées par escrow on-chain. Voir [ADR 0001](docs/adr/0001-l1-monnaie-pure-modules-ancrage-bonde.md) et [ADR 0039](docs/adr/0039-remuneration-operateurs-modules.md).
 10. **Courbe d'émission immuable après la genèse** — le total (100 Md), la demi-vie (~20 ans) et la forme exponentielle continue ne sont gouvernables par **personne** (ni admin, ni action de gouvernance). Nul ne décide de la création monétaire. Voir [ADR 0021](docs/adr/0021-immutabilite-emission.md) et [ADR 0040](docs/adr/0040-emission-progressive-sans-fonderie.md).
@@ -315,10 +296,10 @@ Un éventuel cadre de conformité pourra être étudié le jour où un usage pub
 
 Sans calendrier engagé, par étapes :
 
-- **Fait** : le protocole (L1 Rust, consensus PoA Threshold) et le modèle *fair launch* décrit ici (émission par le travail, bond de validateur avec slashing prouvable, frais au producteur) sont **implémentés et testés**. Le **consensus multi-validateur est éprouvé au banc n=3** (`scripts/bench-n3.sh`) : finalité au quorum, tolérance à 1 panne, sûreté à 1/3 ; jailing/rotation sur set actif et fork-choice déterministe (fonction pure) en place.
+- **Fait** : le protocole (L1 Rust, consensus PoA Threshold implémenté — cible PoS Algorand-style, ADR 0029) et le modèle *fair launch* décrit ici (émission par le travail, bond de validateur avec slashing prouvable, frais au producteur) sont **implémentés et testés**. Le **consensus multi-validateur est éprouvé au banc n=3** (`scripts/bench-n3.sh`) : finalité au quorum, tolérance à 1 panne, sûreté à 1/3 ; jailing/rotation sur set actif et fork-choice déterministe (fonction pure) en place.
 - **En cours (consensus)** : wiring reorg du fork-choice, tx d'unjail, accountability des co-signatures conflictuelles.
 - **Prochaine grande direction (décidée, à implémenter) — l'écosystème de subnets.** Le halving discret laisse place à une **émission élastique à réservoir** `E = r·F` (le *melt* recycle vers la Fonderie, auto-régulation vers un équilibre où l'émission égale l'usage) ; cette émission **finance des subnets** — des surcouches où des participants rendent un service réel (stockage, calcul, aléa…) payé en VINX — répartie **au prorata de l'usage réel (VINX melté)** par subnet, sans staking spéculatif à la TAO. Infrastructure : module bondé + **escrow** + **racine de récompense** + **Claim par preuve Merkle**. ADR [0047](docs/adr/0047-emission-elastique-reservoir.md) / [0041](docs/adr/0041-repartition-emission-usage-melt.md) / [0039](docs/adr/0039-infrastructure-subnets-escrow-recompense.md) ; s'appuie sur l'ancrage bondé de l'[ADR 0001](docs/adr/0001-l1-monnaie-pure-modules-ancrage-bonde.md).
-- **Plus tard** : réseau public, décentralisation à l'échelle (agrégation BLS + comité VRF).
+- **En cours (consensus cible)** : comité VRF ECVRF RFC 9381 + agrégation BLS12-381 (ADR 0029, Accepté). Réseau public, décentralisation à l'échelle.
 
 VinX Ledger n'a pas de pression d'agenda. Le projet avance à son rythme.
 
@@ -334,8 +315,8 @@ VinX Ledger n'a pas de pression d'agenda. Le projet avance à son rythme.
 | Cadence de bloc | Fixe **12 s** (ADR 0043) — un bloc toutes les 12 s, même vide (pas de skip-empty ; congestion via base-fee) |
 | Référence de temps | Timestamp des blocs (temps réel), pas la hauteur |
 | Capacité | 3 000 tx/bloc (réglable) · ~250 TPS · mempool 100 000 |
-| Consensus | PoA Threshold, quorum `⌈2n/3⌉` sur le set complet, finalité prefix-closed déterministe (éprouvée au banc n=3) |
-| Validateurs | permissionnés, **bond requis** ; rotation leader/backup sur le set actif (jailing, ADR 0027) |
+| Consensus | **PoS Algorand-style** — comité VRF n ≈ 100, BLS agrégé, finalité BFT déterministe (ADR 0029) |
+| Validateurs | **permissionless** — bond requis, admission libre, sélection par VRF (ADR 0038/0029) |
 | Full nodes | Ouverts à tous |
 | Supply totale | 100 milliards VinX (immuable, no burn) |
 | **Genèse** | **0 émis, 0 en circulation — aucun pre-mine, aucune réserve pré-allouée** |

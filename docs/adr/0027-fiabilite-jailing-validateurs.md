@@ -40,14 +40,12 @@ sinon deux nœuds jailent des validateurs différents → **fork**. Corollaire :
 
 ## Décision proposée
 
-### Attribution d'un « slot manqué » (spécificité block-on-demand)
+### Attribution d'un « slot manqué » (cadence fixe 12 s, ADR 0045)
 
-En on-demand, il n'y a **pas de slots temporels fixes** : la hauteur n'avance que lorsqu'un
-bloc est produit (travail en attente ou heartbeat). Donc un « slot manqué » se définit
+Avec la **cadence fixe 12 s** (ADR 0045), chaque slot est un tick régulier. Un « slot manqué » se définit
 proprement : **le bloc `H` existe et son proposeur ≠ `leader_at(H)` sur le set actif**. Cela
-n'arrive que si un bloc était **dû** et que le leader prévu ne l'a pas pris dans le timeout —
-un vrai manquement. Un créneau *inactif* (pas de travail) ne fait pas avancer la hauteur donc
-n'est **jamais** compté comme manqué. L'attribution est ainsi 100 % déterministe, sans horloge.
+n'arrive que si le leader prévu ne propose pas dans le timeout — un vrai manquement. L'attribution
+est 100 % déterministe, sans horloge, inchangée par rapport au modèle on-demand.
 
 ### État par validateur (consensus meta)
 

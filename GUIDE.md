@@ -83,13 +83,13 @@ cargo run -p vinx-wallet -- status
 
 ## 3. Staking — bond de validateur
 
-> **Le staking n'est pas un placement à rendement.** En PoA permissionné, la sécurité vient de l'identité des validateurs, pas d'un jeton. Le stake sert donc uniquement de **caution** (bond) : la peau dans le jeu qu'un validateur perd s'il triche. Un détenteur lambda ne stake pas — il garde son VINX pour **l'utiliser comme cash**. Il n'y a **aucune récompense de staking** : les validateurs sont rémunérés par leur **travail** (émission + frais), pas par leur bond.
+> **Le staking n'est pas un placement à rendement.** En PoS permissionless, la sécurité vient du bond économique des validateurs, pas de leur identité. Le stake sert donc uniquement de **caution** (bond) : la peau dans le jeu qu'un validateur perd s'il triche. Un détenteur lambda ne stake pas — il garde son VINX pour **l'utiliser comme cash**. Il n'y a **aucune récompense de staking** : les validateurs sont rémunérés par leur **travail** (émission + frais), pas par leur bond.
 
 **En pratique :**
 - **Bond minimum : 100 000 VINX** (gouvernable) pour être éligible au set des validateurs. Le validateur défini à la genèse est dispensé (bootstrap).
 - **Aucun rendement** sur le bond.
 - **Déliaison différée : 3 jours de temps réel.** Le retrait n'est pas instantané — les fonds restent saisissables pendant la fenêtre où une preuve d'équivocation peut émerger.
-- **Slashing** : équivocation prouvée → 100 % du bond (10 % de prime au rapporteur, le reste fondu dans La Fonderie) ; downtime → suspension du round-robin, sans slash économique.
+- **Slashing** : équivocation prouvée → 100 % du bond (10 % de prime au rapporteur, le reste versé dans le pot d'époque (redistribué aux validateurs honnêtes, ADR 0028) ; downtime → suspension du round-robin, sans slash économique.
 
 ### Poser un bond (staker)
 
@@ -113,7 +113,7 @@ Les fonds reviennent sur le solde **après la période de déliaison** (3 jours 
 
 ## 4. Admin — mise à jour du protocole
 
-> **Console d'admin web** : la page **http://localhost:8545/admin** offre un tableau de bord (hauteur, mempool, Fonderie, version), la gestion des validateurs (ajout/retrait, approbation des demandes), la planification d'upgrades et la maintenance — le tout signé localement avec la clé admin. La page reste en lecture seule tant que la clé de l'admin on-chain n'est pas chargée. Les commandes CLI ci-dessous restent équivalentes pour un usage scripté.
+> **Console d'admin web** : la page **http://localhost:8545/admin** offre un tableau de bord (hauteur, mempool, émission, version), la gestion des validateurs (ajout/retrait, approbation des demandes), la planification d'upgrades et la maintenance — le tout signé localement avec la clé admin. La page reste en lecture seule tant que la clé de l'admin on-chain n'est pas chargée. Les commandes CLI ci-dessous restent équivalentes pour un usage scripté.
 
 Les mises à jour de protocole nécessitent un préavis minimum. La **cible** est un délai en temps réel ; l'implémentation actuelle l'applique encore en hauteur de bloc (migration vers les timestamps planifiée, cf. `ETAT_DU_PROJET.md` §8) :
 
@@ -175,14 +175,14 @@ Affiche le nombre de validateurs, le quorum requis et la liste des adresses.
 Deux pages sont servies par le nœud :
 
 **`http://localhost:8545/` — Explorateur + wallet**
-- **Réseau** : hauteur de bloc, statut, mempool, La Fonderie — en temps réel (SSE)
+- **Réseau** : hauteur de bloc, statut, mempool, émission — en temps réel (SSE)
 - **Wallet** : chargez votre `.json` — la clé ne quitte jamais le navigateur (Ed25519 local)
 - **Envoyer / Staker** : transfer, stake, unstake depuis l'interface
 - **Compte** : consulter n'importe quelle adresse · **Explorateur de blocs** · recherche par hash
 - **Validateurs** et **Protocole** en temps réel
 
 **`http://localhost:8545/admin` — Console d'administration**
-- Tableau de bord (hauteur, mempool, Fonderie, circulation, version de protocole)
+- Tableau de bord (hauteur, mempool, émission, circulation, version de protocole)
 - Validateurs : ensemble actif, ajout/retrait, approbation des demandes en attente
 - Mises à jour : planification d'upgrade · Maintenance : compactage, faucet
 - Actions signées localement avec la clé admin ; lecture seule tant que la clé admin n'est pas chargée
@@ -269,7 +269,7 @@ Les blocs sont propagés via gossipsub. Chaque validateur co-signe les blocs. Le
 | GET | `/validators` | Ensemble des validateurs (+ liveness) |
 | GET | `/validators/pending` | Demandes de validateur en attente (token admin) |
 | GET | `/protocol/version` | Version du protocole + upgrade en attente |
-| GET | `/network/stats` | base_fee, Fonderie, circulation, adresse admin |
+| GET | `/network/stats` | base_fee, émission, circulation, adresse admin |
 | GET | `/metrics` | Métriques Prometheus |
 | GET | `/events` | Server-Sent Events (push par bloc) |
 | GET/POST | `/snapshot` | Export/import de l'état complet (token admin) |

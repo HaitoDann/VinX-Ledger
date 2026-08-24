@@ -3,6 +3,8 @@
 - **Statut :** Proposé (design à décider)
 - **Catégorie :** Tokenomics · Consensus · **Priorité :** 🔴 haute
 - **Date :** Août 2026
+
+> **Note (août 2026) :** cet ADR raisonne sur une contrainte `EPOCH_SECS ≥ HEARTBEAT_INTERVAL_SECS`. Le heartbeat a depuis été aboli (ADR 0045 — cadence fixe 12 s). La borne `EPOCH_SECS ≥ 12 s` reste vraie par construction (le tick est le bloc). Les sections §2.3 et §2.4 restent valides en remplaçant « heartbeat » par « tick de bloc ».
 - **Lié :** **définit la « fenêtre / époque »** que supposent — sans la définir — l'émission
   élastique (ADR 0040, `E = r·F` *par époque*), la répartition inter-subnet par le melt
   (ADR 0041, *« sur la fenêtre »*) et les reward pools de subnet (ADR 0039). S'appuie sur

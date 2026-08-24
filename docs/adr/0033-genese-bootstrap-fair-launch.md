@@ -1,7 +1,7 @@
 # ADR 0033 — Genèse & bootstrap de fair-launch
 
 - **Statut :** Partiellement supersédé — **§1 (genèse multi-validateurs + genesis_hash) reste valide** ;
-  §2 supersédé par ADR 0038 (Open PoA) ; §3 adressé par ADR 0040 (émission progressive, `T_half` allongé).
+  §2 supersédé par ADR 0038 (Open PoS) ; §3 adressé par ADR 0040 (émission progressive, `T_half` allongé).
 - **Catégorie :** Consensus & finalité / Tokenomics · **Priorité :** 🟠 moyenne
 - **Date :** Juillet 2026 — révisé Août 2026
 - **Liens :** concrétise l'esprit fair-launch (whitepaper, ADR 0021) ; §2 → ADR 0038 ;
@@ -9,8 +9,8 @@
 
 > **Note de révision (août 2026)** : les deux problèmes principaux de cet ADR ont été
 > résolus séparément et plus précisément :
-> - **§2 (admission permissionless)** → ADR 0038 (Open PoA) définit la mécanique complète
->   (bond → file, veto collectif, S_perf, expansion phasée).
+> - **§2 (admission permissionless)** → ADR 0038 (Open PoS) définit la mécanique complète
+>   (bond → pool, warmup 3 époques, rotation époque top-N, bornes immuables).
 > - **§3 (lissage émission early)** → ADR 0040 allonge `T_half` à ~20 ans, ce qui réduit
 >   structurellement le front-loading sans toucher la courbe elle-même.
 > - **§1 (genèse multi-validateurs + genesis_hash)** reste à implémenter — c'est la

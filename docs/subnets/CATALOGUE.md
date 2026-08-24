@@ -1,12 +1,16 @@
-# Catalogue des subnets VinX
+# Catalogue des Appchains VinX
 
 - **Statut :** vivant (backlog d'idées, non figé)
-- **Lié :** infrastructure de subnets (ADR 0039) ; émission élastique (ADR 0040) ; répartition
-  par l'usage (ADR 0041) ; garde-fous d'équité (ADR 0044) ; doctrine « monnaie pure + modules
-  hors-nœud » (ADR 0001).
+- **Lié :** SP1 proof verification L1 (ADR 0050) ; ForceExit (ADR 0048) ; Clearinghouse (ADR 0049) ;
+  Celestia DA (ADR 0034) ; rémunération opérateurs escrow (ADR 0039) ; répartition émission par
+  usage/melt (ADR 0041) ; garde-fous d'équité (ADR 0044) ; doctrine settlement layer ZK-natif (ADR 0001).
 
-> Ce document liste des idées de subnets — soit à construire par **🏭 VinX Labs**, soit à
-> proposer à la **🌱 communauté** pour qu'elle orchestre son propre nœud. Ce n'est **pas** une
+> Dans l'architecture cible, les **subnets** deviennent des **Appchains** : ils s'exécutent
+> hors-L1, génèrent des preuves SP1 soumises pour vérification ZK au L1, et publient leurs
+> state diffs sur Celestia. Le L1 ne fait que vérifier — jamais exécuter.
+>
+> Ce document liste des idées d'Appchains — soit à construire par **🏭 VinX Labs**, soit à
+> proposer à la **🌱 communauté** pour qu'elle orchestre son propre séquenceur. Ce n'est **pas** une
 > décision (pas un ADR) : c'est un backlog qui évolue.
 
 ## Le filtre unique : « qui paie, et pourquoi en VINX ? »
@@ -16,6 +20,13 @@ il a besoin de VINX**. Sans demande réelle, pas de melt, pas d'émission légit
 Corollaire : **VinX ne juge jamais la valeur du travail** — elle est révélée par ce que le client
 accepte de payer (le melt). La L1 mesure un flux, pas une qualité.
 
+**Modèle technique cible de chaque Appchain :**
+- Exécution hors-L1, séquenceur unique opérateur (bond requis sur le L1)
+- Génération de preuves SP1 (RISC-V zkVM) → soumission sur le L1 via `AnchorState`
+- State diffs + données publiés sur Celestia (ADR 0034)
+- Escape Hatch natif via ForceExit L1 (ADR 0048) — aucun utilisateur ne peut être censuré définitivement
+- Transferts inter-Appchains via Clearinghouse L1 asynchrone (ADR 0049)
+
 **Deux conditions transverses de succès grand public :**
 1. **UX en fiat, VINX en coulisse.** Le grand public ne détiendra pas de crypto pour utiliser un
    service ; une passerelle carte → VINX → melt doit être invisible côté utilisateur.
@@ -23,9 +34,9 @@ accepte de payer (le melt). La L1 mesure un flux, pas une qualité.
    être soit nettement **moins cher** (capacité dormante), soit **uniquement possible en
    décentralisé** (résistance à la censure, diversité géographique, confidentialité).
 
-**Deux rails de rémunération** (ADR 0044) : le **paiement direct** (client → mineurs, prévisible,
+**Deux rails de rémunération** (ADR 0044) : le **paiement direct** (client → opérateur, prévisible,
 permanent) fait vivre le service ; l'**émission dirigée par le melt** est une subvention
-d'amorçage bornée, qui décroît quand la Fonderie se vide.
+d'amorçage bornée, qui décroît à mesure que la supply est émise (ADR 0040).
 
 ## Gabarit par subnet
 
@@ -34,7 +45,7 @@ Mineurs & scoring · Bond / anti-Sybil · Dépendances & risques · 🏭/🌱 ·
 
 ---
 
-## Pool retenu (4)
+## Pool retenu (4 Appchains candidates)
 
 ### 1. 🟢 Monitoring / uptime distribué
 - **Service rendu :** surveiller la disponibilité et la latence de sites/APIs depuis de nombreux

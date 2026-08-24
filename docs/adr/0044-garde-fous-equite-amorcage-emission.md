@@ -130,7 +130,7 @@ initiale au genesis est donc obligatoire** ; la formule « zéro jeton à la gen
   (comparer 1 Go vs 1 h-GPU vs 1 annotation en « VINX payés », sans oracle) ; (2) **résistance
   Sybil** (fausser la demande brûle de vrais tokens) ; (3) **onboarding permissionless** (un
   nouveau subnet touche sa part par son melt, sans comité).
-- **Deux couches (Q1) :** **sécurité = PoA permissionné** (décentralisation progressive) ;
+- **Deux couches (Q1) :** **sécurité = PoS permissionless** (comité VRF, admission par bond, ADR 0029/0038) ;
   **économie = permissionless** (n'importe qui lance un subnet ou mine). La décentralisation est là
   où elle compte : *qui peut gagner/participer = tout le monde*.
 - **Le pari assumé :** la distribution des ~90 % de la Fonderie **dépend du succès des subnets**

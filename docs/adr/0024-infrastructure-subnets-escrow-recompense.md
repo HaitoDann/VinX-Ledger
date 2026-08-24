@@ -1,4 +1,4 @@
-# ADR 0039 — Infrastructure de subnets : escrow bondé + racine de récompense
+# ADR 0024 — Infrastructure de subnets : escrow bondé + racine de récompense
 
 - **Statut :** Proposé (design à décider)
 - **Catégorie :** Modules (par-dessus l'ADR 0001) · **Priorité :** 🟠 moyenne
