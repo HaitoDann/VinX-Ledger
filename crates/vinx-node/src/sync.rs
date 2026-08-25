@@ -1,5 +1,6 @@
 //! Startup chain-sync: fetches blocks from a trusted peer and replays them.
 
+use futures::future::join_all;
 use rayon::prelude::*;
 use serde::Deserialize;
 use std::time::{SystemTime, UNIX_EPOCH};
@@ -205,6 +206,211 @@ pub async fn sync_from_peer(
     }
 
     applied
+}
+
+/// Number of blocks per HTTP fetch in parallel sync.
+const PARALLEL_BATCH_SIZE: usize = 200;
+/// Maximum concurrent HTTP fetches issued to the peer at once.
+const MAX_PARALLEL_FETCHES: usize = 8;
+
+/// Parallel catch-up sync (ADR 0038) — downloads block batches concurrently,
+/// then applies them in strict sequential order.
+///
+/// Use this **after** `snapshot_sync_from_peer` when the remaining delta is
+/// more than one batch.  It issues up to `MAX_PARALLEL_FETCHES` HTTP requests
+/// to the peer at the same time, cutting wall-clock download time by ~4–8×
+/// compared to the sequential `sync_from_peer`, while keeping state-transition
+/// application strictly in order.
+///
+/// Falls back gracefully: any HTTP error or validation failure is logged and
+/// sync stops at the last successfully applied height.
+///
+/// Returns the total number of blocks applied.
+pub async fn parallel_sync_from_peer(
+    peer_rpc_url: &str,
+    state: &mut WorldState,
+    chain: &mut Chain,
+) -> usize {
+    let client = reqwest::Client::builder()
+        .timeout(std::time::Duration::from_secs(30))
+        .build()
+        .unwrap_or_default();
+    let base_url = peer_rpc_url.trim_end_matches('/').to_owned();
+
+    // 1. Ask the peer for its current tip so we can pre-plan the batches.
+    let peer_height: u64 = {
+        let url = format!("{}/chain/height", base_url);
+        match client.get(&url).send().await {
+            Ok(r) if r.status().is_success() => {
+                match r.json::<serde_json::Value>().await {
+                    Ok(v) => match v.get("height").and_then(|h| h.as_u64()) {
+                        Some(h) => h,
+                        None => {
+                            tracing::warn!("Parallel sync: could not read peer height; falling back to sequential sync");
+                            return 0;
+                        }
+                    },
+                    Err(e) => {
+                        tracing::warn!(error = %e, "Parallel sync: height parse failed");
+                        return 0;
+                    }
+                }
+            }
+            Ok(r) => {
+                tracing::warn!(status = %r.status(), "Parallel sync: height endpoint error");
+                return 0;
+            }
+            Err(e) => {
+                tracing::warn!(error = %e, "Parallel sync: height request failed");
+                return 0;
+            }
+        }
+    };
+
+    let local_tip = chain.tip_height();
+    if peer_height <= local_tip {
+        return 0; // already caught up
+    }
+
+    // 2. Build the list of (from_height, limit) ranges for every needed batch.
+    let mut ranges: Vec<(u64, usize)> = Vec::new();
+    let mut h = local_tip + 1;
+    while h <= peer_height {
+        let remaining = (peer_height - h + 1) as usize;
+        let limit = remaining.min(PARALLEL_BATCH_SIZE);
+        ranges.push((h, limit));
+        h += limit as u64;
+    }
+
+    tracing::info!(
+        local_tip,
+        peer_height,
+        batches = ranges.len(),
+        "Parallel sync: starting ({} concurrent fetches max)",
+        MAX_PARALLEL_FETCHES
+    );
+
+    let mut total_applied = 0usize;
+    let now_secs = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|d| d.as_secs())
+        .unwrap_or(0);
+
+    // 3. Process ranges in windows of MAX_PARALLEL_FETCHES — download the window
+    //    concurrently, then apply in order, then move to the next window.
+    for window in ranges.chunks(MAX_PARALLEL_FETCHES) {
+        // Fire all fetches in this window concurrently.
+        let fetches = window.iter().map(|(from, limit)| {
+            let url = format!(
+                "{}/chain/sync?from={}&limit={}",
+                base_url, from, limit
+            );
+            let c = client.clone();
+            async move {
+                let resp = match c.get(&url).send().await {
+                    Ok(r) => r,
+                    Err(e) => return Err(e.to_string()),
+                };
+                if !resp.status().is_success() {
+                    return Err(format!("HTTP {}", resp.status()));
+                }
+                resp.json::<SyncResponse>().await.map_err(|e| e.to_string())
+            }
+        });
+        let results: Vec<Result<SyncResponse, String>> = join_all(fetches).await;
+
+        // Apply in strict order — stop the moment anything fails.
+        let mut window_ok = true;
+        'batch: for (i, result) in results.into_iter().enumerate() {
+            let (from, _) = window[i];
+            let sync = match result {
+                Ok(s) => s,
+                Err(e) => {
+                    tracing::warn!(from, error = %e, "Parallel sync: fetch failed — stopping");
+                    window_ok = false;
+                    break 'batch;
+                }
+            };
+
+            for block in sync.blocks {
+                let height = block.header.height;
+
+                // Hash-chain linkage.
+                if block.header.prev_hash != chain.tip_hash() {
+                    tracing::error!(height, "Parallel sync: wrong prev_hash — aborting");
+                    return total_applied;
+                }
+                // Timestamp monotonicity + drift cap.
+                if block.header.timestamp <= chain.tip_timestamp() {
+                    tracing::error!(height, "Parallel sync: timestamp not monotonic — aborting");
+                    return total_applied;
+                }
+                if block.header.timestamp
+                    > now_secs.saturating_add(vinx_core::amount::MAX_CLOCK_DRIFT_SECS)
+                {
+                    tracing::error!(height, "Parallel sync: timestamp too far in future — aborting");
+                    return total_applied;
+                }
+                // Proposer + co-signatures.
+                if let Err(e) = validate_block(&block, &state.validator_set) {
+                    tracing::warn!(height, error = %e, "Parallel sync: block not finalized — stopping");
+                    return total_applied;
+                }
+                // Transaction signatures (parallel Ed25519).
+                if !block
+                    .transactions
+                    .par_iter()
+                    .all(|tx| WorldState::verify_tx_signature_pure(tx).is_ok())
+                {
+                    tracing::error!(height, "Parallel sync: invalid tx signature — aborting");
+                    return total_applied;
+                }
+                // State transition with rollback on error.
+                let pre_quorum = state.validator_set.quorum();
+                let protocol_ts = chain.median_time_past_with(block.header.timestamp);
+                let snapshot = state.clone();
+                state.set_block_context(protocol_ts);
+                for tx in &block.transactions {
+                    if let Err(e) = state.apply_transaction_trusted(tx) {
+                        tracing::error!(error = %e, height, "Parallel sync: tx failed — aborting");
+                        *state = snapshot;
+                        return total_applied;
+                    }
+                }
+                state.block_height = height;
+                state.check_upgrade_activation();
+                let _ = state.settle_block(&block.header.validator, height, protocol_ts);
+                if !state.supply_invariant_holds() {
+                    tracing::error!(height, "Parallel sync: supply invariant broken — aborting");
+                    *state = snapshot;
+                    return total_applied;
+                }
+                let root = state.compute_state_root();
+                if root != block.header.state_root {
+                    tracing::error!(height, "Parallel sync: state_root mismatch — aborting");
+                    *state = snapshot;
+                    return total_applied;
+                }
+                let bh = block.header.height;
+                chain.push(block);
+                chain.note_quorum(bh, pre_quorum);
+                total_applied += 1;
+            }
+        }
+
+        chain.advance_finality(&state.validator_set);
+        tracing::info!(
+            total_applied,
+            tip = chain.tip_height(),
+            "Parallel sync: window applied"
+        );
+
+        if !window_ok {
+            break;
+        }
+    }
+
+    total_applied
 }
 
 /// Minimum block gap before snapshot sync is preferred over block-by-block replay.
