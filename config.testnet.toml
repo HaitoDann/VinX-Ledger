@@ -1,0 +1,38 @@
+# VinX Ledger — Testnet node configuration
+# Copy to config.toml on each validator / full-node machine and fill in the
+# REPLACE_WITH_* placeholders.  Env var overrides: see README.
+
+# ─── Data directory ───────────────────────────────────────────────────────────
+data_dir = "testnet-data"
+
+# ─── Key files (generated automatically if absent) ────────────────────────────
+validator_key_file = "testnet-data/validator.json"
+admin_key_file     = "testnet-data/admin.json"
+
+# ─── Block cadence ────────────────────────────────────────────────────────────
+block_time_secs = 6
+
+# ─── RPC ─────────────────────────────────────────────────────────────────────
+rpc_listen = "0.0.0.0:8545"
+
+# Admin token — protect snapshot / compact endpoints. Generate with:
+#   openssl rand -hex 32
+admin_token = "REPLACE_WITH_STRONG_RANDOM_TOKEN"
+
+# ─── P2P ──────────────────────────────────────────────────────────────────────
+p2p_listen = "/ip4/0.0.0.0/tcp/9000"
+
+# Testnet bootnodes — add the public multiaddr of every seed node here.
+# Format: /ip4/<IP>/tcp/9000/p2p/<peer-id>
+# The peer-id is printed in the node logs at startup ("Local peer id: 12D3...").
+peers = [
+  "/ip4/REPLACE_WITH_BOOTNODE_IP/tcp/9000/p2p/REPLACE_WITH_PEER_ID"
+]
+
+# ─── Startup sync ─────────────────────────────────────────────────────────────
+# Point to any live node's RPC for fast snapshot + parallel block catch-up.
+sync_peer_rpc = "http://REPLACE_WITH_BOOTNODE_IP:8545"
+
+# ─── Limits ───────────────────────────────────────────────────────────────────
+max_block_txs    = 3000
+max_mempool_size = 100000

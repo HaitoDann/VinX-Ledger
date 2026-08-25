@@ -1,0 +1,82 @@
+version: "3.9"
+
+# VinX single-machine testnet — one genesis node + two follower nodes.
+# Usage:
+#   1. Fill in genesis-testnet.json (admin_address, initial_validator, genesis_timestamp).
+#   2. Build the image:   docker compose -f docker-compose.testnet.yml build
+#   3. Start:             docker compose -f docker-compose.testnet.yml up
+#
+# The genesis node (node1) prints "Local peer id: 12D3..." on startup.
+# Copy that value into VINX_PEERS for node2/node3 after the first run if you
+# want a deterministic peer-id; or use the libp2p identify protocol (automatic).
+
+services:
+  node1:
+    build: .
+    container_name: vinx-node1
+    environment:
+      RUST_LOG: "info"
+      VINX_DATA_DIR: /data
+      VINX_RPC_LISTEN: "0.0.0.0:8545"
+      VINX_P2P_LISTEN: "/ip4/0.0.0.0/tcp/9000"
+      VINX_BLOCK_TIME: "6"
+      VINX_CHAIN_ID: "7"
+      VINX_GENESIS_SPEC: /genesis/genesis-testnet.json
+    volumes:
+      - node1-data:/data
+      - ./genesis-testnet.json:/genesis/genesis-testnet.json:ro
+    ports:
+      - "8545:8545"
+      - "9000:9000"
+    restart: unless-stopped
+
+  node2:
+    build: .
+    container_name: vinx-node2
+    environment:
+      RUST_LOG: "info"
+      VINX_DATA_DIR: /data
+      VINX_RPC_LISTEN: "0.0.0.0:8545"
+      VINX_P2P_LISTEN: "/ip4/0.0.0.0/tcp/9000"
+      VINX_BLOCK_TIME: "6"
+      VINX_CHAIN_ID: "7"
+      VINX_GENESIS_SPEC: /genesis/genesis-testnet.json
+      VINX_SYNC_PEER: "http://node1:8545"
+      VINX_PEERS: "/ip4/node1/tcp/9000"
+    volumes:
+      - node2-data:/data
+      - ./genesis-testnet.json:/genesis/genesis-testnet.json:ro
+    ports:
+      - "8546:8545"
+      - "9001:9000"
+    depends_on:
+      - node1
+    restart: unless-stopped
+
+  node3:
+    build: .
+    container_name: vinx-node3
+    environment:
+      RUST_LOG: "info"
+      VINX_DATA_DIR: /data
+      VINX_RPC_LISTEN: "0.0.0.0:8545"
+      VINX_P2P_LISTEN: "/ip4/0.0.0.0/tcp/9000"
+      VINX_BLOCK_TIME: "6"
+      VINX_CHAIN_ID: "7"
+      VINX_GENESIS_SPEC: /genesis/genesis-testnet.json
+      VINX_SYNC_PEER: "http://node1:8545"
+      VINX_PEERS: "/ip4/node1/tcp/9000"
+    volumes:
+      - node3-data:/data
+      - ./genesis-testnet.json:/genesis/genesis-testnet.json:ro
+    ports:
+      - "8547:8545"
+      - "9002:9000"
+    depends_on:
+      - node1
+    restart: unless-stopped
+
+volumes:
+  node1-data:
+  node2-data:
+  node3-data:
