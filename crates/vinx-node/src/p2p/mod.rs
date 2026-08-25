@@ -127,6 +127,7 @@ pub async fn start(
     validator_set: Arc<RwLock<ValidatorSet>>,
     metrics: NodeMetrics,
     fork_choice: ForkChoiceCtx,
+    recent_block_txs: Arc<RwLock<std::collections::HashMap<u64, Vec<Transaction>>>>,
 ) -> Result<P2pHandle, NodeError> {
     let (cmd_tx, cmd_rx) = mpsc::unbounded_channel::<P2pCommand>();
 
@@ -256,6 +257,7 @@ pub async fn start(
             fork_choice,
             bls_sk,
             vrf_sk,
+            recent_block_txs,
         )
         .await;
     });
@@ -280,6 +282,7 @@ async fn run_event_loop(
     fork_choice: ForkChoiceCtx,
     bls_sk: vinx_crypto::BlsSecretKey,
     vrf_sk: Option<VrfSecretKey>,
+    recent_block_txs: Arc<RwLock<std::collections::HashMap<u64, Vec<Transaction>>>>,
 ) {
     let mut guard = guard::PeerGuard::new();
     // ADR 0029 Phase 1: pending BLS co-signatures keyed by (height, block_hash).
@@ -318,7 +321,7 @@ async fn run_event_loop(
             }
             event = swarm.next() => {
                 if let Some(event) = event {
-                    handle_swarm_event(event, &chain, &mempool, &state, &validator_set, &local_kp, &local_addr, &mut swarm, &mut guard, &metrics, &fork_choice, &bls_sk, &vrf_sk, &mut pending_bls, &mut cosig_index, &mut competing_headers, &mut pending_vrf, &mut pending_compact).await;
+                    handle_swarm_event(event, &chain, &mempool, &state, &validator_set, &local_kp, &local_addr, &mut swarm, &mut guard, &metrics, &fork_choice, &bls_sk, &vrf_sk, &mut pending_bls, &mut cosig_index, &mut competing_headers, &mut pending_vrf, &mut pending_compact, &recent_block_txs).await;
                 }
             }
         }
@@ -345,6 +348,7 @@ async fn handle_swarm_event(
     competing_headers: &mut HashMap<(u64, Hash32), BlockHeader>,
     pending_vrf: &mut HashMap<u64, Vec<(Address, [u8; VRF_PROOF_LEN])>>,
     pending_compact: &mut HashMap<u64, CompactBlockState>,
+    recent_block_txs: &Arc<RwLock<std::collections::HashMap<u64, Vec<Transaction>>>>,
 ) {
     match event {
         SwarmEvent::NewListenAddr { address, .. } => {
@@ -425,6 +429,7 @@ async fn handle_swarm_event(
                 competing_headers,
                 pending_vrf,
                 pending_compact,
+                recent_block_txs,
             )
             .await;
         }
@@ -552,6 +557,7 @@ async fn dispatch_message(
     competing_headers: &mut HashMap<(u64, Hash32), BlockHeader>,
     pending_vrf: &mut HashMap<u64, Vec<(Address, [u8; VRF_PROOF_LEN])>>,
     pending_compact: &mut HashMap<u64, CompactBlockState>,
+    recent_block_txs: &Arc<RwLock<std::collections::HashMap<u64, Vec<Transaction>>>>,
 ) {
     match msg {
         P2pMessage::NewTransaction(tx) => {
@@ -786,6 +792,8 @@ async fn dispatch_message(
             pending_compact.remove(&height);
             let fin = chain.read().await.finalized_height();
             pending_compact.retain(|h, _| *h > fin);
+            // Prune compact-block tx cache for heights at or below finality.
+            recent_block_txs.write().await.retain(|h, _| *h > fin);
 
             info!(height, "P2P: block validated and applied");
             metrics.p2p_blocks_recv.fetch_add(1, Ordering::Relaxed);
@@ -1183,6 +1191,7 @@ async fn dispatch_message(
                     competing_headers,
                     pending_vrf,
                     pending_compact,
+                    recent_block_txs,
                 ))
                 .await;
             } else {
@@ -1204,12 +1213,32 @@ async fn dispatch_message(
         }
 
         P2pMessage::TxRequest { height, hashes } => {
-            // Serve up to MAX_TX_REQUEST_HASHES transactions from our mempool.
+            // Serve up to MAX_TX_REQUEST_HASHES transactions.
+            // Check the mempool first (live txs), then the recent-block tx cache
+            // (ADR 0037 — producer flushes committed txs from mempool before broadcast).
             let capped: Vec<[u8; 32]> = hashes
                 .into_iter()
                 .take(messages::P2pMessage::MAX_TX_REQUEST_HASHES)
                 .collect();
-            let txs = mempool.read().await.get_by_hashes(&capped);
+            let mut txs = mempool.read().await.get_by_hashes(&capped);
+            // Check the compact-block tx cache for any hashes not found in the mempool.
+            if txs.len() < capped.len() {
+                let served: std::collections::HashSet<[u8; 32]> =
+                    txs.iter().map(|tx| tx.hash()).collect();
+                let cache = recent_block_txs.read().await;
+                for h in &capped {
+                    if !served.contains(h) {
+                        // Search all cached block heights for this hash.
+                        if let Some(tx) = cache
+                            .values()
+                            .flat_map(|v| v.iter())
+                            .find(|tx| &tx.hash() == h)
+                        {
+                            txs.push(tx.clone());
+                        }
+                    }
+                }
+            }
             if !txs.is_empty() {
                 let resp = P2pMessage::TxResponse { height, txs };
                 let topic = IdentTopic::new(resp.topic());
@@ -1267,6 +1296,7 @@ async fn dispatch_message(
                     competing_headers,
                     pending_vrf,
                     pending_compact,
+                    recent_block_txs,
                 ))
                 .await;
             } else {

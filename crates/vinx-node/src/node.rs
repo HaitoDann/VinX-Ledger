@@ -16,7 +16,7 @@ use crate::{
     storage::Storage,
     NodeError,
 };
-use vinx_core::{Block, ValidatorSet};
+use vinx_core::{Block, Transaction, ValidatorSet};
 use vinx_state::WorldState;
 
 // ─── Transaction receipt ─────────────────────────────────────────────────────
@@ -148,6 +148,10 @@ pub struct Node {
     /// réorgs de fork-choice. Maintenu par `reorg::advance_snapshot` après chaque avancée de
     /// finalité (tick + chemins P2P). Partagé avec la tâche P2P via `ForkChoiceCtx`.
     pub finalized_state: Arc<RwLock<(u64, WorldState)>>,
+    /// Compact-block tx cache (ADR 0037): transactions from recently produced blocks,
+    /// kept alive after mempool flush so TxRequest peers can still be served.
+    /// Keyed by block height; pruned after finality.
+    pub recent_block_txs: Arc<RwLock<HashMap<u64, Vec<Transaction>>>>,
 }
 
 impl Node {
@@ -183,6 +187,7 @@ impl Node {
             metrics: NodeMetrics::new(),
             suspended_validators: Arc::new(RwLock::new(HashSet::new())),
             finalized_state,
+            recent_block_txs: Arc::new(RwLock::new(HashMap::new())),
         })
     }
 
@@ -202,6 +207,8 @@ impl Node {
         let (block_events, _) = broadcast::channel(64);
 
         let metrics = NodeMetrics::new();
+        let recent_block_txs_arc: Arc<RwLock<HashMap<u64, Vec<Transaction>>>> =
+            Arc::new(RwLock::new(HashMap::new()));
 
         let fork_choice = ForkChoiceCtx {
             finalized_state: Arc::clone(&finalized_state),
@@ -217,6 +224,7 @@ impl Node {
                 Arc::clone(&vs_arc),
                 metrics.clone(),
                 fork_choice,
+                Arc::clone(&recent_block_txs_arc),
             )
             .await
             {
@@ -255,6 +263,7 @@ impl Node {
             metrics,
             suspended_validators: Arc::new(RwLock::new(HashSet::new())),
             finalized_state,
+            recent_block_txs: recent_block_txs_arc,
         })
     }
 
@@ -297,6 +306,15 @@ impl Node {
         {
             let mut snap = self.finalized_state.write().await;
             crate::reorg::advance_snapshot(&mut snap, &chain);
+        }
+
+        // Cache block transactions for compact-block TxRequest responses (ADR 0037).
+        // Must happen BEFORE update_confirmed_nonces flushes them from the mempool.
+        if !block.transactions.is_empty() {
+            self.recent_block_txs
+                .write()
+                .await
+                .insert(block.header.height, block.transactions.clone() as Vec<Transaction>);
         }
 
         // Flush mempool entries whose nonce is now consumed by this block.
@@ -402,9 +420,10 @@ impl Node {
         };
         let _ = self.block_events.send(event);
 
-        // Broadcast to P2P peers
+        // Broadcast compact block to P2P peers (ADR 0037).
+        // Peers reconstruct from their mempool; missing txs arrive via TxRequest/TxResponse.
         if let Some(ref p2p) = self.p2p {
-            p2p.broadcast_block(block);
+            p2p.broadcast_compact_block(block);
         }
     }
 

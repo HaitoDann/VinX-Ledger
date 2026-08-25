@@ -554,14 +554,16 @@ impl Storage {
 
         let btbl = tx.open_table(BLOCKS).ok()?;
         let mut blocks: Vec<(Hash32, Block)> = Vec::new();
+        let mut height_base: Option<u64> = None;
         let iter = btbl.iter().ok()?;
         for entry in iter.flatten() {
             let (height, row) = (entry.0.value(), entry.1.value());
-            // redb iterates u64 keys in ascending order; enforce density so a
-            // corrupted table cannot silently produce a chain with holes.
-            if height != blocks.len() as u64 {
+            // The base is the height of the first block (0 for genesis chains,
+            // non-zero for snapshot-synced chains). Enforce density from the base.
+            let base = *height_base.get_or_insert(height);
+            if height != base + blocks.len() as u64 {
                 tracing::warn!(
-                    expected = blocks.len(),
+                    expected = base + blocks.len() as u64,
                     found = height,
                     "Block table has a gap — refusing to load"
                 );
@@ -580,6 +582,7 @@ impl Storage {
             return None;
         }
         let mut chain = Chain::from_parts(blocks, finalized_height);
+        chain.height_base = height_base.unwrap_or(0);
 
         // Restore persisted indexes — O(1) vs O(blocks×txs) rebuild
         let indexes_restored = (|| -> Option<()> {
