@@ -134,6 +134,12 @@ pub const VALIDATOR_SCORE_WINDOW_SECS: u64 = 7 * 24 * 3_600;
 /// displacing a veteran by entering at the 50%-start score sentinel.
 pub const VALIDATOR_WARMUP_EPOCHS: u32 = 3;
 
+/// Maximum number of validators promoted from the exit queue to `Unbonding` status
+/// at each epoch close (ADR 0036). Rate-limits churn so a coordinated or governance-
+/// driven mass-exit cannot drain the active set in a single epoch — each wave costs
+/// at least one epoch of delay per `MAX_VALIDATOR_EXITS_PER_EPOCH` batch.
+pub const MAX_VALIDATOR_EXITS_PER_EPOCH: usize = 2;
+
 /// Basis-point denominator (10_000 = 100%).
 pub const BPS_DENOM: u128 = 10_000;
 

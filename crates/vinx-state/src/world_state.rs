@@ -5,9 +5,10 @@ use vinx_core::{
         cumulative_emission_atoms, Amount, ACTIVE_SET_COOLDOWN_SECS, ACTIVE_SET_STEP,
         BOND_COOLDOWN_SECS, BOND_STEP_BPS, BPS_DENOM, DEFAULT_ACTIVE_SET_SIZE,
         DEFAULT_FEE_FLOOR_ATOMS, EPOCH_DURATION_SECS, EXISTENTIAL_DEPOSIT_ATOMS, MAX_BOND_HARD_CAP,
-        MAX_MODULES, MAX_NONCE_AHEAD, MIN_ACTIVE_SET_SIZE, MIN_BOND_HARD_FLOOR,
-        MIN_MODULE_BOND_ATOMS, MIN_STAKE_ATOMS, MIN_VALIDATOR_BOND_ATOMS, PROPOSER_SHARE_BPS,
-        SLASH_BOUNTY_BPS, SLASH_EQUIVOCATION_BPS, UNBONDING_SECS, VALIDATOR_SCORE_WINDOW_SECS,
+        MAX_MODULES, MAX_NONCE_AHEAD, MAX_VALIDATOR_EXITS_PER_EPOCH, MIN_ACTIVE_SET_SIZE,
+        MIN_BOND_HARD_FLOOR, MIN_MODULE_BOND_ATOMS, MIN_STAKE_ATOMS, MIN_VALIDATOR_BOND_ATOMS,
+        PROPOSER_SHARE_BPS, SLASH_BOUNTY_BPS, SLASH_EQUIVOCATION_BPS, UNBONDING_SECS,
+        VALIDATOR_SCORE_WINDOW_SECS,
     },
     block::SlashEvidence,
     chain_id::CHAIN_ID_DEVNET,
@@ -16,7 +17,8 @@ use vinx_core::{
     protocol::{ProtocolVersion, ScheduledUpgrade},
     reliability::{self, ReliabilityMap},
     validator_pool::PoolStatus,
-    Account, CoreError, RegisterBlsKeyPayload, Transaction, TransactionType, ValidatorSet,
+    Account, CoreError, RegisterBlsKeyPayload, Transaction, TransactionType, ValidatorExitRequest,
+    ValidatorSet,
 };
 use vinx_crypto::{
     sha256, vrf_verify, Address, BlsPubKey, BlsSignature, Hash32, IncrementalMerkleTree,
@@ -191,6 +193,15 @@ pub struct WorldState {
     /// Appended after `min_validator_bond_atoms` — v16→v17 migration appends 32 zeros.
     #[serde(default)]
     pub epoch_beacon: Hash32,
+    // ── ADR 0036 — validator churn bounds ───────────────────────────────────────
+    /// FIFO exit queue for validators whose bond dropped below the minimum floor
+    /// (ADR 0036). Entries are promoted to `Unbonding` status at each epoch close,
+    /// at most `MAX_VALIDATOR_EXITS_PER_EPOCH` per epoch. This rate-limits churn and
+    /// prevents a coordinated mass-exit from draining the active set in one epoch.
+    /// Bond remains slashable while the request sits in the queue.
+    /// Appended after `epoch_beacon` — v17→v18 migration appends the empty-Vec encoding.
+    #[serde(default)]
+    pub exit_queue: Vec<ValidatorExitRequest>,
 }
 
 /// A bond amount in its unbonding delay, waiting to return to `address`'s balance
@@ -354,6 +365,13 @@ pub fn v17_meta_suffix() -> Vec<u8> {
     bincode::serialize(&[0u8; 32]).expect("serialize Hash32")
 }
 
+/// The bincode bytes appended to a v17 `WorldState` meta blob to bring it to v18 (ADR 0036
+/// churn bounds). Appends the default for one new field:
+///   1. `exit_queue` — `Vec<ValidatorExitRequest> = []` (8 zero bytes: bincode u64 length)
+pub fn v18_meta_suffix() -> Vec<u8> {
+    bincode::serialize(&Vec::<ValidatorExitRequest>::new()).expect("serialize empty Vec")
+}
+
 /// SHA-256(epoch_number_le || address) — deterministic sort key for tiebreaking
 /// validators with identical reliability scores at epoch rotation (ADR 0038).
 fn epoch_tiebreaker(epoch: u64, addr: &Address) -> [u8; 32] {
@@ -426,6 +444,7 @@ impl WorldState {
             last_epoch_close_ts: 0,
             min_validator_bond_atoms: MIN_VALIDATOR_BOND_ATOMS,
             epoch_beacon: [0u8; 32],
+            exit_queue: Vec::new(),
         }
     }
 
@@ -638,6 +657,64 @@ impl WorldState {
         } else {
             0
         };
+
+        // 0. Process exit queue (ADR 0036): promote up to MAX_VALIDATOR_EXITS_PER_EPOCH
+        //    validators whose bond dropped below the floor to Unbonding status.
+        //    Sorted FIFO by (request_height, address). The floor guard ensures the
+        //    eligible pool cannot shrink below MIN_ACTIVE_SET_SIZE.
+        {
+            self.exit_queue.sort_by(|a, b| {
+                a.request_height
+                    .cmp(&b.request_height)
+                    .then_with(|| a.address.cmp(&b.address))
+            });
+
+            let eligible_count = self
+                .validator_pool
+                .values()
+                .filter(|e| matches!(e.status, PoolStatus::Active | PoolStatus::Benched))
+                .count();
+
+            let mut processed = 0usize;
+            let mut eligible_removed = 0usize;
+            let mut remaining_queue: Vec<ValidatorExitRequest> = Vec::new();
+
+            for req in self.exit_queue.drain(..) {
+                if processed >= MAX_VALIDATOR_EXITS_PER_EPOCH {
+                    remaining_queue.push(req);
+                    continue;
+                }
+                match self.validator_pool.get_mut(&req.address) {
+                    None => { /* validator was slashed / removed — discard silently */ }
+                    Some(entry) => {
+                        if entry.bond_atoms >= self.min_validator_bond_atoms {
+                            // Bond was topped back up — discard the stale exit request.
+                            continue;
+                        }
+                        let is_eligible =
+                            matches!(entry.status, PoolStatus::Active | PoolStatus::Benched);
+                        if is_eligible {
+                            let after = eligible_count.saturating_sub(eligible_removed + 1);
+                            if after < MIN_ACTIVE_SET_SIZE as usize {
+                                // Promoting this validator would violate the floor — defer.
+                                remaining_queue.push(req);
+                                continue;
+                            }
+                            eligible_removed += 1;
+                        }
+                        entry.status = PoolStatus::Unbonding {
+                            unlock_ts: req.unlock_ts,
+                        };
+                        processed += 1;
+                        tracing::info!(
+                            addr = %req.address,
+                            "ADR 0036: validator exit processed, moved to Unbonding"
+                        );
+                    }
+                }
+            }
+            self.exit_queue = remaining_queue;
+        }
 
         // 1. Decay all pool window counters (sliding-window approximation).
         let window_epochs = VALIDATOR_SCORE_WINDOW_SECS / EPOCH_DURATION_SECS.max(1);
@@ -1521,13 +1598,27 @@ impl WorldState {
             unlock_ts,
         });
         self.mark_dirty(&tx.from);
-        // ADR 0038: update pool entry when bond drops below the governable floor.
+        // ADR 0038 + ADR 0036: update pool entry when bond drops below the floor.
+        // Instead of immediately transitioning to Unbonding, enqueue for rate-limited
+        // exit at the next epoch close (at most MAX_VALIDATOR_EXITS_PER_EPOCH per epoch).
+        // Bond remains slashable while queued.
         let new_bond = remaining.atoms();
         if let Some(entry) = self.validator_pool.get_mut(&tx.from) {
             entry.bond_atoms = new_bond;
             if new_bond < self.min_validator_bond_atoms {
-                entry.status = vinx_core::validator_pool::PoolStatus::Unbonding { unlock_ts };
-                tracing::info!(addr = %tx.from, new_bond, "ADR 0038: bond below floor, validator moved to Unbonding");
+                let already_queued = self.exit_queue.iter().any(|r| r.address == tx.from);
+                if !already_queued {
+                    self.exit_queue.push(ValidatorExitRequest {
+                        address: tx.from,
+                        request_height: self.block_height,
+                        unlock_ts,
+                    });
+                    tracing::info!(
+                        addr = %tx.from,
+                        new_bond,
+                        "ADR 0036: bond below floor, validator enqueued for rate-limited exit"
+                    );
+                }
             }
         }
         Ok(())
@@ -3468,8 +3559,10 @@ mod tests {
         assert!(!s.validator_pool.contains_key(&addr), "banned address must not enter pool");
     }
 
+    // ADR 0036: when bond drops below floor the validator is queued for exit, not
+    // immediately moved to Unbonding. After tick_epoch_close the exit is processed.
     #[test]
-    fn test_unstake_below_floor_moves_pool_entry_to_unbonding() {
+    fn test_unstake_below_floor_queues_exit_then_epoch_close_unbonds() {
         use vinx_core::amount::MIN_VALIDATOR_BOND_ATOMS;
         use vinx_core::validator_pool::PoolStatus;
         let (kp, addr) = kp_addr();
@@ -3486,7 +3579,7 @@ mod tests {
         .unwrap();
         assert!(s.validator_pool.contains_key(&addr));
 
-        // Unstake all — bond drops below floor → pool entry → Unbonding.
+        // Unstake all — bond drops below floor → queued for exit (ADR 0036).
         s.set_block_context(1_000);
         s.apply_transaction(&Transaction::new_unstake(
             &kp,
@@ -3496,11 +3589,25 @@ mod tests {
         ))
         .unwrap();
 
-        let entry = &s.validator_pool[&addr];
-        assert!(
-            matches!(entry.status, PoolStatus::Unbonding { .. }),
-            "pool entry must be Unbonding after bond drops below floor"
+        // Immediately after unstake: still in Warmup (not yet Unbonding).
+        assert_eq!(
+            s.exit_queue.len(),
+            1,
+            "exit request must be queued"
         );
+        assert_eq!(s.exit_queue[0].address, addr);
+        assert!(
+            !matches!(s.validator_pool[&addr].status, PoolStatus::Unbonding { .. }),
+            "pool entry must NOT yet be Unbonding before epoch close"
+        );
+
+        // Tick epoch close — exit is processed and validator moves to Unbonding.
+        s.tick_epoch_close();
+        assert!(
+            matches!(s.validator_pool[&addr].status, PoolStatus::Unbonding { .. }),
+            "pool entry must be Unbonding after epoch close processes the exit queue"
+        );
+        assert!(s.exit_queue.is_empty(), "exit queue must be drained");
     }
 
     // ─── ADR 0038: UpdateActiveSetSize governance ─────────────────────────────
@@ -3984,5 +4091,363 @@ mod tests {
 
         let committee = s.committee_for_height(1, 10);
         assert_eq!(committee, vec![active_addr], "only Active/Benched validators are eligible");
+    }
+
+    // ─── ADR 0036: validator churn bounds ─────────────────────────────────────
+
+    fn bonded_active_validator() -> (WorldState, vinx_crypto::KeyPair, Address) {
+        use vinx_core::amount::MIN_VALIDATOR_BOND_ATOMS;
+        use vinx_core::validator_pool::{PoolStatus, ValidatorPoolEntry};
+        let (kp, addr) = kp_addr();
+        let mut s = WorldState::new();
+        s.credit_for_test(addr, Amount::from_atoms(MIN_VALIDATOR_BOND_ATOMS * 3));
+        // Stake bond.
+        s.apply_transaction(&Transaction::new_stake(
+            &kp,
+            Amount::from_atoms(MIN_VALIDATOR_BOND_ATOMS),
+            Amount::ZERO,
+            0,
+        ))
+        .unwrap();
+        // Force pool entry to Active so floor checks are meaningful.
+        s.validator_pool.get_mut(&addr).unwrap().status = PoolStatus::Active;
+        (s, kp, addr)
+    }
+
+    #[test]
+    fn test_exit_queue_dedup_same_validator() {
+        use vinx_core::amount::MIN_VALIDATOR_BOND_ATOMS;
+        let (mut s, kp, addr) = bonded_active_validator();
+        s.set_block_context(1_000);
+
+        // First unstake — drops below floor → queued.
+        s.apply_transaction(&Transaction::new_unstake(
+            &kp,
+            Amount::from_atoms(MIN_VALIDATOR_BOND_ATOMS / 2),
+            Amount::ZERO,
+            1,
+        ))
+        .unwrap();
+        assert_eq!(s.exit_queue.len(), 1, "first unstake below floor queues once");
+
+        // Second unstake — already queued → no duplicate.
+        s.apply_transaction(&Transaction::new_unstake(
+            &kp,
+            Amount::from_atoms(MIN_VALIDATOR_BOND_ATOMS / 4),
+            Amount::ZERO,
+            2,
+        ))
+        .unwrap();
+        assert_eq!(
+            s.exit_queue.len(),
+            1,
+            "second unstake must not add a duplicate exit request"
+        );
+    }
+
+    #[test]
+    fn test_exit_queue_rate_limits_to_max_per_epoch() {
+        use vinx_core::amount::{MAX_VALIDATOR_EXITS_PER_EPOCH, MIN_VALIDATOR_BOND_ATOMS};
+        use vinx_core::validator_pool::{PoolStatus, ValidatorPoolEntry};
+
+        // Spin up more validators than MAX_VALIDATOR_EXITS_PER_EPOCH (=2).
+        let n_exit = MAX_VALIDATOR_EXITS_PER_EPOCH + 2;
+        let mut s = WorldState::new();
+        let mut kps_addrs: Vec<(vinx_crypto::KeyPair, Address)> = Vec::new();
+
+        for i in 0..n_exit {
+            let (kp, addr) = kp_addr();
+            s.credit_for_test(addr, Amount::from_atoms(MIN_VALIDATOR_BOND_ATOMS * 2));
+            s.apply_transaction(&Transaction::new_stake(
+                &kp,
+                Amount::from_atoms(MIN_VALIDATOR_BOND_ATOMS),
+                Amount::ZERO,
+                0,
+            ))
+            .unwrap();
+            // Set Active so floor checks apply.
+            s.validator_pool.get_mut(&addr).unwrap().status = PoolStatus::Active;
+            kps_addrs.push((kp, addr));
+            let _ = i;
+        }
+
+        // Add extra Benched validators so MIN_ACTIVE_SET_SIZE is not threatened.
+        for _ in 0..10 {
+            let (_, extra) = kp_addr();
+            let entry = ValidatorPoolEntry {
+                bond_atoms: MIN_VALIDATOR_BOND_ATOMS,
+                bonded_since_ts: 0,
+                status: PoolStatus::Benched,
+                cosign_count_in_window: 0,
+                eligible_blocks_in_window: 0,
+                bls_pub_key: None,
+                bls_pop: None,
+                vrf_pub_key: None,
+            };
+            s.validator_pool.insert(extra, entry);
+        }
+
+        s.set_block_context(1_000);
+        // Unstake all n_exit validators below the floor.
+        for (kp, _) in &kps_addrs {
+            let addr = Address::from_public_key(&kp.public_key());
+            let _ = s.apply_transaction(&Transaction::new_unstake(
+                kp,
+                Amount::from_atoms(MIN_VALIDATOR_BOND_ATOMS),
+                Amount::ZERO,
+                1,
+            ));
+            let _ = addr;
+        }
+        assert_eq!(s.exit_queue.len(), n_exit, "all {n_exit} exits queued");
+
+        // First epoch close: exactly MAX exits processed, rest stay in queue.
+        s.tick_epoch_close();
+        let unbonding_count = s
+            .validator_pool
+            .values()
+            .filter(|e| matches!(e.status, PoolStatus::Unbonding { .. }))
+            .count();
+        assert_eq!(
+            unbonding_count, MAX_VALIDATOR_EXITS_PER_EPOCH,
+            "first epoch close must process exactly MAX_VALIDATOR_EXITS_PER_EPOCH"
+        );
+        assert_eq!(
+            s.exit_queue.len(),
+            n_exit - MAX_VALIDATOR_EXITS_PER_EPOCH,
+            "remaining exits stay in queue for next epoch"
+        );
+
+        // Second epoch close: clears the remaining exits (≤ MAX).
+        s.tick_epoch_close();
+        let still_queued = s.exit_queue.len();
+        assert_eq!(still_queued, 0, "all exits processed after two epoch closes");
+    }
+
+    #[test]
+    fn test_exit_queue_fifo_by_height_then_address() {
+        use vinx_core::amount::MIN_VALIDATOR_BOND_ATOMS;
+        use vinx_core::validator_pool::{PoolStatus, ValidatorPoolEntry};
+
+        let mut s = WorldState::new();
+
+        // Create 3 validators and manually insert their exit requests in non-FIFO order.
+        let mut addrs: Vec<Address> = Vec::new();
+        for _ in 0..3 {
+            let (_, addr) = kp_addr();
+            let entry = ValidatorPoolEntry {
+                bond_atoms: 0,  // below floor
+                bonded_since_ts: 0,
+                status: PoolStatus::Active,
+                cosign_count_in_window: 0,
+                eligible_blocks_in_window: 0,
+                bls_pub_key: None,
+                bls_pop: None,
+                vrf_pub_key: None,
+            };
+            s.validator_pool.insert(addr, entry);
+            addrs.push(addr);
+        }
+        addrs.sort(); // sort so we can predict tiebreaker order
+
+        // Insert requests at different heights (out of order) to test FIFO.
+        use vinx_core::ValidatorExitRequest;
+        s.exit_queue = vec![
+            ValidatorExitRequest { address: addrs[2], request_height: 10, unlock_ts: 9999 },
+            ValidatorExitRequest { address: addrs[0], request_height: 5,  unlock_ts: 9999 },
+            ValidatorExitRequest { address: addrs[1], request_height: 7,  unlock_ts: 9999 },
+        ];
+
+        // Add extra Benched validators so floor check doesn't block any exit.
+        for _ in 0..20 {
+            let (_, extra) = kp_addr();
+            let entry = ValidatorPoolEntry {
+                bond_atoms: MIN_VALIDATOR_BOND_ATOMS,
+                bonded_since_ts: 0,
+                status: PoolStatus::Benched,
+                cosign_count_in_window: 0,
+                eligible_blocks_in_window: 0,
+                bls_pub_key: None,
+                bls_pop: None,
+                vrf_pub_key: None,
+            };
+            s.validator_pool.insert(extra, entry);
+        }
+
+        s.tick_epoch_close(); // processes first 2 (MAX_VALIDATOR_EXITS_PER_EPOCH)
+
+        // Height 5 (addrs[0]) and height 7 (addrs[1]) must be Unbonding.
+        assert!(
+            matches!(s.validator_pool[&addrs[0]].status, PoolStatus::Unbonding { .. }),
+            "earliest request (height 5) must be processed first"
+        );
+        assert!(
+            matches!(s.validator_pool[&addrs[1]].status, PoolStatus::Unbonding { .. }),
+            "second earliest request (height 7) must be processed second"
+        );
+        // Height 10 (addrs[2]) still queued.
+        assert!(
+            !matches!(s.validator_pool[&addrs[2]].status, PoolStatus::Unbonding { .. }),
+            "latest request (height 10) must stay queued after first epoch close"
+        );
+    }
+
+    #[test]
+    fn test_exit_queue_floor_guard_defers_exit() {
+        use vinx_core::amount::{MIN_ACTIVE_SET_SIZE, MIN_VALIDATOR_BOND_ATOMS};
+        use vinx_core::validator_pool::{PoolStatus, ValidatorPoolEntry};
+        use vinx_core::ValidatorExitRequest;
+
+        // Build a pool with exactly MIN_ACTIVE_SET_SIZE eligible validators.
+        let mut s = WorldState::new();
+        let mut targets: Vec<Address> = Vec::new();
+        for _ in 0..(MIN_ACTIVE_SET_SIZE as usize) {
+            let (_, addr) = kp_addr();
+            let entry = ValidatorPoolEntry {
+                bond_atoms: 0, // below floor
+                bonded_since_ts: 0,
+                status: PoolStatus::Active,
+                cosign_count_in_window: 0,
+                eligible_blocks_in_window: 0,
+                bls_pub_key: None,
+                bls_pop: None,
+                vrf_pub_key: None,
+            };
+            s.validator_pool.insert(addr, entry);
+            targets.push(addr);
+        }
+        targets.sort();
+
+        // Enqueue exits for all of them.
+        s.exit_queue = targets
+            .iter()
+            .map(|&addr| ValidatorExitRequest { address: addr, request_height: 1, unlock_ts: 9999 })
+            .collect();
+
+        // Epoch close: floor guard must prevent any exit (active set already at floor).
+        s.tick_epoch_close();
+        assert!(
+            !s.validator_pool
+                .values()
+                .any(|e| matches!(e.status, PoolStatus::Unbonding { .. })),
+            "floor guard must prevent all exits when active set is at MIN_ACTIVE_SET_SIZE"
+        );
+        assert_eq!(
+            s.exit_queue.len(),
+            MIN_ACTIVE_SET_SIZE as usize,
+            "all exit requests must stay in queue"
+        );
+    }
+
+    #[test]
+    fn test_exit_queue_bond_topup_discards_request() {
+        use vinx_core::amount::MIN_VALIDATOR_BOND_ATOMS;
+        use vinx_core::validator_pool::{PoolStatus, ValidatorPoolEntry};
+        use vinx_core::ValidatorExitRequest;
+
+        let (_, addr) = kp_addr();
+        let mut s = WorldState::new();
+        let entry = ValidatorPoolEntry {
+            bond_atoms: MIN_VALIDATOR_BOND_ATOMS, // back above floor
+            bonded_since_ts: 0,
+            status: PoolStatus::Benched,
+            cosign_count_in_window: 0,
+            eligible_blocks_in_window: 0,
+            bls_pub_key: None,
+            bls_pop: None,
+            vrf_pub_key: None,
+        };
+        s.validator_pool.insert(addr, entry);
+
+        // Exit was queued when bond was low, but bond has since been topped up.
+        s.exit_queue = vec![ValidatorExitRequest {
+            address: addr,
+            request_height: 1,
+            unlock_ts: 9999,
+        }];
+
+        s.tick_epoch_close();
+
+        assert!(
+            !matches!(s.validator_pool[&addr].status, PoolStatus::Unbonding { .. }),
+            "topped-up bond must cause exit request to be discarded silently"
+        );
+        assert!(s.exit_queue.is_empty(), "discarded request must be removed");
+    }
+
+    #[test]
+    fn test_exit_queue_unlock_ts_is_set_from_request_time() {
+        use vinx_core::amount::{MIN_VALIDATOR_BOND_ATOMS, UNBONDING_SECS};
+        let (mut s, kp, addr) = bonded_active_validator();
+        let request_ts = 5_000u64;
+        s.set_block_context(request_ts);
+
+        s.apply_transaction(&Transaction::new_unstake(
+            &kp,
+            Amount::from_atoms(MIN_VALIDATOR_BOND_ATOMS),
+            Amount::ZERO,
+            1,
+        ))
+        .unwrap();
+
+        let expected_unlock = request_ts.saturating_add(UNBONDING_SECS);
+        assert_eq!(s.exit_queue[0].unlock_ts, expected_unlock);
+
+        // Add extra validators so floor check passes.
+        use vinx_core::validator_pool::{PoolStatus, ValidatorPoolEntry};
+        for _ in 0..20 {
+            let (_, extra) = kp_addr();
+            let entry = ValidatorPoolEntry {
+                bond_atoms: MIN_VALIDATOR_BOND_ATOMS,
+                bonded_since_ts: 0,
+                status: PoolStatus::Benched,
+                cosign_count_in_window: 0,
+                eligible_blocks_in_window: 0,
+                bls_pub_key: None,
+                bls_pop: None,
+                vrf_pub_key: None,
+            };
+            s.validator_pool.insert(extra, entry);
+        }
+
+        s.tick_epoch_close();
+
+        if let vinx_core::validator_pool::PoolStatus::Unbonding { unlock_ts } =
+            s.validator_pool[&addr].status
+        {
+            assert_eq!(
+                unlock_ts, expected_unlock,
+                "unlock_ts must equal the value computed at request time"
+            );
+        } else {
+            panic!("expected Unbonding status");
+        }
+    }
+
+    #[test]
+    fn test_exit_queue_removed_validator_discarded() {
+        use vinx_core::ValidatorExitRequest;
+
+        // A validator that was already removed from the pool (e.g. slashed) while in the queue.
+        let (_, addr) = kp_addr();
+        let mut s = WorldState::new();
+        // Validator NOT in the pool.
+        s.exit_queue = vec![ValidatorExitRequest {
+            address: addr,
+            request_height: 1,
+            unlock_ts: 9999,
+        }];
+
+        s.tick_epoch_close(); // must not panic
+
+        assert!(s.exit_queue.is_empty(), "ghost exit must be silently discarded");
+    }
+
+    #[test]
+    fn test_v18_meta_suffix_is_eight_zero_bytes() {
+        // bincode empty Vec<ValidatorExitRequest> = 0u64 LE = [0;8]
+        let suffix = v18_meta_suffix();
+        assert_eq!(suffix.len(), 8, "v18 suffix must be 8 bytes (empty Vec length prefix)");
+        assert_eq!(suffix, vec![0u8; 8]);
     }
 }
