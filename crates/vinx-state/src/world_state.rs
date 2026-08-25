@@ -3267,4 +3267,433 @@ mod tests {
         let entry = &s.validator_pool[&addr];
         assert_eq!(entry.bls_pub_key.as_deref(), Some(sk_b.public_key().0.as_slice()));
     }
+
+    // ─── ADR 0038: open PoS admission (bond floor & active-set governance) ────
+
+    #[test]
+    fn test_stake_auto_enters_pool_at_bond_floor() {
+        use vinx_core::amount::MIN_VALIDATOR_BOND_ATOMS;
+        let (kp, addr) = kp_addr();
+        let mut s = WorldState::new();
+        s.credit_for_test(addr, Amount::from_atoms(MIN_VALIDATOR_BOND_ATOMS));
+        assert!(!s.validator_pool.contains_key(&addr));
+
+        s.apply_transaction(&Transaction::new_stake(
+            &kp,
+            Amount::from_atoms(MIN_VALIDATOR_BOND_ATOMS),
+            Amount::ZERO,
+            0,
+        ))
+        .unwrap();
+
+        assert!(s.validator_pool.contains_key(&addr), "pool entry must be created on floor stake");
+        assert_eq!(s.validator_pool[&addr].bond_atoms, MIN_VALIDATOR_BOND_ATOMS);
+    }
+
+    #[test]
+    fn test_stake_below_floor_does_not_enter_pool() {
+        use vinx_core::amount::MIN_VALIDATOR_BOND_ATOMS;
+        let (kp, addr) = kp_addr();
+        let mut s = WorldState::new();
+        let below_floor = MIN_VALIDATOR_BOND_ATOMS - 1;
+        s.credit_for_test(addr, Amount::from_atoms(below_floor));
+
+        s.apply_transaction(&Transaction::new_stake(
+            &kp,
+            Amount::from_atoms(below_floor),
+            Amount::ZERO,
+            0,
+        ))
+        .unwrap();
+
+        assert!(!s.validator_pool.contains_key(&addr), "sub-floor bond must not enter pool");
+    }
+
+    #[test]
+    fn test_stake_banned_address_not_admitted_to_pool() {
+        use vinx_core::amount::MIN_VALIDATOR_BOND_ATOMS;
+        let (kp, addr) = kp_addr();
+        let mut s = WorldState::new();
+        s.credit_for_test(addr, Amount::from_atoms(MIN_VALIDATOR_BOND_ATOMS));
+        s.banned_validator_keys.insert(addr);
+
+        s.apply_transaction(&Transaction::new_stake(
+            &kp,
+            Amount::from_atoms(MIN_VALIDATOR_BOND_ATOMS),
+            Amount::ZERO,
+            0,
+        ))
+        .unwrap();
+
+        assert!(!s.validator_pool.contains_key(&addr), "banned address must not enter pool");
+    }
+
+    #[test]
+    fn test_unstake_below_floor_moves_pool_entry_to_unbonding() {
+        use vinx_core::amount::MIN_VALIDATOR_BOND_ATOMS;
+        use vinx_core::validator_pool::PoolStatus;
+        let (kp, addr) = kp_addr();
+        let mut s = WorldState::new();
+        s.credit_for_test(addr, Amount::from_atoms(MIN_VALIDATOR_BOND_ATOMS * 2));
+
+        // Stake enough to enter the pool.
+        s.apply_transaction(&Transaction::new_stake(
+            &kp,
+            Amount::from_atoms(MIN_VALIDATOR_BOND_ATOMS),
+            Amount::ZERO,
+            0,
+        ))
+        .unwrap();
+        assert!(s.validator_pool.contains_key(&addr));
+
+        // Unstake all — bond drops below floor → pool entry → Unbonding.
+        s.set_block_context(1_000);
+        s.apply_transaction(&Transaction::new_unstake(
+            &kp,
+            Amount::from_atoms(MIN_VALIDATOR_BOND_ATOMS),
+            Amount::ZERO,
+            1,
+        ))
+        .unwrap();
+
+        let entry = &s.validator_pool[&addr];
+        assert!(
+            matches!(entry.status, PoolStatus::Unbonding { .. }),
+            "pool entry must be Unbonding after bond drops below floor"
+        );
+    }
+
+    // ─── ADR 0038: UpdateActiveSetSize governance ─────────────────────────────
+
+    #[test]
+    fn test_update_active_set_size_happy_path() {
+        use vinx_core::amount::{ACTIVE_SET_STEP, DEFAULT_ACTIVE_SET_SIZE};
+        use vinx_core::GovernanceAction;
+        let (mut s, admin_kp, _) = admin_state();
+        s.current_block_ts = 1_000;
+        let new_size = DEFAULT_ACTIVE_SET_SIZE + ACTIVE_SET_STEP;
+
+        s.apply_transaction(&Transaction::new_admin_action(
+            &admin_kp,
+            &GovernanceAction::UpdateActiveSetSize { new_size },
+            0,
+        ))
+        .unwrap();
+
+        assert_eq!(s.active_set_size, new_size);
+        assert_eq!(s.last_active_set_size_change_ts, 1_000);
+    }
+
+    #[test]
+    fn test_update_active_set_size_wrong_step_rejected() {
+        use vinx_core::amount::DEFAULT_ACTIVE_SET_SIZE;
+        use vinx_core::GovernanceAction;
+        let (mut s, admin_kp, _) = admin_state();
+
+        // Step of 4 (not ACTIVE_SET_STEP=2) must be rejected.
+        assert!(s
+            .apply_transaction(&Transaction::new_admin_action(
+                &admin_kp,
+                &GovernanceAction::UpdateActiveSetSize {
+                    new_size: DEFAULT_ACTIVE_SET_SIZE + 4,
+                },
+                0,
+            ))
+            .is_err());
+        assert_eq!(s.active_set_size, DEFAULT_ACTIVE_SET_SIZE);
+    }
+
+    #[test]
+    fn test_update_active_set_size_below_minimum_rejected() {
+        use vinx_core::amount::{ACTIVE_SET_STEP, MIN_ACTIVE_SET_SIZE};
+        use vinx_core::GovernanceAction;
+        let (mut s, admin_kp, _) = admin_state();
+        // Force the size down to MIN_ACTIVE_SET_SIZE + ACTIVE_SET_STEP so one more
+        // decrement would cross the floor.
+        s.active_set_size = MIN_ACTIVE_SET_SIZE + ACTIVE_SET_STEP;
+
+        assert!(s
+            .apply_transaction(&Transaction::new_admin_action(
+                &admin_kp,
+                &GovernanceAction::UpdateActiveSetSize {
+                    new_size: MIN_ACTIVE_SET_SIZE, // exactly the floor — still ok
+                },
+                0,
+            ))
+            .is_ok());
+
+        // One more decrement would go below the floor.
+        s.last_active_set_size_change_ts = 0; // bypass cooldown
+        assert!(s
+            .apply_transaction(&Transaction::new_admin_action(
+                &admin_kp,
+                &GovernanceAction::UpdateActiveSetSize {
+                    new_size: MIN_ACTIVE_SET_SIZE - ACTIVE_SET_STEP,
+                },
+                1,
+            ))
+            .is_err());
+        assert_eq!(s.active_set_size, MIN_ACTIVE_SET_SIZE);
+    }
+
+    #[test]
+    fn test_update_active_set_size_cooldown_enforced() {
+        use vinx_core::amount::{ACTIVE_SET_COOLDOWN_SECS, ACTIVE_SET_STEP, DEFAULT_ACTIVE_SET_SIZE};
+        use vinx_core::GovernanceAction;
+        let (mut s, admin_kp, _) = admin_state();
+        // Use a non-zero baseline so last_change_ts > 0 after the first change.
+        s.current_block_ts = 1_000;
+
+        // First change succeeds.
+        s.apply_transaction(&Transaction::new_admin_action(
+            &admin_kp,
+            &GovernanceAction::UpdateActiveSetSize {
+                new_size: DEFAULT_ACTIVE_SET_SIZE + ACTIVE_SET_STEP,
+            },
+            0,
+        ))
+        .unwrap();
+
+        // Second change within cooldown must fail.
+        s.current_block_ts = 1_000 + ACTIVE_SET_COOLDOWN_SECS - 1;
+        assert!(s
+            .apply_transaction(&Transaction::new_admin_action(
+                &admin_kp,
+                &GovernanceAction::UpdateActiveSetSize {
+                    new_size: DEFAULT_ACTIVE_SET_SIZE + ACTIVE_SET_STEP * 2,
+                },
+                1,
+            ))
+            .is_err());
+
+        // After cooldown elapses it succeeds again.
+        s.current_block_ts = 1_000 + ACTIVE_SET_COOLDOWN_SECS + 1;
+        s.apply_transaction(&Transaction::new_admin_action(
+            &admin_kp,
+            &GovernanceAction::UpdateActiveSetSize {
+                new_size: DEFAULT_ACTIVE_SET_SIZE + ACTIVE_SET_STEP * 2,
+            },
+            1,
+        ))
+        .unwrap();
+        assert_eq!(s.active_set_size, DEFAULT_ACTIVE_SET_SIZE + ACTIVE_SET_STEP * 2);
+    }
+
+    // ─── ADR 0038: UpdateMinValidatorBond governance ──────────────────────────
+
+    #[test]
+    fn test_update_min_validator_bond_happy_path() {
+        use vinx_core::amount::{BOND_STEP_BPS, BPS_DENOM, MIN_VALIDATOR_BOND_ATOMS};
+        use vinx_core::GovernanceAction;
+        let (mut s, admin_kp, _) = admin_state();
+        // Increase by exactly BOND_STEP_BPS (25 %).
+        let new_atoms = MIN_VALIDATOR_BOND_ATOMS + MIN_VALIDATOR_BOND_ATOMS * BOND_STEP_BPS / BPS_DENOM;
+
+        s.apply_transaction(&Transaction::new_admin_action(
+            &admin_kp,
+            &GovernanceAction::UpdateMinValidatorBond { atoms: new_atoms },
+            0,
+        ))
+        .unwrap();
+
+        assert_eq!(s.min_validator_bond_atoms, new_atoms);
+    }
+
+    #[test]
+    fn test_update_min_validator_bond_below_hard_floor_rejected() {
+        use vinx_core::amount::MIN_BOND_HARD_FLOOR;
+        use vinx_core::GovernanceAction;
+        let (mut s, admin_kp, _) = admin_state();
+        s.min_validator_bond_atoms = MIN_BOND_HARD_FLOOR; // already at the floor
+
+        assert!(s
+            .apply_transaction(&Transaction::new_admin_action(
+                &admin_kp,
+                &GovernanceAction::UpdateMinValidatorBond {
+                    atoms: MIN_BOND_HARD_FLOOR - 1,
+                },
+                0,
+            ))
+            .is_err());
+        assert_eq!(s.min_validator_bond_atoms, MIN_BOND_HARD_FLOOR);
+    }
+
+    #[test]
+    fn test_update_min_validator_bond_above_hard_cap_rejected() {
+        use vinx_core::amount::MAX_BOND_HARD_CAP;
+        use vinx_core::GovernanceAction;
+        let (mut s, admin_kp, _) = admin_state();
+        s.min_validator_bond_atoms = MAX_BOND_HARD_CAP;
+
+        assert!(s
+            .apply_transaction(&Transaction::new_admin_action(
+                &admin_kp,
+                &GovernanceAction::UpdateMinValidatorBond {
+                    atoms: MAX_BOND_HARD_CAP + 1,
+                },
+                0,
+            ))
+            .is_err());
+        assert_eq!(s.min_validator_bond_atoms, MAX_BOND_HARD_CAP);
+    }
+
+    #[test]
+    fn test_update_min_validator_bond_step_too_large_rejected() {
+        use vinx_core::amount::{BOND_STEP_BPS, BPS_DENOM, MIN_VALIDATOR_BOND_ATOMS};
+        use vinx_core::GovernanceAction;
+        let (mut s, admin_kp, _) = admin_state();
+        // More than 25% in one go.
+        let too_large = MIN_VALIDATOR_BOND_ATOMS + MIN_VALIDATOR_BOND_ATOMS * BOND_STEP_BPS / BPS_DENOM + 1;
+
+        assert!(s
+            .apply_transaction(&Transaction::new_admin_action(
+                &admin_kp,
+                &GovernanceAction::UpdateMinValidatorBond { atoms: too_large },
+                0,
+            ))
+            .is_err());
+        assert_eq!(s.min_validator_bond_atoms, MIN_VALIDATOR_BOND_ATOMS);
+    }
+
+    #[test]
+    fn test_update_min_validator_bond_cooldown_enforced() {
+        use vinx_core::amount::{BOND_COOLDOWN_SECS, BOND_STEP_BPS, BPS_DENOM, MIN_VALIDATOR_BOND_ATOMS};
+        use vinx_core::GovernanceAction;
+        let (mut s, admin_kp, _) = admin_state();
+        // Non-zero baseline so last_bond_change_ts > 0 after the first change.
+        s.current_block_ts = 1_000;
+        let step = MIN_VALIDATOR_BOND_ATOMS * BOND_STEP_BPS / BPS_DENOM;
+
+        // First change succeeds.
+        s.apply_transaction(&Transaction::new_admin_action(
+            &admin_kp,
+            &GovernanceAction::UpdateMinValidatorBond {
+                atoms: MIN_VALIDATOR_BOND_ATOMS + step,
+            },
+            0,
+        ))
+        .unwrap();
+
+        // Second change within cooldown must fail.
+        s.current_block_ts = 1_000 + BOND_COOLDOWN_SECS - 1;
+        assert!(s
+            .apply_transaction(&Transaction::new_admin_action(
+                &admin_kp,
+                &GovernanceAction::UpdateMinValidatorBond {
+                    atoms: s.min_validator_bond_atoms + 1,
+                },
+                1,
+            ))
+            .is_err());
+
+        // After cooldown it succeeds.
+        s.current_block_ts = 1_000 + BOND_COOLDOWN_SECS + 1;
+        let new_atoms = s.min_validator_bond_atoms + 1;
+        s.apply_transaction(&Transaction::new_admin_action(
+            &admin_kp,
+            &GovernanceAction::UpdateMinValidatorBond { atoms: new_atoms },
+            1,
+        ))
+        .unwrap();
+        assert_eq!(s.min_validator_bond_atoms, new_atoms);
+    }
+
+    // ─── ADR 0029 Phase 2: epoch beacon ──────────────────────────────────────
+
+    #[test]
+    fn test_tick_epoch_close_updates_beacon() {
+        let mut s = WorldState::new();
+        let beacon_before = s.epoch_beacon;
+        s.tick_epoch_close();
+        assert_ne!(s.epoch_beacon, beacon_before, "beacon must change after epoch close");
+        assert_ne!(s.epoch_beacon, [0u8; 32], "beacon must be non-zero after epoch close");
+    }
+
+    #[test]
+    fn test_tick_epoch_close_beacon_is_deterministic() {
+        let mut s1 = WorldState::new();
+        let mut s2 = WorldState::new();
+        s1.tick_epoch_close();
+        s2.tick_epoch_close();
+        assert_eq!(s1.epoch_beacon, s2.epoch_beacon, "beacon must be deterministic");
+    }
+
+    #[test]
+    fn test_tick_epoch_close_beacon_chain_differs_across_epochs() {
+        let mut s = WorldState::new();
+        s.tick_epoch_close();
+        let beacon_after_1 = s.epoch_beacon;
+        s.tick_epoch_close();
+        let beacon_after_2 = s.epoch_beacon;
+        assert_ne!(beacon_after_1, beacon_after_2, "successive epoch beacons must differ");
+    }
+
+    // ─── ADR 0029 Phase 2: committee_for_height ───────────────────────────────
+
+    fn pool_state_with_active_validators(n: usize) -> WorldState {
+        use vinx_core::validator_pool::{PoolStatus, ValidatorPoolEntry};
+        let mut s = WorldState::new();
+        for _ in 0..n {
+            let (_, addr) = kp_addr();
+            let mut entry = ValidatorPoolEntry::new(MIN_VALIDATOR_BOND_ATOMS, 0);
+            entry.status = PoolStatus::Active;
+            s.validator_pool.insert(addr, entry);
+        }
+        s
+    }
+
+    #[test]
+    fn test_committee_for_height_respects_k_cap() {
+        let s = pool_state_with_active_validators(10);
+        let committee = s.committee_for_height(1, 5);
+        assert_eq!(committee.len(), 5);
+    }
+
+    #[test]
+    fn test_committee_for_height_at_most_pool_size() {
+        let s = pool_state_with_active_validators(3);
+        let committee = s.committee_for_height(1, 10);
+        assert_eq!(committee.len(), 3, "committee cannot exceed pool size");
+    }
+
+    #[test]
+    fn test_committee_for_height_is_deterministic() {
+        let s = pool_state_with_active_validators(10);
+        let c1 = s.committee_for_height(42, 5);
+        let c2 = s.committee_for_height(42, 5);
+        assert_eq!(c1, c2, "committee selection must be deterministic");
+    }
+
+    #[test]
+    fn test_committee_for_height_differs_across_heights() {
+        let s = pool_state_with_active_validators(10);
+        let c1 = s.committee_for_height(1, 5);
+        let c2 = s.committee_for_height(2, 5);
+        // With 10 candidates and 5 slots there's virtually no chance of identical selection.
+        assert_ne!(c1, c2, "committee should differ across heights");
+    }
+
+    #[test]
+    fn test_committee_excludes_unbonding_and_warmup() {
+        use vinx_core::validator_pool::{PoolStatus, ValidatorPoolEntry};
+        let mut s = WorldState::new();
+
+        let (_, active_addr) = kp_addr();
+        let mut active_entry = ValidatorPoolEntry::new(MIN_VALIDATOR_BOND_ATOMS, 0);
+        active_entry.status = PoolStatus::Active;
+        s.validator_pool.insert(active_addr, active_entry);
+
+        let (_, warmup_addr) = kp_addr();
+        let warmup_entry = ValidatorPoolEntry::new(MIN_VALIDATOR_BOND_ATOMS, 0);
+        // Warmup is the default status — leave it as-is.
+        s.validator_pool.insert(warmup_addr, warmup_entry);
+
+        let (_, unbonding_addr) = kp_addr();
+        let mut unbonding_entry = ValidatorPoolEntry::new(MIN_VALIDATOR_BOND_ATOMS, 0);
+        unbonding_entry.status = PoolStatus::Unbonding { unlock_ts: 99999 };
+        s.validator_pool.insert(unbonding_addr, unbonding_entry);
+
+        let committee = s.committee_for_height(1, 10);
+        assert_eq!(committee, vec![active_addr], "only Active/Benched validators are eligible");
+    }
 }
