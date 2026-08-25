@@ -24,6 +24,10 @@ pub enum TransactionType {
     /// themselves; no admin authorization required. Appended last to preserve bincode/borsh
     /// discriminants of all prior variants.
     RegisterBlsKey,
+    /// Jailed validator requests to re-enter the active set (ADR 0027).
+    /// `from` = the validator address; no payload. Requires `UNJAIL_COOLDOWN_HEIGHTS` to
+    /// have elapsed since the jail sentence. Appended last to preserve discriminants.
+    Unjail,
 }
 
 impl TransactionType {
@@ -40,6 +44,7 @@ impl TransactionType {
             TransactionType::AdminAction => 0x08,
             TransactionType::AnchorState => 0x09,
             TransactionType::RegisterBlsKey => 0x0A,
+            TransactionType::Unjail => 0x0B,
         }
     }
 }
@@ -417,6 +422,31 @@ impl Transaction {
             chain_id: CHAIN_ID_DEVNET,
             expires_at_height: None,
             payload: raw,
+            pub_key: Some(pk),
+            signature: None,
+            sponsor: None,
+            sponsor_pub_key: None,
+            sponsor_signature: None,
+        };
+        tx.signature = Some(keypair.sign(&tx.signing_bytes()));
+        tx
+    }
+
+    /// Constructs and signs an Unjail transaction (ADR 0027).
+    /// The jailed validator calls this for themselves after UNJAIL_COOLDOWN_HEIGHTS have elapsed.
+    pub fn new_unjail(keypair: &KeyPair, nonce: u64) -> Self {
+        let pk = keypair.public_key();
+        let from = Address::from_public_key(&pk);
+        let mut tx = Self {
+            tx_type: TransactionType::Unjail,
+            from,
+            to: from,
+            amount: Amount::ZERO,
+            fee: Amount::ZERO,
+            nonce,
+            chain_id: CHAIN_ID_DEVNET,
+            expires_at_height: None,
+            payload: vec![],
             pub_key: Some(pk),
             signature: None,
             sponsor: None,

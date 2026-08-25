@@ -145,6 +145,11 @@ pub const SLASH_EQUIVOCATION_BPS: u128 = 10_000;
 /// distribution pot — no tokens are destroyed (ADR 0040, no-burn principle).
 pub const SLASH_BOUNTY_BPS: u128 = 1_000;
 
+/// Share of the block emission credited directly to the block proposer (ADR 0028).
+/// 20% goes to the producer immediately; 80% goes to the epoch distribution pot
+/// and is shared proportionally among co-signers at epoch close.
+pub const PROPOSER_SHARE_BPS: u128 = 2_000;
+
 /// How long (in real-time seconds) to keep full block data (header + transactions +
 /// signatures). After this window, transactions and signatures are dropped — only the
 /// header (height, hashes, validator, state_root) is kept for chain integrity.

@@ -22,7 +22,7 @@ use messages::P2pMessage;
 use rayon::prelude::*;
 use std::collections::HashMap;
 use std::sync::atomic::Ordering;
-use vinx_core::{Block, Transaction, ValidatorSet};
+use vinx_core::{Block, BlockHeader, SlashEvidence, Transaction, ValidatorSet};
 use vinx_crypto::{Address, Hash32};
 use vinx_state::WorldState;
 
@@ -250,6 +250,13 @@ async fn run_event_loop(
     // Each entry maps to Vec<(validator_idx, bls_sig)> sorted by validator_idx for canonical
     // aggregation. Pruned below finality; drained once quorum is reached.
     let mut pending_bls: HashMap<(u64, Hash32), Vec<(usize, [u8; 96])>> = HashMap::new();
+    // ADR 0030: co-signature conflict accountability.
+    // Maps (height, validator_addr) → (signed_hash, bls_sig) to detect when the same
+    // validator signs two different block hashes at the same height.
+    let mut cosig_index: HashMap<(u64, Address), (Hash32, [u8; 96])> = HashMap::new();
+    // Stores headers of competing (non-canonical) blocks received via NewBlock, keyed by
+    // (height, block_hash). Used to build SlashEvidence when a conflict is detected.
+    let mut competing_headers: HashMap<(u64, Hash32), BlockHeader> = HashMap::new();
 
     loop {
         tokio::select! {
@@ -269,7 +276,7 @@ async fn run_event_loop(
             }
             event = swarm.next() => {
                 if let Some(event) = event {
-                    handle_swarm_event(event, &chain, &mempool, &state, &validator_set, &local_kp, &local_addr, &mut swarm, &mut guard, &metrics, &fork_choice, &bls_sk, &mut pending_bls).await;
+                    handle_swarm_event(event, &chain, &mempool, &state, &validator_set, &local_kp, &local_addr, &mut swarm, &mut guard, &metrics, &fork_choice, &bls_sk, &mut pending_bls, &mut cosig_index, &mut competing_headers).await;
                 }
             }
         }
@@ -291,6 +298,8 @@ async fn handle_swarm_event(
     fork_choice: &ForkChoiceCtx,
     bls_sk: &vinx_crypto::BlsSecretKey,
     pending_bls: &mut HashMap<(u64, Hash32), Vec<(usize, [u8; 96])>>,
+    cosig_index: &mut HashMap<(u64, Address), (Hash32, [u8; 96])>,
+    competing_headers: &mut HashMap<(u64, Hash32), BlockHeader>,
 ) {
     match event {
         SwarmEvent::NewListenAddr { address, .. } => {
@@ -366,6 +375,8 @@ async fn handle_swarm_event(
                 fork_choice,
                 bls_sk,
                 pending_bls,
+                cosig_index,
+                competing_headers,
             )
             .await;
         }
@@ -488,6 +499,8 @@ async fn dispatch_message(
     fork_choice: &ForkChoiceCtx,
     bls_sk: &vinx_crypto::BlsSecretKey,
     pending_bls: &mut HashMap<(u64, Hash32), Vec<(usize, [u8; 96])>>,
+    cosig_index: &mut HashMap<(u64, Address), (Hash32, [u8; 96])>,
+    competing_headers: &mut HashMap<(u64, Hash32), BlockHeader>,
 ) {
     match msg {
         P2pMessage::NewTransaction(tx) => {
@@ -527,6 +540,14 @@ async fn dispatch_message(
                             == Some(block.header.prev_hash);
                     drop(chain_guard); // libérer le verrou lecture avant l'orchestration (écriture)
                     if is_competitor {
+                        // ADR 0030: store the competing block's header so co-signature
+                        // conflict detection can build SlashEvidence if needed.
+                        if vs.contains(&block.header.validator) {
+                            let h = block.hash();
+                            competing_headers.insert((height, h), block.header.clone());
+                            let fin = chain.read().await.finalized_height();
+                            competing_headers.retain(|(bh, _), _| *bh > fin);
+                        }
                         consider_competing_block(
                             block,
                             chain,
@@ -593,6 +614,61 @@ async fn dispatch_message(
             if !vs.contains(&block.header.validator) {
                 warn!(height, "P2P block from non-validator proposer");
                 return;
+            }
+
+            // ADR 0003: equivocation detection — check if this proposer already signed a
+            // different block at this height (using the previously stored hash).
+            {
+                let proposer = block.header.validator;
+                let new_hash = block.hash();
+                let equivocation_block = {
+                    let c = chain.read().await;
+                    c.get_block(height).and_then(|existing| {
+                        if existing.header.validator == proposer && existing.hash() != new_hash {
+                            Some(existing.clone())
+                        } else {
+                            None
+                        }
+                    })
+                };
+                if let Some(existing_block) = equivocation_block {
+                    warn!(height, %proposer, "EQUIVOCATION: proposer sent two different blocks");
+                    if let (Some(sig_a), Some(sig_b)) =
+                        (&existing_block.bls_aggregate, &block.bls_aggregate)
+                    {
+                        if sig_a.len() == 96 && sig_b.len() == 96 {
+                            let evidence = SlashEvidence {
+                                header_a: existing_block.header.clone(),
+                                header_b: block.header.clone(),
+                                bls_sig_a: sig_a.clone(),
+                                bls_sig_b: sig_b.clone(),
+                            };
+                            let (chain_id, nonce) = {
+                                let s = state.read().await;
+                                (
+                                    s.chain_id,
+                                    s.get_account(local_addr)
+                                        .map(|a| a.nonce)
+                                        .unwrap_or(0),
+                                )
+                            };
+                            let mut slash_tx = Transaction::new_slash_validator(
+                                _local_kp, proposer, &evidence, nonce,
+                            );
+                            slash_tx.chain_id = chain_id;
+                            slash_tx.sign(_local_kp);
+                            if mempool.write().await.add(slash_tx.clone()).is_ok() {
+                                let out = P2pMessage::NewTransaction(slash_tx);
+                                let topic = IdentTopic::new(out.topic());
+                                let _ = swarm
+                                    .behaviour_mut()
+                                    .gossipsub
+                                    .publish(topic, out.encode());
+                            }
+                        }
+                    }
+                    return; // reject the equivocating block
+                }
             }
 
             // 3. Transaction signatures verified in parallel; state applied sequentially.
@@ -679,7 +755,7 @@ async fn dispatch_message(
             }
         }
 
-        // ADR 0046: accumulate BLS co-signatures; aggregate and finalize once quorum is met.
+        // ADR 0046 / ADR 0030: accumulate BLS co-signatures; detect co-signer equivocation.
         P2pMessage::BlockBlsCoSignature {
             height,
             block_hash,
@@ -691,21 +767,9 @@ async fn dispatch_message(
                 warn!(height, "P2P BLS cosig: wrong byte lengths");
                 return;
             }
-            // We must already have this block stored and the message hash must match.
-            let our_block_hash: Hash32 = {
-                let c = chain.read().await;
-                match c.get_block(height) {
-                    Some(b) => b.hash(),
-                    None => {
-                        debug!(height, "P2P BLS cosig for unknown height");
-                        return;
-                    }
-                }
-            };
-            if block_hash.as_slice() != our_block_hash {
-                warn!(height, "P2P BLS cosig: block_hash mismatch");
-                return;
-            }
+            let claimed_hash: Hash32 = block_hash.as_slice().try_into().unwrap();
+            let sig_arr: [u8; 96] = bls_sig.as_slice().try_into().unwrap();
+
             // ADR 0029 Phase 1: resolve the sender's validator index and registered BLS PK
             // from the on-chain registry. Reject if the sender is not a registered validator
             // or has not registered a BLS key — never trust the claimed PK from the wire.
@@ -719,7 +783,6 @@ async fn dispatch_message(
                     return;
                 }
             };
-            let sig_arr: [u8; 96] = bls_sig.as_slice().try_into().unwrap();
             let registered_pk = {
                 let st = state.read().await;
                 st.validator_pool
@@ -734,7 +797,9 @@ async fn dispatch_message(
                     return;
                 }
             };
-            // Verify BLS signature against the REGISTERED key (anti-rogue-key).
+            // Verify BLS sig against the CLAIMED hash (not necessarily our canonical one).
+            // This is critical for ADR 0030: we must verify what the peer claims to sign,
+            // even if it differs from our view, to build valid SlashEvidence later.
             let bls_pub = match vinx_crypto::BlsPubKey::from_bytes(&pk_arr) {
                 Ok(p) => p,
                 Err(_) => {
@@ -743,15 +808,82 @@ async fn dispatch_message(
                 }
             };
             let bls_signature = vinx_crypto::BlsSignature(sig_arr);
-            if vinx_crypto::bls_verify(&bls_pub, &bls_signature, &our_block_hash).is_err() {
+            if vinx_crypto::bls_verify(&bls_pub, &bls_signature, &claimed_hash).is_err() {
                 warn!(height, "P2P BLS cosig: signature verification failed");
                 return;
             }
-            // Prune entries that can no longer affect finality.
-            {
-                let fin = chain.read().await.finalized_height();
-                pending_bls.retain(|(h, _), _| *h > fin);
+
+            // ADR 0030: co-signer conflict detection.
+            // Check if this validator has already co-signed a DIFFERENT hash at this height.
+            let fin = chain.read().await.finalized_height();
+            cosig_index.retain(|(h, _), _| *h > fin);
+            let cosig_key = (height, sender_addr);
+            if let Some((prev_hash, prev_sig)) = cosig_index.get(&cosig_key).copied() {
+                if prev_hash == claimed_hash {
+                    debug!(height, "P2P BLS cosig: duplicate, already recorded");
+                    return;
+                }
+                // Same validator, same height, different hash — equivocation detected.
+                warn!(
+                    height, validator = %sender_addr,
+                    "ADR 0030: co-signer equivocation detected — validator signed two hashes"
+                );
+                // Try to build SlashEvidence if we have both block headers.
+                let header_a = {
+                    let c = chain.read().await;
+                    c.get_block(height).map(|b| b.header.clone())
+                        .or_else(|| competing_headers.get(&(height, prev_hash)).cloned())
+                };
+                let header_b = competing_headers.get(&(height, claimed_hash)).cloned();
+                if let (Some(ha), Some(hb)) = (header_a, header_b) {
+                    // Only submit on-chain slash when both headers name the equivocating
+                    // validator as proposer (current apply_slash_validator constraint).
+                    if ha.validator == sender_addr && hb.validator == sender_addr {
+                        let (chain_id, nonce) = {
+                            let s = state.read().await;
+                            (s.chain_id, s.get_account(local_addr).map(|a| a.nonce).unwrap_or(0))
+                        };
+                        let evidence = SlashEvidence {
+                            header_a: ha,
+                            header_b: hb,
+                            bls_sig_a: prev_sig.to_vec(),
+                            bls_sig_b: sig_arr.to_vec(),
+                        };
+                        let mut slash_tx = Transaction::new_slash_validator(
+                            _local_kp, sender_addr, &evidence, nonce,
+                        );
+                        slash_tx.chain_id = chain_id;
+                        slash_tx.sign(_local_kp);
+                        if mempool.write().await.add(slash_tx.clone()).is_ok() {
+                            let out = P2pMessage::NewTransaction(slash_tx);
+                            let topic = IdentTopic::new(out.topic());
+                            let _ = swarm.behaviour_mut().gossipsub.publish(topic, out.encode());
+                            warn!(height, validator = %sender_addr, "ADR 0030: slash evidence gossipped");
+                        }
+                    }
+                }
+                // Do not accumulate an equivocating co-signature.
+                return;
             }
+            cosig_index.insert(cosig_key, (claimed_hash, sig_arr));
+
+            // Only accumulate towards quorum if the peer co-signed OUR canonical block.
+            let our_block_hash: Hash32 = {
+                let c = chain.read().await;
+                match c.get_block(height) {
+                    Some(b) => b.hash(),
+                    None => {
+                        debug!(height, "P2P BLS cosig for unknown height");
+                        return;
+                    }
+                }
+            };
+            if claimed_hash != our_block_hash {
+                debug!(height, "P2P BLS cosig: not for our canonical block — skipping accumulation");
+                return;
+            }
+            // Prune entries that can no longer affect finality.
+            pending_bls.retain(|(h, _), _| *h > fin);
             // Accumulate, deduplicating by validator index.
             let count = {
                 let entry = pending_bls.entry((height, our_block_hash)).or_default();
@@ -809,6 +941,11 @@ async fn dispatch_message(
                 bitmap[byte_idx] |= 1 << bit_pos;
             }
             let agg_count = pending.len();
+            // Resolve cosigner addresses from validator indices (ADR 0028).
+            let cosigner_addrs: Vec<Address> = pending
+                .iter()
+                .filter_map(|(idx, _)| vs.validators().get(*idx).copied())
+                .collect();
             {
                 let mut c = chain.write().await;
                 c.set_block_bls(height, agg.0.to_vec(), canonical_pks, bitmap);
@@ -819,6 +956,8 @@ async fn dispatch_message(
                     info!(height, cosigners = agg_count, "Block finalized via BLS aggregate");
                 }
             }
+            // ADR 0028: record co-signers for proportional epoch distribution.
+            state.write().await.record_block_cosigns(&cosigner_addrs);
             pending_bls.remove(&(height, our_block_hash));
         }
 

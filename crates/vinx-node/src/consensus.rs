@@ -1,5 +1,5 @@
 use vinx_core::{Block, ValidatorSet};
-use vinx_crypto::{Address, BlsSecretKey, KeyPair};
+use vinx_crypto::BlsSecretKey;
 
 use crate::NodeError;
 
@@ -133,6 +133,7 @@ pub(crate) fn more_canonical<'a>(a: &'a Block, b: &'a Block, vs: &ValidatorSet) 
 mod tests {
     use super::*;
     use vinx_core::{block::GENESIS_PREV_HASH, Block, BlockHeader};
+    use vinx_crypto::{Address, KeyPair};
 
     fn addr_of(kp: &KeyPair) -> Address {
         Address::from_public_key(&kp.public_key())
