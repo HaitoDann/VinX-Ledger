@@ -1,0 +1,24 @@
+{
+  "_comment": "VinX Testnet Genesis Spec — shared by every node in the network.",
+  "_instructions": [
+    "1. Set chain_id to 7 for testnet (never change after first block).",
+    "2. Set genesis_timestamp to a fixed Unix epoch you will announce publicly.",
+    "   Use: date -u +%s  (or pick any future second — all nodes must use the same value).",
+    "3. Set admin_address to your admin key's bech32 address (vinx1...).",
+    "4. Set initial_validator to the validator address of your genesis node.",
+    "   This is the ONLY validator at block 0 — others join via governance.",
+    "5. prefund_initial_validator_vinx: atoms of VinX pre-credited to the",
+    "   initial_validator account so it can pay gas and bond.",
+    "   0 = fair launch (no pre-funding). Recommended for mainnet; fine for testnet.",
+    "6. Commit this file; distribute it to all participants.",
+    "   Every node must set VINX_GENESIS_SPEC=<path> before first launch.",
+    "   DO NOT change it after any node has started — genesis hash would differ."
+  ],
+
+  "chain_id": 7,
+  "genesis_timestamp": 1756166400,
+
+  "admin_address":         "vinx1REPLACE_WITH_YOUR_ADMIN_ADDRESS",
+  "initial_validator":     "vinx1REPLACE_WITH_YOUR_VALIDATOR_ADDRESS",
+  "prefund_initial_validator_vinx": 10000
+}
