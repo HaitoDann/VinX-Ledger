@@ -2396,6 +2396,7 @@ impl WorldState {
         acc.balance = Amount::ZERO;
         acc.staked = staked;
     }
+
 }
 
 fn hash_account(account: &Account) -> Hash32 {

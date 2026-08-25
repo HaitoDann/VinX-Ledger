@@ -23,7 +23,7 @@ use rayon::prelude::*;
 use std::collections::HashMap;
 use std::sync::atomic::Ordering;
 use vinx_core::{Block, BlockHeader, SlashEvidence, Transaction, ValidatorSet};
-use vinx_crypto::{Address, Hash32};
+use vinx_crypto::{Address, Hash32, VrfProof, VrfSecretKey, VRF_PROOF_LEN};
 use vinx_state::WorldState;
 
 #[allow(clippy::large_enum_variant)]
@@ -67,6 +67,21 @@ impl P2pHandle {
             },
         ));
     }
+    pub fn broadcast_vrf_proof(
+        &self,
+        height: u64,
+        vrf_proof: Vec<u8>,
+        validator_addr: Vec<u8>,
+    ) {
+        let _ = self.cmd_tx.send(P2pCommand::Broadcast(
+            P2pMessage::BlockVrfProof {
+                height,
+                vrf_proof,
+                validator_addr,
+            },
+        ));
+    }
+
     pub fn shutdown(&self) {
         let _ = self.cmd_tx.send(P2pCommand::Shutdown);
     }
@@ -84,6 +99,7 @@ const TOPICS: &[&str] = &[
     "vinx/txs/1",
     "vinx/bls/1",
     "vinx/sync/1",
+    "vinx/vrf/1",
 ];
 
 pub async fn start(
@@ -207,6 +223,7 @@ pub async fn start(
     let local_kp = config.validator_keypair.clone();
     let local_addr = config.validator_address;
     let bls_sk = config.bls_secret_key.clone();
+    let vrf_sk = config.vrf_secret_key.clone();
 
     tokio::spawn(async move {
         run_event_loop(
@@ -221,6 +238,7 @@ pub async fn start(
             metrics,
             fork_choice,
             bls_sk,
+            vrf_sk,
         )
         .await;
     });
@@ -244,6 +262,7 @@ async fn run_event_loop(
     metrics: NodeMetrics,
     fork_choice: ForkChoiceCtx,
     bls_sk: vinx_crypto::BlsSecretKey,
+    vrf_sk: Option<VrfSecretKey>,
 ) {
     let mut guard = guard::PeerGuard::new();
     // ADR 0029 Phase 1: pending BLS co-signatures keyed by (height, block_hash).
@@ -257,6 +276,9 @@ async fn run_event_loop(
     // Stores headers of competing (non-canonical) blocks received via NewBlock, keyed by
     // (height, block_hash). Used to build SlashEvidence when a conflict is detected.
     let mut competing_headers: HashMap<(u64, Hash32), BlockHeader> = HashMap::new();
+    // ADR 0029 Phase 2b: pending VRF proofs for committee selection.
+    // Maps height → Vec<(validator_addr, proof_bytes)>. Pruned below finality.
+    let mut pending_vrf: HashMap<u64, Vec<(Address, [u8; VRF_PROOF_LEN])>> = HashMap::new();
 
     loop {
         tokio::select! {
@@ -276,7 +298,7 @@ async fn run_event_loop(
             }
             event = swarm.next() => {
                 if let Some(event) = event {
-                    handle_swarm_event(event, &chain, &mempool, &state, &validator_set, &local_kp, &local_addr, &mut swarm, &mut guard, &metrics, &fork_choice, &bls_sk, &mut pending_bls, &mut cosig_index, &mut competing_headers).await;
+                    handle_swarm_event(event, &chain, &mempool, &state, &validator_set, &local_kp, &local_addr, &mut swarm, &mut guard, &metrics, &fork_choice, &bls_sk, &vrf_sk, &mut pending_bls, &mut cosig_index, &mut competing_headers, &mut pending_vrf).await;
                 }
             }
         }
@@ -297,9 +319,11 @@ async fn handle_swarm_event(
     metrics: &NodeMetrics,
     fork_choice: &ForkChoiceCtx,
     bls_sk: &vinx_crypto::BlsSecretKey,
+    vrf_sk: &Option<VrfSecretKey>,
     pending_bls: &mut HashMap<(u64, Hash32), Vec<(usize, [u8; 96])>>,
     cosig_index: &mut HashMap<(u64, Address), (Hash32, [u8; 96])>,
     competing_headers: &mut HashMap<(u64, Hash32), BlockHeader>,
+    pending_vrf: &mut HashMap<u64, Vec<(Address, [u8; VRF_PROOF_LEN])>>,
 ) {
     match event {
         SwarmEvent::NewListenAddr { address, .. } => {
@@ -374,9 +398,11 @@ async fn handle_swarm_event(
                 metrics,
                 fork_choice,
                 bls_sk,
+                vrf_sk,
                 pending_bls,
                 cosig_index,
                 competing_headers,
+                pending_vrf,
             )
             .await;
         }
@@ -498,9 +524,11 @@ async fn dispatch_message(
     metrics: &NodeMetrics,
     fork_choice: &ForkChoiceCtx,
     bls_sk: &vinx_crypto::BlsSecretKey,
+    vrf_sk: &Option<VrfSecretKey>,
     pending_bls: &mut HashMap<(u64, Hash32), Vec<(usize, [u8; 96])>>,
     cosig_index: &mut HashMap<(u64, Address), (Hash32, [u8; 96])>,
     competing_headers: &mut HashMap<(u64, Hash32), BlockHeader>,
+    pending_vrf: &mut HashMap<u64, Vec<(Address, [u8; VRF_PROOF_LEN])>>,
 ) {
     match msg {
         P2pMessage::NewTransaction(tx) => {
@@ -753,6 +781,33 @@ async fn dispatch_message(
                 let mut c = chain.write().await;
                 c.record_signature(local_addr, height, block_hash);
             }
+
+            // 7. VRF proof for committee selection (ADR 0029 Phase 2b).
+            // Only validators that have registered a VRF key participate.
+            if let Some(sk) = vrf_sk {
+                let has_vrf_key = state
+                    .read()
+                    .await
+                    .validator_pool
+                    .get(local_addr)
+                    .and_then(|e| e.vrf_pub_key)
+                    .is_some();
+                if has_vrf_key {
+                    let alpha = state.read().await.committee_alpha(height);
+                    let proof = sk.prove(&alpha);
+                    let vrf_msg = P2pMessage::BlockVrfProof {
+                        height,
+                        vrf_proof: proof.0.to_vec(),
+                        validator_addr: local_addr.as_bytes().to_vec(),
+                    };
+                    let vrf_topic = IdentTopic::new(vrf_msg.topic());
+                    let _ = swarm
+                        .behaviour_mut()
+                        .gossipsub
+                        .publish(vrf_topic, vrf_msg.encode());
+                    debug!(height, "VRF proof gossiped for committee selection");
+                }
+            }
         }
 
         // ADR 0046 / ADR 0030: accumulate BLS co-signatures; detect co-signer equivocation.
@@ -959,6 +1014,68 @@ async fn dispatch_message(
             // ADR 0028: record co-signers for proportional epoch distribution.
             state.write().await.record_block_cosigns(&cosigner_addrs);
             pending_bls.remove(&(height, our_block_hash));
+        }
+
+        // ADR 0029 Phase 2b: accumulate VRF proofs for committee selection.
+        P2pMessage::BlockVrfProof {
+            height,
+            vrf_proof,
+            validator_addr,
+        } => {
+            // Size guards — reject malformed frames early.
+            if validator_addr.len() != 20 || vrf_proof.len() != messages::P2pMessage::VRF_PROOF_WIRE_LEN {
+                warn!(height, "P2P VRF proof: wrong byte lengths");
+                return;
+            }
+            let addr_arr: [u8; 20] = validator_addr.as_slice().try_into().unwrap();
+            let sender_addr = Address::from_bytes(addr_arr);
+            let proof_arr: [u8; VRF_PROOF_LEN] = vrf_proof.as_slice().try_into().unwrap();
+            let vrf_proof_typed = VrfProof(proof_arr);
+
+            // Verify the proof against the validator's registered VRF key.
+            let verified = {
+                let st = state.read().await;
+                st.verify_committee_vrf_proof(&sender_addr, height, &vrf_proof_typed).is_ok()
+            };
+            if !verified {
+                warn!(height, validator = %sender_addr, "P2P VRF proof: verification failed or no registered key");
+                return;
+            };
+
+            // Prune heights at or below finality.
+            let fin = chain.read().await.finalized_height();
+            pending_vrf.retain(|h, _| *h > fin);
+
+            // Deduplicate by validator address.
+            let entry = pending_vrf.entry(height).or_default();
+            if entry.iter().any(|(a, _)| a == &sender_addr) {
+                debug!(height, validator = %sender_addr, "P2P VRF proof: duplicate, ignoring");
+                return;
+            }
+            entry.push((sender_addr, proof_arr));
+            let count = entry.len();
+            debug!(height, count, "P2P VRF proof accumulated");
+
+            // Derive committee once we have enough proofs (≥ quorum).
+            let vs = validator_set.read().await.clone();
+            let quorum = vs.quorum();
+            if count >= quorum {
+                let proofs_typed: Vec<(Address, VrfProof)> = entry
+                    .iter()
+                    .map(|(a, b)| (*a, VrfProof(*b)))
+                    .collect();
+                let active_set_size = state.read().await.active_set_size as usize;
+                let committee = state
+                    .read()
+                    .await
+                    .committee_from_vrf_proofs(height, &proofs_typed, active_set_size);
+                info!(
+                    height,
+                    count,
+                    committee_size = committee.len(),
+                    "VRF committee derived for height"
+                );
+            }
         }
 
         // Respond to sync requests with our stored blocks
