@@ -28,6 +28,11 @@ pub enum TransactionType {
     /// `from` = the validator address; no payload. Requires `UNJAIL_COOLDOWN_HEIGHTS` to
     /// have elapsed since the jail sentence. Appended last to preserve discriminants.
     Unjail,
+    /// Validator self-registers their ECVRF public key (ADR 0029 Phase 2b).
+    /// `payload` = 32-byte compressed Edwards25519 VRF public key.
+    /// Any bonded validator may call this for themselves; no admin authorization required.
+    /// Appended last to preserve discriminants of all prior variants.
+    RegisterVrfKey,
 }
 
 impl TransactionType {
@@ -45,6 +50,7 @@ impl TransactionType {
             TransactionType::AnchorState => 0x09,
             TransactionType::RegisterBlsKey => 0x0A,
             TransactionType::Unjail => 0x0B,
+            TransactionType::RegisterVrfKey => 0x0C,
         }
     }
 }
@@ -447,6 +453,31 @@ impl Transaction {
             chain_id: CHAIN_ID_DEVNET,
             expires_at_height: None,
             payload: vec![],
+            pub_key: Some(pk),
+            signature: None,
+            sponsor: None,
+            sponsor_pub_key: None,
+            sponsor_signature: None,
+        };
+        tx.signature = Some(keypair.sign(&tx.signing_bytes()));
+        tx
+    }
+
+    /// Constructs and signs a RegisterVrfKey transaction (ADR 0029 Phase 2b).
+    /// Any bonded validator calls this to register their ECVRF public key for committee selection.
+    pub fn new_register_vrf_key(keypair: &KeyPair, vrf_pub_key: &[u8; 32], nonce: u64) -> Self {
+        let pk = keypair.public_key();
+        let from = Address::from_public_key(&pk);
+        let mut tx = Self {
+            tx_type: TransactionType::RegisterVrfKey,
+            from,
+            to: from,
+            amount: Amount::ZERO,
+            fee: Amount::ZERO,
+            nonce,
+            chain_id: CHAIN_ID_DEVNET,
+            expires_at_height: None,
+            payload: vrf_pub_key.to_vec(),
             pub_key: Some(pk),
             signature: None,
             sponsor: None,
