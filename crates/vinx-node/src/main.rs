@@ -324,10 +324,15 @@ async fn main() {
     // Startup chain sync from trusted peer (if configured)
     if let Some(ref peer_url) = sync_peer_rpc {
         tracing::info!(peer = %peer_url, "Starting chain sync from peer");
-        // Try snapshot bootstrap first — if the gap is large this is orders of
-        // magnitude faster than replaying every block from genesis.
+        // 1. Snapshot bootstrap — skip replaying history from genesis if gap > 500.
         vinx_node::sync::snapshot_sync_from_peer(peer_url, &mut state, &mut chain).await;
-        let applied = vinx_node::sync::sync_from_peer(peer_url, &mut state, &mut chain).await;
+        // 2. Parallel catch-up — concurrent batch downloads, sequential apply.
+        let applied =
+            vinx_node::sync::parallel_sync_from_peer(peer_url, &mut state, &mut chain).await;
+        // 3. Sequential tail — handles the last few unfinalized blocks the parallel
+        //    pass may have stopped at (validate_block rejects non-finalized blocks).
+        let tail = vinx_node::sync::sync_from_peer(peer_url, &mut state, &mut chain).await;
+        let applied = applied + tail;
         if applied > 0 {
             tracing::info!(applied, tip = chain.tip_height(), "Chain sync complete");
         } else {
