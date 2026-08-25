@@ -24,6 +24,14 @@ use std::collections::HashMap;
 use std::sync::atomic::Ordering;
 use vinx_core::{Block, BlockHeader, SlashEvidence, Transaction, ValidatorSet};
 use vinx_crypto::{Address, Hash32, VrfProof, VrfSecretKey, VRF_PROOF_LEN};
+
+/// In-flight state for a compact block being reassembled (ADR 0037).
+struct CompactBlockState {
+    header: BlockHeader,
+    tx_hashes: Vec<Hash32>,
+    /// Transactions resolved so far, keyed by hash for O(1) lookup.
+    resolved: HashMap<Hash32, Transaction>,
+}
 use vinx_state::WorldState;
 
 #[allow(clippy::large_enum_variant)]
@@ -67,6 +75,14 @@ impl P2pHandle {
             },
         ));
     }
+    /// Gossips a compact block (header + tx hashes) for efficient block propagation
+    /// (ADR 0037). Peers reconstruct the block from their mempool and request any
+    /// missing transactions via `TxRequest`.
+    pub fn broadcast_compact_block(&self, block: &Block) {
+        let msg = P2pMessage::compact_from_block(block);
+        let _ = self.cmd_tx.send(P2pCommand::Broadcast(msg));
+    }
+
     pub fn broadcast_vrf_proof(
         &self,
         height: u64,
@@ -100,6 +116,7 @@ const TOPICS: &[&str] = &[
     "vinx/bls/1",
     "vinx/sync/1",
     "vinx/vrf/1",
+    "vinx/compact/1",
 ];
 
 pub async fn start(
@@ -279,6 +296,9 @@ async fn run_event_loop(
     // ADR 0029 Phase 2b: pending VRF proofs for committee selection.
     // Maps height → Vec<(validator_addr, proof_bytes)>. Pruned below finality.
     let mut pending_vrf: HashMap<u64, Vec<(Address, [u8; VRF_PROOF_LEN])>> = HashMap::new();
+    // ADR 0037: in-flight compact block reassembly. Pruned once the block is
+    // applied or once a full `NewBlock` for the same height arrives.
+    let mut pending_compact: HashMap<u64, CompactBlockState> = HashMap::new();
 
     loop {
         tokio::select! {
@@ -298,7 +318,7 @@ async fn run_event_loop(
             }
             event = swarm.next() => {
                 if let Some(event) = event {
-                    handle_swarm_event(event, &chain, &mempool, &state, &validator_set, &local_kp, &local_addr, &mut swarm, &mut guard, &metrics, &fork_choice, &bls_sk, &vrf_sk, &mut pending_bls, &mut cosig_index, &mut competing_headers, &mut pending_vrf).await;
+                    handle_swarm_event(event, &chain, &mempool, &state, &validator_set, &local_kp, &local_addr, &mut swarm, &mut guard, &metrics, &fork_choice, &bls_sk, &vrf_sk, &mut pending_bls, &mut cosig_index, &mut competing_headers, &mut pending_vrf, &mut pending_compact).await;
                 }
             }
         }
@@ -324,6 +344,7 @@ async fn handle_swarm_event(
     cosig_index: &mut HashMap<(u64, Address), (Hash32, [u8; 96])>,
     competing_headers: &mut HashMap<(u64, Hash32), BlockHeader>,
     pending_vrf: &mut HashMap<u64, Vec<(Address, [u8; VRF_PROOF_LEN])>>,
+    pending_compact: &mut HashMap<u64, CompactBlockState>,
 ) {
     match event {
         SwarmEvent::NewListenAddr { address, .. } => {
@@ -403,6 +424,7 @@ async fn handle_swarm_event(
                 cosig_index,
                 competing_headers,
                 pending_vrf,
+                pending_compact,
             )
             .await;
         }
@@ -529,6 +551,7 @@ async fn dispatch_message(
     cosig_index: &mut HashMap<(u64, Address), (Hash32, [u8; 96])>,
     competing_headers: &mut HashMap<(u64, Hash32), BlockHeader>,
     pending_vrf: &mut HashMap<u64, Vec<(Address, [u8; VRF_PROOF_LEN])>>,
+    pending_compact: &mut HashMap<u64, CompactBlockState>,
 ) {
     match msg {
         P2pMessage::NewTransaction(tx) => {
@@ -758,6 +781,12 @@ async fn dispatch_message(
                 c.note_quorum(height, pre_quorum); // ADR 0002/0027 — quorum historique
                 c.push(block.clone());
             }
+            // ADR 0037: drop any pending compact block reassembly for this height since
+            // the block has now been applied — also prune heights below finality.
+            pending_compact.remove(&height);
+            let fin = chain.read().await.finalized_height();
+            pending_compact.retain(|h, _| *h > fin);
+
             info!(height, "P2P: block validated and applied");
             metrics.p2p_blocks_recv.fetch_add(1, Ordering::Relaxed);
 
@@ -1075,6 +1104,174 @@ async fn dispatch_message(
                     committee_size = committee.len(),
                     "VRF committee derived for height"
                 );
+            }
+        }
+
+        // ADR 0037 — Compact block propagation.
+
+        P2pMessage::CompactBlock { header, tx_hashes } => {
+            let height = header.height;
+
+            // Discard if we're already at or past this height.
+            if chain.read().await.tip_height() >= height {
+                debug!(height, "CompactBlock: already at height, ignoring");
+                return;
+            }
+            // Discard if too far ahead (would be served via sync anyway).
+            if height > chain.read().await.tip_height() + 1 {
+                debug!(height, "CompactBlock: too far ahead, waiting for sync");
+                return;
+            }
+
+            // Look up which transactions we already have in the mempool.
+            let (resolved_txs, missing_hashes): (Vec<Transaction>, Vec<[u8; 32]>) = {
+                let mp = mempool.read().await;
+                let mut resolved = Vec::new();
+                let mut missing = Vec::new();
+                for &h in &tx_hashes {
+                    let found = mp.pending_txs().into_iter().find(|tx| tx.hash() == h).cloned();
+                    match found {
+                        Some(tx) => resolved.push(tx),
+                        None => missing.push(h),
+                    }
+                }
+                (resolved, missing)
+            };
+
+            // Build an in-flight state for this height.
+            let mut state_entry = CompactBlockState {
+                header: header.clone(),
+                tx_hashes: tx_hashes.clone(),
+                resolved: HashMap::new(),
+            };
+            for tx in resolved_txs {
+                state_entry.resolved.insert(tx.hash(), tx);
+            }
+
+            if missing_hashes.is_empty() {
+                // All transactions are known — reconstruct and apply the full block.
+                let mut ordered_txs = Vec::with_capacity(tx_hashes.len());
+                for h in &tx_hashes {
+                    if let Some(tx) = state_entry.resolved.get(h) {
+                        ordered_txs.push(tx.clone());
+                    }
+                }
+                let block = Block {
+                    header,
+                    transactions: ordered_txs,
+                    bls_aggregate: None,
+                    bls_cosigner_pks: vec![],
+                    bls_bitmap: vec![],
+                };
+                info!(height, "CompactBlock: all txs known, applying immediately");
+                // Re-dispatch as a full NewBlock through the existing path.
+                Box::pin(dispatch_message(
+                    P2pMessage::NewBlock(block),
+                    chain,
+                    mempool,
+                    state,
+                    validator_set,
+                    _local_kp,
+                    local_addr,
+                    swarm,
+                    metrics,
+                    fork_choice,
+                    bls_sk,
+                    vrf_sk,
+                    pending_bls,
+                    cosig_index,
+                    competing_headers,
+                    pending_vrf,
+                    pending_compact,
+                ))
+                .await;
+            } else {
+                // Request missing transactions.
+                let n_missing = missing_hashes.len();
+                let capped: Vec<[u8; 32]> = missing_hashes
+                    .into_iter()
+                    .take(messages::P2pMessage::MAX_TX_REQUEST_HASHES)
+                    .collect();
+                let req = P2pMessage::TxRequest {
+                    height,
+                    hashes: capped,
+                };
+                let topic = IdentTopic::new(req.topic());
+                let _ = swarm.behaviour_mut().gossipsub.publish(topic, req.encode());
+                debug!(height, missing = n_missing, "CompactBlock: requesting missing txs");
+                pending_compact.insert(height, state_entry);
+            }
+        }
+
+        P2pMessage::TxRequest { height, hashes } => {
+            // Serve up to MAX_TX_REQUEST_HASHES transactions from our mempool.
+            let capped: Vec<[u8; 32]> = hashes
+                .into_iter()
+                .take(messages::P2pMessage::MAX_TX_REQUEST_HASHES)
+                .collect();
+            let txs = mempool.read().await.get_by_hashes(&capped);
+            if !txs.is_empty() {
+                let resp = P2pMessage::TxResponse { height, txs };
+                let topic = IdentTopic::new(resp.topic());
+                let _ = swarm.behaviour_mut().gossipsub.publish(topic, resp.encode());
+                debug!(height, "TxRequest: served response");
+            }
+        }
+
+        P2pMessage::TxResponse { height, txs } => {
+            let Some(entry) = pending_compact.get_mut(&height) else {
+                debug!(height, "TxResponse: no pending compact block, ignoring");
+                return;
+            };
+            // Integrate received transactions.
+            for tx in txs.into_iter().take(messages::P2pMessage::MAX_TX_RESPONSE_TXS) {
+                let h = tx.hash();
+                if entry.tx_hashes.contains(&h) {
+                    entry.resolved.insert(h, tx);
+                }
+            }
+            // Check if reassembly is complete.
+            if entry.tx_hashes.iter().all(|h| entry.resolved.contains_key(h)) {
+                let header = entry.header.clone();
+                let tx_hashes = entry.tx_hashes.clone();
+                let mut ordered_txs = Vec::with_capacity(tx_hashes.len());
+                for h in &tx_hashes {
+                    if let Some(tx) = entry.resolved.get(h) {
+                        ordered_txs.push(tx.clone());
+                    }
+                }
+                pending_compact.remove(&height);
+                let block = Block {
+                    header,
+                    transactions: ordered_txs,
+                    bls_aggregate: None,
+                    bls_cosigner_pks: vec![],
+                    bls_bitmap: vec![],
+                };
+                info!(height, "CompactBlock: reassembly complete, applying");
+                Box::pin(dispatch_message(
+                    P2pMessage::NewBlock(block),
+                    chain,
+                    mempool,
+                    state,
+                    validator_set,
+                    _local_kp,
+                    local_addr,
+                    swarm,
+                    metrics,
+                    fork_choice,
+                    bls_sk,
+                    vrf_sk,
+                    pending_bls,
+                    cosig_index,
+                    competing_headers,
+                    pending_vrf,
+                    pending_compact,
+                ))
+                .await;
+            } else {
+                let remaining = entry.tx_hashes.iter().filter(|h| !entry.resolved.contains_key(*h)).count();
+                debug!(height, remaining, "TxResponse: partially resolved");
             }
         }
 

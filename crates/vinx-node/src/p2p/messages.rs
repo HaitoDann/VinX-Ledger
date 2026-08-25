@@ -1,6 +1,6 @@
 use borsh::{BorshDeserialize, BorshSerialize};
 use serde::{Deserialize, Serialize};
-use vinx_core::{Block, Transaction};
+use vinx_core::{Block, BlockHeader, Transaction};
 use vinx_crypto::VRF_PROOF_LEN;
 use zstd;
 
@@ -82,6 +82,36 @@ pub enum P2pMessage {
         /// look up the registered VRF public key from the validator pool.
         validator_addr: Vec<u8>,
     },
+
+    // ── ADR 0037: Compact block propagation ───────────────────────────────────
+
+    /// Compact block: header plus the SHA-256 hash of each transaction (ADR 0037).
+    ///
+    /// Sent by the block producer instead of (or in addition to) the full
+    /// `NewBlock` message. Receivers reconstruct the full block from their
+    /// mempool using the hashes, and request any missing transactions via
+    /// `TxRequest`.
+    CompactBlock {
+        header: BlockHeader,
+        /// SHA-256 hashes of the block's transactions, in order.
+        tx_hashes: Vec<[u8; 32]>,
+    },
+
+    /// Request a set of transactions by hash from a peer that announced them
+    /// in a `CompactBlock` (ADR 0037).
+    TxRequest {
+        /// Block height the transactions belong to — used for routing and
+        /// to detect stale requests.
+        height: u64,
+        /// SHA-256 hashes of the transactions the requester is missing.
+        hashes: Vec<[u8; 32]>,
+    },
+
+    /// Response to a `TxRequest` (ADR 0037).
+    TxResponse {
+        height: u64,
+        txs: Vec<Transaction>,
+    },
 }
 
 impl P2pMessage {
@@ -127,11 +157,32 @@ impl P2pMessage {
             P2pMessage::BlockBlsCoSignature { .. } => "vinx/bls/1",
             P2pMessage::SyncRequest { .. } | P2pMessage::SyncResponse { .. } => "vinx/sync/1",
             P2pMessage::BlockVrfProof { .. } => "vinx/vrf/1",
+            P2pMessage::CompactBlock { .. }
+            | P2pMessage::TxRequest { .. }
+            | P2pMessage::TxResponse { .. } => "vinx/compact/1",
         }
     }
 
     /// Expected byte-length of a well-formed VRF proof carried in `BlockVrfProof`.
     pub const VRF_PROOF_WIRE_LEN: usize = VRF_PROOF_LEN;
+
+    // ── ADR 0037 helpers ──────────────────────────────────────────────────────
+
+    /// Maximum number of transaction hashes in a single `TxRequest` to bound
+    /// per-message work on the responder.
+    pub const MAX_TX_REQUEST_HASHES: usize = 512;
+
+    /// Maximum transactions in a single `TxResponse`.
+    pub const MAX_TX_RESPONSE_TXS: usize = 512;
+
+    /// Build a `CompactBlock` message from a full `Block`.
+    pub fn compact_from_block(block: &Block) -> P2pMessage {
+        let tx_hashes = block.transactions.iter().map(|tx| tx.hash()).collect();
+        P2pMessage::CompactBlock {
+            header: block.header.clone(),
+            tx_hashes,
+        }
+    }
 }
 
 /// Decompresses a zstd frame, refusing to produce more than `max` bytes (ADR 0022).
@@ -279,6 +330,76 @@ mod tests {
             }
             _ => panic!("expected BlockBlsCoSignature"),
         }
+    }
+
+    #[test]
+    fn test_compact_block_roundtrip() {
+        let block = dummy_block();
+        let msg = P2pMessage::compact_from_block(&block);
+        let encoded = msg.encode();
+        let decoded = P2pMessage::decode(&encoded).unwrap();
+        match decoded {
+            P2pMessage::CompactBlock { header, tx_hashes } => {
+                assert_eq!(header.height, block.header.height);
+                assert_eq!(tx_hashes.len(), block.transactions.len());
+            }
+            _ => panic!("expected CompactBlock"),
+        }
+    }
+
+    #[test]
+    fn test_tx_request_roundtrip() {
+        let hashes = vec![[0x01u8; 32], [0x02u8; 32]];
+        let msg = P2pMessage::TxRequest {
+            height: 10,
+            hashes: hashes.clone(),
+        };
+        let decoded = P2pMessage::decode(&msg.encode()).unwrap();
+        match decoded {
+            P2pMessage::TxRequest { height, hashes: h } => {
+                assert_eq!(height, 10);
+                assert_eq!(h, hashes);
+            }
+            _ => panic!("expected TxRequest"),
+        }
+    }
+
+    #[test]
+    fn test_tx_response_roundtrip() {
+        let msg = P2pMessage::TxResponse {
+            height: 5,
+            txs: vec![],
+        };
+        let decoded = P2pMessage::decode(&msg.encode()).unwrap();
+        assert!(matches!(decoded, P2pMessage::TxResponse { height: 5, .. }));
+    }
+
+    #[test]
+    fn test_compact_block_topic() {
+        assert_eq!(
+            P2pMessage::CompactBlock {
+                header: dummy_block().header,
+                tx_hashes: vec![],
+            }
+            .topic(),
+            "vinx/compact/1"
+        );
+        assert_eq!(
+            P2pMessage::TxRequest {
+                height: 1,
+                hashes: vec![],
+            }
+            .topic(),
+            "vinx/compact/1"
+        );
+        assert_eq!(
+            P2pMessage::TxResponse {
+                height: 1,
+                txs: vec![],
+            }
+            .topic(),
+            "vinx/compact/1"
+        );
     }
 
     #[test]

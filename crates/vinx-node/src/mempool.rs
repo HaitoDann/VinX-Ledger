@@ -339,6 +339,22 @@ impl Mempool {
         self.queues.values().flat_map(|q| q.values()).collect()
     }
 
+    /// Looks up a set of transaction hashes and returns clones of matching transactions
+    /// from the pending pool.  Used by the compact-block responder (ADR 0037).
+    pub fn get_by_hashes(&self, hashes: &[[u8; 32]]) -> Vec<Transaction> {
+        let mut out = Vec::with_capacity(hashes.len());
+        for tx in self.queues.values().flat_map(|q| q.values()) {
+            let h = tx.hash();
+            if hashes.contains(&h) {
+                out.push(tx.clone());
+                if out.len() == hashes.len() {
+                    break;
+                }
+            }
+        }
+        out
+    }
+
     /// Returns the next nonce to use for `addr`, accounting for pending transactions.
     /// Returns `None` if there are no pending transactions (caller should use confirmed nonce).
     pub fn next_nonce_for(&self, addr: &Address) -> Option<u64> {
