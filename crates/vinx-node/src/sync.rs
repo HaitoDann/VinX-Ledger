@@ -8,6 +8,7 @@ use vinx_state::WorldState;
 
 use crate::chain::Chain;
 use crate::consensus::validate_block;
+use crate::rpc::types::ChainSnapshotResponse;
 
 #[derive(Deserialize)]
 struct SyncResponse {
@@ -204,4 +205,142 @@ pub async fn sync_from_peer(
     }
 
     applied
+}
+
+/// Minimum block gap before snapshot sync is preferred over block-by-block replay.
+const SNAPSHOT_SYNC_THRESHOLD: u64 = 500;
+
+/// Bootstrap a new node from a peer's state snapshot (ADR snapshot-sync).
+///
+/// Fetches the peer's current tip height first. If the local tip is more than
+/// `SNAPSHOT_SYNC_THRESHOLD` blocks behind, downloads the full WorldState snapshot
+/// from `GET /chain/snapshot`, verifies the `state_root`, and replaces the local
+/// state and chain with the snapshot. The caller should then call `sync_from_peer`
+/// for the remaining delta between the snapshot height and the current peer tip.
+///
+/// Returns `true` if a snapshot was applied, `false` if the gap is small enough
+/// that block-by-block replay is preferred (or if any step fails).
+pub async fn snapshot_sync_from_peer(
+    peer_rpc_url: &str,
+    state: &mut WorldState,
+    chain: &mut Chain,
+) -> bool {
+    let client = reqwest::Client::builder()
+        .timeout(std::time::Duration::from_secs(120))
+        .build()
+        .unwrap_or_default();
+
+    // 1. Check the peer's current tip height.
+    let height_url = format!("{}/chain/height", peer_rpc_url.trim_end_matches('/'));
+    let peer_height: u64 = match client.get(&height_url).send().await {
+        Ok(r) if r.status().is_success() => match r.json::<serde_json::Value>().await {
+            Ok(v) => match v.get("height").and_then(|h| h.as_u64()) {
+                Some(h) => h,
+                None => {
+                    tracing::warn!("Snapshot sync: could not read peer height");
+                    return false;
+                }
+            },
+            Err(e) => {
+                tracing::warn!(error = %e, "Snapshot sync: failed to parse height response");
+                return false;
+            }
+        },
+        Ok(r) => {
+            tracing::warn!(status = %r.status(), "Snapshot sync: height endpoint returned error");
+            return false;
+        }
+        Err(e) => {
+            tracing::warn!(error = %e, "Snapshot sync: height request failed");
+            return false;
+        }
+    };
+
+    let local_tip = chain.tip_height();
+    if peer_height <= local_tip + SNAPSHOT_SYNC_THRESHOLD {
+        tracing::info!(
+            local_tip,
+            peer_height,
+            "Snapshot sync: gap is small, using block-by-block replay"
+        );
+        return false;
+    }
+
+    tracing::info!(
+        local_tip,
+        peer_height,
+        gap = peer_height - local_tip,
+        "Snapshot sync: downloading state snapshot from peer"
+    );
+
+    // 2. Fetch the snapshot.
+    let snap_url = format!("{}/chain/snapshot", peer_rpc_url.trim_end_matches('/'));
+    let snap: ChainSnapshotResponse = match client.get(&snap_url).send().await {
+        Ok(r) if r.status().is_success() => match r.json().await {
+            Ok(s) => s,
+            Err(e) => {
+                tracing::warn!(error = %e, "Snapshot sync: failed to parse snapshot response");
+                return false;
+            }
+        },
+        Ok(r) => {
+            tracing::warn!(status = %r.status(), "Snapshot sync: snapshot endpoint returned error");
+            return false;
+        }
+        Err(e) => {
+            tracing::warn!(error = %e, "Snapshot sync: snapshot request failed");
+            return false;
+        }
+    };
+
+    // 3. Decode: hex → decompress with zstd → deserialize bincode → WorldState.
+    let compressed = match hex::decode(&snap.state_hex) {
+        Ok(b) => b,
+        Err(e) => {
+            tracing::error!(error = %e, "Snapshot sync: hex decode failed");
+            return false;
+        }
+    };
+    let raw = match zstd::decode_all(compressed.as_slice()) {
+        Ok(b) => b,
+        Err(e) => {
+            tracing::error!(error = %e, "Snapshot sync: zstd decompress failed");
+            return false;
+        }
+    };
+    let mut new_state: WorldState = match bincode::deserialize(&raw) {
+        Ok(s) => s,
+        Err(e) => {
+            tracing::error!(error = %e, "Snapshot sync: bincode deserialize failed");
+            return false;
+        }
+    };
+
+    // 4. Verify the state root before trusting anything.
+    let computed_root = new_state.compute_state_root();
+    let expected_root = match hex::decode(&snap.state_root) {
+        Ok(b) => b,
+        Err(e) => {
+            tracing::error!(error = %e, "Snapshot sync: state_root hex decode failed");
+            return false;
+        }
+    };
+    if computed_root.as_ref() != expected_root.as_slice() {
+        tracing::error!(
+            height = snap.height,
+            "Snapshot sync: state_root mismatch — rejecting snapshot"
+        );
+        return false;
+    }
+
+    // 5. Initialize the chain from the snapshot block and replace state.
+    let new_chain = Chain::new_from_snapshot(snap.block);
+    *state = new_state;
+    *chain = new_chain;
+
+    tracing::info!(
+        height = snap.height,
+        "Snapshot sync: applied — continuing with block-by-block sync for delta"
+    );
+    true
 }

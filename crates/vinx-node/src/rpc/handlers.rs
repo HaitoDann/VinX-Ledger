@@ -490,6 +490,50 @@ pub async fn get_snapshot(
     }
 }
 
+/// Public bootstrap snapshot — GET /chain/snapshot (ADR snapshot-sync).
+/// No auth required: any new node can call this to bootstrap from a trusted peer.
+/// Returns the full WorldState (bincode+zstd+hex) and the tip block so the caller
+/// can initialize `Chain::new_from_snapshot` without replaying history from genesis.
+pub async fn get_chain_snapshot(State(node): State<Arc<Node>>) -> impl IntoResponse {
+    let mut state_guard = node.state.write().await;
+    let chain_guard = node.chain.read().await;
+    let height = chain_guard.tip_height();
+    let Some((_, block)) = chain_guard.block_row(height) else {
+        return (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(ErrorResponse { error: "tip block not found".into() }),
+        )
+            .into_response();
+    };
+    let block = block.clone();
+    let state_root = hex::encode(state_guard.compute_state_root());
+    // Encode: bincode → zstd → hex
+    let Ok(raw) = bincode::serialize(&*state_guard) else {
+        return (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(ErrorResponse { error: "state serialization failed".into() }),
+        )
+            .into_response();
+    };
+    let compressed = match zstd::encode_all(raw.as_slice(), 3) {
+        Ok(c) => c,
+        Err(e) => {
+            return (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(ErrorResponse { error: format!("zstd: {e}") }),
+            )
+                .into_response();
+        }
+    };
+    let snap = ChainSnapshotResponse {
+        height,
+        state_root,
+        block,
+        state_hex: hex::encode(&compressed),
+    };
+    (StatusCode::OK, Json(snap)).into_response()
+}
+
 /// Returns node metrics in Prometheus text format.
 /// Activity counters (blocks, tx, P2P, rate-limit) are read from lock-free
 /// atomics on NodeMetrics — no lock acquired for those fields.

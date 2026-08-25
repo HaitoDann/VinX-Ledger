@@ -281,6 +281,20 @@ pub struct SnapshotResponse {
     pub state: serde_json::Value,
 }
 
+/// Public chain-snapshot response — used for bootstrap sync (ADR snapshot-sync).
+/// Returned by GET /chain/snapshot; no auth required.
+#[derive(Serialize, Deserialize)]
+pub struct ChainSnapshotResponse {
+    /// Chain tip height at snapshot time.
+    pub height: u64,
+    /// Hex-encoded state root at this height.
+    pub state_root: String,
+    /// The block at `height` (needed to call `Chain::new_from_snapshot`).
+    pub block: vinx_core::Block,
+    /// WorldState serialized as bincode, compressed with zstd, hex-encoded.
+    pub state_hex: String,
+}
+
 /// Economic network stats — exposed via GET /network/stats
 #[derive(Serialize)]
 pub struct NetworkStatsResponse {

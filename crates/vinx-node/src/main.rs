@@ -324,6 +324,9 @@ async fn main() {
     // Startup chain sync from trusted peer (if configured)
     if let Some(ref peer_url) = sync_peer_rpc {
         tracing::info!(peer = %peer_url, "Starting chain sync from peer");
+        // Try snapshot bootstrap first — if the gap is large this is orders of
+        // magnitude faster than replaying every block from genesis.
+        vinx_node::sync::snapshot_sync_from_peer(peer_url, &mut state, &mut chain).await;
         let applied = vinx_node::sync::sync_from_peer(peer_url, &mut state, &mut chain).await;
         if applied > 0 {
             tracing::info!(applied, tip = chain.tip_height(), "Chain sync complete");

@@ -12,6 +12,11 @@ pub struct Chain {
     /// Everything at or below is **final** — never reorganized. Genesis (0) is final.
     #[serde(default)]
     finalized_height: u64,
+    /// Height of the first stored block. Zero for chains starting from genesis;
+    /// non-zero for chains bootstrapped from a state snapshot (ADR snapshot-sync):
+    /// `tip_height() = height_base + blocks.len() - 1`. Backward-compat: defaults to 0.
+    #[serde(default)]
+    pub height_base: u64,
     /// Maps raw tx hash -> (block_height, tx_position). Not persisted via serde
     /// (rebuilt or imported by Storage). Keyed by the 32-byte hash directly —
     /// no hex allocation per insert/lookup — hashed with ahash on the hot path.
@@ -71,6 +76,7 @@ impl Chain {
         let hash = genesis.hash();
         let chain = Self {
             blocks: vec![(hash, genesis.clone())],
+            height_base: 0,
             finalized_height: 0,
             tx_index: AHashMap::new(),
             account_tx_index: AHashMap::new(),
@@ -83,16 +89,36 @@ impl Chain {
     }
 
     /// Rebuilds a chain from persisted parts: the per-height block rows (dense,
-    /// starting at genesis) and the finalized-height watermark. Tx indexes are
+    /// starting at `height_base`) and the finalized-height watermark. Tx indexes are
     /// restored or rebuilt separately by the caller.
     pub fn from_parts(blocks: Vec<(Hash32, Block)>, finalized_height: u64) -> Self {
         Self {
             blocks,
+            height_base: 0,
             finalized_height,
             tx_index: AHashMap::new(),
             account_tx_index: AHashMap::new(),
             slash_evidence: AHashMap::new(),
             dirty_heights: AHashSet::new(),
+            quorum_schedule: Vec::new(),
+            candidates: AHashMap::new(),
+        }
+    }
+
+    /// Bootstraps a chain from a state snapshot (snapshot-sync). The provided block
+    /// is the only stored block; its height becomes `height_base` and `tip_height()`.
+    /// Subsequent `push()` calls continue from there. The snapshot block is pre-finalized.
+    pub fn new_from_snapshot(block: Block) -> Self {
+        let height = block.header.height;
+        let hash = block.hash();
+        Self {
+            blocks: vec![(hash, block)],
+            height_base: height,
+            finalized_height: height,
+            tx_index: AHashMap::new(),
+            account_tx_index: AHashMap::new(),
+            slash_evidence: AHashMap::new(),
+            dirty_heights: AHashSet::from_iter([height]),
             quorum_schedule: Vec::new(),
             candidates: AHashMap::new(),
         }
@@ -106,12 +132,14 @@ impl Chain {
     /// Marks every stored block dirty — used by full saves (genesis bootstrap,
     /// snapshot import) so the whole blocks table is rewritten.
     pub fn mark_all_dirty(&mut self) {
-        self.dirty_heights = (0..self.blocks.len() as u64).collect();
+        self.dirty_heights = (self.height_base..self.height_base + self.blocks.len() as u64)
+            .collect();
     }
 
     /// Borrow of the stored `(hash, block)` row at `height`, for persistence.
     pub fn block_row(&self, height: u64) -> Option<&(Hash32, Block)> {
-        self.blocks.get(height as usize)
+        let idx = height.checked_sub(self.height_base)? as usize;
+        self.blocks.get(idx)
     }
 
     /// Highest final (quorum-signed) height. Everything at or below is irreversible.
@@ -271,7 +299,7 @@ impl Chain {
 
     /// Height of the latest block (0 = only genesis exists).
     pub fn tip_height(&self) -> u64 {
-        (self.blocks.len() as u64).saturating_sub(1)
+        self.height_base + (self.blocks.len() as u64).saturating_sub(1)
     }
 
     pub fn tip_hash(&self) -> Hash32 {
@@ -376,7 +404,8 @@ impl Chain {
     }
 
     pub fn get_block(&self, height: u64) -> Option<&Block> {
-        self.blocks.get(height as usize).map(|(_, b)| b)
+        let idx = height.checked_sub(self.height_base)? as usize;
+        self.blocks.get(idx).map(|(_, b)| b)
     }
 
     /// Appends a block and returns its hash.
@@ -475,7 +504,8 @@ impl Chain {
     /// Looks up a transaction by its raw 32-byte hash.
     pub fn get_tx_by_hash(&self, hash: &Hash32) -> Option<(u64, &Block, &Transaction)> {
         let &(height, tx_pos) = self.tx_index.get(hash)?;
-        let (_, block) = self.blocks.get(height as usize)?;
+        let idx = height.checked_sub(self.height_base)? as usize;
+        let (_, block) = self.blocks.get(idx)?;
         let tx = block.transactions.get(tx_pos as usize)?;
         Some((height, block, tx))
     }
@@ -500,7 +530,8 @@ impl Chain {
         bls_cosigner_pks: Vec<Vec<u8>>,
         bls_bitmap: Vec<u8>,
     ) {
-        if let Some((_, block)) = self.blocks.get_mut(height as usize) {
+        let Some(idx) = height.checked_sub(self.height_base) else { return };
+        if let Some((_, block)) = self.blocks.get_mut(idx as usize) {
             block.bls_aggregate = Some(bls_aggregate);
             block.bls_cosigner_pks = bls_cosigner_pks;
             block.bls_bitmap = bls_bitmap;
@@ -536,14 +567,14 @@ impl Chain {
         let mut pruned_blocks = 0usize;
         let mut tx_pruned = 0usize;
 
-        for (height, (_, block)) in self.blocks.iter_mut().enumerate() {
+        for (i, (_, block)) in self.blocks.iter_mut().enumerate() {
             if block.header.timestamp >= cutoff {
                 break; // blocks are monotonically ordered by time
             }
             if !block.transactions.is_empty() {
                 tx_pruned += block.transactions.len();
                 block.transactions.clear();
-                self.dirty_heights.insert(height as u64);
+                self.dirty_heights.insert(self.height_base + i as u64);
                 pruned_blocks += 1;
             }
         }
@@ -567,21 +598,22 @@ impl Chain {
         if tip < keep_last {
             return;
         }
-        let compact_up_to = (tip - keep_last) as usize;
-        for i in 0..compact_up_to {
+        let compact_up_to_idx =
+            (tip - keep_last).saturating_sub(self.height_base) as usize;
+        for i in 0..compact_up_to_idx {
             if let Some((_, block)) = self.blocks.get_mut(i) {
                 // Only touch (and re-persist) blocks that still had data — repeated
                 // compaction passes must not mark the whole history dirty again.
                 if !block.transactions.is_empty() {
                     block.transactions.clear();
-                    self.dirty_heights.insert(i as u64);
+                    self.dirty_heights.insert(self.height_base + i as u64);
                 }
             }
         }
         // Rebuild index to remove entries from pruned blocks
         self.rebuild_tx_index();
         tracing::info!(
-            compacted = compact_up_to,
+            compacted = compact_up_to_idx,
             "Chain compacted old transaction data"
         );
     }
@@ -600,16 +632,17 @@ impl Chain {
         if tip < keep_last {
             return;
         }
-        let prune_up_to = (tip - keep_last) as usize;
+        let prune_up_to_idx =
+            (tip - keep_last).saturating_sub(self.height_base) as usize;
 
         let mut tx_pruned = 0usize;
 
-        for i in 0..prune_up_to {
+        for i in 0..prune_up_to_idx {
             if let Some((_, block)) = self.blocks.get_mut(i) {
                 if !block.transactions.is_empty() {
                     tx_pruned += block.transactions.len();
                     block.transactions.clear();
-                    self.dirty_heights.insert(i as u64);
+                    self.dirty_heights.insert(self.height_base + i as u64);
                 }
             }
         }
@@ -626,7 +659,7 @@ impl Chain {
 
         tracing::info!(
             tip,
-            pruned_below = prune_up_to,
+            pruned_below = prune_up_to_idx,
             tx_pruned,
             "Chain pruned — headers retained, old tx data dropped"
         );
