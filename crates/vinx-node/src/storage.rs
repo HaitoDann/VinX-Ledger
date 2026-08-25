@@ -50,7 +50,9 @@ use zstd;
 ///      MIN_VALIDATOR_BOND_ATOMS) appended to WorldState meta.
 /// v17: ADR 0029 Phase 2 epoch beacon — `epoch_beacon` (Hash32 = [0u8; 32]) appended
 ///      to WorldState meta.
-const STORAGE_VERSION: u64 = 17;
+/// v18: ADR 0036 validator churn bounds — `exit_queue` (Vec<ValidatorExitRequest> = [])
+///      appended to WorldState meta. Migration appends 8 zero bytes (bincode empty Vec).
+const STORAGE_VERSION: u64 = 18;
 
 /// zstd compression level — level 3 is the sweet spot: ~60-70% size reduction,
 /// negligible latency compared to disk I/O.
@@ -207,6 +209,8 @@ impl Storage {
                 15 => Self::append_meta_suffix(tx, &vinx_state::v16_meta_suffix())?,
                 // v16 → v17 (ADR 0029 Phase 2 epoch beacon): append epoch_beacon ([0u8;32]).
                 16 => Self::append_meta_suffix(tx, &vinx_state::v17_meta_suffix())?,
+                // v17 → v18 (ADR 0036 churn bounds): append exit_queue (empty Vec = 8 zero bytes).
+                17 => Self::append_meta_suffix(tx, &vinx_state::v18_meta_suffix())?,
                 unknown => {
                     return Err(Self::io_err(format!(
                         "no automatic migration from schema v{unknown} to v{STORAGE_VERSION}. \

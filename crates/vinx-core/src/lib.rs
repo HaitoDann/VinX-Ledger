@@ -21,5 +21,5 @@ pub use module::ModuleOp;
 pub use protocol::{ProtocolVersion, ScheduledUpgrade};
 pub use reliability::ValidatorReliability;
 pub use transaction::{RegisterBlsKeyPayload, Transaction, TransactionType};
-pub use validator_pool::{PoolStatus, ValidatorPoolEntry};
+pub use validator_pool::{PoolStatus, ValidatorExitRequest, ValidatorPoolEntry};
 pub use validator_set::ValidatorSet;

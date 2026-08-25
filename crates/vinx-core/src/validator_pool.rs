@@ -1,10 +1,27 @@
-/// Open PoA validator pool types (ADR 0038).
+/// Open PoA validator pool types (ADR 0038 + ADR 0036).
 ///
 /// Every bonded address lives in the pool. The *active set* is the top-N pool
 /// entries by co-signature score, rotated at each epoch close (ADR 0028).
 use serde::{Deserialize, Serialize};
+use vinx_crypto::Address;
 
 use crate::amount::VALIDATOR_WARMUP_EPOCHS;
+
+/// An exit request queued when a validator's bond drops below the floor (ADR 0036).
+///
+/// Requests are processed FIFO — sorted by `(request_height, address)` — at each
+/// epoch close, up to `MAX_VALIDATOR_EXITS_PER_EPOCH` per epoch.  The validator's
+/// bond remains slashable while the request sits in the queue.
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct ValidatorExitRequest {
+    /// Address of the exiting validator.
+    pub address: Address,
+    /// Block height at which the exit was requested — primary FIFO sort key.
+    pub request_height: u64,
+    /// Unbonding unlock timestamp (`current_block_ts + UNBONDING_SECS`) computed at
+    /// request time; used when the entry is promoted to `Unbonding`.
+    pub unlock_ts: u64,
+}
 
 /// Status of a validator in the pool.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -45,6 +62,10 @@ pub struct ValidatorPoolEntry {
     /// Proof-of-Possession BLS signature (G2 compressed, 96 bytes). None before ADR 0046.
     #[serde(default)]
     pub bls_pop: Option<Vec<u8>>,
+    /// ECVRF public key (compressed Edwards25519, 32 bytes). None before VRF key registration.
+    /// Used by the committee-selection VRF (ADR 0029 Phase 2b).
+    #[serde(default)]
+    pub vrf_pub_key: Option<[u8; 32]>,
 }
 
 impl ValidatorPoolEntry {
@@ -60,6 +81,7 @@ impl ValidatorPoolEntry {
             eligible_blocks_in_window: 0,
             bls_pub_key: None,
             bls_pop: None,
+            vrf_pub_key: None,
         }
     }
 
