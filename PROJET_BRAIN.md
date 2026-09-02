@@ -20,21 +20,22 @@
 > ⬆️ **Mis à jour à chaque fin de session. C'est la première chose à lire au retour.**
 
 ```
-[26/08/2026 — ~4h]
-✅ Fait :     ADR 0037 côté producteur (compact blocks + cache recent_block_txs)
-              Snapshot sync (GET /chain/snapshot + snapshot_sync_from_peer)
-              Parallel sync ADR 0038 (8 fetches concurrents, apply séquentiel)
-              Chain height_base pour chaînes bootstrappées depuis snapshot
-              Dockerfile multi-stage + docker-entrypoint.sh + docker-compose.testnet.yml
-              genesis-testnet.json + config.testnet.toml (templates)
-              Décision produit : VinX = rail de paiement uniquement (pas de VM)
+[02/09/2026 — ~2h]
+✅ Fait :     Décision produit formalisée : VinX = rail de paiement uniquement, abandon ZK (ADR 0064)
+              ADR 0064 — VinX rail de paiement (supersède modules/ZK/Appchains)
+              ADR 0065 — Allocateur mimalloc (10-20% gratuits)
+              ADR 0066 — Hash tx mémoïsé via OnceLock (élimine re-hashes)
+              ADR 0067 — Sig cache mempool→bloc (5-10x validation bloc)
+              ADR 0068 — Batch verify Ed25519 (2x vérification résiduelle)
+              ADR 0069 — BLAKE3 remplace SHA-256 (⚠️ avant genesis seulement)
+              Tuto Windows testnet (HTML interactif, publié artifact)
 
 🔜 Next :     Remplir genesis-testnet.json avec les vraies adresses (admin + validateur)
-              Lancer le nœud de genèse sur un serveur public
-              Reverse proxy HTTPS (nginx + Let's Encrypt) sur le port 8545
+              Implémenter ADR 0069 (BLAKE3) AVANT le genesis — breaking change
+              Lancer le nœud de genèse sur serveur public + HTTPS
 
-🤖 AI :       Demandé → "Fais moi les 2" (compact blocks producteur + snapshot sync)
-              Codé → ADR 0037 full, ADR 0038, Chain.height_base, Dockerfile, genesis template
+🤖 AI :       Demandé → évaluation de 17 optimisations + ADRs pour celles retenues
+              Codé → 6 ADRs dans docs/adr/ (0064-0069), mise à jour PROJET_BRAIN.md
               ⚠️ Divergence → —
 
 🚧 Bloqué :   Besoin des adresses admin + validateur réelles pour finaliser genesis-testnet.json
@@ -46,9 +47,9 @@
 
 > **3 items maximum.** Tout le reste attend dans le Backlog.
 
+- [ ] Implémenter ADR 0069 (BLAKE3) — breaking change, **impératif avant genesis**
 - [ ] Remplir `genesis-testnet.json` (admin_address, initial_validator, genesis_timestamp fixé)
 - [ ] Déployer le nœud de genèse sur serveur public + HTTPS
-- [ ] Vérifier que 3 nœuds se synchronisent depuis le même genesis hash
 
 ---
 
@@ -61,12 +62,20 @@
 - Script de vérification genesis : compare le hash du bloc 0 entre pairs et échoue si divergence
 - Wallet web/mobile minimaliste pour le testnet (balance, send, historique)
 
+### Optimisations validées — à implémenter post-genesis
+- ADR 0065 : allocateur mimalloc (4 lignes, 10-20% throughput)
+- ADR 0066 : hash tx mémoïsé (OnceLock, zéro impact protocole)
+- ADR 0067 : sig cache mempool→bloc (5-10x validation bloc)
+- ADR 0068 : batch verify Ed25519 (2x vérification résiduelle)
+
 ### Someday / Maybe *(idées capturées sans engagement)*
 - Bridge Ethereum → VinX (wrapped VinX sur Ethereum, rédemption sur VinX)
-- Modules de transaction supplémentaires (si besoin réel identifié post-testnet, pas avant)
+- Modules de transaction supplémentaires (si besoin prouvé post-testnet, pas avant)
 - Explorer blockchain public hébergé (aujourd'hui disponible via `/block/:height` + `/metrics`)
 - SDK JavaScript pour intégrations tierces
 - Programme de validateurs testnet (incentives, documentation, onboarding)
+- Exécution parallèle de txs (VinxScheduler) — post-testnet seulement, détection de conflits requise
+- Layout comptes plat (cache locality WorldState) — utile à partir de ~100k comptes
 
 ---
 
@@ -116,6 +125,67 @@ Date : 26/08/2026 | Statut : **Implémenté**
 **Choix** : Champ `height_base: u64` avec serde default 0 (compat ascendante). Toute l'arithmétique d'index soustrait `height_base`. `Chain::new_from_snapshot(block)` initialise à la hauteur du snapshot.
 **Pourquoi** : Solution minimale, zéro impact sur les chaînes existantes (height_base = 0).
 **Implémenté dans** : `chain.rs`, `storage.rs`
+
+---
+
+### ADR 0064 : VinX = rail de paiement uniquement (abandon ZK/modules)
+Date : 02/09/2026 | Statut : **Décidé** | Fichier : `docs/adr/0064-vinx-rail-paiement-uniquement.md`
+
+**Contexte** : Choisir entre L1 généraliste (VM, ZK, modules, Appchains) ou rail de paiement pur.
+**Choix** : Rail de paiement uniquement. Abandon du ZK (SP1/Groth16). ADRs 0001/0010/0024/0034/0048/0049/0050 gelés hors scope.
+**Pourquoi** : Surface d'attaque réduite, auditabilité totale, message produit clair, pas de complexité ZK sans preuve de besoin, testnet d'abord.
+**Implémenté dans** : Contrainte de périmètre — pas de code à ajouter. Docs à mettre à jour (whitepaper, README).
+
+---
+
+### ADR 0065 : Allocateur global mimalloc
+Date : 02/09/2026 | Statut : **Décidé** | Fichier : `docs/adr/0065-allocateur-mimalloc.md`
+
+**Contexte** : glibc malloc par défaut — fragmentation + contention sur workloads multi-threadés.
+**Choix** : `mimalloc` via `#[global_allocator]` — 4 lignes, portable Linux/Mac/Windows.
+**Pourquoi** : 10-20% de throughput gratuits, zéro impact protocole/wire format.
+**Implémenté dans** : `Cargo.toml`, `crates/vinx-node/src/main.rs`
+
+---
+
+### ADR 0066 : Hash de transaction mémoïsé
+Date : 02/09/2026 | Statut : **Décidé** | Fichier : `docs/adr/0066-hash-transaction-memoize.md`
+
+**Contexte** : `transaction.hash()` recalculé à chaque point de contact (mempool, compact blocks, validation, sig cache).
+**Choix** : Champ `#[serde(skip)] cached_hash: OnceLock<[u8;32]>` — calcul au premier appel, cache ensuite.
+**Pourquoi** : Élimine N recalculs par tx par bloc. Zéro impact wire format.
+**Implémenté dans** : `crates/vinx-core/src/transaction.rs`
+
+---
+
+### ADR 0067 : Cache de signatures mempool → validation de bloc
+Date : 02/09/2026 | Statut : **Décidé** | Fichier : `docs/adr/0067-cache-signatures-mempool-bloc.md`
+
+**Contexte** : La validation de bloc re-vérifie les signatures Ed25519 de txs déjà vérifiées à l'admission mempool.
+**Choix** : `sig_cache: HashSet<[u8;32]>` dans le Mempool — skip de vérification si hash présent.
+**Pourquoi** : 5-10x sur le chemin critique de validation de bloc en charge normale. Identique à Bitcoin Core.
+**Implémenté dans** : `crates/vinx-node/src/mempool.rs`, handler de validation de bloc.
+
+---
+
+### ADR 0068 : Batch verify Ed25519
+Date : 02/09/2026 | Statut : **Décidé** | Fichier : `docs/adr/0068-batch-verify-ed25519.md`
+
+**Contexte** : Vérification individuelle ne profite pas de la structure algébrique de la courbe.
+**Choix** : `ed25519_dalek::verify_batch()` sur les sigs non cachées. Fallback individuel si batch échoue.
+**Pourquoi** : ~2x sur la vérification résiduelle. Zéro nouvelle dépendance (`ed25519-dalek` déjà présent).
+**Implémenté dans** : `crates/vinx-node/src/p2p/mod.rs`
+
+---
+
+### ADR 0069 : BLAKE3 remplace SHA-256 ⚠️ avant genesis
+Date : 02/09/2026 | Statut : **Décidé — à implémenter avant genesis** | Fichier : `docs/adr/0069-blake3-remplace-sha256.md`
+
+**Contexte** : SHA-256 hérité — lent. BLAKE3 est 5-8x plus rapide sur matériel moderne (AVX2/NEON).
+**Choix** : Remplacer SHA-256 par BLAKE3 dans `block.rs`, `transaction.rs`, `merkle.rs`.
+**Pourquoi** : Gain sur hot path (hash par tx, hash d'en-tête). Changement breaking — impraticable après genesis.
+**Implémenté dans** : `crates/vinx-core/src/block.rs`, `transaction.rs`, `merkle.rs`. Bump `STORAGE_VERSION`.
+**⚠️ Contrainte** : fusionner AVANT le premier bloc du testnet. Après = hard fork.
 
 ---
 
