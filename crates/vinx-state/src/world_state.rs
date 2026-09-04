@@ -1719,6 +1719,30 @@ impl WorldState {
         self.merkle_tree.root()
     }
 
+    /// Returns the registered BLS G1 keys for every validator in `validator_set`,
+    /// in ValidatorSet order (ADR 0029 Phase 1).
+    ///
+    /// `result[i]` is the 48-byte compressed G1 key of the validator at index `i`,
+    /// or `None` when that validator has not yet registered a BLS key (ADR 0046).
+    /// Pass this slice to `Block::bls_signer_count_from_bitmap` or
+    /// `consensus::validate_block_with_registry` to enforce that co-signers are
+    /// registered on-chain and bind BLS keys to specific validator identities.
+    pub fn indexed_bls_keys(
+        &self,
+        validator_set: &vinx_core::ValidatorSet,
+    ) -> Vec<Option<[u8; 48]>> {
+        validator_set
+            .validators()
+            .iter()
+            .map(|addr| {
+                self.validator_pool
+                    .get(addr)
+                    .and_then(|e| e.bls_pub_key.as_deref())
+                    .and_then(|b| b.try_into().ok())
+            })
+            .collect()
+    }
+
     fn apply_slash_validator(&mut self, tx: &Transaction) -> Result<(), CoreError> {
         let evidence: SlashEvidence = bincode::deserialize(&tx.payload)
             .map_err(|_| CoreError::InvalidTransaction("malformed slash evidence".to_string()))?;

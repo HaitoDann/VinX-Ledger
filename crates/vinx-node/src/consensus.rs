@@ -10,6 +10,10 @@ use crate::NodeError;
 /// Any registered validator may propose a block — the round-robin schedule is
 /// advisory (normal) or pre-empted when the scheduled leader is offline (slot skip).
 /// What is always enforced: the proposer must be a current member of the validator set.
+///
+/// # BLS check
+/// Uses `Block::bls_signer_count()` (the `bls_cosigner_pks` path). For full security
+/// — verifying that co-signers are registered on-chain — use `validate_block_with_registry`.
 pub fn validate_block(block: &Block, validator_set: &ValidatorSet) -> Result<(), NodeError> {
     if block.is_genesis() {
         return Ok(());
@@ -36,19 +40,88 @@ pub fn validate_block(block: &Block, validator_set: &ValidatorSet) -> Result<(),
     Ok(())
 }
 
-/// Signs `block` with `bls_sk` (ADR 0046) and initializes or extends the BLS aggregate.
+/// Validates a block against the on-chain BLS key registry (ADR 0029 Phase 1).
 ///
-/// The new G2 signature is aggregated with any existing `bls_aggregate`, and the
-/// corresponding G1 public key is appended to `bls_cosigner_pks`. Calling this
-/// multiple times with different keys extends the aggregate correctly (BLS aggregation
-/// is associative). Returns `Err` when the key has already signed the block (double-sign
-/// guard) or when the aggregate bytes are malformed.
-pub fn sign_block_bls(block: &mut Block, bls_sk: &BlsSecretKey) -> Result<(), NodeError> {
+/// Identical to `validate_block` for the proposer check, but uses
+/// `Block::bls_signer_count_from_bitmap` for the finality check — each bit set in
+/// `bls_bitmap` must correspond to a validator with a registered BLS key in
+/// `indexed_bls_pks`. This closes the key-binding gap: arbitrary BLS keys not
+/// enrolled in the validator pool cannot reach quorum.
+///
+/// `indexed_bls_pks[i]` is the registered G1 key (48 bytes) of the validator at
+/// position `i` in the active `ValidatorSet`, or `None` when unregistered. Build
+/// this slice with `WorldState::indexed_bls_keys(validator_set)`.
+///
+/// When `bls_bitmap` is empty (pre-ADR-0029 blocks), falls back to the
+/// `bls_cosigner_pks` path exactly like `validate_block`.
+pub fn validate_block_with_registry(
+    block: &Block,
+    validator_set: &ValidatorSet,
+    indexed_bls_pks: &[Option<[u8; 48]>],
+) -> Result<(), NodeError> {
+    if block.is_genesis() {
+        return Ok(());
+    }
+
+    if !validator_set.contains(&block.header.validator) {
+        return Err(NodeError::Consensus(format!(
+            "block {} proposed by non-validator {}",
+            block.header.height, block.header.validator
+        )));
+    }
+
+    let signer_count = block
+        .bls_signer_count_from_bitmap(indexed_bls_pks)
+        .map_err(|e| {
+            NodeError::Consensus(format!(
+                "block {} BLS aggregate invalid (registry check): {e}",
+                block.header.height
+            ))
+        })?;
+
+    if signer_count < validator_set.quorum() {
+        return Err(NodeError::Consensus(format!(
+            "block {} needs {}/{} BLS signatures from registered validators, has {}",
+            block.header.height,
+            validator_set.quorum(),
+            validator_set.len(),
+            signer_count,
+        )));
+    }
+
+    Ok(())
+}
+
+/// Signs `block` with `bls_sk` at position `validator_idx` in the active ValidatorSet
+/// (ADR 0046) and initializes or extends the BLS aggregate.
+///
+/// `validator_idx` is the signer's index in the current `ValidatorSet` — used to set
+/// the corresponding bit in `bls_bitmap` and as the canonical double-sign guard. The
+/// G1 public key is also appended to `bls_cosigner_pks` for backward compatibility.
+///
+/// Calling this multiple times with different `validator_idx` values extends the
+/// aggregate correctly (BLS aggregation is associative). Returns `Err` when the
+/// validator at `validator_idx` has already signed (bitmap guard), when the same G1
+/// key appears twice, or when the aggregate bytes are malformed.
+pub fn sign_block_bls(
+    block: &mut Block,
+    bls_sk: &BlsSecretKey,
+    validator_idx: usize,
+) -> Result<(), NodeError> {
     use vinx_crypto::{bls_aggregate, BlsSignature};
+
+    // Canonical double-sign guard: bitmap prevents signing twice at the same index.
+    if block.bls_bitmap_has(validator_idx) {
+        return Err(NodeError::Consensus(
+            "validator already co-signed this block (bitmap)".into(),
+        ));
+    }
+
     let header_hash = block.hash();
     let new_sig = bls_sk.sign(&header_hash);
     let new_pk = bls_sk.public_key().0.to_vec();
 
+    // Belt-and-suspenders: also reject duplicate G1 keys from the cosigner list.
     if block.bls_cosigner_pks.iter().any(|pk| pk == &new_pk) {
         return Err(NodeError::Consensus(
             "BLS key already co-signed this block".into(),
@@ -69,6 +142,7 @@ pub fn sign_block_bls(block: &mut Block, bls_sk: &BlsSecretKey) -> Result<(), No
 
     block.bls_aggregate = Some(agg.0.to_vec());
     block.bls_cosigner_pks.push(new_pk);
+    block.set_bls_bitmap_bit(validator_idx);
     Ok(())
 }
 
@@ -177,7 +251,7 @@ mod tests {
         let vs = ValidatorSet::single(addr.clone());
 
         let mut block = make_block(1, addr);
-        sign_block_bls(&mut block, &BlsSecretKey::generate()).unwrap();
+        sign_block_bls(&mut block, &BlsSecretKey::generate(), 0).unwrap();
         assert!(validate_block(&block, &vs).is_ok());
     }
 
@@ -188,8 +262,8 @@ mod tests {
 
         let outsider = KeyPair::generate();
         let mut block = make_block(1, addr_of(&outsider));
-        sign_block_bls(&mut block, &BlsSecretKey::generate()).unwrap();
-        sign_block_bls(&mut block, &BlsSecretKey::generate()).unwrap();
+        sign_block_bls(&mut block, &BlsSecretKey::generate(), 0).unwrap();
+        sign_block_bls(&mut block, &BlsSecretKey::generate(), 1).unwrap();
 
         assert!(validate_block(&block, &vs).is_err());
     }
@@ -200,8 +274,8 @@ mod tests {
         let vs = ValidatorSet::new(validators.iter().map(addr_of).collect());
 
         let mut block = make_block(1, addr_of(&validators[2]));
-        sign_block_bls(&mut block, &BlsSecretKey::generate()).unwrap();
-        sign_block_bls(&mut block, &BlsSecretKey::generate()).unwrap();
+        sign_block_bls(&mut block, &BlsSecretKey::generate(), 0).unwrap();
+        sign_block_bls(&mut block, &BlsSecretKey::generate(), 1).unwrap();
         assert!(validate_block(&block, &vs).is_ok());
     }
 
@@ -212,8 +286,8 @@ mod tests {
         let vs = ValidatorSet::new(addrs.clone());
 
         let mut block = make_block(3, addrs[0].clone());
-        sign_block_bls(&mut block, &BlsSecretKey::generate()).unwrap();
-        sign_block_bls(&mut block, &BlsSecretKey::generate()).unwrap();
+        sign_block_bls(&mut block, &BlsSecretKey::generate(), 0).unwrap();
+        sign_block_bls(&mut block, &BlsSecretKey::generate(), 1).unwrap();
 
         assert!(validate_block(&block, &vs).is_ok());
     }
@@ -226,8 +300,8 @@ mod tests {
 
         let mut block = make_block(5, addrs[0].clone());
         // Only 3 BLS signers (need 4)
-        for _ in 0..3 {
-            sign_block_bls(&mut block, &BlsSecretKey::generate()).unwrap();
+        for idx in 0..3usize {
+            sign_block_bls(&mut block, &BlsSecretKey::generate(), idx).unwrap();
         }
         assert!(validate_block(&block, &vs).is_err());
     }
@@ -239,8 +313,8 @@ mod tests {
         let vs = ValidatorSet::new(addrs.clone()); // quorum = 4
 
         let mut block = make_block(5, addrs[0].clone());
-        for _ in 0..4 {
-            sign_block_bls(&mut block, &BlsSecretKey::generate()).unwrap();
+        for idx in 0..4usize {
+            sign_block_bls(&mut block, &BlsSecretKey::generate(), idx).unwrap();
         }
         assert!(validate_block(&block, &vs).is_ok());
     }
@@ -253,8 +327,8 @@ mod tests {
         assert_eq!(vs.quorum(), 2);
 
         let mut block = make_block(3, addrs[0].clone());
-        sign_block_bls(&mut block, &BlsSecretKey::generate()).unwrap();
-        sign_block_bls(&mut block, &BlsSecretKey::generate()).unwrap();
+        sign_block_bls(&mut block, &BlsSecretKey::generate(), 0).unwrap();
+        sign_block_bls(&mut block, &BlsSecretKey::generate(), 1).unwrap();
 
         assert!(validate_block(&block, &vs).is_ok());
     }
@@ -267,8 +341,8 @@ mod tests {
         assert_eq!(vs.quorum(), 6);
 
         let mut block = make_block(9, addrs[0].clone());
-        for _ in 0..6 {
-            sign_block_bls(&mut block, &BlsSecretKey::generate()).unwrap();
+        for idx in 0..6usize {
+            sign_block_bls(&mut block, &BlsSecretKey::generate(), idx).unwrap();
         }
         assert!(validate_block(&block, &vs).is_ok());
     }
@@ -284,10 +358,11 @@ mod tests {
         let mut block = make_block(1, addr);
 
         assert!(block.bls_aggregate.is_none());
-        sign_block_bls(&mut block, &BlsSecretKey::generate()).unwrap();
+        sign_block_bls(&mut block, &BlsSecretKey::generate(), 0).unwrap();
         assert!(block.bls_aggregate.is_some());
         assert_eq!(block.bls_cosigner_pks.len(), 1);
         assert_eq!(block.bls_aggregate.as_ref().unwrap().len(), 96);
+        assert!(block.bls_bitmap_has(0), "bitmap bit 0 must be set");
         // Single BLS sig → quorum=1 met → validate_block accepts.
         assert!(validate_block(&block, &vs).is_ok());
     }
@@ -302,9 +377,10 @@ mod tests {
 
         let sk1 = BlsSecretKey::generate();
         let sk2 = BlsSecretKey::generate();
-        sign_block_bls(&mut block, &sk1).unwrap();
-        sign_block_bls(&mut block, &sk2).unwrap();
+        sign_block_bls(&mut block, &sk1, 0).unwrap();
+        sign_block_bls(&mut block, &sk2, 1).unwrap();
         assert_eq!(block.bls_cosigner_pks.len(), 2);
+        assert!(block.bls_bitmap_has(0) && block.bls_bitmap_has(1), "both bitmap bits set");
         // 2 BLS signers ≥ quorum=2 → block is finalized.
         assert_eq!(block.bls_signer_count().unwrap(), 2);
         assert!(block.is_finalized(&vs));
@@ -318,9 +394,11 @@ mod tests {
         let mut block = make_block(1, addr);
 
         let bls_sk = BlsSecretKey::generate();
-        sign_block_bls(&mut block, &bls_sk).unwrap();
-        // Same key signing twice must be rejected.
-        assert!(sign_block_bls(&mut block, &bls_sk).is_err());
+        sign_block_bls(&mut block, &bls_sk, 0).unwrap();
+        // Same validator index signing twice must be rejected (bitmap guard).
+        assert!(sign_block_bls(&mut block, &bls_sk, 0).is_err());
+        // Different index with the same key is also rejected (cosigner_pks guard).
+        assert!(sign_block_bls(&mut block, &bls_sk, 1).is_err());
     }
 
     #[test]
@@ -331,7 +409,7 @@ mod tests {
         let vs = ValidatorSet::single(addr.clone()); // quorum = 1
 
         let mut block = make_block(1, addr);
-        sign_block_bls(&mut block, &BlsSecretKey::generate()).unwrap();
+        sign_block_bls(&mut block, &BlsSecretKey::generate(), 0).unwrap();
         assert!(validate_block(&block, &vs).is_ok());
     }
 
@@ -344,7 +422,7 @@ mod tests {
 
         let mut block = make_block(1, addrs[0].clone());
         // Only 1 BLS signer — below quorum of 2.
-        sign_block_bls(&mut block, &BlsSecretKey::generate()).unwrap();
+        sign_block_bls(&mut block, &BlsSecretKey::generate(), 0).unwrap();
         let err = validate_block(&block, &vs).unwrap_err();
         // Error message should mention BLS, not Ed25519.
         assert!(
@@ -362,12 +440,12 @@ mod tests {
 
         // block_a: 1 BLS sig; block_b: 2 BLS sigs.
         let mut block_a = make_block(1, a[0].clone());
-        sign_block_bls(&mut block_a, &BlsSecretKey::generate()).unwrap();
+        sign_block_bls(&mut block_a, &BlsSecretKey::generate(), 0).unwrap();
 
         let mut block_b = make_block(1, a[0].clone());
         block_b.header.state_root = [0xCCu8; 32];
-        sign_block_bls(&mut block_b, &BlsSecretKey::generate()).unwrap();
-        sign_block_bls(&mut block_b, &BlsSecretKey::generate()).unwrap();
+        sign_block_bls(&mut block_b, &BlsSecretKey::generate(), 0).unwrap();
+        sign_block_bls(&mut block_b, &BlsSecretKey::generate(), 1).unwrap();
 
         let cands = [block_a.clone(), block_b.clone()];
         let head = canonical_head(&cands, &vs).unwrap();
@@ -379,8 +457,8 @@ mod tests {
     /// Builds a block at `height` proposed by `proposer` with `n_sigs` BLS co-signatures.
     fn contested_block(height: u64, proposer: Address, n_sigs: usize) -> Block {
         let mut b = make_block(height, proposer);
-        for _ in 0..n_sigs {
-            sign_block_bls(&mut b, &BlsSecretKey::generate()).unwrap();
+        for idx in 0..n_sigs {
+            sign_block_bls(&mut b, &BlsSecretKey::generate(), idx).unwrap();
         }
         b
     }

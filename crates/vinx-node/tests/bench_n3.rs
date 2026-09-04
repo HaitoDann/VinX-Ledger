@@ -318,8 +318,9 @@ fn indexed_pks(bls_sks: &[BlsSecretKey], addrs: &[Address], vs: &ValidatorSet) -
     pks
 }
 
-/// Aggregates BLS signatures from a subset of validators onto `block`, then sets
-/// the corresponding bitmap bits. Returns the `indexed_bls_pks` registry.
+/// Aggregates BLS signatures from a subset of validators onto `block` and sets
+/// the corresponding bitmap bits via `sign_block_bls`. Returns the `indexed_bls_pks`
+/// registry.
 fn bls_cosign(
     block: &mut Block,
     signer_indices: &[usize],
@@ -328,11 +329,9 @@ fn bls_cosign(
     vs: &ValidatorSet,
 ) -> Vec<Option<[u8; 48]>> {
     for &i in signer_indices {
-        vinx_node::consensus::sign_block_bls(block, &bls_sks[i])
+        let vidx = vs.index_of(&addrs[i]).expect("signer must be in ValidatorSet");
+        vinx_node::consensus::sign_block_bls(block, &bls_sks[i], vidx)
             .expect("BLS sign must succeed");
-        if let Some(vidx) = vs.index_of(&addrs[i]) {
-            block.set_bls_bitmap_bit(vidx);
-        }
     }
     indexed_pks(bls_sks, addrs, vs)
 }

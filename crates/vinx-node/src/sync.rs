@@ -8,7 +8,7 @@ use vinx_core::Block;
 use vinx_state::WorldState;
 
 use crate::chain::Chain;
-use crate::consensus::validate_block;
+use crate::consensus::validate_block_with_registry;
 use crate::rpc::types::ChainSnapshotResponse;
 
 #[derive(Deserialize)]
@@ -121,9 +121,13 @@ pub async fn sync_from_peer(
             }
 
             // Proposer membership + quorum co-signatures, cryptographically verified
-            // (`Block::is_finalized` checks each signature) against the validator set
-            // as of this height — `state.validator_set` evolves as blocks are replayed.
-            if let Err(e) = validate_block(&block, &state.validator_set) {
+            // against the on-chain BLS key registry. Uses the bitmap path
+            // (validate_block_with_registry) so that only keys registered in the
+            // validator pool can contribute to quorum — arbitrary BLS keys are rejected.
+            let indexed_pks = state.indexed_bls_keys(&state.validator_set);
+            if let Err(e) =
+                validate_block_with_registry(&block, &state.validator_set, &indexed_pks)
+            {
                 tracing::warn!(
                     height = block.header.height,
                     error = %e,
@@ -351,8 +355,12 @@ pub async fn parallel_sync_from_peer(
                     tracing::error!(height, "Parallel sync: timestamp too far in future — aborting");
                     return total_applied;
                 }
-                // Proposer + co-signatures.
-                if let Err(e) = validate_block(&block, &state.validator_set) {
+                // Proposer + co-signatures (registry-bound: bitmap verified against
+                // on-chain BLS keys, same security posture as the sequential path).
+                let indexed_pks = state.indexed_bls_keys(&state.validator_set);
+                if let Err(e) =
+                    validate_block_with_registry(&block, &state.validator_set, &indexed_pks)
+                {
                     tracing::warn!(height, error = %e, "Parallel sync: block not finalized — stopping");
                     return total_applied;
                 }
