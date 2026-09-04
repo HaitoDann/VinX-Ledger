@@ -732,8 +732,8 @@ mod tests {
             bls_cosigner_pks: vec![],
             bls_bitmap: vec![],
         };
-        for _ in 0..n_sigs {
-            crate::consensus::sign_block_bls(&mut block, &BlsSecretKey::generate()).unwrap();
+        for idx in 0..n_sigs {
+            crate::consensus::sign_block_bls(&mut block, &BlsSecretKey::generate(), idx).unwrap();
         }
         block
     }
