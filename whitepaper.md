@@ -25,7 +25,7 @@ Construit en solo, sans investisseurs, **sans pre-mine**, sans promesses spécul
 - **Langage** : Rust, implémentation propriétaire de bout en bout — aucun framework blockchain tiers
 - **Vitesse** : Cadence de bloc fixe à **6 s** — un bloc produit toutes les 6 secondes, même vide. Finalité déterministe **au quorum** via BLS agrégé
 - **Capacité** : jusqu'à **3 000 transactions par bloc** (gouvernable), mempool de **100 000** transactions
-- **Performance** : ~500 TPS (3 000 tx à 6 s) — exécution séquentielle intentionnelle pour l'auditabilité
+- **Performance** : ~500 TPS (3 000 tx à 12 s) — exécution séquentielle intentionnelle pour l'auditabilité
 - **Précision** : 18 décimales internes, 2 décimales affichées à l'utilisateur
 - **Adresses** : Format Bech32 avec préfixe `vinx1`
 - **Cryptographie** : Ed25519 (signatures de transaction), BLS12-381 (co-signatures agrégées du comité), BLAKE3 (hachage), Bech32 (adresses)
