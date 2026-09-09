@@ -31,11 +31,15 @@ pub enum GovernanceAction {
     /// Update the governable active-set size N (ADR 0038).
     /// `new_size` must differ from the current value by exactly ±ACTIVE_SET_STEP and stay
     /// ≥ MIN_ACTIVE_SET_SIZE. Subject to ACTIVE_SET_COOLDOWN_SECS between modifications.
-    UpdateActiveSetSize { new_size: u32 },
+    UpdateActiveSetSize {
+        new_size: u32,
+    },
     /// Update the minimum validator bond floor (ADR 0038).
     /// `atoms` must be in [MIN_BOND_HARD_FLOOR, MAX_BOND_HARD_CAP], change by at most
     /// BOND_STEP_BPS of the current value, with BOND_COOLDOWN_SECS between modifications.
-    UpdateMinValidatorBond { atoms: u128 },
+    UpdateMinValidatorBond {
+        atoms: u128,
+    },
 }
 
 #[cfg(test)]

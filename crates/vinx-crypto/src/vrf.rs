@@ -97,13 +97,23 @@ fn hash_to_curve(pk: &VrfPublicKey, alpha: &[u8]) -> EdwardsPoint {
 fn nonce_generation(sk_hash: &[u8; 64], h_compressed: &[u8; 32]) -> Scalar {
     let trunc = &sk_hash[32..64];
     let mut k_hash = [0u8; 64];
-    k_hash.copy_from_slice(&Sha512::new().chain_update(trunc).chain_update(h_compressed).finalize());
+    k_hash.copy_from_slice(
+        &Sha512::new()
+            .chain_update(trunc)
+            .chain_update(h_compressed)
+            .finalize(),
+    );
     Scalar::from_bytes_mod_order_wide(&k_hash)
 }
 
 // ─── hash_points ──────────────────────────────────────────────────────────────
 
-fn hash_points(h: &EdwardsPoint, gamma: &EdwardsPoint, u: &EdwardsPoint, v: &EdwardsPoint) -> Scalar {
+fn hash_points(
+    h: &EdwardsPoint,
+    gamma: &EdwardsPoint,
+    u: &EdwardsPoint,
+    v: &EdwardsPoint,
+) -> Scalar {
     let digest = Sha512::new()
         .chain_update([SUITE, 0x02])
         .chain_update(h.compress().0)

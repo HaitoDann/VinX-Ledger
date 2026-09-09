@@ -151,10 +151,7 @@ pub fn verify_aggregate(
     if pks.is_empty() {
         return Err(BlsError::EmptyAggregate);
     }
-    let pk_inners: Vec<PublicKey> = pks
-        .iter()
-        .map(|p| p.inner())
-        .collect::<Result<_, _>>()?;
+    let pk_inners: Vec<PublicKey> = pks.iter().map(|p| p.inner()).collect::<Result<_, _>>()?;
     let sig = Signature::from_bytes(&agg_sig.0).map_err(|_| BlsError::InvalidSignature)?;
     let pk_refs: Vec<&PublicKey> = pk_inners.iter().collect();
     let agg_pk = AggregatePublicKey::aggregate(&pk_refs, true).map_err(BlsError::Blst)?;

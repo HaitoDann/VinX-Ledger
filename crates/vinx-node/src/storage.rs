@@ -313,7 +313,10 @@ impl Storage {
             tbl.insert(height, recompressed.as_slice())
                 .map_err(Self::io_err)?;
         }
-        tracing::info!(blocks = count, "v14 migration: BLS fields appended to block rows");
+        tracing::info!(
+            blocks = count,
+            "v14 migration: BLS fields appended to block rows"
+        );
         Ok(())
     }
 
@@ -340,7 +343,10 @@ impl Storage {
             tbl.insert(height, recompressed.as_slice())
                 .map_err(Self::io_err)?;
         }
-        tracing::info!(blocks = count, "v15 migration: bls_bitmap field appended to block rows");
+        tracing::info!(
+            blocks = count,
+            "v15 migration: bls_bitmap field appended to block rows"
+        );
         Ok(())
     }
 
