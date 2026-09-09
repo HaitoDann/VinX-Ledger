@@ -362,7 +362,12 @@ impl Chain {
     /// **rejouer** un bloc en milieu de chaîne lors d'une réorg (fork-choice, ADR 0031).
     /// Cohérente avec `median_time_past_with` quand `height == tip+1` (production au tip).
     pub fn median_time_past_ending_at(&self, height: u64, next_ts: u64) -> u64 {
-        let end = (height as usize).min(self.blocks.len());
+        // VINX-08 : même défaut d'indexation que `reorg_replace`. Sur une chaîne
+        // snapshot-syncée la fenêtre MTP était calculée sur les mauvais blocs, donc un
+        // `state_root` divergent au rejeu de réorg.
+        let end = height
+            .checked_sub(self.height_base)
+            .map_or(0, |i| (i as usize).min(self.blocks.len()));
         let start = end.saturating_sub(vinx_core::amount::MEDIAN_TIME_BLOCKS - 1);
         let mut ts: Vec<u64> = self.blocks[start..end]
             .iter()
@@ -388,9 +393,20 @@ impl Chain {
             new_block.header.height, height,
             "hauteur du bloc incohérente"
         );
-        let h = height as usize;
+        // VINX-08 : `blocks` est indexé depuis `height_base` (non nul sur une chaîne
+        // amorcée par snapshot). Indexer par hauteur absolue faisait paniquer `drain`
+        // ("start index out of range") — déni de service distant sur tout nœud
+        // snapshot-syncé recevant un bloc concurrent. Comme `block_row`/`get_block`,
+        // on convertit hauteur → index.
+        let Some(idx) = height.checked_sub(self.height_base) else {
+            return Vec::new();
+        };
+        let idx = idx as usize;
+        if idx >= self.blocks.len() {
+            return Vec::new();
+        }
         // Retire le bloc contesté et tout ce qui le surplombe (branche perdante).
-        let removed: Vec<Hash32> = self.blocks.drain(h..).map(|(hash, _)| hash).collect();
+        let removed: Vec<Hash32> = self.blocks.drain(idx..).map(|(hash, _)| hash).collect();
         // Installe le bloc canonique à `height` (redevient le tip).
         self.blocks.push((new_block.hash(), new_block));
         // Les candidats à cette hauteur n'ont plus de raison d'être.
