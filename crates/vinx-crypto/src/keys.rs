@@ -1,6 +1,6 @@
 use crate::CryptoError;
 use borsh::{BorshDeserialize, BorshSerialize};
-use ed25519_dalek::{Signer, Verifier};
+use ed25519_dalek::Signer;
 use rand::rngs::OsRng;
 use serde::{Deserialize, Deserializer, Serialize, Serializer};
 

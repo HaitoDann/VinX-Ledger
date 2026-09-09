@@ -1,5 +1,6 @@
-use vinx_core::{Block, ValidatorSet};
-use vinx_crypto::BlsSecretKey;
+use vinx_core::{Block, Transaction, ValidatorSet};
+use vinx_crypto::{BlsSecretKey, Hash32};
+use vinx_state::WorldState;
 
 use crate::NodeError;
 
@@ -58,6 +59,82 @@ pub fn verify_proposer_authenticated(
             ))
         })?;
 
+    Ok(())
+}
+
+/// Vérifie en parallèle les signatures de toutes les transactions d'un bloc (ADR 0015).
+///
+/// Déterministe et indépendant de l'ordre : `verify_tx_signature_pure` est le prédicat
+/// canonique unique (VINX-03), et l'exécution d'état reste séquentielle ailleurs. Partagé
+/// par le chemin P2P, la sync et le banc adversarial pour qu'ils ne puissent pas diverger
+/// sur la définition de « bloc cryptographiquement valide » — la divergence entre deux
+/// définitions est exactement ce qui a produit VINX-03.
+pub fn verify_block_tx_signatures(txs: &[Transaction]) -> bool {
+    use rayon::prelude::*;
+    txs.par_iter()
+        .all(|tx| WorldState::verify_tx_signature_pure(tx).is_ok())
+}
+
+/// Vue de la chaîne nécessaire pour valider un bloc entrant, extraite sous verrou par
+/// l'appelant afin que cette fonction reste pure.
+pub struct IncomingBlockCtx {
+    /// Hash du tip courant — le parent que le bloc doit chaîner.
+    pub tip_hash: Hash32,
+    /// Timestamp du tip courant, pour le contrôle de monotonie (ADR 0005).
+    pub tip_timestamp: u64,
+    /// Horloge murale locale, pour la borne de dérive.
+    pub now: u64,
+}
+
+/// Contrôles d'en-tête et d'autorité d'un bloc entrant, avant tout travail d'état.
+///
+/// C'est **la** définition de « ce bloc a le droit d'être appliqué au tip » : chaînage,
+/// bornes de timestamp (ADR 0005), authentification cryptographique du proposeur contre le
+/// registre BLS (ADR 0070), puis signatures de transactions (ADR 0015). Le chemin P2P, la
+/// sync et le banc adversarial appellent tous celle-ci — un banc qui réimplémenterait la
+/// séquence ne testerait que lui-même.
+///
+/// N'exige délibérément **pas** le quorum : un bloc fraîchement gossipé ne porte que la
+/// co-signature de son producteur (voir `verify_proposer_authenticated`).
+pub fn validate_incoming_block(
+    block: &Block,
+    ctx: &IncomingBlockCtx,
+    validator_set: &ValidatorSet,
+    indexed_bls_pks: &[Option<[u8; 48]>],
+) -> Result<(), NodeError> {
+    if block.header.prev_hash != ctx.tip_hash {
+        return Err(NodeError::Consensus(format!(
+            "block {} does not chain onto the current tip",
+            block.header.height
+        )));
+    }
+    // ADR 0005 : monotonie, puis borne de dérive. Le `state_root` ne rattrape pas ces
+    // deux cas (les deux côtés utilisent le même timestamp de bloc), d'où un contrôle
+    // explicite — cf. VINX-07, où son absence sur un seul chemin permettait de projeter
+    // l'horloge protocole dans le futur et de frapper toute l'émission restante.
+    if block.header.timestamp <= ctx.tip_timestamp {
+        return Err(NodeError::Consensus(format!(
+            "block {} timestamp is not monotonic",
+            block.header.height
+        )));
+    }
+    if block.header.timestamp
+        > ctx
+            .now
+            .saturating_add(vinx_core::amount::MAX_CLOCK_DRIFT_SECS)
+    {
+        return Err(NodeError::Consensus(format!(
+            "block {} timestamp is too far in the future",
+            block.header.height
+        )));
+    }
+    verify_proposer_authenticated(block, validator_set, indexed_bls_pks)?;
+    if !verify_block_tx_signatures(&block.transactions) {
+        return Err(NodeError::Consensus(format!(
+            "block {} has invalid transaction signature(s)",
+            block.header.height
+        )));
+    }
     Ok(())
 }
 

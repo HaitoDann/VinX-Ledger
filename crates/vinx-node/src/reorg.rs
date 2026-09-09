@@ -38,11 +38,13 @@ pub enum ReorgOutcome {
 /// Vérifie l'invariant de supply (ADR 0004) et le `state_root` du bloc : un désaccord signifie
 /// que l'état reconstruit ne correspond pas à celui du producteur → la réorg est refusée
 /// (sûreté). Ne touche **pas** à `chain`.
-pub(crate) fn replay_block(
-    state: &mut WorldState,
-    chain: &Chain,
-    block: &Block,
-) -> Result<(), String> {
+/// Rejoue un bloc **déjà validé cryptographiquement** sur `state` et vérifie que le
+/// `state_root` obtenu correspond à celui de l'en-tête.
+///
+/// Précondition (contrat) : l'appelant a déjà vérifié les signatures — via
+/// `consensus::validate_incoming_block`. C'est la frontière `trusted` d'ADR 0070 :
+/// `apply_transaction_trusted` saute délibérément la crypto.
+pub fn replay_block(state: &mut WorldState, chain: &Chain, block: &Block) -> Result<(), String> {
     let height = block.header.height;
     let protocol_ts = chain.median_time_past_ending_at(height, block.header.timestamp);
     state.set_block_context(protocol_ts);

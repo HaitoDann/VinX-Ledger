@@ -19,7 +19,6 @@ use crate::{
     storage::Storage, NodeError,
 };
 use messages::P2pMessage;
-use rayon::prelude::*;
 use std::collections::HashMap;
 use std::sync::atomic::Ordering;
 use vinx_core::{Block, BlockHeader, SlashEvidence, Transaction, ValidatorSet};
@@ -457,8 +456,9 @@ async fn handle_swarm_event(
 /// the deterministic execution order untouched. This parallelises validation, not
 /// execution: the risky part (parallel state transitions) is deferred — see ADR 0015.
 fn verify_block_tx_signatures_parallel(txs: &[Transaction]) -> bool {
-    txs.par_iter()
-        .all(|tx| WorldState::verify_tx_signature_pure(tx).is_ok())
+    // Primitive partagée (consensus.rs) : le chemin P2P, la sync et le banc adversarial
+    // doivent avoir *une* définition de la validité cryptographique d'un bloc.
+    crate::consensus::verify_block_tx_signatures(txs)
 }
 
 /// ADR 0031 — traite un bloc **concurrent** (collision leader/backup) à une hauteur non
