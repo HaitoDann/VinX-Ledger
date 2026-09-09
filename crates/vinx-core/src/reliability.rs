@@ -82,8 +82,9 @@ pub fn active_quorum(vs: &ValidatorSet, rel: &ReliabilityMap) -> usize {
 
 /// À l'application du bloc de hauteur `height` produit par `actual_proposer` :
 /// - remet à 0 le compteur du **proposeur effectif** (production réussie) ;
-/// - si le proposeur diffère du **leader actif prévu**, incrémente le manquement de ce leader
-///   et le **jaile** s'il atteint [`MAX_MISSED_PROPOSALS`].
+/// - si le proposeur diffère du **leader actif prévu** *et* que le créneau du leader est
+///   écoulé ([`SLOT_TIMEOUT_SECS`] depuis le bloc précédent), incrémente le manquement de ce
+///   leader et le **jaile** s'il atteint [`MAX_MISSED_PROPOSALS`].
 ///
 /// Fait 100 % déterministe (un créneau inactif ne produit pas de bloc, donc n'est jamais
 /// compté). Retourne `true` si ce bloc provoque un jailing.
@@ -92,10 +93,18 @@ pub fn on_block_applied(
     vs: &ValidatorSet,
     height: u64,
     actual_proposer: &Address,
+    block_ts: u64,
+    prev_block_ts: u64,
 ) -> bool {
     let expected = active_leader_at(vs, rel, height);
     rel.entry(*actual_proposer).or_default().missed_proposals = 0;
-    if *actual_proposer != expected {
+    // VINX-06 : ne compter un manquement que si le leader a **réellement** laissé passer
+    // son tour. Sans cette condition, un validateur unique qui propose systématiquement
+    // avant le leader prévu jaile tout le set honnête en trois tours — les blocs d'un
+    // non-leader sont acceptés par le chemin P2P sans aucune contrainte de créneau.
+    // `block_ts`/`prev_block_ts` sont des quantités d'en-tête, donc déterministes.
+    let slot_elapsed = block_ts.saturating_sub(prev_block_ts) >= crate::amount::SLOT_TIMEOUT_SECS;
+    if *actual_proposer != expected && slot_elapsed {
         let e = rel.entry(expected).or_default();
         if e.jailed_until.is_none() {
             e.missed_proposals = e.missed_proposals.saturating_add(1);
@@ -124,6 +133,7 @@ pub fn try_unjail(rel: &mut ReliabilityMap, addr: &Address, height: u64) -> bool
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::amount::SLOT_TIMEOUT_SECS;
     use vinx_crypto::KeyPair;
 
     fn addrs(n: usize) -> Vec<Address> {
@@ -139,13 +149,27 @@ mod tests {
         let mut rel = ReliabilityMap::new();
 
         // height 1 → leader actif = a[1]. Un backup (a[0]) produit → a[1] manque.
-        assert!(!on_block_applied(&mut rel, &vs, 1, &a[0]));
+        assert!(!on_block_applied(
+            &mut rel,
+            &vs,
+            1,
+            &a[0],
+            SLOT_TIMEOUT_SECS,
+            0
+        ));
         assert_eq!(rel[&a[1]].missed_proposals, 1);
         // a[0] a produit → son compteur est à 0.
         assert_eq!(rel[&a[0]].missed_proposals, 0);
 
         // height 4 → leader a[1] à nouveau ; s'il produit cette fois, reset.
-        assert!(!on_block_applied(&mut rel, &vs, 4, &a[1]));
+        assert!(!on_block_applied(
+            &mut rel,
+            &vs,
+            4,
+            &a[1],
+            SLOT_TIMEOUT_SECS,
+            0
+        ));
         assert_eq!(
             rel[&a[1]].missed_proposals, 0,
             "une production réussie remet à 0"
@@ -170,14 +194,14 @@ mod tests {
         ];
         for (h, p) in plan {
             assert!(
-                !on_block_applied(&mut rel, &vs, h, p),
+                !on_block_applied(&mut rel, &vs, h, p, SLOT_TIMEOUT_SECS, 0),
                 "pas encore de jail à h={h}"
             );
         }
         assert_eq!(rel[&a[1]].missed_proposals, 2);
         // height 7 → 3ᵉ manquement de a[1] → jail.
         assert!(
-            on_block_applied(&mut rel, &vs, 7, &a[0]),
+            on_block_applied(&mut rel, &vs, 7, &a[0], SLOT_TIMEOUT_SECS, 0),
             "jail au 3ᵉ manquement"
         );
         assert!(rel[&a[1]].is_jailed());
@@ -262,5 +286,64 @@ mod tests {
             "plancher : set complet si tous jailés"
         );
         assert!(active_quorum(&vs, &rel) >= 1);
+    }
+
+    /// VINX-06 — a validator that simply proposes *before* the scheduled leader, at
+    /// normal cadence, must not be able to jail the honest set. Before the slot-timeout
+    /// condition, 3 pre-emptive blocks jailed each honest leader in turn, and a single
+    /// byzantine validator ended up alone in the rotation.
+    #[test]
+    fn preemptive_proposer_cannot_jail_the_honest_set() {
+        let a = addrs(5);
+        let vs = ValidatorSet::new(a.clone());
+        let attacker = a[0];
+        let mut rel = ReliabilityMap::new();
+
+        // 60 blocks all proposed by the attacker, each arriving at the normal cadence
+        // (well under SLOT_TIMEOUT_SECS after the previous one).
+        let mut prev_ts = 1_000u64;
+        for h in 1..=60u64 {
+            let ts = prev_ts + 12;
+            assert!(
+                !on_block_applied(&mut rel, &vs, h, &attacker, ts, prev_ts),
+                "a block at normal cadence must never jail the scheduled leader"
+            );
+            prev_ts = ts;
+        }
+        for v in &a {
+            assert!(
+                !rel.get(v).map(|r| r.is_jailed()).unwrap_or(false),
+                "no honest validator may be jailed by a pre-emptive proposer"
+            );
+        }
+        assert_eq!(
+            active_validators(&vs, &rel).len(),
+            5,
+            "the whole set must remain in the rotation"
+        );
+    }
+
+    /// The counterpart: a leader that genuinely lets its slot elapse is still charged,
+    /// so the fix does not disable liveness accounting.
+    #[test]
+    fn genuinely_absent_leader_is_still_jailed() {
+        let a = addrs(3);
+        let vs = ValidatorSet::new(a.clone());
+        let mut rel = ReliabilityMap::new();
+
+        // One validator proposes every block, each arriving well after the scheduled
+        // leader's slot elapsed — the legitimate slot-skip case.
+        let proposer = a[0];
+        let mut jailed_any = false;
+        let mut prev_ts = 0u64;
+        for h in 1..=12u64 {
+            let ts = prev_ts + SLOT_TIMEOUT_SECS + 1;
+            jailed_any |= on_block_applied(&mut rel, &vs, h, &proposer, ts, prev_ts);
+            prev_ts = ts;
+        }
+        assert!(
+            jailed_any,
+            "a leader that repeatedly misses an elapsed slot must still be jailed"
+        );
     }
 }

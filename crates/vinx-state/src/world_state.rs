@@ -207,6 +207,13 @@ pub struct WorldState {
     /// Appended after `epoch_beacon` — v17→v18 migration appends the empty-Vec encoding.
     #[serde(default)]
     pub exit_queue: Vec<ValidatorExitRequest>,
+    /// Timestamp of the previous block, needed to decide deterministically whether a
+    /// scheduled leader's slot actually elapsed before a backup proposed (ADR 0027,
+    /// VINX-06). Zero until the first block is settled.
+    /// Appended after `exit_queue` — same append-only migration strategy as the fields
+    /// above, so a pre-v19 blob remains a strict prefix.
+    #[serde(default)]
+    pub last_block_ts: u64,
 }
 
 /// A bond amount in its unbonding delay, waiting to return to `address`'s balance
@@ -372,6 +379,17 @@ pub fn v18_meta_suffix() -> Vec<u8> {
     bincode::serialize(&Vec::<ValidatorExitRequest>::new()).expect("serialize empty Vec")
 }
 
+/// The bincode bytes appended to a v18 `WorldState` meta blob to bring it to v19
+/// (ADR 0027 / VINX-06 slot timeout). Appends the default for one new field:
+///   1. `last_block_ts` — `u64 = 0`
+///
+/// Zero is the correct default: it makes the first block after a migration look like a
+/// fully elapsed slot, which only means the first missed-proposal charge behaves as it
+/// did before the fix. It never jails anyone on its own.
+pub fn v19_meta_suffix() -> Vec<u8> {
+    bincode::serialize(&0u64).expect("serialize u64")
+}
+
 /// SHA-256(epoch_number_le || address) — deterministic sort key for tiebreaking
 /// validators with identical reliability scores at epoch rotation (ADR 0038).
 fn epoch_tiebreaker(epoch: u64, addr: &Address) -> [u8; 32] {
@@ -445,6 +463,7 @@ impl WorldState {
             min_validator_bond_atoms: MIN_VALIDATOR_BOND_ATOMS,
             epoch_beacon: [0u8; 32],
             exit_queue: Vec::new(),
+            last_block_ts: 0,
         }
     }
 
@@ -587,6 +606,8 @@ impl WorldState {
                 &self.validator_set,
                 height,
                 producer,
+                block_ts,
+                self.last_block_ts,
             );
             if jailed {
                 tracing::warn!(
@@ -595,6 +616,9 @@ impl WorldState {
                 );
             }
         }
+        // Record this block's timestamp for the next block's slot-timeout decision.
+        // Set after the reliability update so a block never compares against itself.
+        self.last_block_ts = block_ts;
         // 5. Epoch close (ADR 0028/0038) — triggered when EPOCH_DURATION_SECS have elapsed
         //    since the last close. Deterministic on block_ts so all nodes close the same epoch.
         if EPOCH_DURATION_SECS > 0 && self.emission_started {
@@ -1779,6 +1803,7 @@ impl WorldState {
             last_epoch_close_ts: u64,
             last_active_set_size_change_ts: u64,
             last_bond_change_ts: u64,
+            last_block_ts: u64,
         }
 
         let commitment = ConsensusCommitment {
@@ -1809,6 +1834,7 @@ impl WorldState {
             last_epoch_close_ts: self.last_epoch_close_ts,
             last_active_set_size_change_ts: self.last_active_set_size_change_ts,
             last_bond_change_ts: self.last_bond_change_ts,
+            last_block_ts: self.last_block_ts,
         };
 
         let encoded = bincode::serialize(&commitment)
@@ -4772,6 +4798,27 @@ mod tests {
             s.exit_queue.is_empty(),
             "ghost exit must be silently discarded"
         );
+    }
+
+    #[test]
+    fn test_v19_meta_suffix_round_trips_into_a_v18_blob() {
+        // The v18→v19 migration relies on the bincode prefix-append property: a v18 meta
+        // blob must be a strict prefix of a v19 one, so appending the suffix yields a
+        // deserializable v19 state with last_block_ts = 0.
+        let s = WorldState::new();
+        let full = bincode::serialize(&s).expect("serialize v19 state");
+        let suffix = v19_meta_suffix();
+        assert_eq!(suffix, 0u64.to_le_bytes().to_vec());
+        assert!(
+            full.ends_with(&suffix),
+            "last_block_ts must be the last serialized field for the append migration"
+        );
+        let v18_blob = &full[..full.len() - suffix.len()];
+        let mut migrated = v18_blob.to_vec();
+        migrated.extend_from_slice(&suffix);
+        let back: WorldState =
+            bincode::deserialize(&migrated).expect("migrated blob must deserialize");
+        assert_eq!(back.last_block_ts, 0);
     }
 
     #[test]

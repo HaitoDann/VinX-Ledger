@@ -52,7 +52,7 @@ use zstd;
 ///      to WorldState meta.
 /// v18: ADR 0036 validator churn bounds — `exit_queue` (Vec<ValidatorExitRequest> = [])
 ///      appended to WorldState meta. Migration appends 8 zero bytes (bincode empty Vec).
-const STORAGE_VERSION: u64 = 18;
+const STORAGE_VERSION: u64 = 19;
 
 /// zstd compression level — level 3 is the sweet spot: ~60-70% size reduction,
 /// negligible latency compared to disk I/O.
@@ -214,6 +214,8 @@ impl Storage {
                 16 => Self::append_meta_suffix(tx, &vinx_state::v17_meta_suffix())?,
                 // v17 → v18 (ADR 0036 churn bounds): append exit_queue (empty Vec = 8 zero bytes).
                 17 => Self::append_meta_suffix(tx, &vinx_state::v18_meta_suffix())?,
+                // v18 → v19 (ADR 0027 / VINX-06 slot timeout): append last_block_ts (u64 = 0).
+                18 => Self::append_meta_suffix(tx, &vinx_state::v19_meta_suffix())?,
                 unknown => {
                     return Err(Self::io_err(format!(
                         "no automatic migration from schema v{unknown} to v{STORAGE_VERSION}. \

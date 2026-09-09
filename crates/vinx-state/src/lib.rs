@@ -6,7 +6,7 @@ pub use genesis::{
 };
 pub use world_state::{
     v10_meta_suffix, v11_meta_suffix, v12_meta_suffix, v13_meta_suffix, v16_meta_suffix,
-    v17_meta_suffix, v18_meta_suffix, v8_meta_suffix, v9_meta_suffix, AdminPolicy,
+    v17_meta_suffix, v18_meta_suffix, v19_meta_suffix, v8_meta_suffix, v9_meta_suffix, AdminPolicy,
     GovernanceProposal, ModuleEntry, WorldState,
 };
 

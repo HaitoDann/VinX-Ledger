@@ -190,6 +190,22 @@ pub const BATCH_WINDOW_MS: u64 = 200;
 /// manipulation a producer could attempt with a bogus (future) clock.
 pub const MAX_CLOCK_DRIFT_SECS: u64 = 120;
 
+/// Grace period a scheduled leader gets before a backup proposal counts as a missed
+/// proposal against it (ADR 0027, VINX-06).
+///
+/// Jailing used to be charged whenever the actual proposer differed from the scheduled
+/// leader, with no timing condition at all — and the P2P path accepts a block from any
+/// set member, with no slot deadline. A single validator that simply proposed *first* at
+/// every height therefore charged a miss to every honest leader in turn and jailed the
+/// entire honest set after three rounds.
+///
+/// A miss is only real if the leader actually had its turn and did not take it, so the
+/// charge now requires the block to arrive at least this long after the previous one.
+/// Derived from the 12 s target cadence plus the clock-drift allowance, so an honest
+/// backup stepping in for a genuinely absent leader still charges the miss, while a
+/// pre-emptive proposal at normal cadence does not.
+pub const SLOT_TIMEOUT_SECS: u64 = 3 * 12 + MAX_CLOCK_DRIFT_SECS;
+
 /// Window (number of recent blocks) for the Median Time Past (ADR 0005): a single
 /// producer cannot make the network's time reference jump because it is a median.
 pub const MEDIAN_TIME_BLOCKS: usize = 11;
