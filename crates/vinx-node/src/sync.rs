@@ -432,12 +432,54 @@ const SNAPSHOT_SYNC_THRESHOLD: u64 = 500;
 /// for the remaining delta between the snapshot height and the current peer tip.
 ///
 /// Returns `true` if a snapshot was applied, `false` if the gap is small enough
+/// Returns true when `url` is safe to fetch a state snapshot from: HTTPS, or a loopback
+/// address where there is no network path for an attacker to sit on.
+fn is_transport_acceptable(url: &str) -> bool {
+    let lower = url.trim().to_ascii_lowercase();
+    if lower.starts_with("https://") {
+        return true;
+    }
+    let Some(rest) = lower.strip_prefix("http://") else {
+        return false; // unknown scheme — refuse rather than guess
+    };
+    let host = rest
+        .split(['/', '?', '#'])
+        .next()
+        .unwrap_or("")
+        .rsplit('@')
+        .next()
+        .unwrap_or("");
+    let host = host.strip_prefix('[').map_or_else(
+        || host.split(':').next().unwrap_or(""),
+        |v6| v6.split(']').next().unwrap_or(""),
+    );
+    if host == "localhost" {
+        return true;
+    }
+    // Parse rather than prefix-match: "127.0.0.1.evil.com" starts with "127." but is a
+    // perfectly ordinary attacker-controlled hostname.
+    match host.parse::<std::net::IpAddr>() {
+        Ok(ip) => ip.is_loopback(),
+        Err(_) => false,
+    }
+}
+
 /// that block-by-block replay is preferred (or if any step fails).
 pub async fn snapshot_sync_from_peer(
     peer_rpc_url: &str,
     state: &mut WorldState,
     chain: &mut Chain,
 ) -> bool {
+    // VINX-10: a snapshot installs an entire world state — balances, validator set, admin
+    // key. Fetching that over plain HTTP hands any on-path attacker full control of the
+    // node. Refuse cleartext except against a loopback peer (local dev).
+    if !is_transport_acceptable(peer_rpc_url) {
+        tracing::error!(
+            peer = %peer_rpc_url,
+            "Snapshot sync: refusing to fetch a state snapshot over plaintext HTTP —              use https:// (or a loopback address for local development)"
+        );
+        return false;
+    }
     let client = reqwest::Client::builder()
         .timeout(std::time::Duration::from_secs(120))
         .build()
@@ -530,20 +572,63 @@ pub async fn snapshot_sync_from_peer(
     };
 
     // 4. Verify the state root before trusting anything.
+    //
+    // VINX-10: this used to compare against `snap.state_root`, a field supplied by the
+    // *same peer* that sent the state — it proved only that the peer could hash what it
+    // had just sent, and any fabricated state passed trivially. The authoritative value
+    // is the one committed in the snapshot block's header, which the rest of the network
+    // also sees. `snap.state_root` is now only cross-checked for a mismatch (a peer
+    // disagreeing with itself is a bug or an attack; either way, refuse).
     let computed_root = new_state.compute_state_root();
-    let expected_root = match hex::decode(&snap.state_root) {
-        Ok(b) => b,
+    if computed_root != snap.block.header.state_root {
+        tracing::error!(
+            height = snap.height,
+            "Snapshot sync: state does not match the snapshot block header's state_root              — rejecting snapshot"
+        );
+        return false;
+    }
+    match hex::decode(&snap.state_root) {
+        Ok(b) if b.as_slice() == computed_root.as_ref() => {}
+        Ok(_) => {
+            tracing::error!(
+                height = snap.height,
+                "Snapshot sync: peer's state_root field contradicts its own block header                  — rejecting snapshot"
+            );
+            return false;
+        }
         Err(e) => {
             tracing::error!(error = %e, "Snapshot sync: state_root hex decode failed");
             return false;
         }
-    };
-    if computed_root.as_ref() != expected_root.as_slice() {
+    }
+    // The block must also be at the height the snapshot claims, or the state and the
+    // chain would be installed at inconsistent heights.
+    if snap.block.header.height != snap.height {
         tracing::error!(
-            height = snap.height,
-            "Snapshot sync: state_root mismatch — rejecting snapshot"
+            claimed = snap.height,
+            header = snap.block.header.height,
+            "Snapshot sync: snapshot height disagrees with its block header — rejecting"
         );
         return false;
+    }
+
+    // The snapshot block is installed as *finalized* by `Chain::new_from_snapshot`, so it
+    // must carry a real quorum of co-signatures from validators registered in the state
+    // being adopted — otherwise a peer can hand us a fabricated history and declare it
+    // irreversible. This is checked against the snapshot's own validator set, which is
+    // the best a syncing node can do without trusted checkpoints; shipping checkpoints
+    // (weak subjectivity) remains open, see audit/post-fix/FINDINGS_STATUS.md.
+    {
+        let indexed_pks = new_state.indexed_bls_keys(&new_state.validator_set);
+        if let Err(e) =
+            validate_block_with_registry(&snap.block, &new_state.validator_set, &indexed_pks)
+        {
+            tracing::error!(
+                height = snap.height, error = %e,
+                "Snapshot sync: snapshot block is not quorum-signed by its own validator                  set — rejecting"
+            );
+            return false;
+        }
     }
 
     // 5. Initialize the chain from the snapshot block and replace state.
@@ -556,4 +641,39 @@ pub async fn snapshot_sync_from_peer(
         "Snapshot sync: applied — continuing with block-by-block sync for delta"
     );
     true
+}
+
+#[cfg(test)]
+mod transport_tests {
+    use super::is_transport_acceptable;
+
+    /// VINX-10: a snapshot installs an entire world state, so the transport must not be
+    /// attacker-controllable. HTTPS is accepted; cleartext only against loopback.
+    #[test]
+    fn https_is_accepted_and_public_http_is_refused() {
+        assert!(is_transport_acceptable("https://seed.example.com:8545"));
+        assert!(is_transport_acceptable("HTTPS://Seed.Example.Com/"));
+        assert!(!is_transport_acceptable("http://seed.example.com:8545"));
+        assert!(!is_transport_acceptable("http://203.0.113.7:8545"));
+    }
+
+    #[test]
+    fn loopback_http_is_allowed_for_local_development() {
+        assert!(is_transport_acceptable("http://localhost:8545"));
+        assert!(is_transport_acceptable("http://127.0.0.1:8545"));
+        assert!(is_transport_acceptable("http://127.1.2.3:8545/"));
+        assert!(is_transport_acceptable("http://[::1]:8545"));
+    }
+
+    /// A host that merely *contains* a loopback-looking substring must not pass.
+    #[test]
+    fn lookalike_hosts_are_refused() {
+        assert!(!is_transport_acceptable("http://localhost.evil.com:8545"));
+        assert!(!is_transport_acceptable("http://127.0.0.1.evil.com/"));
+        assert!(!is_transport_acceptable("http://evil.com/?x=localhost"));
+        assert!(!is_transport_acceptable("http://evil.com#localhost"));
+        assert!(!is_transport_acceptable("http://user@evil.com/"));
+        assert!(!is_transport_acceptable("ftp://seed.example.com"));
+        assert!(!is_transport_acceptable("seed.example.com:8545"));
+    }
 }
