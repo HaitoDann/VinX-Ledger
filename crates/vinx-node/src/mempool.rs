@@ -343,17 +343,41 @@ impl Mempool {
     /// Looks up a set of transaction hashes and returns clones of matching transactions
     /// from the pending pool.  Used by the compact-block responder (ADR 0037).
     pub fn get_by_hashes(&self, hashes: &[[u8; 32]]) -> Vec<Transaction> {
+        // VINX-09: `hashes.contains()` inside the mempool scan made this O(mempool × hashes)
+        // with a SHA-256 per comparison. Hash the request set once instead.
+        let wanted: AHashSet<[u8; 32]> = hashes.iter().copied().collect();
         let mut out = Vec::with_capacity(hashes.len());
         for tx in self.queues.values().flat_map(|q| q.values()) {
-            let h = tx.hash();
-            if hashes.contains(&h) {
+            if wanted.contains(&tx.hash()) {
                 out.push(tx.clone());
-                if out.len() == hashes.len() {
+                if out.len() == wanted.len() {
                     break;
                 }
             }
         }
         out
+    }
+
+    /// Resolves `hashes` against the pending pool in a single scan (ADR 0037, VINX-09).
+    /// Returns the transactions found (in request order) and the hashes still missing.
+    pub fn resolve_hashes(&self, hashes: &[[u8; 32]]) -> (Vec<Transaction>, Vec<[u8; 32]>) {
+        let mut found: AHashMap<[u8; 32], Transaction> = AHashMap::new();
+        let wanted: AHashSet<[u8; 32]> = hashes.iter().copied().collect();
+        for tx in self.queues.values().flat_map(|q| q.values()) {
+            let h = tx.hash();
+            if wanted.contains(&h) {
+                found.insert(h, tx.clone());
+            }
+        }
+        let mut resolved = Vec::with_capacity(found.len());
+        let mut missing = Vec::new();
+        for h in hashes {
+            match found.get(h) {
+                Some(tx) => resolved.push(tx.clone()),
+                None => missing.push(*h),
+            }
+        }
+        (resolved, missing)
     }
 
     /// Returns the next nonce to use for `addr`, accounting for pending transactions.
