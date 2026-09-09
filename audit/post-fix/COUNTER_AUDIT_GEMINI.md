@@ -63,6 +63,42 @@ anything.
 
 6. **VINX-07, VINX-09, VINX-11** — see PATCH.md.
 
+### Second round (landed after the first dossier)
+
+7. **VINX-04** — `WorldState::compute_consensus_root` / `compute_state_root`.
+   `state_root = sha256(DST ‖ accounts_root ‖ consensus_root)`. Verify by enumerating
+   every field of `WorldState` and checking it against the `ConsensusCommitment` struct:
+   list any field that is neither committed nor `serde(skip)`. Then verify the encoding
+   is order-stable — `banned_validator_keys` is a `HashSet` sorted before hashing;
+   confirm nothing else, including anything nested, iterates non-deterministically.
+
+8. **VINX-12** — `Transaction::signing_bytes` now length-prefixes `payload` with a `u32`
+   BE, written unconditionally. Confirm the encoding is injective, and check the two
+   hand-written JavaScript signing paths in `crates/vinx-node/src/rpc/ui.rs` byte for
+   byte against the Rust — they were updated by hand, and a mismatch means every
+   signature produced by the web UI is rejected.
+
+9. **VINX-10** — `sync::snapshot_sync_from_peer`. Confirm the recomputed root is
+   compared against `snap.block.header.state_root` (not the peer's `state_root` field),
+   the height is cross-checked, and the block passes `validate_block_with_registry`.
+   Confirm `is_transport_acceptable` cannot be bypassed.
+
+10. **VX-RED-003/007** — `Storage::claim_vote` and its callers. Confirm no path releases
+    a BLS signature at a height without first claiming the lock, and that the write is
+    durable before the signature is published.
+
+11. **VINX-06** — `reliability::on_block_applied`. Confirm `last_block_ts` is written on
+    every block-application path (production, P2P, sync, reorg replay) and rewound
+    correctly on a reorg; a stale value changes a jailing decision and therefore the
+    state root.
+
+12. **Bootstrap** — `GenesisConfig::validator_bls`, `BlsKeyFile`, and the startup
+    auto-registration in `main.rs`. Confirm the BLS key is genuinely persisted across
+    restarts and that a node cannot end up signing with a key that differs from the one
+    registered on-chain.
+
+13. **VINX-13 / 20 / 24** — payload bound, admin fail-closed, strict Ed25519.
+
 ## Regression hunt — the part that matters most
 
 These patches changed public APIs and consensus-relevant behaviour. Look specifically for:
@@ -87,10 +123,31 @@ These patches changed public APIs and consensus-relevant behaviour. Look specifi
 
 ## Known-open, deliberately not fixed
 
-VINX-04, VINX-10, VINX-12, VX-RED-003/007, VINX-06 — see FINDINGS_STATUS.md. Do not
-report them as new. **Do** verify my claim that they are *not* made worse by these
-patches, and check my reasoning that they require protocol changes rather than local
-fixes.
+See FINDINGS_STATUS.md, "Still open": the BLS PoP is not bound to the validator address
+or `chain_id`; there are no weak-subjectivity checkpoints; a validator can bond without
+a BLS key; the vote lock is per height, not per `(height, round)`; plus VINX-14, 16/22,
+17/18, 19, 21, 23.
+
+Do not report these as new. **Do** verify my claim that they are not made worse by these
+patches, and check my reasoning that each requires a protocol change rather than a local
+fix — if any of them can in fact be closed locally, say so and show how.
+
+## Claims in the dossier I want checked specifically
+
+These are assertions I made. Treat each as a hypothesis and confirm or refute it against
+the code:
+
+1. That `sign_block_bls` has always set the bitmap, so removing the empty-bitmap
+   fallback costs no legitimate producer anything.
+2. That requiring quorum on P2P block ingestion would stall the chain, which is why
+   `verify_proposer_authenticated` deliberately does not require it.
+3. That `producer.rs` always sets the proposer's own bitmap bit, so a produced block
+   satisfies the authentication check it will face at its peers.
+4. That the bootstrap deadlock is genuinely closed — that a fresh multi-node network can
+   now reach a state where all validators are authenticable, without operator action
+   beyond configuring genesis.
+5. That `last_block_ts` being the last serialized field is what makes the v18→v19
+   migration safe.
 
 ## Output
 

@@ -89,8 +89,108 @@ Each fix, and what it claims. Attack the claim.
    allow now that duplicate registration is refused (consider re-registration after a
    validator exits, and cross-chain PoP replay)?
 
+## Second round of patches — attack these too
+
+These landed after the first dossier was written. Several change consensus rules, so
+they are the highest-value targets in the repository right now.
+
+7. **VINX-04 — `state_root` now commits to consensus state**
+   (`WorldState::compute_consensus_root`, `compute_state_root`).
+   `state_root = sha256(DST ‖ accounts_root ‖ consensus_root)`, where `consensus_root`
+   is a bincode encoding of the validator set, pool, admin key and policy, pending
+   governance and upgrades, epoch beacon, supply counters and more.
+   *Attack:* find a consensus field that still is **not** committed — enumerate the
+   `WorldState` fields and diff them against the `ConsensusCommitment` struct; anything
+   missing that is not `serde(skip)` is a hole. Then attack determinism, which is the
+   real risk here: is every collection in that encoding order-stable across nodes?
+   `banned_validator_keys` is a `HashSet` and is sorted before hashing — is anything
+   else reachable with a non-deterministic iteration order, directly or nested inside
+   `ValidatorPoolEntry`, `GovernanceProposal`, `ModuleEntry`, `ReliabilityMap`? Can a
+   `serde(skip)` field influence a committed one? And check the timing: `state_root` is
+   computed at a specific point in block application — can a field included in the
+   commitment be mutated between the producer's call and a validator's, so the two
+   compute different roots for the same block? That is a fork.
+
+8. **VINX-12 — `signing_bytes` length-prefixes the payload**
+   (`Transaction::signing_bytes`).
+   `payload` is now preceded by a `u32` big-endian length, written unconditionally.
+   *Attack:* is the encoding actually injective now? Try to construct any two distinct
+   transactions sharing signing bytes — vary `tx_type`, the expiry flag, payload length
+   boundaries, the sponsor flag. Check the `u32` cast: `self.payload.len() as u32`
+   truncates above 4 GiB — is a payload that large reachable, and is
+   `MAX_TX_PAYLOAD_BYTES` enforced on every path that reaches `signing_bytes`
+   (including `hash()`, which the mempool and the compact-block resolver call on
+   unverified input)? Also check the JS in `rpc/ui.rs`: both signing paths were updated
+   by hand — do they byte-for-byte match the Rust for a non-empty payload?
+
+9. **VINX-10 — snapshot verified against the block header, HTTPS required**
+   (`sync::snapshot_sync_from_peer`, `sync::is_transport_acceptable`).
+   The recomputed root must equal `snap.block.header.state_root`, the block height must
+   match, and the block must pass `validate_block_with_registry` against the snapshot's
+   *own* validator set.
+   *Attack:* the node still trusts the snapshot's own validator set — build a fully
+   self-consistent fake history (attacker-controlled validators with registered BLS
+   keys, quorum-signed) and show it is adopted and marked finalized. That is the known
+   residual risk; confirm whether the checks make it *harder* or are pure theatre.
+   Separately, attack `is_transport_acceptable`: it parses the host with string
+   splitting before an `IpAddr` parse — try IPv6 zone ids, userinfo containing `/` or
+   `#`, uppercase, trailing dots (`127.0.0.1.`), decimal/octal/hex IPv4 forms
+   (`http://2130706433/`), and anything reqwest would resolve differently from this
+   parser. A parser/resolver mismatch is the classic SSRF-style bypass.
+
+10. **VX-RED-003/007 — durable vote lock**
+    (`Storage::claim_vote`, its callers in `p2p/mod.rs` and `node.rs`).
+    The lock is claimed before signing; refusal or error means no signature.
+    *Attack:* find a path that still releases a signature at a height without claiming
+    the lock. `p2p/mod.rs` guards the lock behind `if let Some(storage)` — what happens
+    on a node with `data_dir: None` (storage absent)? Does it then sign unconditionally,
+    and is that reachable in a real deployment? In `node.rs` the lock is claimed *after*
+    `produce_block` (the hash is not known before) — can a validator produce a block and
+    have a competing co-signature already in flight for the same height? Is the redb
+    write actually durable at the point `claim_vote` returns, or does redb buffer it?
+    Is there a TOCTOU between two concurrent tasks reaching `claim_vote`? And: the
+    `votes` table grows without bound — is that a disk-exhaustion vector?
+
+11. **VINX-06 — jailing requires an elapsed slot**
+    (`reliability::on_block_applied`, `SLOT_TIMEOUT_SECS`, `WorldState::last_block_ts`).
+    A missed proposal is charged only when `block_ts - prev_block_ts >=
+    SLOT_TIMEOUT_SECS`.
+    *Attack:* the condition is now attacker-influenceable in the other direction — a
+    proposer chooses its own `block_ts` within the drift bound. Can a validator inflate
+    the apparent gap to jail an honest leader anyway, or suppress it to make a genuinely
+    absent leader never jailed (a liveness attack: keep a faulty leader in rotation
+    forever)? `last_block_ts` is set inside `settle_block` — check it is set on every
+    path that applies a block (production, P2P, sync, reorg replay) and that a reorg
+    rewinds it correctly; a stale `last_block_ts` after a reorg changes the jailing
+    decision and therefore the state root.
+
+12. **Bootstrap: genesis BLS registration and startup auto-registration**
+    (`GenesisConfig::validator_bls`, `BlsKeyFile`, the auto-registration block in
+    `main.rs`).
+    *Attack:* the node auto-submits a `RegisterBlsKey` transaction at startup using the
+    account nonce it reads at that moment. What happens if a transaction for that nonce
+    is already in the mempool, or if the node restarts repeatedly? Can the
+    auto-registration be induced to overwrite a good registration with a stale one, or
+    be used as a nonce-consumption grief? `create_genesis_state` **panics** on an invalid
+    PoP — is that reachable from any input an attacker controls (a genesis spec file
+    fetched or supplied remotely)? A remote panic is a DoS.
+
+13. **VINX-13/20/24 — payload bound, admin fail-closed, strict Ed25519**
+    *Attack:* for VINX-20, enumerate every governance path — does any *other* handler
+    still authorize with the old permissive pattern? For VINX-24, `verify_strict`
+    changes which signatures are valid: is there any persisted state, test vector, or
+    already-signed artefact that was valid under `verify` and is now rejected (a
+    consensus split between node versions)? For VINX-13, is `MAX_TX_PAYLOAD_BYTES`
+    checked before or after the expensive work in every path that accepts untrusted
+    transactions?
+
 ## Also look for
 
+- **Cross-fix interactions.** These patches were written in sequence and interact:
+  the consensus commitment (VINX-04) now includes `last_block_ts` (VINX-06), which is
+  written by `settle_block`; the vote lock (VX-RED-003) and proposer authentication
+  (VINX-01) both gate signing. Look for an ordering or reentrancy issue that only
+  appears when two of them are combined.
 - Any **new** vulnerability introduced by these patches — a rejection path that turns
   into a liveness attack (can an attacker make honest nodes reject legitimate blocks?),
   a new panic, a new unbounded allocation, a lock ordering change in `p2p/mod.rs` where
@@ -102,11 +202,20 @@ Each fix, and what it claims. Attack the claim.
 
 ## Known-open items — do not re-report as new
 
-VINX-04 (`state_root` does not commit to consensus state), VINX-10 (snapshot-sync root),
-VINX-12 (`signing_bytes` ambiguity), VX-RED-003/007 (equivocation detected not
-prevented), VINX-06 (jailing). These are confirmed and deliberately deferred; see
-FINDINGS_STATUS.md. **Do** report if a patch here made any of them worse or newly
-reachable.
+The following are confirmed, deliberately deferred, and recorded in FINDINGS_STATUS.md:
+
+- The BLS Proof-of-Possession is still signed over `pk_bytes` alone, not bound to the
+  validator address or `chain_id` (VINX-11 partial) — so it is replayable across chains.
+- No weak-subjectivity checkpoints: a syncing node still trusts the snapshot's own
+  validator set (VINX-10 residual).
+- A validator can enter the pool without a BLS key and register one afterwards.
+- The vote lock is per height, not per `(height, round)`.
+- VINX-07 (SyncResponse clock drift) is fixed but has no test — the exploit needs a
+  multi-node harness.
+- VINX-14, 16/22, 17/18, 19, 21, 23 remain open (see FINDINGS_STATUS.md).
+
+**Do** report if a patch made any of these worse or newly reachable, and **do** report a
+concrete exploit for any of them — "still open" is not "not worth proving".
 
 ## Output
 
