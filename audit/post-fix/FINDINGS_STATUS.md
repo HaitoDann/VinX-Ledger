@@ -32,11 +32,11 @@ fix was written; all six passed on the audited commit, i.e. each attack worked.
 | VINX-07 | `SyncResponse` lacks the clock-drift bound → supply inflation | Claude | **CONFIRMED** | P1 | Fixed `fbc5e73` |
 | VINX-09 | CompactBlock resolution unbounded → remote CPU DoS | Claude | **CONFIRMED** | P2 | Fixed `74e3c69` + `fbc5e73` |
 | VINX-11 | BLS PoP not bound to identity; key re-registrable | Claude | **CONFIRMED** | P2 | Partially fixed `8627ffc` + `b361343` |
-| VINX-12 / (ChatGPT serialization) | `signing_bytes` payload/sponsor ambiguity | Claude, ChatGPT (as UNPROVEN) | **CONFIRMED** | P2 | **Open** — consensus-breaking, see below |
-| VINX-04 | `state_root` does not commit to consensus state | Claude | **CONFIRMED** | P1 | **Open** — consensus-breaking, see below |
-| VINX-06 | One byzantine validator jails the honest set | Claude | LIKELY | P2 | **Open** |
-| VINX-10 | Snapshot-sync root is self-consistent, unbound to header | Claude | **CONFIRMED** | P1 | **Open** |
-| VX-RED-003 / VX-RED-007 | Equivocation detected but not prevented | ChatGPT | LIKELY | P1 | **Open** |
+| VINX-12 / (ChatGPT serialization) | `signing_bytes` payload/sponsor ambiguity | Claude, ChatGPT (as UNPROVEN) | **CONFIRMED** | P2 | Fixed `0824b7b` |
+| VINX-04 | `state_root` does not commit to consensus state | Claude | **CONFIRMED** | P1 | Fixed `1c75312` |
+| VINX-06 | One byzantine validator jails the honest set | Claude | **CONFIRMED** | P2 | Fixed `86f0b05` |
+| VINX-10 | Snapshot-sync root is self-consistent, unbound to header | Claude | **CONFIRMED** | P1 | Fixed `26df4a7` |
+| VX-RED-003 / VX-RED-007 | Equivocation detected but not prevented | ChatGPT | **CONFIRMED** | P1 | Fixed `bc7fb8e` |
 | VX-RED-008 | Reorg relies on a `trusted` precondition | ChatGPT (self-marked UNPROVEN) | UNPROVEN | P3 | No action |
 | VX-RED-009 | Deferred crypto lets txs accumulate before verification | ChatGPT (self-marked partial) | LIKELY | P3 | Mitigated by `MAX_NONCE_AHEAD` |
 | VX-RED-010 / FINDING-04 | P2P Sybil / rate-limit bypass; mempool deadlock | ChatGPT (UNPROVEN), Gemini (UNPROVEN) | UNPROVEN | P3 | No action |
@@ -95,149 +95,90 @@ contribution was correctly refuting FINDING-03, which Claude and ChatGPT had bot
 reported — a reminder that the refutations in these reports deserve the same
 independent check as the accusations.
 
-## Confirmed but deliberately NOT fixed here
+## Still open
 
-These are real and demonstrated, but each changes consensus or state encoding and must
-land as a coordinated protocol change with a golden-vector test and an activation
-height — not folded into a security patch series.
+### VINX-11 (partial) — the PoP is not bound to an identity
 
-### VINX-04 — `state_root` commits only to accounts (P1)
+Duplicate registration is now refused and duplicate keys are rejected among a block's
+signers, so one signature can no longer count twice. But the Proof-of-Possession is
+still signed over `pk_bytes` alone, not over `bls_pub_key ‖ validator_address ‖
+chain_id`. It therefore remains replayable across chains and carries no binding to the
+registering validator. Closing this changes the PoP format — a protocol change, and the
+right moment is alongside a BLS-at-bonding requirement.
 
-`hash_account` is `sha256(address ‖ balance ‖ nonce ‖ staked)`, so the root covers no
-consensus state at all: `validator_set`, `validator_pool` (bonds, BLS keys, PoP, VRF
-keys, jail status), `admin_address`, `admin_policy`, `pending_governance`,
-`pending_upgrade`, `epoch_beacon`, `base_fee`, `emitted_atoms`, `circulating_supply`,
-`chain_id` and more. Two nodes can disagree on the entire validator set and the admin
-key while publishing an identical `state_root`.
+### Weak subjectivity for snapshot-sync
 
-Proven: two `WorldState`s with identical accounts but different `validator_set`,
-`admin_address` and `epoch_beacon` produced equal roots.
+VINX-10 now verifies the snapshot against its block header and requires a real quorum
+from the snapshot's own validator set. A syncing node still trusts that validator set.
+The real answer is trusted checkpoints (header hash + height) shipped with the binary,
+plus cross-checking the snapshot against several independent peers. Neither is
+implemented.
 
-Since `state_root` is the only state-integrity check on every block-validation path
-(`p2p/mod.rs`, `sync.rs`, `reorg.rs`), any divergence in the uncovered region is
-silent. It also makes snapshot-sync unverifiable (VINX-10) and prevents light-client
-verification.
+### BLS key required at bonding time
 
-Recommended: `state_root = sha256(accounts_root ‖ consensus_root)` over a deterministic
-encoding of the consensus fields, locked by a golden vector.
+A validator can enter the pool without a BLS key and only then register one. Requiring
+the key as part of bonding would make "every active validator is authenticable" a
+structural invariant rather than a convergence process.
 
-### VINX-12 — `signing_bytes` payload/sponsor ambiguity (P2)
+### Per-round vote locking
 
-`payload` is appended with no length prefix, immediately followed by the sponsor
-marker (`0x00`, or `0x01 ‖ sponsor[20]`). The encoding is not injective. Proven: for any
-sponsor address whose last byte is `0x00` (1 in 256), a sponsored transaction and an
-unsponsored one with a re-cut payload produce **identical signing bytes and an identical
-txid**, so one signature is valid for two economically different transactions — the fee
-payer changes from the sponsor to the sender.
-
-ChatGPT flagged the missing framing and correctly declined to call it proven without a
-collision; the collision exists and is cheap to construct.
-
-Recommended: length-prefix `payload` (and any other variable-length field) in
-`signing_bytes`. This changes every transaction hash, so it is a hard fork.
-
-### VINX-10 — snapshot-sync trusts a self-consistent root (P1)
-
-`snapshot_sync_from_peer` compares the recomputed root against `snap.state_root`, a
-field from the *same peer* that sent the state — it proves only that the peer can hash
-what it just sent. It is never compared against `snap.block.header.state_root`, which
-is present in the response and free to check, and `Chain::new_from_snapshot` then marks
-the snapshot block **finalized** with no quorum verification. With VINX-04, even a
-correct check would not cover the validator set or admin key.
-
-Recommended: require `computed_root == snap.block.header.state_root`, validate the
-snapshot block against the registry, ship trusted checkpoints with the binary
-(weak subjectivity), and require HTTPS for `sync_peer_rpc`.
-
-### VX-RED-003 / VX-RED-007 — equivocation is detected, not prevented (P1)
-
-`record_signature()` returns `true` when a validator has already signed a different hash
-at the same height, but the result is used as telemetry: nothing stops the second
-signature. The invariant "one validator, one vote per height" is not enforced, and an
-attacker sending two valid competing blocks can make honest validators co-sign both
-branches.
-
-Recommended: a persistent, atomic, per-height (ideally per `(height, round)`) vote lock,
-consulted *before* signing and surviving restarts and local reorgs. This needs
-durable storage design and is not a local patch.
-
-### VINX-06 — one byzantine validator jails the honest set (LIKELY, P2)
-
-`on_block_applied` charges a missed proposal to the scheduled leader whenever the actual
-proposer differs, and the P2P path accepts any set member as proposer with no slot
-timeout — so a validator that consistently pre-empts the leader jails the whole honest
-set after three rounds. Marked LIKELY rather than CONFIRMED: not reproduced here.
-Note the mitigation Claude's report itself records — finality quorum is computed over
-the full set, so this breaks liveness and fairness, not safety.
-
-Recommended: charge a miss only after a verifiable slot timeout derived from the header
-timestamp, and reject a non-leader block proposed before that threshold.
+The vote lock is per height. If the protocol adopts explicit rounds, it must become
+per `(height, round)`.
 
 ## Not fixed, lower priority
 
-VINX-13 (unbounded tx `payload`), VINX-14 (governance `ScheduleUpgrade` bypasses the
-ADR 0006 notice delay), VINX-15 (node private keys written with default permissions),
+Fixed since: VINX-13 (unbounded tx `payload`, `07191f3`), VINX-15 (key files written
+world-readable, `48f5cb6`), VINX-20 (admin authority fail-open, `07191f3`),
+VINX-24 (non-strict Ed25519 verification, `07191f3`).
+
+Still open: VINX-14 (governance `ScheduleUpgrade` bypasses the ADR 0006 notice delay),
 VINX-16/VINX-22 (unbounded in-memory candidate and cooldown maps), VINX-17/VINX-18
 (ECVRF `validate_key` absent, committee selection not wired), VINX-19 (web UI handles a
-private key under a CDN script with no SRI/CSP), VINX-20 (admin authority fail-open when
-no admin is configured), VINX-21 (monotonically decreasing peer reputation),
-VINX-23 (`try_evict_for` O(n) per insertion), VINX-24 (non-strict Ed25519 verification).
+private key under a CDN script with no SRI/CSP), VINX-21 (monotonically decreasing peer
+reputation), VINX-23 (`try_evict_for` O(n) per insertion).
 
-VINX-15, VINX-19 and VINX-24 are cheap and worth doing next; the rest are hardening.
+VINX-19 and VINX-14 are the two worth doing next; the rest are performance hardening.
 
-## DEPLOYMENT PREREQUISITE — read before deploying this branch
+## Bootstrap prerequisite — RESOLVED (`48f5cb6`)
 
-**On-chain BLS key registration is now required for a block to be accepted by peers.**
+The proposer-authentication fix (VINX-01) made on-chain BLS registration a precondition
+for a block to be accepted. At the time it was introduced, `create_genesis_state`
+registered no BLS keys and nothing in the codebase could submit a `RegisterBlsKey`
+transaction, so on a fresh multi-node network peers would have refused every block —
+and the transaction that fixes that can only travel inside a block peers accept. A
+bootstrap deadlock, introduced by this series and recorded here as a launch blocker.
 
-`verify_proposer_authenticated` (VINX-01) verifies the proposer's co-signature against
-its key in the on-chain registry. A proposer whose key is not registered cannot be
-authenticated — you cannot verify authorship against a key you do not have — so its
-blocks are refused. That is the only secure behaviour available, but it has an
-operational consequence that must not be discovered in production.
+It is now closed:
 
-Current state of the repository:
+* `GenesisConfig::validator_bls` registers the genesis validator's key (PoP verified) so
+  it is authenticable from height 1; `GenesisSpec` carries it for multi-node testnets.
+* The node auto-submits its own `RegisterBlsKey` at startup when it is bonded and its
+  registered key is missing or stale, so later validators converge without operator
+  action. The genesis validator produces the blocks that carry those registrations.
+* The validator BLS key is now persisted (`<data_dir>/validator_bls.json`). It was
+  previously regenerated on every `NodeConfig::new`, which — once blocks are
+  authenticated against a registered key — would have had every node's blocks refused
+  after its first restart.
 
-* `create_genesis_state` registers **no** BLS keys. `validator_pool` entries start with
-  `bls_pub_key: None`.
-* There is **no way to submit a `RegisterBlsKey` transaction**: no node startup path, no
-  wallet CLI subcommand. `grep -rn "RegisterBlsKey" crates/` returns only the type
-  definition, the state handler and tests.
+Pinned by `audit_regression.rs::genesis_registers_the_validator_bls_key` and
+`::genesis_rejects_an_invalid_bls_pop`.
 
-So on a fresh multi-node network the registry stays empty, and with this branch peers
-reject every block. The producer still appends to its *own* chain (`producer.rs` does not
-call the check), so a single-node devnet is unaffected — but a multi-node network cannot
-make progress, and the transaction needed to fix that cannot be included in a block that
-peers accept. That is a bootstrap deadlock.
-
-This requirement is **partly pre-existing**: `sync.rs:129` and `sync.rs:362` already
-called `validate_block_with_registry`, and since `producer.rs` always sets the proposer's
-bitmap bit, that path already failed against an empty registry. The sync path was
-therefore already broken in this configuration. What changed is that the requirement now
-also applies to the main `NewBlock` gossip path, so the gap became load-bearing instead
-of latent.
-
-Pinned by `audit_regression_node.rs::unregistered_proposer_is_refused_and_registration_is_a_prerequisite`.
-
-**Before deploying, one of these must land:**
-
-1. Add the initial validators' BLS public keys to `GenesisConfig` and register them in
-   `create_genesis_state`; and/or
-2. Require a BLS key at bonding time (`Stake` / validator entry), so a validator cannot
-   join the set without one; and
-3. Ship the missing tooling — a wallet subcommand and/or node startup auto-registration —
-   so an existing validator can register.
-
-Option 1 or 2 is the real fix: a validator that cannot be authenticated should not be in
-the active set. Both are protocol changes and are deliberately out of scope for this
-security series, but this is a **launch blocker**, not hardening.
+Still an operational requirement, just no longer a deadlock: **a validator must have a
+registered BLS key before its blocks are accepted.** Requiring one at bonding time, so a
+validator cannot enter the active set without it, remains the stronger design and is
+listed below.
 
 ## Needs human review
 
 1. **`apps/vinx-desktop/src-tauri`** — excluded from the workspace and not covered by
    `cargo test --workspace`. Gemini's `export_wallet` finding is fabricated, but the
    real IPC surface, CSP and key handling still need a first-hand review.
-2. **The three open consensus items above** (VINX-04, VINX-10, VX-RED-003) require a
-   protocol decision, not just a patch.
+2. **The consensus changes in this series are hard forks** — `state_root` now commits
+   to consensus state (VINX-04) and `signing_bytes` length-prefixes the payload
+   (VINX-12), so every state root and every transaction hash changes. This is
+   deliberate and safe only because the chain is pre-launch at `0.1.0-alpha.1` with no
+   live network to migrate. Confirm that assumption before merging anywhere that has
+   real state.
 3. **The deployment prerequisite above** — decide between genesis registration and
    bonding-time enforcement, and ship the registration tooling. Nothing else in this
    series changes network behaviour as much as this does.

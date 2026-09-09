@@ -16,7 +16,7 @@ cargo test --workspace
 | `cargo fmt --all --check` | clean |
 | `cargo check --workspace --all-targets` | 0 errors |
 | `cargo clippy --workspace --all-targets` | 0 errors (warnings pre-existing, chiefly `clone` on `Copy` `Address`) |
-| `cargo test --workspace` | **397 passed, 0 failed** |
+| `cargo test --workspace` | **414 passed, 0 failed** |
 
 Every commit in the series was also checked out individually and verified to build
 (`cargo check --workspace --all-targets`) and pass `cargo test --workspace` on its own,
@@ -83,9 +83,74 @@ unchanged in substance; they now run against the registry, which is strictly str
   ingestion paths, which are now identical; the exploit itself is unverified here.
 * **VINX-09** has no timing assertion — a wall-clock threshold is a flaky test. The
   bound is a structural precondition verified by inspection.
-* **VINX-04, VINX-10, VINX-12, VX-RED-003, VINX-06** remain open and therefore have no
-  passing regression test. Their PoCs demonstrated the flaw and are reproduced in
-  BEFORE.md; they were not committed as `#[ignore]`d tests because a permanently failing
-  test in the tree is noise. FINDINGS_STATUS.md records what each still needs.
+* **VINX-04, VINX-10, VINX-12, VX-RED-003 and VINX-06 are now fixed** and each carries a
+  regression test (see the second round below). What remains open — the PoP identity
+  binding, weak-subjectivity checkpoints, BLS-at-bonding, per-round vote locking — is
+  listed in FINDINGS_STATUS.md and has no test, by definition.
 * **No multi-node adversarial testing** was performed. Everything here is unit and
   integration level within one process.
+
+
+## Second round — tests added with the remaining fixes
+
+`crates/vinx-state/src/world_state.rs` (unit)
+
+| Test | Covers |
+|---|---|
+| `test_state_root_commits_to_consensus_state` | VINX-04 — mutates ten consensus fields individually; the root must move for each |
+| `test_consensus_root_is_insertion_order_independent` | VINX-04 — the `HashSet` ordering hazard |
+| `test_state_root_empty_accounts_still_commits_consensus` | VINX-04 — replaces the old "empty ⇒ zero root" assertion |
+| `test_v19_meta_suffix_round_trips_into_a_v18_blob` | VINX-06 — the bincode prefix-append property the storage migration relies on |
+
+`crates/vinx-core/src/transaction.rs` (unit)
+
+| Test | Covers |
+|---|---|
+| `test_signing_bytes_payload_sponsor_boundary_is_unambiguous` | VINX-12 — builds the exact collision (sponsor ending `0x00`) |
+| `test_signing_bytes_payload_length_is_committed` | VINX-12 — empty vs `[0x00]` payload |
+
+`crates/vinx-core/src/reliability.rs` (unit)
+
+| Test | Covers |
+|---|---|
+| `preemptive_proposer_cannot_jail_the_honest_set` | VINX-06 — the original attack: 60 pre-emptive blocks, nobody jailed |
+| `genuinely_absent_leader_is_still_jailed` | VINX-06 — liveness accounting still works |
+
+`crates/vinx-crypto/src/keys.rs` (unit)
+
+| Test | Covers |
+|---|---|
+| `small_order_public_key_is_rejected` | VINX-24 — strict verification |
+| `honest_signature_still_verifies_under_strict` | VINX-24 — no regression for honest signatures |
+
+`crates/vinx-node/src/sync.rs` (unit)
+
+| Test | Covers |
+|---|---|
+| `https_is_accepted_and_public_http_is_refused` | VINX-10 — transport requirement |
+| `loopback_http_is_allowed_for_local_development` | VINX-10 — dev escape hatch |
+| `lookalike_hosts_are_refused` | VINX-10 — `127.0.0.1.evil.com` must not pass (this test caught a real bug in the first version of the guard) |
+
+`crates/vinx-node/tests/storage_test.rs`
+
+| Test | Covers |
+|---|---|
+| `vote_lock_prevents_equivocation_and_survives_restart` | VX-RED-003/007 — grant, idempotent re-sign, refusal, durability across reopen |
+
+`crates/vinx-state/tests/audit_regression.rs`
+
+| Test | Covers |
+|---|---|
+| `genesis_registers_the_validator_bls_key` | Bootstrap deadlock |
+| `genesis_rejects_an_invalid_bls_pop` | Genesis must not store an unverifiable key |
+| `oversized_payload_is_rejected_on_every_path` | VINX-13 — admission, verified apply, trusted apply, and the exact limit |
+| `admin_action_is_refused_when_no_authority_is_configured` | VINX-20 — fail closed |
+
+### Still not covered
+
+* **VINX-07** still has no test (needs the multi-node harness), unchanged from round one.
+* **VINX-09** still has no timing assertion; the bound is structural.
+* **No multi-node adversarial testing** has been performed. This remains the single
+  largest gap: every consensus fix here is validated in-process, and the properties they
+  protect (no two finalized blocks at one height, no validator voting twice, all nodes
+  agreeing on transaction validity) are network properties.
