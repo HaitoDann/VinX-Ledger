@@ -31,6 +31,10 @@ struct CompactBlockState {
     tx_hashes: Vec<Hash32>,
     /// Transactions resolved so far, keyed by hash for O(1) lookup.
     resolved: HashMap<Hash32, Transaction>,
+    /// Proposer proof carried by the announcement (VINX-01): the reconstructed block
+    /// must be re-authenticated, so the aggregate/bitmap cannot be dropped here.
+    bls_aggregate: Option<Vec<u8>>,
+    bls_bitmap: Vec<u8>,
 }
 use vinx_state::WorldState;
 
@@ -668,9 +672,18 @@ async fn dispatch_message(
             //    (ADR 0027/0031). On exige donc l'appartenance au set, pas le leader strict —
             //    cohérent avec consensus::validate_block (sinon les blocs backup sont rejetés
             //    et la finalité se fige à n≥2, cf. banc n=3).
-            if !vs.contains(&block.header.validator) {
-                warn!(height, "P2P block from non-validator proposer");
-                return;
+            // VINX-01 / VX-RED-002 — set membership is not authorship. `header.validator`
+            // is a public address, so on its own it proves nothing: any peer could name an
+            // honest validator and have the block applied. Require a co-signature from the
+            // proposer's *registered* BLS key over this exact header.
+            {
+                let indexed_pks = state.read().await.indexed_bls_keys(&vs);
+                if let Err(e) =
+                    crate::consensus::verify_proposer_authenticated(&block, &vs, &indexed_pks)
+                {
+                    warn!(height, error = %e, "P2P block failed proposer authentication");
+                    return;
+                }
             }
 
             // ADR 0003: equivocation detection — check if this proposer already signed a
@@ -1121,8 +1134,12 @@ async fn dispatch_message(
         }
 
         // ADR 0037 — Compact block propagation.
-
-        P2pMessage::CompactBlock { header, tx_hashes } => {
+        P2pMessage::CompactBlock {
+            header,
+            tx_hashes,
+            bls_aggregate,
+            bls_bitmap,
+        } => {
             let height = header.height;
 
             // Discard if we're already at or past this height.
@@ -1136,26 +1153,40 @@ async fn dispatch_message(
                 return;
             }
 
-            // Look up which transactions we already have in the mempool.
-            let (resolved_txs, missing_hashes): (Vec<Transaction>, Vec<[u8; 32]>) = {
-                let mp = mempool.read().await;
-                let mut resolved = Vec::new();
-                let mut missing = Vec::new();
-                for &h in &tx_hashes {
-                    let found = mp.pending_txs().into_iter().find(|tx| tx.hash() == h).cloned();
-                    match found {
-                        Some(tx) => resolved.push(tx),
-                        None => missing.push(h),
-                    }
-                }
-                (resolved, missing)
-            };
+            // VINX-09 — bound the announced work before doing any. `tx_hashes` was limited
+            // only by MAX_DECODED_BYTES (16 MiB ≈ 524 288 hashes), and each hash triggered a
+            // full mempool allocation plus a SHA-256 per entry, all under the mempool lock:
+            // one message froze the node. The count must also match the header the proposer
+            // committed to.
+            if tx_hashes.len() != header.tx_count as usize {
+                warn!(
+                    height,
+                    announced = tx_hashes.len(),
+                    header_tx_count = header.tx_count,
+                    "CompactBlock: tx_hashes disagree with header.tx_count"
+                );
+                return;
+            }
+            if tx_hashes.len() > P2pMessage::MAX_TX_REQUEST_HASHES {
+                warn!(
+                    height,
+                    count = tx_hashes.len(),
+                    "CompactBlock: too many tx hashes"
+                );
+                return;
+            }
+
+            // Look up which transactions we already have in the mempool — single scan.
+            let (resolved_txs, missing_hashes): (Vec<Transaction>, Vec<[u8; 32]>) =
+                mempool.read().await.resolve_hashes(&tx_hashes);
 
             // Build an in-flight state for this height.
             let mut state_entry = CompactBlockState {
                 header: header.clone(),
                 tx_hashes: tx_hashes.clone(),
                 resolved: HashMap::new(),
+                bls_aggregate: bls_aggregate.clone(),
+                bls_bitmap: bls_bitmap.clone(),
             };
             for tx in resolved_txs {
                 state_entry.resolved.insert(tx.hash(), tx);
@@ -1172,9 +1203,9 @@ async fn dispatch_message(
                 let block = Block {
                     header,
                     transactions: ordered_txs,
-                    bls_aggregate: None,
+                    bls_aggregate,
                     bls_cosigner_pks: vec![],
-                    bls_bitmap: vec![],
+                    bls_bitmap,
                 };
                 info!(height, "CompactBlock: all txs known, applying immediately");
                 // Re-dispatch as a full NewBlock through the existing path.
@@ -1274,13 +1305,15 @@ async fn dispatch_message(
                         ordered_txs.push(tx.clone());
                     }
                 }
+                let bls_aggregate = entry.bls_aggregate.clone();
+                let bls_bitmap = entry.bls_bitmap.clone();
                 pending_compact.remove(&height);
                 let block = Block {
                     header,
                     transactions: ordered_txs,
-                    bls_aggregate: None,
+                    bls_aggregate,
                     bls_cosigner_pks: vec![],
-                    bls_bitmap: vec![],
+                    bls_bitmap,
                 };
                 info!(height, "CompactBlock: reassembly complete, applying");
                 Box::pin(dispatch_message(
@@ -1360,9 +1393,17 @@ async fn dispatch_message(
                 // Tout validateur enregistré peut proposer (backup sur slot-skip, ADR 0027/0031) —
                 // même règle que consensus::validate_block. Le leader strict rejetait à tort les
                 // blocs backup et figeait la sync/finalité à n≥2 (révélé par le banc n=3).
-                if !vs.contains(&block.header.validator) {
-                    warn!(height, "SyncResponse block from non-validator proposer");
-                    break;
+                // VINX-01 — `SyncResponse` is a freely gossipable message carrying up to
+                // MAX_SYNC_RESPONSE_BLOCKS blocks. Authenticate each proposer against the
+                // on-chain BLS registry, exactly like the NewBlock path.
+                {
+                    let indexed_pks = state.read().await.indexed_bls_keys(&vs);
+                    if let Err(e) =
+                        crate::consensus::verify_proposer_authenticated(&block, &vs, &indexed_pks)
+                    {
+                        warn!(height, error = %e, "SyncResponse block failed proposer authentication");
+                        break;
+                    }
                 }
                 if block.header.prev_hash != chain.read().await.tip_hash() {
                     warn!(height, "SyncResponse block wrong prev_hash");
@@ -1372,6 +1413,24 @@ async fn dispatch_message(
                 if block.header.timestamp <= chain.read().await.tip_timestamp() {
                     warn!(height, "SyncResponse block timestamp not monotonic");
                     break;
+                }
+                // VINX-07 — the three other block-ingestion paths (NewBlock, sync_from_peer,
+                // parallel_sync_from_peer) bound the timestamp by now + MAX_CLOCK_DRIFT_SECS;
+                // this one only checked monotonicity. Six consecutive blocks dated far in the
+                // future move the Median Time Past, and protocol time drives both emission
+                // (`emit_work_reward`) and unbond maturation — so an unbounded timestamp mints
+                // the remaining supply and matures every slashable bond at once.
+                {
+                    let now = std::time::SystemTime::now()
+                        .duration_since(std::time::UNIX_EPOCH)
+                        .map(|d| d.as_secs())
+                        .unwrap_or(0);
+                    if block.header.timestamp
+                        > now.saturating_add(vinx_core::amount::MAX_CLOCK_DRIFT_SECS)
+                    {
+                        warn!(height, "SyncResponse block timestamp too far in the future");
+                        break;
+                    }
                 }
                 // ADR 0015: parallel transaction-signature verification, then sequential
                 // trusted apply.

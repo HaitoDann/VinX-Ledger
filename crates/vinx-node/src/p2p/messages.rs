@@ -84,7 +84,6 @@ pub enum P2pMessage {
     },
 
     // ── ADR 0037: Compact block propagation ───────────────────────────────────
-
     /// Compact block: header plus the SHA-256 hash of each transaction (ADR 0037).
     ///
     /// Sent by the block producer instead of (or in addition to) the full
@@ -95,6 +94,14 @@ pub enum P2pMessage {
         header: BlockHeader,
         /// SHA-256 hashes of the block's transactions, in order.
         tx_hashes: Vec<[u8; 32]>,
+        /// Aggregate BLS signature over `header.hash()` (96 bytes), carried so the
+        /// reconstructed block can be authenticated (VINX-01). Without it the compact
+        /// path rebuilt a block with **no signature at all** and applied it.
+        #[serde(default)]
+        bls_aggregate: Option<Vec<u8>>,
+        /// Bitmap of signing validator indices, matching `bls_aggregate`.
+        #[serde(default)]
+        bls_bitmap: Vec<u8>,
     },
 
     /// Request a set of transactions by hash from a peer that announced them
@@ -108,10 +115,7 @@ pub enum P2pMessage {
     },
 
     /// Response to a `TxRequest` (ADR 0037).
-    TxResponse {
-        height: u64,
-        txs: Vec<Transaction>,
-    },
+    TxResponse { height: u64, txs: Vec<Transaction> },
 }
 
 impl P2pMessage {
@@ -181,6 +185,8 @@ impl P2pMessage {
         P2pMessage::CompactBlock {
             header: block.header.clone(),
             tx_hashes,
+            bls_aggregate: block.bls_aggregate.clone(),
+            bls_bitmap: block.bls_bitmap.clone(),
         }
     }
 }
@@ -339,7 +345,9 @@ mod tests {
         let encoded = msg.encode();
         let decoded = P2pMessage::decode(&encoded).unwrap();
         match decoded {
-            P2pMessage::CompactBlock { header, tx_hashes } => {
+            P2pMessage::CompactBlock {
+                header, tx_hashes, ..
+            } => {
                 assert_eq!(header.height, block.header.height);
                 assert_eq!(tx_hashes.len(), block.transactions.len());
             }
@@ -380,6 +388,8 @@ mod tests {
             P2pMessage::CompactBlock {
                 header: dummy_block().header,
                 tx_hashes: vec![],
+                bls_aggregate: None,
+                bls_bitmap: vec![],
             }
             .topic(),
             "vinx/compact/1"
