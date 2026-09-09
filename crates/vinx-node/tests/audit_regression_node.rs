@@ -194,3 +194,29 @@ fn reorg_replace_is_height_base_aware() {
         .reorg_replace(5000, make_block(5000, [0u8; 32], v))
         .is_empty());
 }
+
+/// Deployment invariant surfaced by the VINX-01 fix: a proposer whose BLS key is NOT
+/// registered on-chain cannot be authenticated, so its blocks are refused. This is the
+/// intended (and only possible) secure behaviour — you cannot verify authorship against
+/// a key you do not have — but it makes on-chain BLS registration a hard prerequisite
+/// for block acceptance. See audit/post-fix/FINDINGS_STATUS.md "Deployment prerequisite".
+#[test]
+fn unregistered_proposer_is_refused_and_registration_is_a_prerequisite() {
+    let validators: Vec<Address> = (0..3).map(|_| addr()).collect();
+    let vs = ValidatorSet::new(validators.clone());
+
+    // A genuine proposer signing with its real key, exactly as `producer.rs` does.
+    let mut block = make_block(1, [0u8; 32], validators[1]);
+    consensus::sign_block_bls(&mut block, &bls_sk(1), 1).unwrap();
+
+    // Registry empty (the state of a fresh chain: genesis registers no BLS keys).
+    let empty_registry: Vec<Option<[u8; 48]>> = vec![None; 3];
+    assert!(
+        consensus::verify_proposer_authenticated(&block, &vs, &empty_registry).is_err(),
+        "an unregistered proposer cannot be authenticated"
+    );
+
+    // Once the key is registered, the same block authenticates.
+    consensus::verify_proposer_authenticated(&block, &vs, &registry(3))
+        .expect("a registered proposer's block is accepted");
+}
