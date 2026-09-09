@@ -1227,6 +1227,16 @@ impl WorldState {
 
         // Sponsored fee: the sponsor must exist and cover the fee it signed for.
         if let Some(ref sponsor) = tx.sponsor {
+            // VINX-03 defence in depth: a sponsored transaction must at least *carry* the
+            // sponsor's key and signature. The authoritative cryptographic check is
+            // `verify_tx_signature_pure` on the admission paths; this structural gate makes
+            // a stripped-sponsorship transaction impossible to park in the mempool even if
+            // a future caller forgets it.
+            if tx.sponsor_pub_key.is_none() || tx.sponsor_signature.is_none() {
+                return Err(CoreError::InvalidTransaction(
+                    "sponsored transaction is missing the sponsor's key or signature".to_string(),
+                ));
+            }
             let Some(sponsor_acc) = self.accounts.get(sponsor) else {
                 return Err(CoreError::InvalidTransaction(
                     "sponsor account does not exist".to_string(),

@@ -115,23 +115,10 @@ pub async fn submit_tx(
     State(node): State<Arc<Node>>,
     Json(tx): Json<Transaction>,
 ) -> ApiResult<TxSubmitResponse> {
-    // Pre-validate signature before accepting into mempool
-    if let Some(pk) = &tx.pub_key {
-        let derived = Address::from_public_key(pk);
-        if derived != tx.from {
-            return Err(ApiError::BadRequest(
-                "Public key does not match sender address".to_string(),
-            ));
-        }
-        if let Some(sig) = &tx.signature {
-            pk.verify(&tx.signing_bytes(), sig)
-                .map_err(|e| ApiError::BadRequest(e.to_string()))?;
-        } else {
-            return Err(ApiError::BadRequest("Missing signature".to_string()));
-        }
-    } else {
-        return Err(ApiError::BadRequest("Missing public key".to_string()));
-    }
+    // Pre-validate signature before accepting into mempool.
+    // VINX-03: must be the canonical predicate — an ad-hoc sender-only check let a
+    // sponsored transaction with no sponsor signature drain the named sponsor's account.
+    WorldState::verify_tx_signature_pure(&tx).map_err(|e| ApiError::BadRequest(e.to_string()))?;
 
     let tx_hash = hex::encode(tx.hash());
     match admit_to_mempool(&node, tx).await {
@@ -796,22 +783,9 @@ pub async fn submit_tx_batch(
         .par_iter()
         .map(|tx| {
             let hash = hex::encode(tx.hash());
-            let result = (|| {
-                let pk = tx
-                    .pub_key
-                    .as_ref()
-                    .ok_or_else(|| "Missing public key".to_string())?;
-                let derived = Address::from_public_key(pk);
-                if derived != tx.from {
-                    return Err("Public key does not match sender address".to_string());
-                }
-                let sig = tx
-                    .signature
-                    .as_ref()
-                    .ok_or_else(|| "Missing signature".to_string())?;
-                pk.verify(&tx.signing_bytes(), sig)
-                    .map_err(|e| e.to_string())
-            })();
+            // VINX-03: same canonical predicate as the single-tx path — it also
+            // verifies the sponsor's key and signature.
+            let result = WorldState::verify_tx_signature_pure(tx).map_err(|e| e.to_string());
             (hash, result)
         })
         .collect();

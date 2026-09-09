@@ -503,6 +503,21 @@ impl Transaction {
     /// Builder: attach a sponsor who will pay the fee instead of the sender.
     /// `keypair` is the sponsor's keypair. Call after all other fields are set,
     /// since the sponsor signs the transaction's current signing bytes.
+    ///
+    /// # Ordering: the sender must sign *after* this call
+    ///
+    /// Attaching a sponsor appends the sponsor marker to [`Transaction::signing_bytes`],
+    /// so any sender signature made earlier (e.g. by `new_transfer`) no longer verifies.
+    /// Call [`Transaction::sign`] with the sender's keypair afterwards:
+    ///
+    /// ```ignore
+    /// let mut tx = Transaction::new_transfer(&sender, to, amount, fee, nonce)
+    ///     .with_sponsor(&sponsor);
+    /// tx.sign(&sender); // re-sign: signing bytes changed
+    /// ```
+    ///
+    /// Signature fields are themselves excluded from the signing bytes, so re-signing the
+    /// sender does not invalidate the sponsor's signature.
     pub fn with_sponsor(mut self, keypair: &KeyPair) -> Self {
         let pk = keypair.public_key();
         let addr = Address::from_public_key(&pk);

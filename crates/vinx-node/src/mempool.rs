@@ -6,6 +6,7 @@ use std::sync::Arc;
 use tokio::sync::Notify;
 use vinx_core::{CoreError, Transaction};
 use vinx_crypto::{Address, Hash32};
+use vinx_state::WorldState;
 
 const DEFAULT_MAX_SIZE: usize = 100_000;
 /// Maximum pending transactions per sender address.
@@ -365,15 +366,17 @@ impl Mempool {
     }
 
     /// Verifies a transaction's cryptographic signature without holding &mut self.
+    ///
+    /// VINX-03 / VX-RED-005: this used to check the *sender* signature only. A sponsored
+    /// transaction whose `sponsor_signature` was absent or forged therefore entered the
+    /// "verified" queue, and the producer applied it with `apply_transaction_trusted`
+    /// (which skips crypto by contract) — debiting `fee` from an account that never
+    /// consented, with no upper bound on `fee`. Peers, meanwhile, re-check the sponsor via
+    /// `verify_tx_signature_pure` and reject the block, so the producer also forked itself.
+    ///
+    /// There must be exactly one definition of cryptographic validity. This delegates to it.
     fn verify_sig_static(tx: &Transaction) -> bool {
-        let Some(pk) = &tx.pub_key else { return false };
-        if Address::from_public_key(pk) != tx.from {
-            return false;
-        }
-        let Some(sig) = &tx.signature else {
-            return false;
-        };
-        pk.verify(&tx.signing_bytes(), sig).is_ok()
+        WorldState::verify_tx_signature_pure(tx).is_ok()
     }
 }
 
