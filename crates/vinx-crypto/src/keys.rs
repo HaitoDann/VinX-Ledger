@@ -68,7 +68,13 @@ impl PublicKey {
         let vk = ed25519_dalek::VerifyingKey::from_bytes(&self.0)
             .map_err(|_| CryptoError::InvalidKeyBytes)?;
         let sig = ed25519_dalek::Signature::from_bytes(&signature.0);
-        vk.verify(message, &sig)
+        // VINX-24: `verify_strict`, not `verify`. The permissive path accepts small-order
+        // public keys and mixed-order components, so a single signature can verify under
+        // more than one public key. On a chain where `Address` is derived from the public
+        // key, that weakens the "one signature, one signer" property the whole transaction
+        // model rests on. Strict verification also rejects non-canonical encodings, which
+        // keeps signature validity identical on every node — a divergence here is a fork.
+        vk.verify_strict(message, &sig)
             .map_err(|_| CryptoError::InvalidSignature)
     }
 }
@@ -131,5 +137,33 @@ mod tests {
         let s1 = kp.sign(msg);
         let s2 = kp.sign(msg);
         assert_eq!(s1, s2);
+    }
+
+    /// VINX-24 — verification must be strict. `verify` (non-strict) accepts small-order
+    /// public keys and mixed-order components, so one signature can verify under more
+    /// than one public key; `verify_strict` rejects them. A signature must also stay
+    /// valid or invalid identically on every node, or validity itself forks.
+    #[test]
+    fn small_order_public_key_is_rejected() {
+        // The canonical small-order Edwards point of order 8.
+        let small_order = [
+            0xc7u8, 0x17, 0x6a, 0x70, 0x3d, 0x4d, 0xd8, 0x4f, 0xba, 0x3c, 0x0b, 0x76, 0x0d, 0x10,
+            0x67, 0x0f, 0x2a, 0x20, 0x53, 0xfa, 0x2c, 0x39, 0xcc, 0xc6, 0x4e, 0xc7, 0xfd, 0x77,
+            0x92, 0xac, 0x03, 0x7a,
+        ];
+        let pk = PublicKey(small_order);
+        // Whatever the signature bytes, a small-order key must never verify.
+        let sig = VinxSignature([0u8; 64]);
+        assert!(pk.verify(b"any message", &sig).is_err());
+    }
+
+    /// Strictness must not break ordinary signatures.
+    #[test]
+    fn honest_signature_still_verifies_under_strict() {
+        let kp = KeyPair::generate();
+        let msg = b"vinx strict verification";
+        let sig = kp.sign(msg);
+        kp.public_key().verify(msg, &sig).expect("valid signature");
+        assert!(kp.public_key().verify(b"other message", &sig).is_err());
     }
 }

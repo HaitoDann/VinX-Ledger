@@ -230,3 +230,72 @@ fn genesis_rejects_an_invalid_bls_pop() {
         }),
     });
 }
+
+/// VINX-13 — `payload` was unbounded while the fee derives from `amount` alone, so a
+/// zero-value transaction carrying megabytes cost only the fee floor: free block bloat.
+/// The bound must hold on the consensus path, not just at mempool admission, or an
+/// oversized payload still enters state inside a block.
+#[test]
+fn oversized_payload_is_rejected_on_every_path() {
+    use vinx_core::amount::MAX_TX_PAYLOAD_BYTES;
+
+    let sender = KeyPair::generate();
+    let sender_addr = Address::from_public_key(&sender.public_key());
+    let recipient = Address::from_public_key(&KeyPair::generate().public_key());
+
+    let mut state = genesis_with(sender_addr);
+    state.credit_for_test(sender_addr, Amount::from_vinx(1_000));
+
+    let amount = Amount::from_atoms(0);
+    let mut tx = Transaction::new_transfer(&sender, recipient, amount, floor(), 0);
+    tx.payload = vec![0u8; MAX_TX_PAYLOAD_BYTES + 1];
+    tx.sign(&sender);
+
+    assert!(
+        state.admission_check(&tx).is_err(),
+        "mempool admission must reject an oversized payload"
+    );
+    assert!(
+        state.clone().apply_transaction(&tx).is_err(),
+        "the verified apply path must reject it"
+    );
+    assert!(
+        state.apply_transaction_trusted(&tx).is_err(),
+        "the block-application path must reject it too, or blocks disagree"
+    );
+
+    // Exactly at the limit is still accepted — the bound must not be off by one.
+    let mut ok = Transaction::new_transfer(&sender, recipient, amount, floor(), 0);
+    ok.payload = vec![0u8; MAX_TX_PAYLOAD_BYTES];
+    ok.sign(&sender);
+    state
+        .admission_check(&ok)
+        .expect("a payload at the limit is valid");
+}
+
+/// VINX-20 — an absent admin authority is not a permissive one. With no admin
+/// configured, governance actions used to be executed for anyone.
+#[test]
+fn admin_action_is_refused_when_no_authority_is_configured() {
+    use vinx_core::governance::GovernanceAction;
+
+    let attacker = KeyPair::generate();
+    let attacker_addr = Address::from_public_key(&attacker.public_key());
+    let victim_validator = Address::from_public_key(&KeyPair::generate().public_key());
+
+    let mut state = genesis_with(attacker_addr);
+    state.admin_address = None; // "dev mode" — previously wide open
+    state.admin_policy = None;
+    state.credit_for_test(attacker_addr, Amount::from_vinx(1_000));
+
+    let tx = Transaction::new_admin_action(
+        &attacker,
+        &GovernanceAction::RemoveValidator(victim_validator),
+        0,
+    );
+    assert_eq!(
+        state.apply_transaction(&tx),
+        Err(vinx_core::CoreError::Unauthorized),
+        "governance must fail closed when no admin authority exists"
+    );
+}

@@ -5,10 +5,10 @@ use vinx_core::{
         cumulative_emission_atoms, Amount, ACTIVE_SET_COOLDOWN_SECS, ACTIVE_SET_STEP,
         BOND_COOLDOWN_SECS, BOND_STEP_BPS, BPS_DENOM, DEFAULT_ACTIVE_SET_SIZE,
         DEFAULT_FEE_FLOOR_ATOMS, EPOCH_DURATION_SECS, EXISTENTIAL_DEPOSIT_ATOMS, MAX_BOND_HARD_CAP,
-        MAX_MODULES, MAX_NONCE_AHEAD, MAX_VALIDATOR_EXITS_PER_EPOCH, MIN_ACTIVE_SET_SIZE,
-        MIN_BOND_HARD_FLOOR, MIN_MODULE_BOND_ATOMS, MIN_STAKE_ATOMS, MIN_VALIDATOR_BOND_ATOMS,
-        PROPOSER_SHARE_BPS, SLASH_BOUNTY_BPS, SLASH_EQUIVOCATION_BPS, UNBONDING_SECS,
-        VALIDATOR_SCORE_WINDOW_SECS,
+        MAX_MODULES, MAX_NONCE_AHEAD, MAX_TX_PAYLOAD_BYTES, MAX_VALIDATOR_EXITS_PER_EPOCH,
+        MIN_ACTIVE_SET_SIZE, MIN_BOND_HARD_FLOOR, MIN_MODULE_BOND_ATOMS, MIN_STAKE_ATOMS,
+        MIN_VALIDATOR_BOND_ATOMS, PROPOSER_SHARE_BPS, SLASH_BOUNTY_BPS, SLASH_EQUIVOCATION_BPS,
+        UNBONDING_SECS, VALIDATOR_SCORE_WINDOW_SECS,
     },
     block::SlashEvidence,
     chain_id::CHAIN_ID_DEVNET,
@@ -1196,6 +1196,14 @@ impl WorldState {
     /// path would accept. Anything admitted can still fail at inclusion (state moved
     /// on) — this is a cheap gate, not a simulation.
     pub fn admission_check(&self, tx: &Transaction) -> Result<(), CoreError> {
+        // VINX-13: bound the payload before anything else. The fee is derived from
+        // `amount`, not from size, so an oversized payload is otherwise free block bloat.
+        if tx.payload.len() > MAX_TX_PAYLOAD_BYTES {
+            return Err(CoreError::InvalidTransaction(format!(
+                "payload of {} bytes exceeds the {MAX_TX_PAYLOAD_BYTES}-byte limit",
+                tx.payload.len()
+            )));
+        }
         if tx.chain_id != self.chain_id {
             return Err(CoreError::InvalidTransaction(format!(
                 "chain_id {} does not match this network ({})",
@@ -1323,6 +1331,16 @@ impl WorldState {
 
     /// Cheap replay-protection guards: chain-id binding and height-based TTL.
     fn check_replay_and_ttl(&self, tx: &Transaction) -> Result<(), CoreError> {
+        // VINX-13: consensus-level payload bound. Enforced here rather than only at
+        // admission because both `apply_transaction` and `apply_transaction_trusted` go
+        // through this gate — so an oversized payload cannot enter state via a block
+        // either, and every node agrees on which blocks are valid.
+        if tx.payload.len() > MAX_TX_PAYLOAD_BYTES {
+            return Err(CoreError::InvalidTransaction(format!(
+                "payload of {} bytes exceeds the {MAX_TX_PAYLOAD_BYTES}-byte limit",
+                tx.payload.len()
+            )));
+        }
         // Chain-ID replay protection
         if tx.chain_id != self.chain_id {
             return Err(CoreError::InvalidTransaction(format!(
@@ -1997,11 +2015,17 @@ impl WorldState {
     fn apply_admin_action(&mut self, tx: &Transaction) -> Result<(), CoreError> {
         // ADR 0011: authorize against the effective admin authority — the K-of-M committee
         // if one is set, else the legacy single admin key, else dev mode (open).
+        // VINX-20: fail closed. This used to skip the check entirely when no admin
+        // authority was configured ("dev mode (open)"), which means a chain that never set
+        // one — or that cleared it — let *anyone* add and remove validators, schedule
+        // protocol upgrades and rotate the admin key. An absent authority is not a
+        // permissive authority.
         let (signers, threshold) = self.effective_admin();
-        if let Some(ref signers) = signers {
-            if !signers.contains(&tx.from) {
-                return Err(CoreError::Unauthorized);
-            }
+        let Some(ref signers) = signers else {
+            return Err(CoreError::Unauthorized);
+        };
+        if !signers.contains(&tx.from) {
+            return Err(CoreError::Unauthorized);
         }
 
         // ADR 0007: check the nonce but do NOT consume it yet — a governance action that
@@ -2044,7 +2068,8 @@ impl WorldState {
     }
 
     /// The effective admin authority (ADR 0011): `(Some(signers), threshold)` under a
-    /// committee or a single admin key; `(None, 1)` in dev mode (no admin restriction).
+    /// committee or a single admin key; `(None, 1)` when no authority is configured — in
+    /// which case callers must **refuse** the action (VINX-20), never allow it.
     fn effective_admin(&self) -> (Option<Vec<Address>>, u16) {
         if let Some(ref p) = self.admin_policy {
             (Some(p.signers.clone()), p.threshold)

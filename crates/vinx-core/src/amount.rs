@@ -188,6 +188,17 @@ pub const BATCH_WINDOW_MS: u64 = 200;
 /// Maximum a block timestamp may lead the receiving node's clock before the block is
 /// rejected (ADR 0005). Accommodates honest clock skew while capping the emission-time
 /// manipulation a producer could attempt with a bogus (future) clock.
+/// Hard ceiling on a transaction's `payload`, in bytes (VINX-13).
+///
+/// `payload` was unbounded while the fee is computed from `amount` alone, so a
+/// zero-value transaction carrying megabytes of payload cost the fee floor and nothing
+/// more. Filling blocks and every peer's mempool with such transactions is cheap block
+/// bloat and a cheap way to crowd out real traffic.
+///
+/// 16 KiB comfortably covers every payload the protocol defines — the largest are
+/// governance actions and BLS registrations, all well under 1 KiB.
+pub const MAX_TX_PAYLOAD_BYTES: usize = 16 * 1024;
+
 pub const MAX_CLOCK_DRIFT_SECS: u64 = 120;
 
 /// Grace period a scheduled leader gets before a backup proposal counts as a missed
