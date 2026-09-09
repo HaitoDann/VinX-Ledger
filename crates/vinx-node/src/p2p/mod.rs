@@ -70,14 +70,14 @@ impl P2pHandle {
         bls_sig: Vec<u8>,
         validator_addr: Vec<u8>,
     ) {
-        let _ = self.cmd_tx.send(P2pCommand::Broadcast(
-            P2pMessage::BlockBlsCoSignature {
+        let _ = self
+            .cmd_tx
+            .send(P2pCommand::Broadcast(P2pMessage::BlockBlsCoSignature {
                 height,
                 block_hash,
                 bls_sig,
                 validator_addr,
-            },
-        ));
+            }));
     }
     /// Gossips a compact block (header + tx hashes) for efficient block propagation
     /// (ADR 0037). Peers reconstruct the block from their mempool and request any
@@ -87,19 +87,14 @@ impl P2pHandle {
         let _ = self.cmd_tx.send(P2pCommand::Broadcast(msg));
     }
 
-    pub fn broadcast_vrf_proof(
-        &self,
-        height: u64,
-        vrf_proof: Vec<u8>,
-        validator_addr: Vec<u8>,
-    ) {
-        let _ = self.cmd_tx.send(P2pCommand::Broadcast(
-            P2pMessage::BlockVrfProof {
+    pub fn broadcast_vrf_proof(&self, height: u64, vrf_proof: Vec<u8>, validator_addr: Vec<u8>) {
+        let _ = self
+            .cmd_tx
+            .send(P2pCommand::Broadcast(P2pMessage::BlockVrfProof {
                 height,
                 vrf_proof,
                 validator_addr,
-            },
-        ));
+            }));
     }
 
     pub fn shutdown(&self) {
@@ -717,9 +712,7 @@ async fn dispatch_message(
                                 let s = state.read().await;
                                 (
                                     s.chain_id,
-                                    s.get_account(local_addr)
-                                        .map(|a| a.nonce)
-                                        .unwrap_or(0),
+                                    s.get_account(local_addr).map(|a| a.nonce).unwrap_or(0),
                                 )
                             };
                             let mut slash_tx = Transaction::new_slash_validator(
@@ -730,10 +723,8 @@ async fn dispatch_message(
                             if mempool.write().await.add(slash_tx.clone()).is_ok() {
                                 let out = P2pMessage::NewTransaction(slash_tx);
                                 let topic = IdentTopic::new(out.topic());
-                                let _ = swarm
-                                    .behaviour_mut()
-                                    .gossipsub
-                                    .publish(topic, out.encode());
+                                let _ =
+                                    swarm.behaviour_mut().gossipsub.publish(topic, out.encode());
                             }
                         }
                     }
@@ -936,7 +927,8 @@ async fn dispatch_message(
                 // Try to build SlashEvidence if we have both block headers.
                 let header_a = {
                     let c = chain.read().await;
-                    c.get_block(height).map(|b| b.header.clone())
+                    c.get_block(height)
+                        .map(|b| b.header.clone())
                         .or_else(|| competing_headers.get(&(height, prev_hash)).cloned())
                 };
                 let header_b = competing_headers.get(&(height, claimed_hash)).cloned();
@@ -946,7 +938,10 @@ async fn dispatch_message(
                     if ha.validator == sender_addr && hb.validator == sender_addr {
                         let (chain_id, nonce) = {
                             let s = state.read().await;
-                            (s.chain_id, s.get_account(local_addr).map(|a| a.nonce).unwrap_or(0))
+                            (
+                                s.chain_id,
+                                s.get_account(local_addr).map(|a| a.nonce).unwrap_or(0),
+                            )
                         };
                         let evidence = SlashEvidence {
                             header_a: ha,
@@ -955,7 +950,10 @@ async fn dispatch_message(
                             bls_sig_b: sig_arr.to_vec(),
                         };
                         let mut slash_tx = Transaction::new_slash_validator(
-                            _local_kp, sender_addr, &evidence, nonce,
+                            _local_kp,
+                            sender_addr,
+                            &evidence,
+                            nonce,
                         );
                         slash_tx.chain_id = chain_id;
                         slash_tx.sign(_local_kp);
@@ -984,7 +982,10 @@ async fn dispatch_message(
                 }
             };
             if claimed_hash != our_block_hash {
-                debug!(height, "P2P BLS cosig: not for our canonical block — skipping accumulation");
+                debug!(
+                    height,
+                    "P2P BLS cosig: not for our canonical block — skipping accumulation"
+                );
                 return;
             }
             // Prune entries that can no longer affect finality.
@@ -993,7 +994,10 @@ async fn dispatch_message(
             let count = {
                 let entry = pending_bls.entry((height, our_block_hash)).or_default();
                 if entry.iter().any(|(idx, _)| *idx == validator_idx) {
-                    debug!(height, validator_idx, "P2P BLS cosig: duplicate validator, ignoring");
+                    debug!(
+                        height,
+                        validator_idx, "P2P BLS cosig: duplicate validator, ignoring"
+                    );
                     return;
                 }
                 entry.push((validator_idx, sig_arr));
@@ -1078,7 +1082,9 @@ async fn dispatch_message(
             validator_addr,
         } => {
             // Size guards — reject malformed frames early.
-            if validator_addr.len() != 20 || vrf_proof.len() != messages::P2pMessage::VRF_PROOF_WIRE_LEN {
+            if validator_addr.len() != 20
+                || vrf_proof.len() != messages::P2pMessage::VRF_PROOF_WIRE_LEN
+            {
                 warn!(height, "P2P VRF proof: wrong byte lengths");
                 return;
             }
@@ -1090,7 +1096,8 @@ async fn dispatch_message(
             // Verify the proof against the validator's registered VRF key.
             let verified = {
                 let st = state.read().await;
-                st.verify_committee_vrf_proof(&sender_addr, height, &vrf_proof_typed).is_ok()
+                st.verify_committee_vrf_proof(&sender_addr, height, &vrf_proof_typed)
+                    .is_ok()
             };
             if !verified {
                 warn!(height, validator = %sender_addr, "P2P VRF proof: verification failed or no registered key");
@@ -1115,15 +1122,14 @@ async fn dispatch_message(
             let vs = validator_set.read().await.clone();
             let quorum = vs.quorum();
             if count >= quorum {
-                let proofs_typed: Vec<(Address, VrfProof)> = entry
-                    .iter()
-                    .map(|(a, b)| (*a, VrfProof(*b)))
-                    .collect();
+                let proofs_typed: Vec<(Address, VrfProof)> =
+                    entry.iter().map(|(a, b)| (*a, VrfProof(*b))).collect();
                 let active_set_size = state.read().await.active_set_size as usize;
-                let committee = state
-                    .read()
-                    .await
-                    .committee_from_vrf_proofs(height, &proofs_typed, active_set_size);
+                let committee = state.read().await.committee_from_vrf_proofs(
+                    height,
+                    &proofs_typed,
+                    active_set_size,
+                );
                 info!(
                     height,
                     count,
@@ -1243,7 +1249,11 @@ async fn dispatch_message(
                 };
                 let topic = IdentTopic::new(req.topic());
                 let _ = swarm.behaviour_mut().gossipsub.publish(topic, req.encode());
-                debug!(height, missing = n_missing, "CompactBlock: requesting missing txs");
+                debug!(
+                    height,
+                    missing = n_missing,
+                    "CompactBlock: requesting missing txs"
+                );
                 pending_compact.insert(height, state_entry);
             }
         }
@@ -1278,7 +1288,10 @@ async fn dispatch_message(
             if !txs.is_empty() {
                 let resp = P2pMessage::TxResponse { height, txs };
                 let topic = IdentTopic::new(resp.topic());
-                let _ = swarm.behaviour_mut().gossipsub.publish(topic, resp.encode());
+                let _ = swarm
+                    .behaviour_mut()
+                    .gossipsub
+                    .publish(topic, resp.encode());
                 debug!(height, "TxRequest: served response");
             }
         }
@@ -1289,14 +1302,21 @@ async fn dispatch_message(
                 return;
             };
             // Integrate received transactions.
-            for tx in txs.into_iter().take(messages::P2pMessage::MAX_TX_RESPONSE_TXS) {
+            for tx in txs
+                .into_iter()
+                .take(messages::P2pMessage::MAX_TX_RESPONSE_TXS)
+            {
                 let h = tx.hash();
                 if entry.tx_hashes.contains(&h) {
                     entry.resolved.insert(h, tx);
                 }
             }
             // Check if reassembly is complete.
-            if entry.tx_hashes.iter().all(|h| entry.resolved.contains_key(h)) {
+            if entry
+                .tx_hashes
+                .iter()
+                .all(|h| entry.resolved.contains_key(h))
+            {
                 let header = entry.header.clone();
                 let tx_hashes = entry.tx_hashes.clone();
                 let mut ordered_txs = Vec::with_capacity(tx_hashes.len());
@@ -1338,7 +1358,11 @@ async fn dispatch_message(
                 ))
                 .await;
             } else {
-                let remaining = entry.tx_hashes.iter().filter(|h| !entry.resolved.contains_key(*h)).count();
+                let remaining = entry
+                    .tx_hashes
+                    .iter()
+                    .filter(|h| !entry.resolved.contains_key(*h))
+                    .count();
                 debug!(height, remaining, "TxResponse: partially resolved");
             }
         }

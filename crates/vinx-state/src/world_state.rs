@@ -21,8 +21,8 @@ use vinx_core::{
     ValidatorSet,
 };
 use vinx_crypto::{
-    sha256, vrf_verify, Address, BlsPubKey, BlsSignature, Hash32, IncrementalMerkleTree,
-    VrfProof, VrfPublicKey,
+    sha256, vrf_verify, Address, BlsPubKey, BlsSignature, Hash32, IncrementalMerkleTree, VrfProof,
+    VrfPublicKey,
 };
 
 /// In-memory representation of the full chain state.
@@ -330,15 +330,10 @@ pub fn v11_meta_suffix() -> Vec<u8> {
 pub fn v12_meta_suffix() -> Vec<u8> {
     use std::collections::{BTreeMap, HashSet};
     use vinx_core::ValidatorPoolEntry;
-    let mut out =
-        bincode::serialize(&BTreeMap::<Address, ValidatorPoolEntry>::new())
-            .expect("serialize empty pool");
-    out.extend(
-        bincode::serialize(&HashSet::<Address>::new()).expect("serialize empty ban set"),
-    );
-    out.extend(
-        bincode::serialize(&DEFAULT_ACTIVE_SET_SIZE).expect("serialize active_set_size"),
-    );
+    let mut out = bincode::serialize(&BTreeMap::<Address, ValidatorPoolEntry>::new())
+        .expect("serialize empty pool");
+    out.extend(bincode::serialize(&HashSet::<Address>::new()).expect("serialize empty ban set"));
+    out.extend(bincode::serialize(&DEFAULT_ACTIVE_SET_SIZE).expect("serialize active_set_size"));
     out.extend(bincode::serialize(&0u64).expect("serialize 0u64"));
     out.extend(bincode::serialize(&0u64).expect("serialize 0u64"));
     out
@@ -598,13 +593,11 @@ impl WorldState {
         // 5. Epoch close (ADR 0028/0038) — triggered when EPOCH_DURATION_SECS have elapsed
         //    since the last close. Deterministic on block_ts so all nodes close the same epoch.
         if EPOCH_DURATION_SECS > 0 && self.emission_started {
-            let since_last = block_ts.saturating_sub(
-                if self.last_epoch_close_ts == 0 {
-                    self.emission_epoch_ts
-                } else {
-                    self.last_epoch_close_ts
-                },
-            );
+            let since_last = block_ts.saturating_sub(if self.last_epoch_close_ts == 0 {
+                self.emission_epoch_ts
+            } else {
+                self.last_epoch_close_ts
+            });
             if since_last >= EPOCH_DURATION_SECS {
                 self.tick_epoch_close();
             }
@@ -804,10 +797,7 @@ impl WorldState {
                             pot.atoms() - distributed
                         };
                         if share_atoms > 0 {
-                            self.distribute_from_epoch_pot(
-                                addr,
-                                Amount::from_atoms(share_atoms),
-                            );
+                            self.distribute_from_epoch_pot(addr, Amount::from_atoms(share_atoms));
                             distributed += share_atoms;
                         }
                     }
@@ -905,17 +895,17 @@ impl WorldState {
         height: u64,
         proof: &VrfProof,
     ) -> Result<[u8; 64], CoreError> {
-        let entry = self.validator_pool.get(addr).ok_or_else(|| {
-            CoreError::InvalidTransaction("validator not in pool".to_string())
-        })?;
+        let entry = self
+            .validator_pool
+            .get(addr)
+            .ok_or_else(|| CoreError::InvalidTransaction("validator not in pool".to_string()))?;
         let vrf_pk_bytes = entry.vrf_pub_key.ok_or_else(|| {
             CoreError::InvalidTransaction("validator has no registered VRF key".to_string())
         })?;
         let vrf_pk = VrfPublicKey(vrf_pk_bytes);
         let alpha = self.committee_alpha(height);
-        vrf_verify(&vrf_pk, proof, &alpha).map_err(|_| {
-            CoreError::Crypto("VRF proof verification failed".to_string())
-        })
+        vrf_verify(&vrf_pk, proof, &alpha)
+            .map_err(|_| CoreError::Crypto("VRF proof verification failed".to_string()))
     }
 
     /// Forms a committee from a set of submitted VRF proofs (ADR 0029 Phase 2b).
@@ -954,8 +944,7 @@ impl WorldState {
             .atoms()
             .checked_add(self.epoch_dist_emission_pot.atoms())
             .and_then(|v| v.checked_add(self.destroyed_atoms));
-        lhs == Some(self.emitted_atoms)
-            && self.emitted_atoms <= vinx_core::amount::MAX_SUPPLY_ATOMS
+        lhs == Some(self.emitted_atoms) && self.emitted_atoms <= vinx_core::amount::MAX_SUPPLY_ATOMS
     }
 
     /// Supply not yet emitted (`MAX_SUPPLY − emitted_atoms`).
@@ -1539,9 +1528,7 @@ impl WorldState {
         self.mark_dirty(&tx.from);
         // ADR 0038: auto-enter the validator pool once the bond floor is met.
         let bond = new_staked.atoms();
-        if bond >= self.min_validator_bond_atoms
-            && !self.banned_validator_keys.contains(&tx.from)
-        {
+        if bond >= self.min_validator_bond_atoms && !self.banned_validator_keys.contains(&tx.from) {
             if let Some(entry) = self.validator_pool.get_mut(&tx.from) {
                 entry.bond_atoms = bond;
             } else {
@@ -1796,12 +1783,14 @@ impl WorldState {
         let bls_pk = BlsPubKey::from_bytes(&bls_pk_bytes).map_err(|_| {
             CoreError::InvalidTransaction("target BLS public key is malformed".to_string())
         })?;
-        let sig_a_arr: [u8; 96] = evidence.bls_sig_a.as_slice().try_into().map_err(|_| {
-            CoreError::InvalidTransaction("bls_sig_a must be 96 bytes".to_string())
-        })?;
-        let sig_b_arr: [u8; 96] = evidence.bls_sig_b.as_slice().try_into().map_err(|_| {
-            CoreError::InvalidTransaction("bls_sig_b must be 96 bytes".to_string())
-        })?;
+        let sig_a_arr: [u8; 96] =
+            evidence.bls_sig_a.as_slice().try_into().map_err(|_| {
+                CoreError::InvalidTransaction("bls_sig_a must be 96 bytes".to_string())
+            })?;
+        let sig_b_arr: [u8; 96] =
+            evidence.bls_sig_b.as_slice().try_into().map_err(|_| {
+                CoreError::InvalidTransaction("bls_sig_b must be 96 bytes".to_string())
+            })?;
         if vinx_crypto::bls_verify(&bls_pk, &BlsSignature(sig_a_arr), &hash_a).is_err()
             || vinx_crypto::bls_verify(&bls_pk, &BlsSignature(sig_b_arr), &hash_b).is_err()
         {
@@ -2291,10 +2280,9 @@ impl WorldState {
             ));
         }
 
-        let payload: RegisterBlsKeyPayload =
-            bincode::deserialize(&tx.payload).map_err(|_| {
-                CoreError::InvalidTransaction("malformed RegisterBlsKey payload".to_string())
-            })?;
+        let payload: RegisterBlsKeyPayload = bincode::deserialize(&tx.payload).map_err(|_| {
+            CoreError::InvalidTransaction("malformed RegisterBlsKey payload".to_string())
+        })?;
 
         if payload.bls_pub_key.len() != 48 {
             return Err(CoreError::InvalidTransaction(
@@ -2373,18 +2361,18 @@ impl WorldState {
 
         if tx.payload.len() != 32 {
             return Err(CoreError::InvalidTransaction(
-                "RegisterVrfKey payload must be 32 bytes (compressed Edwards25519 point)".to_string(),
+                "RegisterVrfKey payload must be 32 bytes (compressed Edwards25519 point)"
+                    .to_string(),
             ));
         }
         let mut key_bytes = [0u8; 32];
         key_bytes.copy_from_slice(&tx.payload);
 
         // Validate: the key must decompress to a valid Edwards25519 point.
-        if VrfPublicKey(key_bytes)
-            .0
-            .len() != 32
-        {
-            return Err(CoreError::InvalidTransaction("invalid VRF public key".to_string()));
+        if VrfPublicKey(key_bytes).0.len() != 32 {
+            return Err(CoreError::InvalidTransaction(
+                "invalid VRF public key".to_string(),
+            ));
         }
         // Actually validate by attempting a decompress via vrf_verify with a dummy proof
         // would be expensive. Instead just accept the 32 bytes — they are validated on
@@ -2442,7 +2430,6 @@ impl WorldState {
         acc.balance = Amount::ZERO;
         acc.staked = staked;
     }
-
 }
 
 fn hash_account(account: &Account) -> Hash32 {
@@ -2510,7 +2497,7 @@ mod tests {
         let mut s = WorldState::new();
         let (_, producer) = kp_addr();
         s.settle_block(&producer, 1, 0); // establish epoch at t=0
-        // One full half-life later: ~50% of the supply has been minted.
+                                         // One full half-life later: ~50% of the supply has been minted.
         let (_, emission) = s.settle_block(&producer, 2, EMISSION_T_HALF_SECS);
         let expected = cumulative_emission_atoms(EMISSION_T_HALF_SECS);
         assert_eq!(emission.atoms(), expected);
@@ -2531,7 +2518,8 @@ mod tests {
         let (_, emission) = s.settle_block(&producer, 2, EMISSION_T_HALF_SECS / 20); // ~1 year
         assert!(emission > Amount::ZERO);
         // ADR 0028: producer receives PROPOSER_SHARE_BPS (20%) of the emission.
-        let expected_balance = Amount::from_atoms(emission.atoms() * PROPOSER_SHARE_BPS / BPS_DENOM);
+        let expected_balance =
+            Amount::from_atoms(emission.atoms() * PROPOSER_SHARE_BPS / BPS_DENOM);
         assert_eq!(s.accounts[&producer].balance, expected_balance);
     }
 
@@ -3245,12 +3233,19 @@ mod tests {
         // Before cooldown: unjail should fail.
         s.block_height = 0;
         let tx = Transaction::new_unjail(&kp, 0);
-        assert!(s.apply_transaction(&tx).is_err(), "unjail before cooldown must fail");
+        assert!(
+            s.apply_transaction(&tx).is_err(),
+            "unjail before cooldown must fail"
+        );
         // After cooldown: unjail should succeed.
         s.block_height = UNJAIL_COOLDOWN_HEIGHTS + 2;
         let tx = Transaction::new_unjail(&kp, 0);
         s.apply_transaction(&tx).unwrap();
-        assert!(!s.reliability.get(&addr).map(|r| r.is_jailed()).unwrap_or(false));
+        assert!(!s
+            .reliability
+            .get(&addr)
+            .map(|r| r.is_jailed())
+            .unwrap_or(false));
     }
 
     #[test]
@@ -3260,7 +3255,10 @@ mod tests {
         s.credit_for_test(addr, Amount::from_vinx(1));
         // Validator was never jailed.
         let tx = Transaction::new_unjail(&kp, 0);
-        assert!(s.apply_transaction(&tx).is_err(), "unjail when not jailed must fail");
+        assert!(
+            s.apply_transaction(&tx).is_err(),
+            "unjail when not jailed must fail"
+        );
     }
 
     // ─── protocol upgrades ───────────────────────────────────────────────────
@@ -3411,10 +3409,8 @@ mod tests {
         let addr = Address::from_public_key(&kp.public_key());
         s.credit_for_test(addr, Amount::from_vinx(1_000));
         // Insert directly into the pool (bypasses admission rules for test simplicity).
-        s.validator_pool.insert(
-            addr,
-            ValidatorPoolEntry::new(MIN_VALIDATOR_BOND_ATOMS, 0),
-        );
+        s.validator_pool
+            .insert(addr, ValidatorPoolEntry::new(MIN_VALIDATOR_BOND_ATOMS, 0));
         (s, kp, addr)
     }
 
@@ -3489,8 +3485,8 @@ mod tests {
 
     #[test]
     fn test_register_bls_key_wrong_sizes_rejected() {
-        use vinx_core::RegisterBlsKeyPayload;
         use vinx_core::CoreError;
+        use vinx_core::RegisterBlsKeyPayload;
 
         let (mut s, kp, _addr) = validator_pool_state();
 
@@ -3543,7 +3539,10 @@ mod tests {
             .unwrap();
 
         let entry = &s.validator_pool[&addr];
-        assert_eq!(entry.bls_pub_key.as_deref(), Some(sk_b.public_key().0.as_slice()));
+        assert_eq!(
+            entry.bls_pub_key.as_deref(),
+            Some(sk_b.public_key().0.as_slice())
+        );
     }
 
     // ─── ADR 0038: open PoS admission (bond floor & active-set governance) ────
@@ -3564,7 +3563,10 @@ mod tests {
         ))
         .unwrap();
 
-        assert!(s.validator_pool.contains_key(&addr), "pool entry must be created on floor stake");
+        assert!(
+            s.validator_pool.contains_key(&addr),
+            "pool entry must be created on floor stake"
+        );
         assert_eq!(s.validator_pool[&addr].bond_atoms, MIN_VALIDATOR_BOND_ATOMS);
     }
 
@@ -3584,7 +3586,10 @@ mod tests {
         ))
         .unwrap();
 
-        assert!(!s.validator_pool.contains_key(&addr), "sub-floor bond must not enter pool");
+        assert!(
+            !s.validator_pool.contains_key(&addr),
+            "sub-floor bond must not enter pool"
+        );
     }
 
     #[test]
@@ -3603,7 +3608,10 @@ mod tests {
         ))
         .unwrap();
 
-        assert!(!s.validator_pool.contains_key(&addr), "banned address must not enter pool");
+        assert!(
+            !s.validator_pool.contains_key(&addr),
+            "banned address must not enter pool"
+        );
     }
 
     // ADR 0036: when bond drops below floor the validator is queued for exit, not
@@ -3637,11 +3645,7 @@ mod tests {
         .unwrap();
 
         // Immediately after unstake: still in Warmup (not yet Unbonding).
-        assert_eq!(
-            s.exit_queue.len(),
-            1,
-            "exit request must be queued"
-        );
+        assert_eq!(s.exit_queue.len(), 1, "exit request must be queued");
         assert_eq!(s.exit_queue[0].address, addr);
         assert!(
             !matches!(s.validator_pool[&addr].status, PoolStatus::Unbonding { .. }),
@@ -3732,7 +3736,9 @@ mod tests {
 
     #[test]
     fn test_update_active_set_size_cooldown_enforced() {
-        use vinx_core::amount::{ACTIVE_SET_COOLDOWN_SECS, ACTIVE_SET_STEP, DEFAULT_ACTIVE_SET_SIZE};
+        use vinx_core::amount::{
+            ACTIVE_SET_COOLDOWN_SECS, ACTIVE_SET_STEP, DEFAULT_ACTIVE_SET_SIZE,
+        };
         use vinx_core::GovernanceAction;
         let (mut s, admin_kp, _) = admin_state();
         // Use a non-zero baseline so last_change_ts > 0 after the first change.
@@ -3770,7 +3776,10 @@ mod tests {
             1,
         ))
         .unwrap();
-        assert_eq!(s.active_set_size, DEFAULT_ACTIVE_SET_SIZE + ACTIVE_SET_STEP * 2);
+        assert_eq!(
+            s.active_set_size,
+            DEFAULT_ACTIVE_SET_SIZE + ACTIVE_SET_STEP * 2
+        );
     }
 
     // ─── ADR 0038: UpdateMinValidatorBond governance ──────────────────────────
@@ -3781,7 +3790,8 @@ mod tests {
         use vinx_core::GovernanceAction;
         let (mut s, admin_kp, _) = admin_state();
         // Increase by exactly BOND_STEP_BPS (25 %).
-        let new_atoms = MIN_VALIDATOR_BOND_ATOMS + MIN_VALIDATOR_BOND_ATOMS * BOND_STEP_BPS / BPS_DENOM;
+        let new_atoms =
+            MIN_VALIDATOR_BOND_ATOMS + MIN_VALIDATOR_BOND_ATOMS * BOND_STEP_BPS / BPS_DENOM;
 
         s.apply_transaction(&Transaction::new_admin_action(
             &admin_kp,
@@ -3837,7 +3847,8 @@ mod tests {
         use vinx_core::GovernanceAction;
         let (mut s, admin_kp, _) = admin_state();
         // More than 25% in one go.
-        let too_large = MIN_VALIDATOR_BOND_ATOMS + MIN_VALIDATOR_BOND_ATOMS * BOND_STEP_BPS / BPS_DENOM + 1;
+        let too_large =
+            MIN_VALIDATOR_BOND_ATOMS + MIN_VALIDATOR_BOND_ATOMS * BOND_STEP_BPS / BPS_DENOM + 1;
 
         assert!(s
             .apply_transaction(&Transaction::new_admin_action(
@@ -3851,7 +3862,9 @@ mod tests {
 
     #[test]
     fn test_update_min_validator_bond_cooldown_enforced() {
-        use vinx_core::amount::{BOND_COOLDOWN_SECS, BOND_STEP_BPS, BPS_DENOM, MIN_VALIDATOR_BOND_ATOMS};
+        use vinx_core::amount::{
+            BOND_COOLDOWN_SECS, BOND_STEP_BPS, BPS_DENOM, MIN_VALIDATOR_BOND_ATOMS,
+        };
         use vinx_core::GovernanceAction;
         let (mut s, admin_kp, _) = admin_state();
         // Non-zero baseline so last_bond_change_ts > 0 after the first change.
@@ -3899,8 +3912,14 @@ mod tests {
         let mut s = WorldState::new();
         let beacon_before = s.epoch_beacon;
         s.tick_epoch_close();
-        assert_ne!(s.epoch_beacon, beacon_before, "beacon must change after epoch close");
-        assert_ne!(s.epoch_beacon, [0u8; 32], "beacon must be non-zero after epoch close");
+        assert_ne!(
+            s.epoch_beacon, beacon_before,
+            "beacon must change after epoch close"
+        );
+        assert_ne!(
+            s.epoch_beacon, [0u8; 32],
+            "beacon must be non-zero after epoch close"
+        );
     }
 
     #[test]
@@ -3909,7 +3928,10 @@ mod tests {
         let mut s2 = WorldState::new();
         s1.tick_epoch_close();
         s2.tick_epoch_close();
-        assert_eq!(s1.epoch_beacon, s2.epoch_beacon, "beacon must be deterministic");
+        assert_eq!(
+            s1.epoch_beacon, s2.epoch_beacon,
+            "beacon must be deterministic"
+        );
     }
 
     #[test]
@@ -3919,7 +3941,10 @@ mod tests {
         let beacon_after_1 = s.epoch_beacon;
         s.tick_epoch_close();
         let beacon_after_2 = s.epoch_beacon;
-        assert_ne!(beacon_after_1, beacon_after_2, "successive epoch beacons must differ");
+        assert_ne!(
+            beacon_after_1, beacon_after_2,
+            "successive epoch beacons must differ"
+        );
     }
 
     // ─── ADR 0029 Phase 2: committee_for_height ───────────────────────────────
@@ -4074,8 +4099,8 @@ mod tests {
 
     #[test]
     fn test_committee_from_vrf_proofs_selects_top_k() {
-        use vinx_crypto::VrfSecretKey;
         use vinx_core::validator_pool::PoolStatus;
+        use vinx_crypto::VrfSecretKey;
         let mut s = WorldState::new();
         let height = 7u64;
 
@@ -4137,7 +4162,11 @@ mod tests {
         s.validator_pool.insert(unbonding_addr, unbonding_entry);
 
         let committee = s.committee_for_height(1, 10);
-        assert_eq!(committee, vec![active_addr], "only Active/Benched validators are eligible");
+        assert_eq!(
+            committee,
+            vec![active_addr],
+            "only Active/Benched validators are eligible"
+        );
     }
 
     // ─── ADR 0036: validator churn bounds ─────────────────────────────────────
@@ -4175,7 +4204,11 @@ mod tests {
             1,
         ))
         .unwrap();
-        assert_eq!(s.exit_queue.len(), 1, "first unstake below floor queues once");
+        assert_eq!(
+            s.exit_queue.len(),
+            1,
+            "first unstake below floor queues once"
+        );
 
         // Second unstake — already queued → no duplicate.
         s.apply_transaction(&Transaction::new_unstake(
@@ -4268,7 +4301,10 @@ mod tests {
         // Second epoch close: clears the remaining exits (≤ MAX).
         s.tick_epoch_close();
         let still_queued = s.exit_queue.len();
-        assert_eq!(still_queued, 0, "all exits processed after two epoch closes");
+        assert_eq!(
+            still_queued, 0,
+            "all exits processed after two epoch closes"
+        );
     }
 
     #[test]
@@ -4283,7 +4319,7 @@ mod tests {
         for _ in 0..3 {
             let (_, addr) = kp_addr();
             let entry = ValidatorPoolEntry {
-                bond_atoms: 0,  // below floor
+                bond_atoms: 0, // below floor
                 bonded_since_ts: 0,
                 status: PoolStatus::Active,
                 cosign_count_in_window: 0,
@@ -4300,9 +4336,21 @@ mod tests {
         // Insert requests at different heights (out of order) to test FIFO.
         use vinx_core::ValidatorExitRequest;
         s.exit_queue = vec![
-            ValidatorExitRequest { address: addrs[2], request_height: 10, unlock_ts: 9999 },
-            ValidatorExitRequest { address: addrs[0], request_height: 5,  unlock_ts: 9999 },
-            ValidatorExitRequest { address: addrs[1], request_height: 7,  unlock_ts: 9999 },
+            ValidatorExitRequest {
+                address: addrs[2],
+                request_height: 10,
+                unlock_ts: 9999,
+            },
+            ValidatorExitRequest {
+                address: addrs[0],
+                request_height: 5,
+                unlock_ts: 9999,
+            },
+            ValidatorExitRequest {
+                address: addrs[1],
+                request_height: 7,
+                unlock_ts: 9999,
+            },
         ];
 
         // Add extra Benched validators so floor check doesn't block any exit.
@@ -4325,16 +4373,25 @@ mod tests {
 
         // Height 5 (addrs[0]) and height 7 (addrs[1]) must be Unbonding.
         assert!(
-            matches!(s.validator_pool[&addrs[0]].status, PoolStatus::Unbonding { .. }),
+            matches!(
+                s.validator_pool[&addrs[0]].status,
+                PoolStatus::Unbonding { .. }
+            ),
             "earliest request (height 5) must be processed first"
         );
         assert!(
-            matches!(s.validator_pool[&addrs[1]].status, PoolStatus::Unbonding { .. }),
+            matches!(
+                s.validator_pool[&addrs[1]].status,
+                PoolStatus::Unbonding { .. }
+            ),
             "second earliest request (height 7) must be processed second"
         );
         // Height 10 (addrs[2]) still queued.
         assert!(
-            !matches!(s.validator_pool[&addrs[2]].status, PoolStatus::Unbonding { .. }),
+            !matches!(
+                s.validator_pool[&addrs[2]].status,
+                PoolStatus::Unbonding { .. }
+            ),
             "latest request (height 10) must stay queued after first epoch close"
         );
     }
@@ -4368,7 +4425,11 @@ mod tests {
         // Enqueue exits for all of them.
         s.exit_queue = targets
             .iter()
-            .map(|&addr| ValidatorExitRequest { address: addr, request_height: 1, unlock_ts: 9999 })
+            .map(|&addr| ValidatorExitRequest {
+                address: addr,
+                request_height: 1,
+                unlock_ts: 9999,
+            })
             .collect();
 
         // Epoch close: floor guard must prevent any exit (active set already at floor).
@@ -4487,14 +4548,21 @@ mod tests {
 
         s.tick_epoch_close(); // must not panic
 
-        assert!(s.exit_queue.is_empty(), "ghost exit must be silently discarded");
+        assert!(
+            s.exit_queue.is_empty(),
+            "ghost exit must be silently discarded"
+        );
     }
 
     #[test]
     fn test_v18_meta_suffix_is_eight_zero_bytes() {
         // bincode empty Vec<ValidatorExitRequest> = 0u64 LE = [0;8]
         let suffix = v18_meta_suffix();
-        assert_eq!(suffix.len(), 8, "v18 suffix must be 8 bytes (empty Vec length prefix)");
+        assert_eq!(
+            suffix.len(),
+            8,
+            "v18 suffix must be 8 bytes (empty Vec length prefix)"
+        );
         assert_eq!(suffix, vec![0u8; 8]);
     }
 }
