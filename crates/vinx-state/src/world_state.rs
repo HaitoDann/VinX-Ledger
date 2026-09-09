@@ -26,6 +26,11 @@ use vinx_crypto::{
 };
 
 /// In-memory representation of the full chain state.
+/// Domain-separation tag for the two-subtree state root (VINX-04).
+const STATE_ROOT_DST: &[u8] = b"VINX:state_root:v2";
+/// Domain-separation tag for the consensus subtree (VINX-04).
+const CONSENSUS_ROOT_DST: &[u8] = b"VINX:consensus_root:v1";
+
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct WorldState {
     /// Accounts keyed by bech32 address. A `BTreeMap` (not `HashMap`) so iteration
@@ -1713,7 +1718,105 @@ impl WorldState {
     /// O(txs_per_block × log n), orders of magnitude faster than O(n) for large account sets.
     pub fn compute_state_root(&mut self) -> Hash32 {
         self.flush_dirty();
-        self.merkle_tree.root()
+        let accounts_root = self.merkle_tree.root();
+        let consensus_root = self.compute_consensus_root();
+        let mut buf = Vec::with_capacity(32 + 32 + STATE_ROOT_DST.len());
+        buf.extend_from_slice(STATE_ROOT_DST);
+        buf.extend_from_slice(&accounts_root);
+        buf.extend_from_slice(&consensus_root);
+        sha256(&buf)
+    }
+
+    /// Merkle-equivalent commitment to the **consensus** portion of the state
+    /// (VINX-04).
+    ///
+    /// `compute_state_root` used to return the accounts root alone, so the root committed
+    /// to nothing but `(address, balance, nonce, staked)` per account. Everything that
+    /// decides who may produce blocks and who governs the chain — the validator set and
+    /// pool (bonds, BLS keys, PoP, VRF keys, status), the admin key and policy, pending
+    /// governance and upgrades, the epoch beacon, the supply counters — sat outside it.
+    /// Two nodes could therefore disagree on the entire validator set and the admin key
+    /// while publishing an identical `state_root`, and since `state_root` is the only
+    /// state-integrity check on every block-validation path (`p2p`, `sync`, `reorg`), that
+    /// divergence was silent and undetectable.
+    ///
+    /// The encoding is deterministic by construction: every collection is a `BTreeMap` or
+    /// an order-carrying `Vec`, and the one `HashSet` is sorted before hashing. Fields
+    /// marked `serde(skip)` are transient within a block and deliberately excluded.
+    ///
+    /// Changing this encoding changes every `state_root` and is a hard fork.
+    pub fn compute_consensus_root(&self) -> Hash32 {
+        // Sorted, so the iteration order of the HashSet cannot leak into the root.
+        let mut banned: Vec<&Address> = self.banned_validator_keys.iter().collect();
+        banned.sort_unstable();
+
+        #[derive(Serialize)]
+        struct ConsensusCommitment<'a> {
+            chain_id: u32,
+            block_height: u64,
+            validator_set: &'a ValidatorSet,
+            validator_pool: &'a BTreeMap<Address, vinx_core::ValidatorPoolEntry>,
+            banned_validator_keys: Vec<&'a Address>,
+            active_set_size: u32,
+            min_validator_bond_atoms: u128,
+            admin_address: &'a Option<Address>,
+            admin_policy: &'a Option<AdminPolicy>,
+            pending_governance: &'a [GovernanceProposal],
+            current_version: &'a ProtocolVersion,
+            pending_upgrade: &'a Option<ScheduledUpgrade>,
+            pending_unbonds: &'a [PendingUnbond],
+            exit_queue: &'a [ValidatorExitRequest],
+            reliability: &'a ReliabilityMap,
+            epoch_beacon: &'a Hash32,
+            modules: &'a BTreeMap<Hash32, ModuleEntry>,
+            fee_floor: u128,
+            base_fee: u128,
+            circulating_supply: u128,
+            emitted_atoms: u128,
+            destroyed_atoms: u128,
+            epoch_dist_emission_pot: u128,
+            emission_epoch_ts: u64,
+            last_epoch_close_ts: u64,
+            last_active_set_size_change_ts: u64,
+            last_bond_change_ts: u64,
+        }
+
+        let commitment = ConsensusCommitment {
+            chain_id: self.chain_id,
+            block_height: self.block_height,
+            validator_set: &self.validator_set,
+            validator_pool: &self.validator_pool,
+            banned_validator_keys: banned,
+            active_set_size: self.active_set_size,
+            min_validator_bond_atoms: self.min_validator_bond_atoms,
+            admin_address: &self.admin_address,
+            admin_policy: &self.admin_policy,
+            pending_governance: &self.pending_governance,
+            current_version: &self.current_version,
+            pending_upgrade: &self.pending_upgrade,
+            pending_unbonds: &self.pending_unbonds,
+            exit_queue: &self.exit_queue,
+            reliability: &self.reliability,
+            epoch_beacon: &self.epoch_beacon,
+            modules: &self.modules,
+            fee_floor: self.fee_floor.atoms(),
+            base_fee: self.base_fee.atoms(),
+            circulating_supply: self.circulating_supply.atoms(),
+            emitted_atoms: self.emitted_atoms,
+            destroyed_atoms: self.destroyed_atoms,
+            epoch_dist_emission_pot: self.epoch_dist_emission_pot.atoms(),
+            emission_epoch_ts: self.emission_epoch_ts,
+            last_epoch_close_ts: self.last_epoch_close_ts,
+            last_active_set_size_change_ts: self.last_active_set_size_change_ts,
+            last_bond_change_ts: self.last_bond_change_ts,
+        };
+
+        let encoded = bincode::serialize(&commitment)
+            .expect("consensus commitment serialization is infallible");
+        let mut buf = Vec::with_capacity(CONSENSUS_ROOT_DST.len() + encoded.len());
+        buf.extend_from_slice(CONSENSUS_ROOT_DST);
+        buf.extend_from_slice(&encoded);
+        sha256(&buf)
     }
 
     /// Returns the registered BLS G1 keys for every validator in `validator_set`,
@@ -3340,10 +3443,127 @@ mod tests {
 
     // ─── Merkle state root ───────────────────────────────────────────────────
 
+    /// VINX-04: the root is no longer the bare accounts root, so an empty account set no
+    /// longer implies an all-zeros root — it still commits to the consensus state. The
+    /// empty *accounts* subtree is what is zero.
     #[test]
-    fn test_state_root_empty_is_zero() {
+    fn test_state_root_empty_accounts_still_commits_consensus() {
         let mut s = WorldState::new();
-        assert_eq!(s.compute_state_root(), [0u8; 32]);
+        let root = s.compute_state_root();
+        assert_ne!(
+            root, [0u8; 32],
+            "an empty account set must still commit to consensus state"
+        );
+        // Deterministic: same state, same root.
+        let mut s2 = WorldState::new();
+        assert_eq!(root, s2.compute_state_root());
+    }
+
+    /// VINX-04 regression — mutating any consensus field must move the root. Before the
+    /// fix, two states differing on the validator set, the admin key and the epoch beacon
+    /// produced *equal* roots, so the divergence was silent on every validation path.
+    #[test]
+    fn test_state_root_commits_to_consensus_state() {
+        let addr = || Address::from_public_key(&KeyPair::generate().public_key());
+
+        let base = WorldState::new();
+        let baseline = base.clone().compute_state_root();
+
+        // Each mutation is applied to an otherwise identical state.
+        let mut mutations: Vec<(&str, Box<dyn Fn(&mut WorldState)>)> = Vec::new();
+        let v = addr();
+        mutations.push((
+            "validator_set",
+            Box::new(move |s: &mut WorldState| {
+                s.validator_set.add(v);
+            }),
+        ));
+        let a = addr();
+        mutations.push((
+            "admin_address",
+            Box::new(move |s: &mut WorldState| {
+                s.admin_address = Some(a);
+            }),
+        ));
+        mutations.push((
+            "epoch_beacon",
+            Box::new(|s: &mut WorldState| {
+                s.epoch_beacon = [0xFFu8; 32];
+            }),
+        ));
+        mutations.push((
+            "chain_id",
+            Box::new(|s: &mut WorldState| {
+                s.chain_id = s.chain_id.wrapping_add(1);
+            }),
+        ));
+        mutations.push((
+            "active_set_size",
+            Box::new(|s: &mut WorldState| {
+                s.active_set_size += 1;
+            }),
+        ));
+        mutations.push((
+            "min_validator_bond_atoms",
+            Box::new(|s: &mut WorldState| {
+                s.min_validator_bond_atoms += 1;
+            }),
+        ));
+        mutations.push((
+            "emitted_atoms",
+            Box::new(|s: &mut WorldState| {
+                s.emitted_atoms += 1;
+            }),
+        ));
+        mutations.push((
+            "destroyed_atoms",
+            Box::new(|s: &mut WorldState| {
+                s.destroyed_atoms += 1;
+            }),
+        ));
+        let b = addr();
+        mutations.push((
+            "banned_validator_keys",
+            Box::new(move |s: &mut WorldState| {
+                s.banned_validator_keys.insert(b);
+            }),
+        ));
+        let p = addr();
+        mutations.push((
+            "validator_pool",
+            Box::new(move |s: &mut WorldState| {
+                s.validator_pool
+                    .insert(p, vinx_core::ValidatorPoolEntry::new(1, 0));
+            }),
+        ));
+
+        for (name, mutate) in mutations {
+            let mut s = base.clone();
+            mutate(&mut s);
+            assert_ne!(
+                s.compute_state_root(),
+                baseline,
+                "state_root must change when `{name}` changes"
+            );
+        }
+    }
+
+    /// The sorted encoding of `banned_validator_keys` must not depend on insertion order,
+    /// or two honest nodes would compute different roots for the same state.
+    #[test]
+    fn test_consensus_root_is_insertion_order_independent() {
+        let a = Address::from_public_key(&KeyPair::generate().public_key());
+        let b = Address::from_public_key(&KeyPair::generate().public_key());
+
+        let mut s1 = WorldState::new();
+        s1.banned_validator_keys.insert(a);
+        s1.banned_validator_keys.insert(b);
+
+        let mut s2 = WorldState::new();
+        s2.banned_validator_keys.insert(b);
+        s2.banned_validator_keys.insert(a);
+
+        assert_eq!(s1.compute_consensus_root(), s2.compute_consensus_root());
     }
 
     #[test]
