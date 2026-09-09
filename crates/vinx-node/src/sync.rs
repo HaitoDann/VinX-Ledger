@@ -432,35 +432,33 @@ const SNAPSHOT_SYNC_THRESHOLD: u64 = 500;
 /// for the remaining delta between the snapshot height and the current peer tip.
 ///
 /// Returns `true` if a snapshot was applied, `false` if the gap is small enough
-/// Returns true when `url` is safe to fetch a state snapshot from: HTTPS, or a loopback
+/// Returns true when `raw` is safe to fetch a state snapshot from: HTTPS, or a loopback
 /// address where there is no network path for an attacker to sit on.
-fn is_transport_acceptable(url: &str) -> bool {
-    let lower = url.trim().to_ascii_lowercase();
-    if lower.starts_with("https://") {
-        return true;
-    }
-    let Some(rest) = lower.strip_prefix("http://") else {
-        return false; // unknown scheme — refuse rather than guess
+///
+/// # Parse with the same parser the client uses
+///
+/// This deliberately delegates to the `url` crate — the one `reqwest` itself parses with —
+/// rather than splitting the string by hand. A hand-rolled parser was the first version and
+/// it was bypassable: for `http://evil.com\@127.0.0.1/` it took the text after the last `@`
+/// and saw the loopback address `127.0.0.1`, while `url` (per the WHATWG spec, where a
+/// backslash terminates the authority for special schemes) resolves the host to `evil.com`.
+/// The guard said "loopback, allow" and the client then fetched an entire world state, in
+/// cleartext, from the attacker's host. Any divergence between the checking parser and the
+/// connecting parser is exploitable; sharing one removes the class.
+fn is_transport_acceptable(raw: &str) -> bool {
+    let Ok(parsed) = url::Url::parse(raw.trim()) else {
+        return false; // unparseable — refuse rather than guess
     };
-    let host = rest
-        .split(['/', '?', '#'])
-        .next()
-        .unwrap_or("")
-        .rsplit('@')
-        .next()
-        .unwrap_or("");
-    let host = host.strip_prefix('[').map_or_else(
-        || host.split(':').next().unwrap_or(""),
-        |v6| v6.split(']').next().unwrap_or(""),
-    );
-    if host == "localhost" {
-        return true;
-    }
-    // Parse rather than prefix-match: "127.0.0.1.evil.com" starts with "127." but is a
-    // perfectly ordinary attacker-controlled hostname.
-    match host.parse::<std::net::IpAddr>() {
-        Ok(ip) => ip.is_loopback(),
-        Err(_) => false,
+    match parsed.scheme() {
+        "https" => true,
+        "http" => match parsed.host() {
+            // `Host::Domain` covers "localhost"; anything else resolvable is not loopback.
+            Some(url::Host::Domain(d)) => d.eq_ignore_ascii_case("localhost"),
+            Some(url::Host::Ipv4(ip)) => ip.is_loopback(),
+            Some(url::Host::Ipv6(ip)) => ip.is_loopback(),
+            None => false,
+        },
+        _ => false, // unknown scheme
     }
 }
 
@@ -675,5 +673,27 @@ mod transport_tests {
         assert!(!is_transport_acceptable("http://user@evil.com/"));
         assert!(!is_transport_acceptable("ftp://seed.example.com"));
         assert!(!is_transport_acceptable("seed.example.com:8545"));
+    }
+
+    /// The guard must agree with the parser the HTTP client actually uses. A hand-written
+    /// parser did not: for these inputs it read a loopback host where `url` — and therefore
+    /// `reqwest` — resolves an attacker-controlled one, so the check passed and the snapshot
+    /// was then fetched in cleartext from that host.
+    #[test]
+    fn parser_confusion_hosts_are_refused() {
+        // Backslash terminates the authority for special schemes (WHATWG URL): the real
+        // host is `evil.com`, not the `127.0.0.1` that follows the `@`.
+        assert!(!is_transport_acceptable("http://evil.com\\@127.0.0.1/"));
+        // Loopback in the userinfo, real host after the `@`.
+        assert!(!is_transport_acceptable("http://127.0.0.1:8545@evil.com/"));
+        // Alternate IPv4 spellings of 127.0.0.1 are still loopback once parsed — they must
+        // be treated consistently, not by string comparison.
+        assert!(is_transport_acceptable("http://2130706433/"));
+        assert!(is_transport_acceptable("http://127.1/"));
+        // IPv4-mapped IPv6 loopback is not the IPv6 loopback `::1`.
+        assert!(!is_transport_acceptable("http://[::ffff:127.0.0.1]/"));
+        // Whitespace and case must not change the verdict.
+        assert!(is_transport_acceptable("  HTTP://LOCALHOST:8545  "));
+        assert!(!is_transport_acceptable("  HTTP://EVIL.COM  "));
     }
 }

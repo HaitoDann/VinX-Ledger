@@ -1429,10 +1429,17 @@ impl WorldState {
         if self.admin_policy.is_some() {
             return Err(CoreError::Unauthorized);
         }
-        if let Some(ref admin) = self.admin_address {
-            if &tx.from != admin {
-                return Err(CoreError::Unauthorized);
-            }
+        // VINX-20 (complément) : échec fermé, comme `apply_admin_action`. Le premier
+        // correctif n'avait traité que `apply_admin_action` et avait laissé ce chemin —
+        // qui garde `AnnounceUpgrade` — sur l'ancien motif permissif : sans admin
+        // configuré, le `if let Some(..)` était sauté et **n'importe qui** pouvait
+        // planifier une mise à jour de protocole. Une autorité absente n'est pas une
+        // autorité permissive.
+        let Some(ref admin) = self.admin_address else {
+            return Err(CoreError::Unauthorized);
+        };
+        if &tx.from != admin {
+            return Err(CoreError::Unauthorized);
         }
         Ok(())
     }
@@ -1827,6 +1834,8 @@ impl WorldState {
             last_active_set_size_change_ts: u64,
             last_bond_change_ts: u64,
             last_block_ts: u64,
+            emission_started: bool,
+            foundry: u128,
         }
 
         let commitment = ConsensusCommitment {
@@ -1858,6 +1867,13 @@ impl WorldState {
             last_active_set_size_change_ts: self.last_active_set_size_change_ts,
             last_bond_change_ts: self.last_bond_change_ts,
             last_block_ts: self.last_block_ts,
+            // `emission_started` gouverne l'émission ET la clôture d'époque : deux nœuds
+            // qui en divergent émettent différemment. Il n'était engagé qu'indirectement,
+            // via `emission_epoch_ts` — donc invisible quand celui-ci vaut 0.
+            emission_started: self.emission_started,
+            // Dormant depuis ADR 0040, mais persisté et désérialisé : l'engager coûte
+            // 16 octets et supprime la question « est-il vraiment mort ? ».
+            foundry: self.foundry.atoms(),
         };
 
         let encoded = bincode::serialize(&commitment)

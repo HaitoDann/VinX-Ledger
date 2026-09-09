@@ -4133,6 +4133,7 @@ dependencies = [
  "toml",
  "tracing",
  "tracing-subscriber",
+ "url",
  "vinx-core",
  "vinx-crypto",
  "vinx-state",

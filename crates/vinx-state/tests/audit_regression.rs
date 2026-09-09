@@ -299,3 +299,54 @@ fn admin_action_is_refused_when_no_authority_is_configured() {
         "governance must fail closed when no admin authority exists"
     );
 }
+
+/// Passe adversariale (auto-audit) — VINX-20 n'était corrigé qu'à moitié. Le premier
+/// correctif avait traité `apply_admin_action` et laissé `check_admin`, qui garde
+/// `AnnounceUpgrade`, sur l'ancien motif permissif : sans admin configuré, n'importe qui
+/// pouvait planifier une mise à jour de protocole.
+#[test]
+fn announce_upgrade_is_refused_when_no_authority_is_configured() {
+    let attacker = KeyPair::generate();
+    let attacker_addr = Address::from_public_key(&attacker.public_key());
+
+    let mut state = genesis_with(attacker_addr);
+    state.admin_address = None;
+    state.admin_policy = None;
+    state.credit_for_test(attacker_addr, Amount::from_vinx(1_000));
+
+    let tx = Transaction::new_announce_upgrade(
+        &attacker,
+        vinx_core::protocol::ProtocolVersion {
+            major: 9,
+            minor: 9,
+            patch: 9,
+        },
+        u64::MAX,
+        0,
+    );
+    assert_eq!(
+        state.apply_transaction(&tx),
+        Err(vinx_core::CoreError::Unauthorized),
+        "planifier une mise à jour doit échouer fermé sans autorité admin"
+    );
+}
+
+/// Passe adversariale — `emission_started` gouverne l'émission *et* la clôture d'époque,
+/// et n'était engagé qu'indirectement via `emission_epoch_ts`, donc invisible quand
+/// celui-ci vaut 0. `foundry` est dormant mais persisté. Les deux sont désormais engagés.
+#[test]
+fn state_root_commits_emission_flag_and_foundry() {
+    let admin = Address::from_public_key(&KeyPair::generate().public_key());
+
+    let base = genesis_with(admin);
+    let baseline = base.clone().compute_consensus_root();
+
+    // Un état identique sauf `emission_started` doit avoir une racine différente.
+    let mut started = base.clone();
+    started.settle_block(&admin, 1, 0); // établit l'époque à t=0 → emission_epoch_ts reste 0
+    assert_ne!(
+        started.compute_consensus_root(),
+        baseline,
+        "emission_started doit être engagé même quand emission_epoch_ts vaut 0"
+    );
+}

@@ -111,10 +111,35 @@ pub async fn get_account(
     }
 }
 
+/// Rejects a transaction whose `payload` exceeds the consensus bound, before any
+/// expensive work touches it (ADR 0035 / finding VINX-13).
+///
+/// `admission_check` enforces the same bound as a consensus rule; this is purely an
+/// ordering guard so the RPC surface does not verify a signature and hash a payload it is
+/// going to refuse anyway.
+fn payload_bound_msg(tx: &Transaction) -> Option<String> {
+    (tx.payload.len() > vinx_core::amount::MAX_TX_PAYLOAD_BYTES).then(|| {
+        format!(
+            "payload of {} bytes exceeds the {}-byte limit",
+            tx.payload.len(),
+            vinx_core::amount::MAX_TX_PAYLOAD_BYTES
+        )
+    })
+}
+
 pub async fn submit_tx(
     State(node): State<Arc<Node>>,
     Json(tx): Json<Transaction>,
 ) -> ApiResult<TxSubmitResponse> {
+    // Cheapest structural check first: the payload bound gates how much data the
+    // signature verification and the two SHA-256 passes below will chew through. It used
+    // to be enforced only in `admission_check`, i.e. *after* all of that, so an
+    // unauthenticated caller could force the full crypto cost on an oversized payload.
+    // The P2P path already had this ordering right (admission before crypto).
+    if let Some(msg) = payload_bound_msg(&tx) {
+        return Err(ApiError::BadRequest(msg));
+    }
+
     // Pre-validate signature before accepting into mempool.
     // VINX-03: must be the canonical predicate — an ad-hoc sender-only check let a
     // sponsored transaction with no sponsor signature drain the named sponsor's account.
@@ -787,9 +812,17 @@ pub async fn submit_tx_batch(
         .par_iter()
         .map(|tx| {
             let hash = hex::encode(tx.hash());
-            // VINX-03: same canonical predicate as the single-tx path — it also
-            // verifies the sponsor's key and signature.
-            let result = WorldState::verify_tx_signature_pure(tx).map_err(|e| e.to_string());
+            // Payload bound before crypto, as in the single-tx path — and it matters
+            // more here: the batch fans out over rayon, so the amplification is
+            // multiplied by the number of entries.
+            let result = payload_bound_msg(tx).map_or_else(
+                || {
+                    // VINX-03: same canonical predicate as the single-tx path — it
+                    // also verifies the sponsor's key and signature.
+                    WorldState::verify_tx_signature_pure(tx).map_err(|e| e.to_string())
+                },
+                Err,
+            );
             (hash, result)
         })
         .collect();
