@@ -668,11 +668,11 @@ async function sendTx(txType) {
   const discriminants = { Transfer:0x01, Stake:0x02, Unstake:0x03 };
   // Canonical signing bytes — must match vinx-core Transaction::signing_bytes():
   // disc(1) ‖ from(20) ‖ to(20) ‖ amount(16 BE) ‖ fee(16 BE) ‖ nonce(8 BE)
-  // ‖ chain_id(4 BE) ‖ expiry(1=0x00) ‖ payload(empty) ‖ sponsor(1=0x00)
+  // ‖ chain_id(4 BE) ‖ expiry(1=0x00) ‖ payload_len(4 BE) ‖ payload(empty) ‖ sponsor(1=0x00)
   let fromB, toB;
   try { fromB = bech32Decode20(wallet.address); toB = bech32Decode20(to); }
   catch (e) { result.innerHTML = `<p class="msg err">Adresse invalide : ${e.message}</p>`; return; }
-  const sigBytes = new Uint8Array(1+20+20+16+16+8+4+1+1);
+  const sigBytes = new Uint8Array(1+20+20+16+16+8+4+1+4+1);
   let i = 0;
   sigBytes[i++] = discriminants[txType];
   sigBytes.set(fromB, i); i += 20;
@@ -682,6 +682,7 @@ async function sendTx(txType) {
   sigBytes.set(bigIntTo8BE(BigInt(nonce)), i); i += 8;
   sigBytes.set(u32To4BE(chainId), i);          i += 4;
   sigBytes[i++] = 0x00; // expires_at_height: None
+  sigBytes.set(u32To4BE(0), i); i += 4; // payload_len = 0 (VINX-12: always prefixed)
   sigBytes[i++] = 0x00; // sponsor: None
   const signature = nacl.sign.detached(sigBytes, wallet.secretKey64);
   const pubKeyArr = '['+Array.from(wallet.publicKey32).join(',')+']';
@@ -1117,7 +1118,7 @@ function updateGate(){
 // ─── Governance signing ───────────────────────────────────────────────────────
 // Canonical signing bytes — must match vinx-core Transaction::signing_bytes():
 // disc(1) ‖ from(20) ‖ to(20) ‖ amount(16 BE) ‖ fee(16 BE) ‖ nonce(8 BE)
-// ‖ chain_id(4 BE) ‖ expiry(1=0x00) ‖ payload ‖ sponsor(1=0x00)
+// ‖ chain_id(4 BE) ‖ expiry(1=0x00) ‖ payload_len(4 BE) ‖ payload ‖ sponsor(1=0x00)
 async function submitGov(txName, disc, toAddr, payloadBytes){
   if(!wallet||!isAdmin)throw new Error('Clé admin requise.');
   let nonce=0;
@@ -1125,7 +1126,7 @@ async function submitGov(txName, disc, toAddr, payloadBytes){
   const chainId=wallet.chainId??42;
   const fromB=bech32Decode20(wallet.address), toB=bech32Decode20(toAddr);
   const payload=payloadBytes||new Uint8Array(0);
-  const sig=new Uint8Array(1+20+20+16+16+8+4+1+payload.length+1);
+  const sig=new Uint8Array(1+20+20+16+16+8+4+1+4+payload.length+1);
   let i=0;
   sig[i++]=disc;
   sig.set(fromB,i);i+=20;
@@ -1135,6 +1136,7 @@ async function submitGov(txName, disc, toAddr, payloadBytes){
   sig.set(bigIntTo8BE(BigInt(nonce)),i);i+=8;
   sig.set(u32To4BE(chainId),i);i+=4;
   sig[i++]=0x00; // expiry: None
+  sig.set(u32To4BE(payload.length),i);i+=4; // payload_len (VINX-12: always prefixed)
   sig.set(payload,i);i+=payload.length;
   sig[i++]=0x00; // sponsor: None
   const signature=nacl.sign.detached(sig,wallet.secretKey64);

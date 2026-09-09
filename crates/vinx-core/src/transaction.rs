@@ -140,8 +140,11 @@ impl Transaction {
     ///
     /// Addresses are the raw 20-byte payload (fixed length, so no length prefix).
     /// Layout: discriminant(1) ‖ from(20) ‖ to(20) ‖ amount(16 BE) ‖ fee(16 BE) ‖
-    /// nonce(8 BE) ‖ chain_id(4 BE) ‖ expiry(0 | 1‖8 BE) ‖ payload ‖
+    /// nonce(8 BE) ‖ chain_id(4 BE) ‖ expiry(0 | 1‖8 BE) ‖ payload_len(4 BE) ‖ payload ‖
     /// sponsor(0 | 1‖20). Any client (web UI, SDK) must reproduce this exactly.
+    ///
+    /// Every variable-length field is length-prefixed or flag-delimited, so the encoding
+    /// is injective: two different transactions can never share signing bytes (VINX-12).
     pub fn signing_bytes(&self) -> Vec<u8> {
         let mut bytes = Vec::with_capacity(128);
         bytes.push(self.tx_type.discriminant());
@@ -158,9 +161,22 @@ impl Transaction {
             }
             None => bytes.push(0u8),
         }
-        if !self.payload.is_empty() {
-            bytes.extend_from_slice(&self.payload);
-        }
+        // VINX-12: length-prefixed, always — including when empty.
+        //
+        // `payload` used to be appended raw, immediately followed by the sponsor marker
+        // (`0x00`, or `0x01 ‖ sponsor[20]`). That encoding is not injective: for any
+        // sponsor address whose last byte is 0x00 (1 in 256), a sponsored transaction and
+        // an unsponsored one with a re-cut payload produce identical signing bytes — and
+        // therefore an identical txid, since `hash()` is `sha256(signing_bytes())`. One
+        // signature was valid for two economically different transactions, and the fee
+        // payer differed between them (sponsor vs sender).
+        //
+        // A `u32` big-endian length makes every field self-delimiting, so no re-cut of the
+        // byte string can be reinterpreted as different field boundaries. The prefix is
+        // written unconditionally: emitting it only for a non-empty payload would leave the
+        // empty case ambiguous again.
+        bytes.extend_from_slice(&(self.payload.len() as u32).to_be_bytes());
+        bytes.extend_from_slice(&self.payload);
         // Include sponsor address so the sponsor signature commits to it
         if let Some(ref sponsor) = self.sponsor {
             bytes.push(1u8);
@@ -572,7 +588,7 @@ mod tests {
             sponsor_signature: None,
         };
         // disc(01) ‖ from(0x11×20) ‖ to(0x22×20) ‖ amount(16 BE) ‖ fee(16 BE)
-        //   ‖ nonce(8 BE) ‖ chain_id(4 BE) ‖ expiry(00) ‖ sponsor(00)
+        //   ‖ nonce(8 BE) ‖ chain_id(4 BE) ‖ expiry(00) ‖ payload_len(4 BE) ‖ sponsor(00)
         let expected = concat!(
             "01",
             "1111111111111111111111111111111111111111",
@@ -582,6 +598,7 @@ mod tests {
             "0000000000000007",
             "0000002a",
             "00",
+            "00000000",
             "00",
         );
         assert_eq!(hex::encode(tx.signing_bytes()), expected);
@@ -630,6 +647,7 @@ mod tests {
             "0000000000000007",                         // nonce 7
             "0000002a",                                 // chain_id 42
             "00",                                       // expiry None
+            "00000018",                                 // payload_len = 24 (VINX-12)
             "00000000", // GovernanceAction::AddValidator (u32 LE = 0)
             "15161718191a1b1c1d1e1f202122232425262728", // validator address = 15..28
             "00",       // sponsor None
@@ -651,9 +669,84 @@ mod tests {
         assert_eq!(
             hex::encode(upgrade.signing_bytes()),
             "040102030405060708090a0b0c0d0e0f10111213140102030405060708090a0b0c0d0e0f1011121314\
-             000000000000000000000000000000000000000000000000000000000000000000000000000000070000002a0000\
-             010002000300000000000003e800"
+             000000000000000000000000000000000000000000000000000000000000000000000000000000070000002a00\
+             0000000e\
+             00010002000300000000000003e800"
         );
+    }
+
+    /// VINX-12 regression — the payload/sponsor boundary must be unambiguous.
+    ///
+    /// Before the length prefix, for any sponsor address ending in `0x00` these two
+    /// transactions produced identical signing bytes and an identical txid, so one
+    /// signature was valid for both — and they disagree on who pays the fee.
+    #[test]
+    fn test_signing_bytes_payload_sponsor_boundary_is_unambiguous() {
+        let from = Address::from_bytes([0x11; 20]);
+        let to = Address::from_bytes([0x22; 20]);
+        // Worst case: a sponsor address whose last byte is 0x00.
+        let mut sponsor_raw = [0x33u8; 20];
+        sponsor_raw[19] = 0x00;
+        let sponsor = Address::from_bytes(sponsor_raw);
+
+        let mk = |payload: Vec<u8>, sponsor: Option<Address>| Transaction {
+            tx_type: TransactionType::Transfer,
+            from,
+            to,
+            amount: Amount::from_atoms(1),
+            fee: Amount::from_atoms(1),
+            nonce: 0,
+            chain_id: 42,
+            expires_at_height: None,
+            payload,
+            pub_key: None,
+            signature: None,
+            sponsor,
+            sponsor_pub_key: None,
+            sponsor_signature: None,
+        };
+
+        let payload = vec![0xAAu8, 0xBB];
+        // A: sponsored, payload = P.
+        let a = mk(payload.clone(), Some(sponsor));
+        // B: unsponsored, payload = P ‖ 0x01 ‖ sponsor[0..19] — the old re-cut collision.
+        let mut recut = payload.clone();
+        recut.push(0x01);
+        recut.extend_from_slice(&sponsor_raw[..19]);
+        let b = mk(recut, None);
+
+        assert_ne!(
+            a.signing_bytes(),
+            b.signing_bytes(),
+            "payload/sponsor boundary must not be re-cuttable"
+        );
+        assert_ne!(a.hash(), b.hash(), "and the txids must differ");
+    }
+
+    /// The length prefix must also separate an empty payload from a short one, and keep
+    /// payloads of different lengths distinguishable at the boundary.
+    #[test]
+    fn test_signing_bytes_payload_length_is_committed() {
+        let mk = |payload: Vec<u8>| Transaction {
+            tx_type: TransactionType::Transfer,
+            from: Address::from_bytes([0x11; 20]),
+            to: Address::from_bytes([0x22; 20]),
+            amount: Amount::from_atoms(1),
+            fee: Amount::from_atoms(1),
+            nonce: 0,
+            chain_id: 42,
+            expires_at_height: None,
+            payload,
+            pub_key: None,
+            signature: None,
+            sponsor: None,
+            sponsor_pub_key: None,
+            sponsor_signature: None,
+        };
+        let empty = mk(vec![]);
+        let one_zero = mk(vec![0x00]);
+        assert_ne!(empty.signing_bytes(), one_zero.signing_bytes());
+        assert_ne!(empty.hash(), one_zero.hash());
     }
 
     #[test]
