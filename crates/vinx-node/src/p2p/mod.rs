@@ -1039,13 +1039,18 @@ async fn dispatch_message(
                 .filter_map(|(idx, _)| vs.validators().get(*idx).copied())
                 .collect();
             {
+                let indexed_pks = state.read().await.indexed_bls_keys(&vs);
                 let mut c = chain.write().await;
                 c.set_block_bls(height, agg.0.to_vec(), canonical_pks, bitmap);
-                let fin = c.advance_finality(&vs);
+                let fin = c.advance_finality(&vs, &indexed_pks);
                 if fin >= height {
                     let mut snap = fork_choice.finalized_state.write().await;
                     crate::reorg::advance_snapshot(&mut snap, &c);
-                    info!(height, cosigners = agg_count, "Block finalized via BLS aggregate");
+                    info!(
+                        height,
+                        cosigners = agg_count,
+                        "Block finalized via BLS aggregate"
+                    );
                 }
             }
             // ADR 0028: record co-signers for proportional epoch distribution.
@@ -1429,10 +1434,11 @@ async fn dispatch_message(
                     // banc n=3 : hauteur qui monte, finalité à 0). Prefix-closed → ne finalise
                     // que les blocs ayant réellement le quorum.
                     let vs = validator_set.read().await.clone();
+                    let indexed_pks = state.read().await.indexed_bls_keys(&vs);
                     let mut c = chain.write().await;
                     c.note_quorum(height, pre_quorum); // ADR 0002/0027 — quorum historique
                     c.push(block);
-                    c.advance_finality(&vs);
+                    c.advance_finality(&vs, &indexed_pks);
                     drop(c);
                     info!(height, "Block applied via P2P sync");
                 } else {

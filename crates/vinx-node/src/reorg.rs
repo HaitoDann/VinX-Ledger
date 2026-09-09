@@ -141,7 +141,11 @@ pub fn consider_candidate(
     if !chain.record_candidate(candidate.clone()) {
         return ReorgOutcome::NoChange; // doublon / sous la finalité / déjà retenu
     }
-    if !chain.would_reorg_at(height, validator_set) {
+    // VINX-05 : le poids de fork-choice se compte sur le registre BLS on-chain, pas sur
+    // les clés que le bloc transporte. On lit le registre de l'état courant (celui du
+    // préfixe canonique sur lequel le candidat se branche).
+    let indexed_pks = state.indexed_bls_keys(validator_set);
+    if !chain.would_reorg_at(height, validator_set, &indexed_pks) {
         return ReorgOutcome::NoChange; // le bloc retenu reste canonique
     }
     match rebuild_canonical_state(finalized_state, snapshot_height, chain, height, &candidate) {
@@ -149,7 +153,9 @@ pub fn consider_candidate(
             chain.reorg_replace(height, candidate);
             *state = new_state;
             *validator_set = state.validator_set.clone();
-            chain.advance_finality(validator_set);
+            // Le set et le registre ont pu changer au rejeu : recalculer avant finalité.
+            let indexed_pks = state.indexed_bls_keys(validator_set);
+            chain.advance_finality(validator_set, &indexed_pks);
             ReorgOutcome::Reorged
         }
         Err(_) => {

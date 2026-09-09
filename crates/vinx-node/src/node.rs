@@ -293,7 +293,8 @@ impl Node {
         // ADR 0002: advance the finalized pointer. On a single-validator chain the
         // proposer's own signature already meets quorum, so the block is final at once;
         // with more validators it becomes final once quorum co-signs (via P2P).
-        chain.advance_finality(&state.validator_set);
+        let indexed_pks = state.indexed_bls_keys(&state.validator_set);
+        chain.advance_finality(&state.validator_set, &indexed_pks);
 
         // ADR 0028 — record the producer as a co-signer of their own block.
         // Additional co-signers are recorded when quorum BLS sigs arrive via P2P.
@@ -311,10 +312,10 @@ impl Node {
         // Cache block transactions for compact-block TxRequest responses (ADR 0037).
         // Must happen BEFORE update_confirmed_nonces flushes them from the mempool.
         if !block.transactions.is_empty() {
-            self.recent_block_txs
-                .write()
-                .await
-                .insert(block.header.height, block.transactions.clone() as Vec<Transaction>);
+            self.recent_block_txs.write().await.insert(
+                block.header.height,
+                block.transactions.clone() as Vec<Transaction>,
+            );
         }
 
         // Flush mempool entries whose nonce is now consumed by this block.
@@ -540,7 +541,10 @@ impl Node {
                         let h = block.header.height;
                         let block_ts = block.header.timestamp;
                         if h > 0 && h % PRUNE_INTERVAL == 0 {
-                            self.chain.write().await.prune_by_age(block_ts, TX_RETENTION_SECS);
+                            self.chain
+                                .write()
+                                .await
+                                .prune_by_age(block_ts, TX_RETENTION_SECS);
                         }
                         if h >= LIVENESS_EVICTION_BLOCKS {
                             let liveness = self.validator_liveness.read().await;

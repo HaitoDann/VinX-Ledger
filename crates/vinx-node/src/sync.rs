@@ -125,8 +125,7 @@ pub async fn sync_from_peer(
             // (validate_block_with_registry) so that only keys registered in the
             // validator pool can contribute to quorum — arbitrary BLS keys are rejected.
             let indexed_pks = state.indexed_bls_keys(&state.validator_set);
-            if let Err(e) =
-                validate_block_with_registry(&block, &state.validator_set, &indexed_pks)
+            if let Err(e) = validate_block_with_registry(&block, &state.validator_set, &indexed_pks)
             {
                 tracing::warn!(
                     height = block.header.height,
@@ -200,7 +199,8 @@ pub async fn sync_from_peer(
         // ADR 0002 — faire suivre le pointeur de finalité local : les blocs synchronisés
         // portent déjà les co-signatures du pair ; sans cet appel, `finalized_height` reste
         // figé après un rattrapage par sync (prefix-closed → seuls les blocs à quorum comptent).
-        chain.advance_finality(&state.validator_set);
+        let indexed_pks = state.indexed_bls_keys(&state.validator_set);
+        chain.advance_finality(&state.validator_set, &indexed_pks);
 
         tracing::info!(applied, tip = chain.tip_height(), "Sync batch applied");
 
@@ -245,21 +245,19 @@ pub async fn parallel_sync_from_peer(
     let peer_height: u64 = {
         let url = format!("{}/chain/height", base_url);
         match client.get(&url).send().await {
-            Ok(r) if r.status().is_success() => {
-                match r.json::<serde_json::Value>().await {
-                    Ok(v) => match v.get("height").and_then(|h| h.as_u64()) {
-                        Some(h) => h,
-                        None => {
-                            tracing::warn!("Parallel sync: could not read peer height; falling back to sequential sync");
-                            return 0;
-                        }
-                    },
-                    Err(e) => {
-                        tracing::warn!(error = %e, "Parallel sync: height parse failed");
+            Ok(r) if r.status().is_success() => match r.json::<serde_json::Value>().await {
+                Ok(v) => match v.get("height").and_then(|h| h.as_u64()) {
+                    Some(h) => h,
+                    None => {
+                        tracing::warn!("Parallel sync: could not read peer height; falling back to sequential sync");
                         return 0;
                     }
+                },
+                Err(e) => {
+                    tracing::warn!(error = %e, "Parallel sync: height parse failed");
+                    return 0;
                 }
-            }
+            },
             Ok(r) => {
                 tracing::warn!(status = %r.status(), "Parallel sync: height endpoint error");
                 return 0;
@@ -305,10 +303,7 @@ pub async fn parallel_sync_from_peer(
     for window in ranges.chunks(MAX_PARALLEL_FETCHES) {
         // Fire all fetches in this window concurrently.
         let fetches = window.iter().map(|(from, limit)| {
-            let url = format!(
-                "{}/chain/sync?from={}&limit={}",
-                base_url, from, limit
-            );
+            let url = format!("{}/chain/sync?from={}&limit={}", base_url, from, limit);
             let c = client.clone();
             async move {
                 let resp = match c.get(&url).send().await {
@@ -352,7 +347,10 @@ pub async fn parallel_sync_from_peer(
                 if block.header.timestamp
                     > now_secs.saturating_add(vinx_core::amount::MAX_CLOCK_DRIFT_SECS)
                 {
-                    tracing::error!(height, "Parallel sync: timestamp too far in future — aborting");
+                    tracing::error!(
+                        height,
+                        "Parallel sync: timestamp too far in future — aborting"
+                    );
                     return total_applied;
                 }
                 // Proposer + co-signatures (registry-bound: bitmap verified against
@@ -406,7 +404,8 @@ pub async fn parallel_sync_from_peer(
             }
         }
 
-        chain.advance_finality(&state.validator_set);
+        let indexed_pks = state.indexed_bls_keys(&state.validator_set);
+        chain.advance_finality(&state.validator_set, &indexed_pks);
         tracing::info!(
             total_applied,
             tip = chain.tip_height(),

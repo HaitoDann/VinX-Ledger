@@ -125,7 +125,10 @@ impl Block {
 
     /// Number of bits set in `bls_bitmap` (popcount).
     pub fn bls_bitmap_popcount(&self) -> usize {
-        self.bls_bitmap.iter().map(|b| b.count_ones() as usize).sum()
+        self.bls_bitmap
+            .iter()
+            .map(|b| b.count_ones() as usize)
+            .sum()
     }
 
     /// Verifies `bls_aggregate` against the on-chain BLS key registry (ADR 0029 Phase 1).
@@ -135,14 +138,27 @@ impl Block {
     /// Uses `bls_bitmap` to determine which validators signed; each set bit must have
     /// a corresponding registered key. Returns the signer count on success.
     ///
-    /// Falls back to `bls_signer_count()` (cosigner_pks path) when `bls_bitmap` is empty
-    /// (pre-ADR-0029 blocks produced before Phase 1 was deployed).
+    /// # Security (VINX-02 / VX-RED-001)
+    ///
+    /// There is **no fallback** to the `bls_cosigner_pks` path. That fallback used to
+    /// trigger whenever `bls_bitmap` was empty, and `bls_signer_count()` reconstructs its
+    /// signers from `bls_cosigner_pks` — a field carried *by the block itself*. An attacker
+    /// therefore reached quorum with keys registered by nobody, simply by omitting the
+    /// bitmap: a security-critical downgrade selected by the untrusted input. Blocks
+    /// produced by `consensus::sign_block_bls` always set the bitmap, so requiring it costs
+    /// legitimate producers nothing.
+    ///
+    /// An empty bitmap that nonetheless carries an aggregate is rejected as malformed:
+    /// signatures are claimed but attributed to no validator index.
     pub fn bls_signer_count_from_bitmap(
         &self,
         indexed_bls_pks: &[Option<[u8; 48]>],
     ) -> Result<usize, BlsError> {
         if self.bls_bitmap.is_empty() {
-            return self.bls_signer_count();
+            return match self.bls_aggregate {
+                Some(_) => Err(BlsError::EmptyAggregate),
+                None => Ok(0),
+            };
         }
         let agg_vec = match &self.bls_aggregate {
             Some(b) => b,
@@ -168,14 +184,35 @@ impl Block {
         if pks.is_empty() {
             return Err(BlsError::EmptyAggregate);
         }
+        // VINX-11: the same G1 key registered under two validator slots would let one
+        // real signature be counted twice (aggregate 2·pk vs 2·sigma verifies fine).
+        // One bit of the bitmap must mean one independent decision.
+        for i in 1..pks.len() {
+            if pks[..i].iter().any(|p| p.0 == pks[i].0) {
+                return Err(BlsError::InvalidKey);
+            }
+        }
         bls_verify_aggregate(&pks, &agg_sig, &self.header.hash())?;
         Ok(pks.len())
     }
 
-    /// Verifies the BLS aggregate signature and returns the cosigner count.
+    /// Verifies the BLS aggregate against `bls_cosigner_pks` and returns how many keys
+    /// it contains.
+    ///
+    /// # This is NOT a security predicate (VINX-02 / VINX-05)
+    ///
+    /// `bls_cosigner_pks` is supplied **by the block itself**. This function proves only
+    /// that the aggregate matches the keys the block chose to advertise — it does *not*
+    /// prove those keys belong to any validator. An attacker generates `quorum` keys of
+    /// their own and passes this check trivially.
+    ///
+    /// Use it for display only. Every security decision — finality, fork-choice weight,
+    /// block validation — must use [`Block::bls_signer_count_from_bitmap`] with the
+    /// on-chain registry (`WorldState::indexed_bls_keys`).
+    ///
     /// Returns `Ok(0)` when `bls_aggregate` is absent; `Err` on invalid aggregate or
     /// on malformed byte lengths (expected 96 bytes for sig, 48 bytes per pubkey).
-    pub fn bls_signer_count(&self) -> Result<usize, BlsError> {
+    pub fn bls_signer_count_unverified(&self) -> Result<usize, BlsError> {
         let agg_vec = match &self.bls_aggregate {
             Some(b) => b,
             None => return Ok(0),
@@ -203,12 +240,22 @@ impl Block {
         Ok(pks.len())
     }
 
-    /// Returns true when this block has enough BLS co-signatures (≥ quorum).
-    pub fn is_finalized(&self, validator_set: &ValidatorSet) -> bool {
+    /// Returns true when this block carries co-signatures from at least `quorum`
+    /// validators **whose BLS keys are registered on-chain**.
+    ///
+    /// `indexed_bls_pks[i]` is the registered G1 key of the validator at index `i` in
+    /// `validator_set`, or `None` when unregistered — build it with
+    /// `WorldState::indexed_bls_keys`. Requiring the registry here is what stops a block
+    /// from declaring its own signers (VINX-02).
+    pub fn is_finalized(
+        &self,
+        validator_set: &ValidatorSet,
+        indexed_bls_pks: &[Option<[u8; 48]>],
+    ) -> bool {
         if self.is_genesis() {
             return true;
         }
-        self.bls_signer_count()
+        self.bls_signer_count_from_bitmap(indexed_bls_pks)
             .map(|c| c >= validator_set.quorum())
             .unwrap_or(false)
     }
@@ -294,7 +341,7 @@ mod tests {
         let addr = Address::from_public_key(&kp.public_key());
         let vs = ValidatorSet::single(addr.clone());
         let genesis = make_block(0, addr);
-        assert!(genesis.is_finalized(&vs));
+        assert!(genesis.is_finalized(&vs, &[]));
     }
 
     #[test]
@@ -372,9 +419,12 @@ mod tests {
         let agg = vinx_crypto::bls_aggregate(&[bls_sig]).unwrap();
         block.bls_aggregate = Some(agg.0.to_vec());
         block.bls_cosigner_pks = vec![bls_sk.public_key().0.to_vec()];
+        block.set_bls_bitmap_bit(0);
+        let indexed_pks = vec![Some(bls_sk.public_key().0)];
 
-        assert_eq!(block.bls_signer_count().unwrap(), 1);
-        assert!(block.is_finalized(&vs));
+        assert_eq!(block.bls_signer_count_unverified().unwrap(), 1);
+        assert_eq!(block.bls_signer_count_from_bitmap(&indexed_pks).unwrap(), 1);
+        assert!(block.is_finalized(&vs, &indexed_pks));
     }
 
     #[test]
@@ -393,9 +443,11 @@ mod tests {
         let agg = vinx_crypto::bls_aggregate(&[bls_sk.sign(&header_hash)]).unwrap();
         block.bls_aggregate = Some(agg.0.to_vec());
         block.bls_cosigner_pks = vec![wrong_sk.public_key().0.to_vec()];
+        block.set_bls_bitmap_bit(0);
+        let indexed_pks = vec![Some(wrong_sk.public_key().0)];
 
-        assert!(block.bls_signer_count().is_err());
-        assert!(!block.is_finalized(&vs));
+        assert!(block.bls_signer_count_unverified().is_err());
+        assert!(!block.is_finalized(&vs, &indexed_pks));
     }
 
     // ─── ADR 0029 Phase 1 — bls_bitmap ───────────────────────────────────────
@@ -446,25 +498,71 @@ mod tests {
         let pk_bytes = bls_sk.public_key().0;
         let indexed_pks = vec![Some(pk_bytes)];
         assert_eq!(block.bls_signer_count_from_bitmap(&indexed_pks).unwrap(), 1);
-        // is_finalized uses bls_signer_count() (cosigner_pks path) — quorum=1 met.
-        assert!(block.is_finalized(&vs));
+        // is_finalized now goes through the registry too — quorum=1 met by a registered key.
+        assert!(block.is_finalized(&vs, &indexed_pks));
     }
 
+    /// VINX-02 regression — an empty `bls_bitmap` must NOT fall back to the
+    /// block-supplied `bls_cosigner_pks` list. That fallback let an attacker reach
+    /// quorum with self-generated keys simply by omitting the bitmap.
     #[test]
-    fn test_bls_signer_count_from_bitmap_fallback_when_no_bitmap() {
+    fn test_empty_bitmap_does_not_fall_back_to_cosigner_pks() {
         use vinx_crypto::BlsSecretKey;
         let kp = KeyPair::generate();
         let addr = Address::from_public_key(&kp.public_key());
         let mut block = make_block(1, addr);
         let header_hash = block.hash();
 
-        // No bitmap set → falls back to bls_cosigner_pks path.
+        // A perfectly valid aggregate over a key the registry never heard of.
         let bls_sk = BlsSecretKey::generate();
         let agg = vinx_crypto::bls_aggregate(&[bls_sk.sign(&header_hash)]).unwrap();
         block.bls_aggregate = Some(agg.0.to_vec());
         block.bls_cosigner_pks = vec![bls_sk.public_key().0.to_vec()];
-        // bls_bitmap is empty → fallback
-        assert_eq!(block.bls_signer_count_from_bitmap(&[]).unwrap(), 1);
+        // bls_bitmap stays empty — the attacker-selected downgrade.
+
+        assert!(
+            block.bls_signer_count_from_bitmap(&[]).is_err(),
+            "an aggregate attributed to no validator index must be rejected"
+        );
+        let indexed = vec![Some(bls_sk.public_key().0)];
+        assert!(
+            block.bls_signer_count_from_bitmap(&indexed).is_err(),
+            "even a registered key must not count without a bitmap bit"
+        );
+    }
+
+    /// VINX-02 — a block with no aggregate at all simply has zero verified signers.
+    #[test]
+    fn test_empty_bitmap_without_aggregate_counts_zero() {
+        let kp = KeyPair::generate();
+        let addr = Address::from_public_key(&kp.public_key());
+        let block = make_block(1, addr);
+        assert_eq!(block.bls_signer_count_from_bitmap(&[]).unwrap(), 0);
+    }
+
+    /// VINX-11 — the same G1 key at two bitmap positions must not be counted twice.
+    #[test]
+    fn test_duplicate_registered_key_across_slots_rejected() {
+        use vinx_crypto::BlsSecretKey;
+        let kp = KeyPair::generate();
+        let addr = Address::from_public_key(&kp.public_key());
+        let mut block = make_block(1, addr);
+        let header_hash = block.hash();
+
+        let bls_sk = BlsSecretKey::generate();
+        // Aggregate the *same* signature twice — anyone can do this without the key.
+        let sig = bls_sk.sign(&header_hash);
+        let agg = vinx_crypto::bls_aggregate(&[sig.clone(), sig]).unwrap();
+        block.bls_aggregate = Some(agg.0.to_vec());
+        block.set_bls_bitmap_bit(0);
+        block.set_bls_bitmap_bit(1);
+
+        let pk = bls_sk.public_key().0;
+        let indexed_pks = vec![Some(pk), Some(pk)]; // one key, two validator slots
+        assert!(
+            block.bls_signer_count_from_bitmap(&indexed_pks).is_err(),
+            "one signature must never count as two independent signers"
+        );
     }
 
     #[test]
@@ -503,5 +601,4 @@ mod tests {
         let indexed_pks = vec![Some(wrong_sk.public_key().0)];
         assert!(block.bls_signer_count_from_bitmap(&indexed_pks).is_err());
     }
-
 }

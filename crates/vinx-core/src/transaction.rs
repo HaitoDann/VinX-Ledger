@@ -417,7 +417,8 @@ impl Transaction {
     ) -> Self {
         let pk = keypair.public_key();
         let from = Address::from_public_key(&pk);
-        let raw = bincode::serialize(payload).expect("RegisterBlsKeyPayload serialization is infallible");
+        let raw =
+            bincode::serialize(payload).expect("RegisterBlsKeyPayload serialization is infallible");
         let mut tx = Self {
             tx_type: TransactionType::RegisterBlsKey,
             from,

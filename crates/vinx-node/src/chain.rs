@@ -132,8 +132,8 @@ impl Chain {
     /// Marks every stored block dirty — used by full saves (genesis bootstrap,
     /// snapshot import) so the whole blocks table is rewritten.
     pub fn mark_all_dirty(&mut self) {
-        self.dirty_heights = (self.height_base..self.height_base + self.blocks.len() as u64)
-            .collect();
+        self.dirty_heights =
+            (self.height_base..self.height_base + self.blocks.len() as u64).collect();
     }
 
     /// Borrow of the stored `(hash, block)` row at `height`, for persistence.
@@ -156,7 +156,17 @@ impl Chain {
     /// above the current mark (ADR 0002). Called after producing a block and after a
     /// co-signature lands. Finality is prefix-closed: it stops at the first block that
     /// has not yet reached quorum. Returns the new finalized height.
-    pub fn advance_finality(&mut self, validator_set: &vinx_core::ValidatorSet) -> u64 {
+    ///
+    /// `indexed_bls_pks` is the on-chain BLS registry indexed by validator position
+    /// (`WorldState::indexed_bls_keys`). VINX-02/VINX-05: finality previously used
+    /// `bls_signer_count()`, which counts keys the block carries itself — a block could
+    /// declare its own quorum and be marked irreversible. Finality must be decided against
+    /// keys registered on-chain, never against keys supplied by the block.
+    pub fn advance_finality(
+        &mut self,
+        validator_set: &vinx_core::ValidatorSet,
+        indexed_bls_pks: &[Option<[u8; 48]>],
+    ) -> u64 {
         let tip = self.tip_height();
         // Seuil courant, utilisé en repli quand le schedule n'a pas d'entrée pour la hauteur
         // (ex. suffixe non finalisé après un reload : le schedule est reconstruit à
@@ -169,7 +179,10 @@ impl Chain {
             // bloquerait le préfixe.
             let threshold = self.quorum_at(next, fallback);
             let is_final = match self.block_row(next) {
-                Some((_, b)) => b.bls_signer_count().map(|c| c >= threshold).unwrap_or(false),
+                Some((_, b)) => b
+                    .bls_signer_count_from_bitmap(indexed_bls_pks)
+                    .map(|c| c >= threshold)
+                    .unwrap_or(false),
                 None => break,
             };
             if is_final {
@@ -267,23 +280,29 @@ impl Chain {
         &self,
         height: u64,
         validator_set: &vinx_core::ValidatorSet,
+        indexed_bls_pks: &[Option<[u8; 48]>],
     ) -> Option<Hash32> {
         let stored = self.block_row(height).map(|(_, b)| b);
         let cands = self.candidates_at(height);
         stored
             .into_iter()
             .chain(cands.iter())
-            .reduce(|a, b| crate::consensus::more_canonical(a, b, validator_set))
+            .reduce(|a, b| crate::consensus::more_canonical(a, b, validator_set, indexed_bls_pks))
             .map(|b| b.hash())
     }
 
     /// `true` si un candidat concurrent l'emporterait sur le bloc actuellement retenu à
     /// `height` selon la règle de fork-choice — c.-à-d. si une réorganisation serait requise
     /// (tranche 2b). En tranche 2a, sert uniquement à journaliser une divergence observée.
-    pub fn would_reorg_at(&self, height: u64, validator_set: &vinx_core::ValidatorSet) -> bool {
+    pub fn would_reorg_at(
+        &self,
+        height: u64,
+        validator_set: &vinx_core::ValidatorSet,
+        indexed_bls_pks: &[Option<[u8; 48]>],
+    ) -> bool {
         match (
             self.block_row(height),
-            self.canonical_choice(height, validator_set),
+            self.canonical_choice(height, validator_set, indexed_bls_pks),
         ) {
             (Some((stored_hash, _)), Some(canonical)) => *stored_hash != canonical,
             _ => false,
@@ -546,7 +565,9 @@ impl Chain {
         bls_cosigner_pks: Vec<Vec<u8>>,
         bls_bitmap: Vec<u8>,
     ) {
-        let Some(idx) = height.checked_sub(self.height_base) else { return };
+        let Some(idx) = height.checked_sub(self.height_base) else {
+            return;
+        };
         if let Some((_, block)) = self.blocks.get_mut(idx as usize) {
             block.bls_aggregate = Some(bls_aggregate);
             block.bls_cosigner_pks = bls_cosigner_pks;
@@ -614,8 +635,7 @@ impl Chain {
         if tip < keep_last {
             return;
         }
-        let compact_up_to_idx =
-            (tip - keep_last).saturating_sub(self.height_base) as usize;
+        let compact_up_to_idx = (tip - keep_last).saturating_sub(self.height_base) as usize;
         for i in 0..compact_up_to_idx {
             if let Some((_, block)) = self.blocks.get_mut(i) {
                 // Only touch (and re-persist) blocks that still had data — repeated
@@ -648,8 +668,7 @@ impl Chain {
         if tip < keep_last {
             return;
         }
-        let prune_up_to_idx =
-            (tip - keep_last).saturating_sub(self.height_base) as usize;
+        let prune_up_to_idx = (tip - keep_last).saturating_sub(self.height_base) as usize;
 
         let mut tx_pruned = 0usize;
 
@@ -728,9 +747,23 @@ mod tests {
         assert!(chain.record_signature(&addr, 5, hash_b)); // different hash — EQUIVOCATION
     }
 
+    /// Deterministic BLS key for validator index `idx`, so tests can build a matching
+    /// on-chain registry (`test_registry`) for the registry-bound finality path.
+    fn test_bls_sk(idx: usize) -> vinx_crypto::BlsSecretKey {
+        let mut seed = [0u8; 32];
+        seed[0] = idx as u8 + 1;
+        vinx_crypto::BlsSecretKey::from_bytes(&seed).expect("valid BLS scalar")
+    }
+
+    /// The registered BLS keys of the first `n` validator slots.
+    fn test_registry(n: usize) -> Vec<Option<[u8; 48]>> {
+        (0..n)
+            .map(|i| Some(test_bls_sk(i).public_key().0))
+            .collect()
+    }
+
     /// Builds a block at `height` with `n_sigs` BLS co-signatures.
     fn signed_block(height: u64, prev: Hash32, proposer: Address, n_sigs: usize) -> Block {
-        use vinx_crypto::BlsSecretKey;
         let header = BlockHeader {
             height,
             prev_hash: prev,
@@ -749,7 +782,7 @@ mod tests {
             bls_bitmap: vec![],
         };
         for idx in 0..n_sigs {
-            crate::consensus::sign_block_bls(&mut block, &BlsSecretKey::generate(), idx).unwrap();
+            crate::consensus::sign_block_bls(&mut block, &test_bls_sk(idx), idx).unwrap();
         }
         block
     }
@@ -766,7 +799,7 @@ mod tests {
         let b1 = signed_block(1, chain.tip_hash(), v, 1);
         chain.push(b1);
         assert_eq!(chain.finalized_height(), 0); // not advanced until we ask
-        chain.advance_finality(&vs);
+        chain.advance_finality(&vs, &test_registry(vs.len()));
         assert_eq!(chain.finalized_height(), 1);
         assert!(chain.is_final(1));
         assert!(!chain.is_final(2));
@@ -831,12 +864,12 @@ mod tests {
         chain.record_candidate(strong);
 
         assert_eq!(
-            chain.canonical_choice(1, &vs),
+            chain.canonical_choice(1, &vs, &test_registry(vs.len())),
             Some(strong_hash),
             "le poids de co-signatures supérieur gagne (règle 3)"
         );
         assert!(
-            chain.would_reorg_at(1, &vs),
+            chain.would_reorg_at(1, &vs, &test_registry(vs.len())),
             "réorg requise vers le candidat plus soutenu"
         );
     }
@@ -858,11 +891,11 @@ mod tests {
         chain.record_candidate(leader_block);
 
         assert_eq!(
-            chain.canonical_choice(1, &vs),
+            chain.canonical_choice(1, &vs, &test_registry(vs.len())),
             Some(leader_hash),
             "à poids égal, le leader prévu l'emporte sur le backup (règle 4)"
         );
-        assert!(chain.would_reorg_at(1, &vs));
+        assert!(chain.would_reorg_at(1, &vs, &test_registry(vs.len())));
     }
 
     #[test]
@@ -929,7 +962,7 @@ mod tests {
         assert_eq!(chain.candidates_at(1).len(), 1);
 
         // Finaliser h=1 → les candidats à h=1 sont purgés (réorg interdite sous finalité).
-        chain.advance_finality(&vs);
+        chain.advance_finality(&vs, &test_registry(vs.len()));
         assert_eq!(chain.finalized_height(), 1);
         assert!(
             chain.candidates_at(1).is_empty(),
@@ -991,7 +1024,7 @@ mod tests {
 
         // Avancer avec le set COURANT (quorum 2). Sans quorum historique, le bloc 1 (1 sig)
         // bloquerait le préfixe à 0 ; avec, il finalise sous quorum-1, puis le bloc 2.
-        chain.advance_finality(&vs_now);
+        chain.advance_finality(&vs_now, &test_registry(vs_now.len()));
         assert_eq!(
             chain.finalized_height(),
             2,
@@ -1003,7 +1036,7 @@ mod tests {
         let (mut chain2, _) = Chain::new_with_genesis(v1, 0);
         let b1b = signed_block(1, chain2.tip_hash(), v1, 1);
         chain2.push(b1b);
-        chain2.advance_finality(&vs_now);
+        chain2.advance_finality(&vs_now, &test_registry(vs_now.len()));
         assert_eq!(
             chain2.finalized_height(),
             0,
@@ -1022,7 +1055,7 @@ mod tests {
 
         let b1 = signed_block(1, chain.tip_hash(), v, 1); // 1 of 2 sigs
         chain.push(b1);
-        chain.advance_finality(&vs);
+        chain.advance_finality(&vs, &test_registry(vs.len()));
         assert_eq!(chain.finalized_height(), 0); // below quorum → not final
     }
 

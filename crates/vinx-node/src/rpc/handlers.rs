@@ -170,11 +170,10 @@ pub async fn get_block(
     Path(height): Path<u64>,
 ) -> ApiResult<BlockResponse> {
     let chain = node.chain.read().await;
+    let vs = node.validator_set.read().await.clone();
+    let indexed_pks = node.state.read().await.indexed_bls_keys(&vs);
     match chain.get_block(height) {
-        Some(block) => Ok(Json(BlockResponse::from_block(
-            block,
-            &*node.validator_set.read().await,
-        ))),
+        Some(block) => Ok(Json(BlockResponse::from_block(block, &vs, &indexed_pks))),
         None => Err(ApiError::NotFound(format!("Block {} not found", height))),
     }
 }
@@ -347,13 +346,12 @@ pub async fn get_chain_sync(
     }
 
     let end = (start + limit as u64).min(tip + 1);
+    let vs = node.validator_set.read().await.clone();
+    let indexed_pks = node.state.read().await.indexed_bls_keys(&vs);
     let mut blocks = Vec::new();
     for h in start..end {
         if let Some(block) = chain.get_block(h) {
-            blocks.push(BlockResponse::from_block(
-                block,
-                &*node.validator_set.read().await,
-            ));
+            blocks.push(BlockResponse::from_block(block, &vs, &indexed_pks));
         }
     }
     let count = blocks.len();
@@ -488,7 +486,9 @@ pub async fn get_chain_snapshot(State(node): State<Arc<Node>>) -> impl IntoRespo
     let Some((_, block)) = chain_guard.block_row(height) else {
         return (
             StatusCode::INTERNAL_SERVER_ERROR,
-            Json(ErrorResponse { error: "tip block not found".into() }),
+            Json(ErrorResponse {
+                error: "tip block not found".into(),
+            }),
         )
             .into_response();
     };
@@ -498,7 +498,9 @@ pub async fn get_chain_snapshot(State(node): State<Arc<Node>>) -> impl IntoRespo
     let Ok(raw) = bincode::serialize(&*state_guard) else {
         return (
             StatusCode::INTERNAL_SERVER_ERROR,
-            Json(ErrorResponse { error: "state serialization failed".into() }),
+            Json(ErrorResponse {
+                error: "state serialization failed".into(),
+            }),
         )
             .into_response();
     };
@@ -507,7 +509,9 @@ pub async fn get_chain_snapshot(State(node): State<Arc<Node>>) -> impl IntoRespo
         Err(e) => {
             return (
                 StatusCode::INTERNAL_SERVER_ERROR,
-                Json(ErrorResponse { error: format!("zstd: {e}") }),
+                Json(ErrorResponse {
+                    error: format!("zstd: {e}"),
+                }),
             )
                 .into_response();
         }

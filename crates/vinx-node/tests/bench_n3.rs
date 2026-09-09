@@ -82,10 +82,11 @@ fn n3_round_robin_and_finality_full_participation() {
         led[leader_idx] += 1;
 
         let mut b = make_block(h, chain.tip_hash(), leader);
-        bls_cosign(&mut b, &[0, 1, 2], &bls_sks, &addrs, &vs); // 3/3 co-signent
-        consensus::validate_block(&b, &vs).expect("proposeur enregistré + quorum atteint");
+        let reg = bls_cosign(&mut b, &[0, 1, 2], &bls_sks, &addrs, &vs); // 3/3 co-signent
+        consensus::validate_block_with_registry(&b, &vs, &reg)
+            .expect("proposeur enregistré + quorum atteint");
         chain.push(b);
-        chain.advance_finality(&vs);
+        chain.advance_finality(&vs, &reg);
 
         assert_eq!(
             chain.finalized_height(),
@@ -117,10 +118,10 @@ fn n3_finality_survives_one_validator_down() {
         let mut b = make_block(h, chain.tip_hash(), leader);
         // Les deux validateurs en ligne co-signent → 2/3 = quorum.
         let present: Vec<usize> = (0..3).filter(|&i| i != OFFLINE).collect();
-        bls_cosign(&mut b, &present, &bls_sks, &addrs, &vs);
-        consensus::validate_block(&b, &vs).expect("2/3 atteint le quorum");
+        let reg = bls_cosign(&mut b, &present, &bls_sks, &addrs, &vs);
+        consensus::validate_block_with_registry(&b, &vs, &reg).expect("2/3 atteint le quorum");
         chain.push(b);
-        chain.advance_finality(&vs);
+        chain.advance_finality(&vs, &reg);
 
         assert_eq!(
             chain.finalized_height(),
@@ -141,14 +142,14 @@ fn n3_no_finality_below_quorum() {
     let leader_idx = vs.leader_idx_at(1);
     let leader = *vs.leader_at(1);
     let mut b = make_block(1, chain.tip_hash(), leader);
-    bls_cosign(&mut b, &[leader_idx], &bls_sks, &addrs, &vs);
+    let reg = bls_cosign(&mut b, &[leader_idx], &bls_sks, &addrs, &vs);
 
     assert!(
-        consensus::validate_block(&b, &vs).is_err(),
+        consensus::validate_block_with_registry(&b, &vs, &reg).is_err(),
         "1/3 est sous le quorum → bloc non finalisable"
     );
     chain.push(b);
-    chain.advance_finality(&vs);
+    chain.advance_finality(&vs, &reg);
     assert_eq!(
         chain.finalized_height(),
         0,
@@ -165,14 +166,14 @@ fn n3_prefix_closed_finality_and_recovery() {
 
     // h1 : 2/3 → final.
     let mut b1 = make_block(1, chain.tip_hash(), *vs.leader_at(1));
-    bls_cosign(&mut b1, &[0, 1], &bls_sks, &addrs, &vs);
+    let reg = bls_cosign(&mut b1, &[0, 1], &bls_sks, &addrs, &vs);
     chain.push(b1);
-    chain.advance_finality(&vs);
+    chain.advance_finality(&vs, &reg);
     assert_eq!(chain.finalized_height(), 1);
 
     // h2 : 1/3 seulement → PAS final (un co-signataire manque).
     let mut b2 = make_block(2, chain.tip_hash(), *vs.leader_at(2));
-    bls_cosign(&mut b2, &[0], &bls_sks, &addrs, &vs);
+    bls_cosign(&mut b2, &[0], &bls_sks, &addrs, &vs); // 1/3 seulement
     chain.push(b2);
 
     // h3 : 2/3 → final en soi, mais un trou non finalisé le précède.
@@ -180,7 +181,7 @@ fn n3_prefix_closed_finality_and_recovery() {
     bls_cosign(&mut b3, &[0, 1], &bls_sks, &addrs, &vs);
     chain.push(b3);
 
-    chain.advance_finality(&vs);
+    chain.advance_finality(&vs, &reg);
     assert_eq!(
         chain.finalized_height(),
         1,
@@ -202,11 +203,11 @@ fn n3_prefix_closed_finality_and_recovery() {
     let now_final = chain
         .get_block(2)
         .unwrap()
-        .bls_signer_count()
+        .bls_signer_count_unverified()
         .is_ok_and(|c| c >= vs.quorum());
     assert!(now_final, "h2 atteint 2/3 après la co-signature tardive");
 
-    chain.advance_finality(&vs);
+    chain.advance_finality(&vs, &reg);
     assert_eq!(
         chain.finalized_height(),
         3,
@@ -233,7 +234,7 @@ fn n3_fork_choice_converges_regardless_of_arrival_order() {
     // le cas de collision que l'ADR 0031 doit résoudre). On vérifie que deux nœuds qui les
     // reçoivent dans des ordres OPPOSÉS convergent vers la même tête et le même état — via le
     // VRAI chemin de production, de fork-choice et de réorg (aucune simulation).
-    let (kps, _bls_sks, addrs, vs) = three_validators();
+    let (kps, bls_sks, addrs, vs) = three_validators();
 
     let leader_addr = *vs.leader_at(1);
     let backup_addr = *addrs.iter().find(|a| **a != leader_addr).unwrap();
@@ -266,9 +267,11 @@ fn n3_fork_choice_converges_regardless_of_arrival_order() {
     assert_eq!(block_b.header.height, 1);
 
     // Tête canonique selon la règle pure (identique sur tout nœud).
-    let canonical = consensus::canonical_head(&[block_a.clone(), block_b.clone()], &vs)
-        .expect("une tête canonique")
-        .hash();
+    let fc_registry = indexed_pks(&bls_sks, &addrs, &vs);
+    let canonical =
+        consensus::canonical_head(&[block_a.clone(), block_b.clone()], &vs, &fc_registry)
+            .expect("une tête canonique")
+            .hash();
 
     // Un nœud qui applique `first`, puis reçoit `second` via le chemin de fork-choice réel.
     let run_node = |first: &Block, second: &Block| -> (Hash32, [u8; 32]) {
@@ -308,7 +311,11 @@ fn n3_fork_choice_converges_regardless_of_arrival_order() {
 
 /// Builds an `indexed_bls_pks` registry from a parallel list of BLS secret keys
 /// and validator addresses. Index `i` corresponds to `ValidatorSet::index_of(addrs[i])`.
-fn indexed_pks(bls_sks: &[BlsSecretKey], addrs: &[Address], vs: &ValidatorSet) -> Vec<Option<[u8; 48]>> {
+fn indexed_pks(
+    bls_sks: &[BlsSecretKey],
+    addrs: &[Address],
+    vs: &ValidatorSet,
+) -> Vec<Option<[u8; 48]>> {
     let mut pks = vec![None; vs.len()];
     for (i, bls_sk) in bls_sks.iter().enumerate() {
         if let Some(idx) = vs.index_of(&addrs[i]) {
@@ -329,7 +336,9 @@ fn bls_cosign(
     vs: &ValidatorSet,
 ) -> Vec<Option<[u8; 48]>> {
     for &i in signer_indices {
-        let vidx = vs.index_of(&addrs[i]).expect("signer must be in ValidatorSet");
+        let vidx = vs
+            .index_of(&addrs[i])
+            .expect("signer must be in ValidatorSet");
         vinx_node::consensus::sign_block_bls(block, &bls_sks[i], vidx)
             .expect("BLS sign must succeed");
     }
@@ -388,7 +397,8 @@ fn n3_bls_quorum_two_signers_no_crypto_error() {
         vs.quorum()
     );
 
-    vinx_node::consensus::validate_block(&block, &vs).expect("block must be valid");
+    vinx_node::consensus::validate_block_with_registry(&block, &vs, &registry)
+        .expect("block must be valid");
 }
 
 // ─── 9. popcount = nombre de co-signataires sur 6 blocs ───────────────────────

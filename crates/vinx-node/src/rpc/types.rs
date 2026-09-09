@@ -102,7 +102,11 @@ pub struct BlockResponse {
 }
 
 impl BlockResponse {
-    pub fn from_block(block: &Block, validator_set: &ValidatorSet) -> Self {
+    pub fn from_block(
+        block: &Block,
+        validator_set: &ValidatorSet,
+        indexed_bls_pks: &[Option<[u8; 48]>],
+    ) -> Self {
         Self {
             height: block.header.height,
             hash: hash_to_hex(&block.hash()),
@@ -112,8 +116,12 @@ impl BlockResponse {
             tx_count: block.header.tx_count,
             state_root: hash_to_hex(&block.header.state_root),
             base_fee: block.header.base_fee,
-            signatures_count: block.bls_signer_count().unwrap_or(0),
-            finalized: block.is_finalized(validator_set),
+            // VINX-02: report co-signers actually bound to registered validator keys,
+            // not the count the block advertises for itself.
+            signatures_count: block
+                .bls_signer_count_from_bitmap(indexed_bls_pks)
+                .unwrap_or(0),
+            finalized: block.is_finalized(validator_set, indexed_bls_pks),
             transactions: block.transactions.iter().map(TxResponse::from_tx).collect(),
         }
     }
