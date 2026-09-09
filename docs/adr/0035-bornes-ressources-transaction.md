@@ -5,6 +5,20 @@
 - **Date :** Juillet 2026
 - **Liens :** complète le durcissement P2P (ADR 0022) côté machine d'état ; cohérent avec
   l'anti-bloat (ADR 0026) et les poids de tx (ADR 0009).
+- **Partiellement implémenté :** septembre 2026 — `MAX_TX_PAYLOAD_BYTES = 16 KiB`, appliqué
+  au niveau consensus (finding VINX-13).
+
+> ⚠️ **Correction (septembre 2026, finding VINX-13).** `payload` était **non borné** alors que
+> les frais dérivent de `amount`, pas de la taille : une transaction de valeur nulle portant
+> des mégaoctets coûtait le plancher de frais et rien de plus — du gonflement de bloc gratuit,
+> qui évince aussi le trafic réel du mempool de chaque pair. La borne est appliquée dans
+> `check_replay_and_ttl`, la porte partagée par `apply_transaction` et
+> `apply_transaction_trusted` : c'est donc une **règle de consensus**, pas un simple filtre de
+> mempool — sans quoi un payload surdimensionné entrait quand même en état via un bloc et les
+> nœuds divergeaient sur la validité des blocs. Régression :
+> `oversized_payload_is_rejected_on_every_path`.
+>
+> Le reste de cet ADR (poids de bloc, bornes par type de transaction) demeure **Proposé**.
 
 ## Contexte
 

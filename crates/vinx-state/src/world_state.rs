@@ -141,8 +141,13 @@ pub struct WorldState {
     #[serde(default)]
     pub destroyed_atoms: u128,
     /// Fiabilité des validateurs (ADR 0027) : manquements de proposition + jailing, dérivés
-    /// **déterministiquement** de la séquence de blocs (comme `pending_unbonds`, hors
-    /// `state_root`). `serde(default)` pour l'état pré-0027.
+    /// **déterministiquement** de la séquence de blocs (comme `pending_unbonds`).
+    /// `serde(default)` pour l'état pré-0027.
+    ///
+    /// Depuis VINX-04 (ADR 0072) ce champ **est engagé** par `consensus_root` : ses intrants
+    /// (`rel`, `validator_set`, hauteur, proposeur, `block_ts`, `last_block_ts`) sont tous
+    /// déterministes et il est persisté, donc l'engager rend visible toute divergence de
+    /// jailing au lieu de la laisser silencieuse.
     #[serde(default)]
     pub reliability: ReliabilityMap,
     // ── Open PoA (ADR 0038) ─────────────────────────────────────────────────────

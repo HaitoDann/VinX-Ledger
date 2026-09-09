@@ -5,6 +5,7 @@
 - **Portée :** Sécurité — protection contre la double-dépense et le rejeu de transactions.
 - **Décideur :** VinX Labs.
 - **Crate :** `crates/vinx-core` — `src/transaction.rs`
+- **Révisé par :** [ADR 0073](./0073-injectivite-serialisation-signee.md) (§3 ci-dessous : layout des `signing_bytes`)
 
 ---
 
@@ -45,18 +46,40 @@ invalide si `current_height > expiry_height`.
 ### 2.4 Sponsor (protection des comptes tiers)
 
 Une tx peut être co-signée par un `sponsor: Option<PublicKey>` qui paie les frais à la place
-de l'expéditeur. La signature du sponsor est vérifiée séparément → pas de rejeu possible
-(les deux nonces sont consommés).
+de l'expéditeur. La signature du sponsor est vérifiée séparément → pas de rejeu possible.
+
+> ⚠️ **Correction (septembre 2026, finding VINX-03).** Cette garantie était **décrite mais
+> non implémentée**. Aucun des trois points d'entrée du mempool ne vérifiait la signature du
+> sponsor : n'importe qui pouvait désigner un compte tiers comme `sponsor`, fixer `fee` à son
+> solde entier et le **vider** sans son consentement. Les trois chemins appellent désormais
+> l'unique prédicat canonique `WorldState::verify_tx_signature_pure`. Voir
+> `audit/post-fix/PATCH.md`.
 
 ## 3. Intégration dans les signing_bytes
 
-Les `signing_bytes` (message signé) incluent **tous les champs anti-replay** dans cet ordre :
+Les `signing_bytes` (message signé) incluent **tous les champs anti-replay**. Layout
+**actuel et faisant foi** (voir ADR 0073) :
+
 ```
 [tx_type(1o)] [from(20o)] [to(20o)] [amount(16o)] [fee(16o)] [nonce(8o)]
-[chain_id(4o)] [expiry_height(9o)] [payload_len(8o)] [payload(var)]
+[chain_id(4o)] [expiry(0x00 | 0x01‖8o)] [payload_len(4o BE)] [payload(var)]
+[sponsor(0x00 | 0x01‖20o)]
 ```
+
 Ainsi la signature couvre `chain_id`, `nonce` et `expiry_height` → impossible de modifier
 ces champs après signature.
+
+> ⚠️ **Correction (septembre 2026, finding VINX-12).** Le layout décrit ici à l'origine
+> annonçait un `payload_len(8o)` que le code **n'a jamais implémenté**, et omettait le
+> marqueur de sponsor. `payload` était concaténé brut, immédiatement suivi du marqueur : pour
+> toute adresse de sponsor finissant par `0x00`, deux transactions économiquement
+> différentes produisaient des octets signés et un **txid identiques**. Corrigé par un
+> préfixe de longueur `u32` BE écrit inconditionnellement (ADR 0073).
+>
+> **Leçon :** un layout consensus-critique décrit en prose dérive du code sans que personne
+> ne s'en aperçoive. Il doit être figé par un **vecteur doré** (ADR 0020) — ce que font
+> désormais `test_signing_bytes_golden_vector` et
+> `test_governance_signing_bytes_golden_vector`.
 
 ## 4. Critères de validation
 

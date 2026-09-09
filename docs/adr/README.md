@@ -22,9 +22,18 @@ Ce dossier trace toutes les décisions d'architecture de VinX Ledger. Chaque ADR
 |---|---|---|---|---|
 | 1 | *(à nommer)* | L1 solide : socle crypto, consensus BFT, émission progressive, finalité | 0051–0063, 0002–0003, 0005–0011, 0015, 0020–0022, 0026–0027, 0031, 0040, 0043, 0045, 0046 | ✅ Terminé |
 | 2 | *(à nommer)* | PoS Algorand-style : comité VRF, pool permissionless, récompenses époque | 0029, 0038, 0028 | 🔄 En cours |
-| 3 | *(à nommer)* | Appchains ZK : SP1, Celestia DA, ForceExit, Clearinghouse | 0050, 0034, 0048, 0049 | 📅 Suivant |
-| 4 | *(à nommer)* | Économie Appchains : melt, répartition émission, garde-fous | 0039, 0041, 0042, 0044, 0047 | 🔮 Futur |
+| **1.5** | **Durcissement & lancement** | **Sécurité du consensus après audit, amorçage, processus de release, critères de lancement** | **0070–0080**, 0064 | 🔄 **En cours** |
+| 3 | *(à nommer)* | Appchains ZK : SP1, Celestia DA, ForceExit, Clearinghouse | 0050, 0034, 0048, 0049 | ❄️ Gelé par 0064 |
+| 4 | *(à nommer)* | Économie Appchains : melt, répartition émission, garde-fous | 0039, 0041, 0042, 0044, 0047 | ❄️ Gelé par 0064 |
 | 5 | *(à nommer)* | Réseau public : mainnet, décentralisation à l'échelle | 0013, 0016, 0018, 0019 | 🔮 Vision |
+
+> **Périmètre produit :** [ADR 0064](./0064-vinx-rail-paiement-uniquement.md) fixe VinX comme
+> **rail de paiement L1 minimaliste sans VM**. Les phases 3 et 4 sont gelées : aucune
+> implémentation avant qu'un besoin soit démontré post-testnet et réexaminé dans un nouvel ADR.
+>
+> **Porte de sortie :** [ADR 0080](./0080-criteres-lancement-testnet-mainnet.md) énumère les
+> conditions vérifiables du testnet public puis du mainnet. Aucun critère n'est aujourd'hui
+> entièrement satisfait.
 
 ---
 
@@ -144,7 +153,46 @@ Ce dossier trace toutes les décisions d'architecture de VinX Ledger. Chaque ADR
 
 ---
 
-## Phase 3 — Appchains ZK 📅 Suivant
+## Phase 1.5 — Durcissement & lancement 🔄 En cours
+
+Décisions issues de l'**audit contradictoire de septembre 2026** et des manques révélés en
+préparant un lancement public. Le dossier d'audit complet — matrice des findings, preuves
+d'exploitation, correctifs, prompts de contre-audit — vit dans
+[`audit/post-fix/`](../../audit/post-fix/).
+
+### Sécurité du consensus (correctifs d'audit, implémentés)
+
+| ADR | Titre | Statut | Finding |
+|---|---|---|---|
+| [0070](./0070-authentification-proposeur-registre-bls.md) | Authentification du proposeur & liaison au registre BLS | 🔧 Implémenté | VINX-01/02/05 |
+| [0071](./0071-verrou-vote-persistant.md) | Verrou de vote persistant — une signature par hauteur | 🔧 Implémenté | VX-RED-003/007 |
+| [0072](./0072-state-root-engage-consensus.md) | `state_root` engage l'état de consensus ⚠️ *hard fork* | 🔧 Implémenté | VINX-04 |
+| [0073](./0073-injectivite-serialisation-signee.md) | Injectivité de la sérialisation signée ⚠️ *hard fork* | 🔧 Implémenté | VINX-12 |
+
+### Amorçage & exploitation
+
+| ADR | Titre | Statut | Priorité |
+|---|---|---|---|
+| [0075](./0075-genese-enrolement-validateurs.md) | Cérémonie de genèse & enrôlement des validateurs | 🔧 Partiel | 🔴 Haute |
+| [0076](./0076-gestion-operationnelle-cles-validateur.md) | Gestion opérationnelle des clés de validateur | 🔧 Partiel | 🔴 Haute |
+| [0074](./0074-synchronisation-etat-subjectivite-faible.md) | Synchronisation d'état & subjectivité faible | 🔧 Partiel | 🔴 Haute (mainnet) |
+
+### Produit & processus
+
+| ADR | Titre | Statut | Priorité |
+|---|---|---|---|
+| [0077](./0077-finalite-paiement-garanties-confirmation.md) | Finalité de paiement : garantie & règle de confirmation | 📐 Accepté | 🔴 Haute |
+| [0078](./0078-divulgation-vulnerabilites-reponse-incident.md) | Divulgation des vulnérabilités & réponse à incident | 📐 Accepté | 🔴 Haute |
+| [0079](./0079-release-versioning-upgrade-reseau.md) | Release, versioning & upgrade réseau | 📐 Accepté | 🟠 Moyenne |
+| [0080](./0080-criteres-lancement-testnet-mainnet.md) | **Critères de lancement : testnet → mainnet** | 📐 Accepté | 🔴 Porte de sortie |
+
+> **Le manque le plus important reste le banc adversarial multi-nœuds** (ADR 0080 §2.2) :
+> tous les correctifs de consensus sont validés en un seul processus, alors que les
+> propriétés qu'ils protègent sont des propriétés de réseau.
+
+---
+
+## Phase 3 — Appchains ZK ❄️ Gelé par ADR 0064
 
 ### Vérification ZK
 
@@ -281,15 +329,48 @@ Ce dossier trace toutes les décisions d'architecture de VinX Ledger. Chaque ADR
 | [0061](./0061-stockage-persistant-storage-version.md) | Stockage persistant & STORAGE_VERSION | ✅ Vérifié | 1 |
 | [0062](./0062-world-state-structure.md) | WorldState — structure de l'état du monde | ✅ Vérifié | 1 |
 | [0063](./0063-consensus-poa-threshold-initial.md) | Consensus PoA Threshold (implémentation initiale) | 🔧 Implémenté | 1 |
+| [0064](./0064-vinx-rail-paiement-uniquement.md) | VinX = rail de paiement uniquement (périmètre) | 📐 Décidé | 1.5 |
+| [0065](./0065-allocateur-mimalloc.md) | Allocateur mimalloc | 📐 Décidé — non implémenté | 1 |
+| [0066](./0066-hash-transaction-memoize.md) | Hash de transaction mémoïsé | 📐 Décidé — non implémenté | 1 |
+| [0067](./0067-cache-signatures-mempool-bloc.md) | Cache de signatures mempool → bloc | 📐 Décidé — non implémenté | 1 |
+| [0068](./0068-batch-verify-ed25519.md) | Vérification Ed25519 par lot | 📐 Décidé — non implémenté | 1 |
+| [0069](./0069-blake3-remplace-sha256.md) | BLAKE3 en remplacement de SHA-256 ⚠️ | 📐 Décidé — **avant genesis** | 1.5 |
+| [0070](./0070-authentification-proposeur-registre-bls.md) | Authentification du proposeur & registre BLS | 🔧 Implémenté | 1.5 |
+| [0071](./0071-verrou-vote-persistant.md) | Verrou de vote persistant (1 vote / hauteur) | 🔧 Implémenté | 1.5 |
+| [0072](./0072-state-root-engage-consensus.md) | `state_root` engage l'état de consensus ⚠️ | 🔧 Implémenté | 1.5 |
+| [0073](./0073-injectivite-serialisation-signee.md) | Injectivité de la sérialisation signée ⚠️ | 🔧 Implémenté | 1.5 |
+| [0074](./0074-synchronisation-etat-subjectivite-faible.md) | Sync d'état & subjectivité faible | 🔧 Partiel | 1.5 |
+| [0075](./0075-genese-enrolement-validateurs.md) | Genèse & enrôlement des validateurs | 🔧 Partiel | 1.5 |
+| [0076](./0076-gestion-operationnelle-cles-validateur.md) | Gestion opérationnelle des clés validateur | 🔧 Partiel | 1.5 |
+| [0077](./0077-finalite-paiement-garanties-confirmation.md) | Finalité de paiement & règle de confirmation | 📐 Accepté | 1.5 |
+| [0078](./0078-divulgation-vulnerabilites-reponse-incident.md) | Divulgation & réponse à incident | 📐 Accepté | 1.5 |
+| [0079](./0079-release-versioning-upgrade-reseau.md) | Release, versioning & upgrade réseau | 📐 Accepté | 1.5 |
+| [0080](./0080-criteres-lancement-testnet-mainnet.md) | Critères de lancement testnet → mainnet | 📐 Accepté | 1.5 |
+
+> ⚠️ = change les règles de consensus. Appliqué **sans hauteur d'activation**, ce qui n'est
+> acceptable qu'en pré-lancement (`0.1.0-alpha.1`, aucun réseau public). Après le lancement,
+> voir ADR 0079 §2.3.
+>
+> *Le numéro 0025 n'a jamais été attribué.*
+>
+> **ADR 0065–0069 sont décidés mais non implémentés** — `grep -rn blake3 crates/` ne retourne
+> rien, le code hache encore en SHA-256. ADR 0069 change **tous** les hachages du protocole
+> et se déclare « à implémenter avant genesis block 0 » : c'est un changement
+> consensus-breaking à faire avant le lancement, ou à repousser explicitement après une
+> hauteur d'activation (ADR 0079 §2.3). Il est suivi à ce titre dans ADR 0080.
 
 ---
 
 ## Comment contribuer
 
 1. Copier le gabarit de l'ADR 0001 (Contexte / Options / Décision / Conséquences).
-2. Numéroter en séquence (prochain disponible après 0063).
+2. Numéroter en séquence (prochain disponible : **0081**).
 3. Écrire les **critères de validation vérifiables** avant de passer Accepté.
 4. Suivre le cycle : `Proposé → Accepté → En cours → Implémenté → Vérifié`.
 5. Mettre à jour ce README et `PROTOCOL_SPEC.md` quand l'ADR passe Implémenté.
+6. Classer le changement selon ADR 0079 §2.2 (*consensus-breaking* / compatible réseau /
+   local au nœud) **avant** la revue. En cas de doute : consensus-breaking.
+7. Un ADR proposant une VM, des modules ou du ZK doit référencer ADR 0064 et démontrer un
+   besoin avéré post-testnet.
 
 Voir [CONTRIBUTING.md](../../CONTRIBUTING.md) pour le processus complet.

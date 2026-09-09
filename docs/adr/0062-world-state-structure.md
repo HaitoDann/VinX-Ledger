@@ -6,6 +6,17 @@
 - **Décideur :** VinX Labs.
 - **Crate :** `crates/vinx-state` — `src/world_state.rs`
 
+- **Révisé par :** [ADR 0072](./0072-state-root-engage-consensus.md) — le `state_root` engage
+  désormais l'état de consensus, pas seulement les comptes (finding VINX-04)
+
+> ⚠️ **Correction (septembre 2026, finding VINX-04).** `compute_state_root` ne renvoyait que
+> la racine Merkle des **comptes** : `validator_set`, `validator_pool`, `admin_address`,
+> `epoch_beacon` et une vingtaine d'autres champs de consensus n'étaient engagés par rien.
+> Deux nœuds pouvaient diverger sur l'intégralité du set de validateurs et sur la clé admin
+> tout en publiant un `state_root` identique — divergence silencieuse et indétectable.
+> Tout nouveau champ de consensus ajouté à `WorldState` **doit** être ajouté au
+> `ConsensusCommitment` d'ADR 0072, sous peine de rouvrir exactement ce trou.
+
 ---
 
 ## 1. Contexte

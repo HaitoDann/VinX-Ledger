@@ -12,6 +12,29 @@
 - **Liens :** complète la finalité (ADR 0002) et le slashing d'équivocation (ADR 0003) ;
   distinct du slashing (faute prouvée) — ici on gère la **fiabilité**, pas la malveillance.
 
+- **Corrigé en place :** septembre 2026 — un manquement n'est imputé qu'après écoulement du
+  créneau (`SLOT_TIMEOUT_SECS`). Voir `audit/post-fix/FINDINGS_STATUS.md`, finding VINX-06.
+
+> ⚠️ **Correction (septembre 2026, finding VINX-06).** Un manquement était imputé au leader
+> prévu **dès que** le proposeur effectif différait, sans aucune condition de temps — et le
+> chemin P2P accepte un bloc de n'importe quel membre du set, sans délai de créneau. Un
+> unique validateur proposant systématiquement **avant** le leader imputait donc un
+> manquement à chaque honnête à son tour et **emprisonnait tout le set honnête en trois
+> tours**, prenant le contrôle total de la production et censurant à volonté. Le manquement
+> exige désormais que `block_ts - prev_block_ts >= SLOT_TIMEOUT_SECS`, deux quantités
+> d'en-tête donc déterministes. Régressions :
+> `preemptive_proposer_cannot_jail_the_honest_set` (l'attaque échoue) et
+> `genuinely_absent_leader_is_still_jailed` (la comptabilité de liveness fonctionne toujours).
+
+> ⚠️ **Renversement assumé (ADR 0072).** Cet ADR qualifie `reliability` de table « dérivée
+> (meta, **hors `state_root`**) ». Ce n'est **plus vrai** : ADR 0072 l'engage dans
+> `consensus_root`. La décision est délibérée. Les intrants de `on_block_applied` sont tous
+> déterministes (état + champs d'en-tête) et la table est persistée, donc l'engagement
+> n'introduit aucune non-déterminisme — il rend au contraire **détectable** une divergence de
+> jailing qui restait auparavant silencieuse. L'argument de sûreté de la section ci-dessous
+> (« le quorum n'est jamais réduit par le jailing ») est inchangé : il porte sur le
+> dénominateur du quorum, pas sur l'engagement de la table.
+
 ## Contexte
 
 Le planning de leader est un **round-robin par hauteur** (`leader_at(H) = validators[H % N]`),
