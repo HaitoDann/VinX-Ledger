@@ -2306,10 +2306,22 @@ impl WorldState {
         let bls_pop_sig = BlsSignature(pop_arr);
 
         bls_pub.verify_pop(&bls_pop_sig).map_err(|_| {
-            CoreError::InvalidTransaction(
-                "BLS Proof-of-Possession verification failed".to_string(),
-            )
+            CoreError::InvalidTransaction("BLS Proof-of-Possession verification failed".to_string())
         })?;
+
+        // VINX-11: the PoP proves possession but binds the key to no identity. Without a
+        // uniqueness check, validator B re-registers validator A's published key/PoP; two
+        // bitmap bits then resolve to the same G1 key and one real signature is counted
+        // twice, corrupting reliability accounting and epoch-pot distribution.
+        if self
+            .validator_pool
+            .iter()
+            .any(|(addr, e)| addr != &tx.from && e.bls_pub_key.as_deref() == Some(&pk_arr[..]))
+        {
+            return Err(CoreError::InvalidTransaction(
+                "BLS public key already registered by another validator".to_string(),
+            ));
+        }
 
         // Verification passed — mutate.
         let entry = self
