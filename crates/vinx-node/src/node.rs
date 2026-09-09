@@ -290,6 +290,27 @@ impl Node {
             timestamp,
         )?;
 
+        // VX-RED-003 — producing a block is also a vote at that height: `produce_block`
+        // co-signs it with our BLS key. Claim the same durable lock the P2P co-signing
+        // path uses, so a validator can never both produce one block and co-sign a
+        // competing one at the same height. Recorded after production because the hash
+        // is not known before; a failure here is logged rather than fatal, since the
+        // block is already built — but it means the next co-sign at this height is
+        // refused by the lock, which is the safe direction.
+        if let Some(storage) = self.storage.as_ref() {
+            match storage.claim_vote(block.header.height, block.hash()) {
+                Ok(true) => {}
+                Ok(false) => tracing::warn!(
+                    height = block.header.height,
+                    "produced a block at a height already voted — vote lock disagrees"
+                ),
+                Err(e) => tracing::warn!(
+                    height = block.header.height, error = %e,
+                    "could not record the vote lock for the produced block"
+                ),
+            }
+        }
+
         // ADR 0002: advance the finalized pointer. On a single-validator chain the
         // proposer's own signature already meets quorum, so the block is final at once;
         // with more validators it becomes final once quorum co-signs (via P2P).

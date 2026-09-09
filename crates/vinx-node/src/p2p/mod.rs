@@ -806,6 +806,38 @@ async fn dispatch_message(
             let vs = validator_set.read().await.clone();
             if vs.contains(local_addr) {
                 let block_hash = block.hash();
+
+                // VX-RED-003 / VX-RED-007 — claim the vote lock BEFORE signing.
+                //
+                // The node used to sign and gossip first, then call `record_signature`
+                // and discard its result. Detection is not prevention: an attacker who
+                // sends two individually valid blocks at the same height, both under the
+                // finality depth, made an *honest* validator co-sign both, so honest
+                // validators contributed to two competing branches and the
+                // "one validator, one vote per height" invariant did not hold.
+                //
+                // The lock is committed durably before any signature is released, so it
+                // also survives a restart between the two blocks. Re-signing the same
+                // hash stays allowed: a re-gossiped block is not equivocation.
+                if let Some(storage) = fork_choice.storage.as_ref() {
+                    match storage.claim_vote(height, block_hash) {
+                        Ok(true) => {}
+                        Ok(false) => {
+                            warn!(
+                                height,
+                                "refusing to co-sign a second block at this height                                  (vote already locked) — equivocation prevented"
+                            );
+                            return;
+                        }
+                        Err(e) => {
+                            // Fail closed: without a durable lock we cannot prove we are
+                            // not equivocating, and equivocation is slashable.
+                            warn!(height, error = %e, "vote lock unavailable — not co-signing");
+                            return;
+                        }
+                    }
+                }
+
                 let bls_sig = bls_sk.sign(&block_hash);
                 let bls_msg = P2pMessage::BlockBlsCoSignature {
                     height,
@@ -819,6 +851,9 @@ async fn dispatch_message(
                     .gossipsub
                     .publish(bls_topic, bls_msg.encode());
                 debug!(height, "BLS co-signed block");
+                // Still recorded: `record_signature` remains the slashing-evidence index
+                // for *other* validators' equivocation. Our own vote is now gated by the
+                // durable lock above rather than merely observed here.
                 let mut c = chain.write().await;
                 c.record_signature(local_addr, height, block_hash);
             }

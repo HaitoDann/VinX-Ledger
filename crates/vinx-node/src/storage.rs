@@ -66,6 +66,9 @@ const ACCOUNTS: TableDefinition<&[u8], &[u8]> = TableDefinition::new("accounts")
 /// incrementally — only heights dirtied since the last flush (v10).
 const BLOCKS: TableDefinition<u64, &[u8]> = TableDefinition::new("blocks");
 const META: TableDefinition<&str, u64> = TableDefinition::new("meta");
+/// Height → the single block hash this validator has co-signed at that height
+/// (VX-RED-003 / VX-RED-007). Durable and committed *before* a signature is released.
+const VOTES: TableDefinition<u64, [u8; 32]> = TableDefinition::new("votes");
 
 pub struct Storage {
     db: Arc<Database>,
@@ -618,6 +621,54 @@ impl Storage {
 
     /// Compresses and writes a pre-serialized mempool blob to redb.
     /// Designed to run inside `tokio::task::spawn_blocking`.
+    /// Claims the right to co-sign `block_hash` at `height` — the vote lock that makes
+    /// "one validator, one vote per height" an enforced invariant rather than an
+    /// observation (VX-RED-003 / VX-RED-007).
+    ///
+    /// Returns `Ok(true)` when the caller may sign: either no vote is recorded at this
+    /// height, or the recorded vote is for this exact hash (so re-signing is idempotent —
+    /// a re-gossiped block must not be treated as equivocation). Returns `Ok(false)` when
+    /// a *different* hash is already locked at that height; the caller must not sign.
+    ///
+    /// The write is committed before this returns, so the lock survives a crash between
+    /// claiming and signing. Committing durably before the signature is released is the
+    /// whole point: a lock recorded after the fact cannot prevent anything.
+    pub fn claim_vote(&self, height: u64, block_hash: [u8; 32]) -> io::Result<bool> {
+        let write = self
+            .db
+            .begin_write()
+            .map_err(|e| io::Error::other(e.to_string()))?;
+        let allowed = {
+            let mut t = write
+                .open_table(VOTES)
+                .map_err(|e| io::Error::other(e.to_string()))?;
+            let existing = t
+                .get(height)
+                .map_err(|e| io::Error::other(e.to_string()))?
+                .map(|v| v.value());
+            match existing {
+                Some(h) if h != block_hash => false,
+                Some(_) => true, // same block — idempotent
+                None => {
+                    t.insert(height, block_hash)
+                        .map_err(|e| io::Error::other(e.to_string()))?;
+                    true
+                }
+            }
+        };
+        write
+            .commit()
+            .map_err(|e| io::Error::other(e.to_string()))?;
+        Ok(allowed)
+    }
+
+    /// The block hash this validator co-signed at `height`, if any.
+    pub fn recorded_vote(&self, height: u64) -> Option<[u8; 32]> {
+        let read = self.db.begin_read().ok()?;
+        let t = read.open_table(VOTES).ok()?;
+        t.get(height).ok()?.map(|v| v.value())
+    }
+
     pub fn save_mempool_blob(&self, blob: Vec<u8>) -> io::Result<()> {
         let compressed = Self::compress(&blob)?;
         let tx = self.db.begin_write().map_err(Self::io_err)?;

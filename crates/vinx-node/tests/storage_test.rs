@@ -202,3 +202,36 @@ async fn test_state_persists_across_node_restarts() {
         assert_eq!(state.account_balance(&admin_addr), Amount::ZERO);
     }
 }
+
+/// VX-RED-003 / VX-RED-007 — the vote lock must make "one validator, one vote per
+/// height" an enforced invariant, and it must survive a restart: an attacker who sends a
+/// competing block after a reboot would otherwise still induce equivocation.
+#[test]
+fn vote_lock_prevents_equivocation_and_survives_restart() {
+    let dir = TmpDir::new();
+    let hash_a = [0xAAu8; 32];
+    let hash_b = [0xBBu8; 32];
+
+    {
+        let storage = Storage::open(dir.path()).unwrap();
+        // First vote at height 7 is granted.
+        assert!(storage.claim_vote(7, hash_a).unwrap());
+        // Re-signing the *same* block is idempotent — a re-gossiped block is not
+        // equivocation and must not be refused.
+        assert!(storage.claim_vote(7, hash_a).unwrap());
+        // A different block at the same height is refused.
+        assert!(!storage.claim_vote(7, hash_b).unwrap());
+        // Other heights are unaffected.
+        assert!(storage.claim_vote(8, hash_b).unwrap());
+        assert_eq!(storage.recorded_vote(7), Some(hash_a));
+    }
+
+    // Reopen: the lock is durable, so the refusal still stands after a restart.
+    {
+        let storage = Storage::open(dir.path()).unwrap();
+        assert_eq!(storage.recorded_vote(7), Some(hash_a));
+        assert!(!storage.claim_vote(7, hash_b).unwrap());
+        assert!(storage.claim_vote(7, hash_a).unwrap());
+        assert_eq!(storage.recorded_vote(9), None);
+    }
+}
