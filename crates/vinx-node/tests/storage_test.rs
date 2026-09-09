@@ -45,6 +45,7 @@ fn test_storage_roundtrip() {
         chain_id: vinx_core::CHAIN_ID_DEVNET,
         admin_address: admin.clone(),
         validator_address: validator.clone(),
+        validator_bls: None,
     });
     let (mut chain, _) = Chain::new_with_genesis(validator.clone(), 0);
 
@@ -76,6 +77,7 @@ fn test_storage_roundtrip_preserves_typed_tx_index() {
         chain_id: vinx_core::CHAIN_ID_DEVNET,
         admin_address: admin,
         validator_address: validator,
+        validator_bls: None,
     });
     let (mut chain, _) = Chain::new_with_genesis(validator, 0);
 
@@ -131,6 +133,7 @@ fn test_incremental_persist_writes_only_dirty_rows() {
         chain_id: vinx_core::CHAIN_ID_DEVNET,
         admin_address: admin.clone(),
         validator_address: validator.clone(),
+        validator_bls: None,
     });
     let (mut chain, _) = Chain::new_with_genesis(validator.clone(), 0);
     let storage = Storage::new(tmp.path());
@@ -173,6 +176,7 @@ async fn test_state_persists_across_node_restarts() {
             chain_id: vinx_core::CHAIN_ID_DEVNET,
             admin_address: admin_addr.clone(),
             validator_address: validator_addr.clone(),
+            validator_bls: None,
         });
         let (chain, _) = Chain::new_with_genesis(validator_addr.clone(), 0);
         let config = NodeConfig::new(validator_kp.clone()).with_data_dir(tmp.path());

@@ -41,6 +41,7 @@ async fn start_test_node() -> (Arc<Node>, String) {
         chain_id: vinx_core::CHAIN_ID_DEVNET,
         admin_address: admin_addr.clone(),
         validator_address: validator_addr.clone(),
+        validator_bls: None,
     });
 
     let (chain, _genesis_block) = Chain::new_with_genesis(validator_addr.clone(), 0);
@@ -364,6 +365,7 @@ async fn test_faucet_endpoint() {
         chain_id: vinx_core::CHAIN_ID_DEVNET,
         admin_address: admin_addr.clone(),
         validator_address: validator_addr.clone(),
+        validator_bls: None,
     });
     let (chain, _) = Chain::new_with_genesis(validator_addr.clone(), 0);
 
@@ -516,6 +518,7 @@ async fn test_crash_recovery() {
             chain_id: vinx_core::CHAIN_ID_DEVNET,
             admin_address: admin_addr.clone(),
             validator_address: validator_addr.clone(),
+            validator_bls: None,
         });
         let (chain, _) = Chain::new_with_genesis(validator_addr.clone(), 0);
         let config = NodeConfig::new(validator_kp.clone())

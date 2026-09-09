@@ -828,6 +828,7 @@ mod tests {
             chain_id: vinx_core::CHAIN_ID_DEVNET,
             admin_address: admin,
             validator_address: validator,
+            validator_bls: None,
         });
         // Fair launch: genesis grants nothing, so seed a balance to check it survives.
         state.credit_for_test(admin, Amount::from_vinx(500));
@@ -931,6 +932,7 @@ mod tests {
             chain_id: vinx_core::CHAIN_ID_DEVNET,
             admin_address: admin,
             validator_address: validator,
+            validator_bls: None,
         });
         let (mut chain, _) = Chain::new_with_genesis(validator, 0);
 
@@ -1014,6 +1016,7 @@ mod tests {
             chain_id: vinx_core::CHAIN_ID_DEVNET,
             admin_address: admin,
             validator_address: validator,
+            validator_bls: None,
         });
         let (mut chain, _) = Chain::new_with_genesis(validator, 0);
 
@@ -1090,6 +1093,7 @@ mod tests {
             chain_id: vinx_core::CHAIN_ID_DEVNET,
             admin_address: admin,
             validator_address: validator,
+            validator_bls: None,
         });
         let (mut chain, _) = Chain::new_with_genesis(validator, 0);
 
@@ -1133,6 +1137,7 @@ mod tests {
             chain_id: vinx_core::CHAIN_ID_DEVNET,
             admin_address: admin,
             validator_address: validator,
+            validator_bls: None,
         });
         let (mut chain, _) = Chain::new_with_genesis(validator, 0);
         chain.push(make_test_block(1, chain.tip_hash(), validator));

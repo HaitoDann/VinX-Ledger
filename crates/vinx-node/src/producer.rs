@@ -380,6 +380,7 @@ mod tests {
             admin_address: admin_addr,
             validator_address: validator_addr.clone(),
             chain_id: vinx_core::CHAIN_ID_DEVNET,
+            validator_bls: None,
         });
 
         let (chain, _) = Chain::new_with_genesis(validator_addr.clone(), 0);

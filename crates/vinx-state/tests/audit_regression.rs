@@ -14,6 +14,7 @@ fn genesis_with(admin: Address) -> WorldState {
         chain_id: vinx_core::CHAIN_ID_DEVNET,
         admin_address: admin,
         validator_address: validator,
+        validator_bls: None,
     })
 }
 
@@ -164,4 +165,68 @@ fn bls_key_cannot_be_registered_by_two_validators() {
         state.apply_transaction(&reg2).is_err(),
         "the same G1 key must not be claimed by a second validator"
     );
+}
+
+/// Bootstrap regression: the genesis validator's BLS key must be in the registry from
+/// height 0, otherwise it cannot produce a block its peers accept — and it cannot
+/// register the key either, because doing so requires a block peers accept.
+#[test]
+fn genesis_registers_the_validator_bls_key() {
+    use vinx_crypto::BlsSecretKey;
+
+    let admin = Address::from_public_key(&KeyPair::generate().public_key());
+    let validator = Address::from_public_key(&KeyPair::generate().public_key());
+    let sk = BlsSecretKey::generate();
+
+    // Without the key, the registry is empty — the deadlock this fixes.
+    let bare = create_genesis_state(&GenesisConfig {
+        chain_id: vinx_core::CHAIN_ID_DEVNET,
+        admin_address: admin,
+        validator_address: validator,
+        validator_bls: None,
+    });
+    assert_eq!(
+        bare.indexed_bls_keys(&bare.validator_set),
+        vec![None],
+        "no key configured ⇒ empty registry (single-node use only)"
+    );
+
+    // With it, the genesis validator is authenticable from block 1.
+    let state = create_genesis_state(&GenesisConfig {
+        chain_id: vinx_core::CHAIN_ID_DEVNET,
+        admin_address: admin,
+        validator_address: validator,
+        validator_bls: Some(vinx_state::GenesisBlsKey {
+            pub_key: sk.public_key().0,
+            pop: sk.proof_of_possession().0,
+        }),
+    });
+    assert_eq!(
+        state.indexed_bls_keys(&state.validator_set),
+        vec![Some(sk.public_key().0)],
+        "the genesis validator's key must be registered at height 0"
+    );
+}
+
+/// The genesis writer must not accept an unverifiable key: a bad PoP would put a key
+/// into state that no block can ever verify against.
+#[test]
+#[should_panic(expected = "Proof-of-Possession")]
+fn genesis_rejects_an_invalid_bls_pop() {
+    use vinx_crypto::BlsSecretKey;
+
+    let admin = Address::from_public_key(&KeyPair::generate().public_key());
+    let validator = Address::from_public_key(&KeyPair::generate().public_key());
+    let sk = BlsSecretKey::generate();
+    let other = BlsSecretKey::generate();
+
+    let _ = create_genesis_state(&GenesisConfig {
+        chain_id: vinx_core::CHAIN_ID_DEVNET,
+        admin_address: admin,
+        validator_address: validator,
+        validator_bls: Some(vinx_state::GenesisBlsKey {
+            pub_key: sk.public_key().0,
+            pop: other.proof_of_possession().0, // PoP of a different key
+        }),
+    });
 }

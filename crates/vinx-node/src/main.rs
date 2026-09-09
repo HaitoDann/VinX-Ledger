@@ -115,8 +115,77 @@ impl KeyFile {
         } else {
             let (kf, kp) = Self::generate();
             let json = serde_json::to_string_pretty(&kf).unwrap();
-            std::fs::write(path, json).expect("write key file");
+            write_secret_file(path, &json);
             (kf, kp)
+        }
+    }
+}
+
+/// Writes secret key material with owner-only permissions (VINX-15).
+///
+/// `std::fs::write` creates the file with the process umask, typically 0644 —
+/// world-readable. On a shared host that hands a validator's signing key to any local
+/// user. The file is created 0600 before any byte is written, so the key is never
+/// briefly readable.
+fn write_secret_file(path: &Path, contents: &str) {
+    #[cfg(unix)]
+    {
+        use std::io::Write;
+        use std::os::unix::fs::OpenOptionsExt;
+        let mut f = std::fs::OpenOptions::new()
+            .write(true)
+            .create(true)
+            .truncate(true)
+            .mode(0o600)
+            .open(path)
+            .expect("create key file");
+        f.write_all(contents.as_bytes()).expect("write key file");
+        // An existing file keeps its old mode when reopened; enforce it explicitly.
+        let mut perms = f.metadata().expect("stat key file").permissions();
+        std::os::unix::fs::PermissionsExt::set_mode(&mut perms, 0o600);
+        f.set_permissions(perms).expect("chmod key file");
+    }
+    #[cfg(not(unix))]
+    {
+        std::fs::write(path, contents).expect("write key file");
+    }
+}
+
+/// The validator's BLS12-381 key, persisted alongside the Ed25519 validator key.
+///
+/// This **must** be stable across restarts. Blocks are authenticated against the BLS key
+/// registered on-chain (`consensus::verify_proposer_authenticated`), so a node that
+/// generated a fresh BLS key on every start — which is what `NodeConfig::new` does by
+/// default — would have every block it produces refused by its peers after the first
+/// restart, with no way to recover but a new registration.
+#[derive(serde::Serialize, serde::Deserialize)]
+struct BlsKeyFile {
+    /// G1 compressed public key, hex (48 bytes).
+    pub_key_hex: String,
+    /// Proof-of-Possession over the public key, hex (96 bytes).
+    pop_hex: String,
+    secret_key_hex: String,
+}
+
+impl BlsKeyFile {
+    fn load_or_generate(path: &Path) -> (Self, vinx_crypto::BlsSecretKey) {
+        if path.exists() {
+            let json = std::fs::read_to_string(path).expect("read BLS key file");
+            let kf: Self = serde_json::from_str(&json).expect("parse BLS key file");
+            let bytes = hex::decode(&kf.secret_key_hex).expect("hex decode BLS key");
+            let arr: [u8; 32] = bytes.try_into().expect("32-byte BLS key");
+            let sk = vinx_crypto::BlsSecretKey::from_bytes(&arr).expect("valid BLS scalar");
+            (kf, sk)
+        } else {
+            let sk = vinx_crypto::BlsSecretKey::generate();
+            let kf = Self {
+                pub_key_hex: hex::encode(sk.public_key().0),
+                pop_hex: hex::encode(sk.proof_of_possession().0),
+                secret_key_hex: hex::encode(sk.to_bytes()),
+            };
+            let json = serde_json::to_string_pretty(&kf).unwrap();
+            write_secret_file(path, &json);
+            (kf, sk)
         }
     }
 }
@@ -135,6 +204,13 @@ struct GenesisSpec {
     initial_validator: String,
     #[serde(default)]
     prefund_initial_validator_vinx: u128,
+    /// Initial validator's BLS G1 public key, hex (48 bytes), with its
+    /// Proof-of-Possession, hex (96 bytes). Required for a multi-node network: without
+    /// it the BLS registry is empty at genesis and peers refuse every block.
+    #[serde(default)]
+    initial_validator_bls_pub_key: Option<String>,
+    #[serde(default)]
+    initial_validator_bls_pop: Option<String>,
 }
 
 // ─── Main ─────────────────────────────────────────────────────────────────────
@@ -199,6 +275,9 @@ async fn main() {
 
     let (admin_kf, _admin_kp) = KeyFile::load_or_generate(&admin_key_path);
     let (validator_kf, validator_kp) = KeyFile::load_or_generate(&validator_key_path);
+    // Persisted so the on-chain BLS registration stays valid across restarts.
+    let bls_key_path = data_dir.join("validator_bls.json");
+    let (bls_kf, bls_sk) = BlsKeyFile::load_or_generate(&bls_key_path);
 
     let admin_addr: Address = admin_kf.address.parse().expect("admin address");
     let validator_addr: Address = validator_kf.address.parse().expect("validator address");
@@ -235,10 +314,41 @@ async fn main() {
                     .initial_validator
                     .parse()
                     .expect("spec initial_validator");
+                // The initial validator may be another node, so its BLS key must come
+                // from the shared spec — every node has to derive an identical genesis.
+                let spec_bls = match (
+                    spec.initial_validator_bls_pub_key.as_deref(),
+                    spec.initial_validator_bls_pop.as_deref(),
+                ) {
+                    (Some(pk_hex), Some(pop_hex)) => {
+                        let pk: [u8; 48] = hex::decode(pk_hex)
+                            .expect("spec initial_validator_bls_pub_key: hex")
+                            .try_into()
+                            .expect("spec BLS public key must be 48 bytes");
+                        let pop: [u8; 96] = hex::decode(pop_hex)
+                            .expect("spec initial_validator_bls_pop: hex")
+                            .try_into()
+                            .expect("spec BLS PoP must be 96 bytes");
+                        Some(vinx_state::GenesisBlsKey { pub_key: pk, pop })
+                    }
+                    (None, None) => {
+                        tracing::warn!(
+                            "⚠ Genesis spec carries no initial_validator_bls_pub_key: the BLS \
+                             registry will be empty and peers will refuse every block. Set it \
+                             for any multi-node network."
+                        );
+                        None
+                    }
+                    _ => panic!(
+                        "genesis spec must set both initial_validator_bls_pub_key and \
+                         initial_validator_bls_pop, or neither"
+                    ),
+                };
                 let cfg = GenesisConfig {
                     admin_address: admin,
                     validator_address: init_val,
                     chain_id: spec.chain_id,
+                    validator_bls: spec_bls,
                 };
                 let prefund_atoms = spec
                     .prefund_initial_validator_vinx
@@ -256,6 +366,12 @@ async fn main() {
                     admin_address: admin_addr,
                     validator_address: validator_addr,
                     chain_id,
+                    // This node *is* the genesis validator here, so register its own key:
+                    // otherwise it could never produce a block its peers accept.
+                    validator_bls: Some(vinx_state::GenesisBlsKey {
+                        pub_key: bls_sk.public_key().0,
+                        pop: bls_sk.proof_of_possession().0,
+                    }),
                 };
                 // VINX_DEV_PREFUND_VINX : pré-finance le validateur de genèse (mono-nœud dev).
                 let dev_prefund_atoms = std::env::var("VINX_DEV_PREFUND_VINX")
@@ -277,6 +393,7 @@ async fn main() {
     drop(storage);
 
     let mut config = NodeConfig::new(validator_kp)
+        .with_bls_key(bls_sk)
         .with_block_time(block_time)
         .with_rpc_listen(&rpc_listen)
         .with_data_dir(&data_dir);
@@ -355,6 +472,56 @@ async fn main() {
     );
 
     let node = vinx_node::Node::new_with_p2p(state, chain, config).await;
+
+    // ── BLS key registration (bootstrap) ──────────────────────────────────────
+    // Blocks are authenticated against the BLS key registered on-chain, so a bonded
+    // validator whose key is absent (or stale after a key rotation) has every block it
+    // produces refused by peers. It cannot fix that by hand either: the fix is a
+    // transaction, and its own blocks are the ones being refused. Submit the
+    // registration automatically so a validator converges on its own.
+    {
+        let st = node.state.read().await;
+        let me = node.config.validator_address;
+        let registered = st
+            .validator_pool
+            .get(&me)
+            .and_then(|e| e.bls_pub_key.as_deref())
+            .map(|k| k == node.config.bls_secret_key.public_key().0.as_slice());
+        match registered {
+            // Bonded, and the registered key is already ours: nothing to do.
+            Some(true) => {}
+            // Bonded, but no key registered or a stale one.
+            Some(false) | None if st.validator_pool.contains_key(&me) => {
+                let nonce = st.get_account(&me).map(|a| a.nonce).unwrap_or(0);
+                let chain_id = st.chain_id;
+                drop(st);
+                let payload = vinx_core::RegisterBlsKeyPayload {
+                    bls_pub_key: hex::decode(&bls_kf.pub_key_hex).expect("own BLS pubkey hex"),
+                    bls_pop: hex::decode(&bls_kf.pop_hex).expect("own BLS PoP hex"),
+                };
+                let mut tx = vinx_core::Transaction::new_register_bls_key(
+                    &node.config.validator_keypair,
+                    &payload,
+                    nonce,
+                );
+                tx.chain_id = chain_id;
+                tx.sign(&node.config.validator_keypair);
+                match node.mempool.write().await.add(tx) {
+                    Ok(()) => tracing::info!(
+                        validator = %me,
+                        "ADR 0046: submitted BLS key registration — blocks are only accepted \
+                         by peers once it is included"
+                    ),
+                    Err(e) => tracing::warn!(
+                        validator = %me, error = %e,
+                        "BLS key registration could not be queued"
+                    ),
+                }
+            }
+            // Not bonded: not a validator, nothing to register.
+            _ => {}
+        }
+    }
 
     // Restore mempool from last persist — re-validate each tx against current state.
     if let Some(txs) = restored_mempool {

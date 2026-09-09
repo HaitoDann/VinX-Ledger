@@ -223,6 +223,7 @@ fn genesis_state_n3(addrs: &[Address], vs: &ValidatorSet) -> WorldState {
         admin_address: addrs[0],
         validator_address: addrs[0],
         chain_id: vinx_core::CHAIN_ID_DEVNET,
+        validator_bls: None,
     });
     s.validator_set = vs.clone();
     s

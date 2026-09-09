@@ -210,6 +210,7 @@ mod tests {
             admin_address: addr,
             validator_address: addr,
             chain_id: vinx_core::CHAIN_ID_DEVNET,
+            validator_bls: None,
         });
         let (chain, genesis) = Chain::new_with_genesis(addr, 0);
         let _ = genesis;

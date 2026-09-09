@@ -1,6 +1,6 @@
 use crate::WorldState;
-use vinx_core::{Account, Amount, ValidatorSet, CHAIN_ID_MAINNET};
-use vinx_crypto::Address;
+use vinx_core::{Account, Amount, PoolStatus, ValidatorPoolEntry, ValidatorSet, CHAIN_ID_MAINNET};
+use vinx_crypto::{Address, BlsPubKey, BlsSignature};
 
 pub struct GenesisConfig {
     /// Admin account — holds the governance key. It receives **no** genesis allocation
@@ -13,6 +13,29 @@ pub struct GenesisConfig {
     pub validator_address: Address,
     /// Chain ID for replay protection (CHAIN_ID_MAINNET / TESTNET / DEVNET).
     pub chain_id: u32,
+    /// BLS12-381 G1 public key (48 bytes) of the genesis validator, with its
+    /// Proof-of-Possession (96 bytes).
+    ///
+    /// Since blocks are authenticated against the on-chain BLS registry
+    /// (`consensus::verify_proposer_authenticated`), a proposer whose key is not
+    /// registered cannot be authenticated and its blocks are refused by peers. The
+    /// genesis validator has no way to register one itself — that would require a
+    /// transaction in a block peers accept, which is exactly what it cannot produce.
+    /// Registering it here breaks that bootstrap deadlock.
+    ///
+    /// `None` leaves the registry empty, which is only usable for a single-node chain
+    /// (a lone producer appends to its own chain without the P2P check). Any
+    /// multi-node network must set it.
+    pub validator_bls: Option<GenesisBlsKey>,
+}
+
+/// The genesis validator's BLS key material, verified before it is written to state.
+#[derive(Clone, Debug)]
+pub struct GenesisBlsKey {
+    /// G1 compressed public key, 48 bytes.
+    pub pub_key: [u8; 48],
+    /// Proof-of-Possession over `pub_key`, G2 compressed, 96 bytes.
+    pub pop: [u8; 96],
 }
 
 /// Builds the initial chain state from the genesis configuration.
@@ -32,6 +55,28 @@ pub fn create_genesis_state(config: &GenesisConfig) -> WorldState {
     // Initial validator set — admin can add/remove validators via governance transactions.
     state.validator_set = ValidatorSet::single(config.validator_address);
     state.chain_id = config.chain_id;
+
+    // Register the genesis validator's BLS key so its blocks can be authenticated from
+    // height 1. The genesis validator is grandfathered past the bond requirement, so it
+    // has no pool entry yet; create one with a zero bond purely to carry the key.
+    // `indexed_bls_keys` reads `validator_pool`, so without this entry the registry is
+    // empty and every block it produces is refused by peers.
+    if let Some(ref bls) = config.validator_bls {
+        let pop_ok = BlsPubKey::from_bytes(&bls.pub_key)
+            .and_then(|pk| pk.verify_pop(&BlsSignature(bls.pop)))
+            .is_ok();
+        assert!(
+            pop_ok,
+            "genesis validator BLS Proof-of-Possession is invalid — refusing to write an \
+             unverifiable key into genesis state"
+        );
+        let mut entry = ValidatorPoolEntry::new(0, 0);
+        // The genesis validator produces from height 1; it does not serve a warm-up.
+        entry.status = PoolStatus::Active;
+        entry.bls_pub_key = Some(bls.pub_key.to_vec());
+        entry.bls_pop = Some(bls.pop.to_vec());
+        state.validator_pool.insert(config.validator_address, entry);
+    }
 
     state
 }
@@ -80,6 +125,7 @@ mod tests {
             admin_address: admin_addr.clone(),
             validator_address: validator_addr,
             chain_id: CHAIN_ID_DEVNET,
+            validator_bls: None,
         });
         (state, admin_addr)
     }
@@ -123,6 +169,7 @@ mod tests {
             admin_address: admin_addr,
             validator_address: validator_addr.clone(),
             chain_id: CHAIN_ID_DEVNET,
+            validator_bls: None,
         });
         assert!(state.validator_set.contains(&validator_addr));
         assert_eq!(state.validator_set.len(), 1);
