@@ -4,21 +4,23 @@
 
 <h1 align="center">VinX Ledger</h1>
 
-<p align="center"><strong>Settlement layer ZK-natif — rapide, souverain, sans intermédiaire.</strong></p>
+<p align="center"><strong>Rail de paiement L1 PoS — rapide, souverain, sans intermédiaire.</strong></p>
 
-<p align="center">L1 de paiement avec finalité déterministe, consensus Algorand-style et écosystème d'Appchains ZK.</p>
+<p align="center">Une chaîne de paiement minimaliste : finalité déterministe au quorum, consensus Algorand-style, émission fair-launch. Rien d'autre.</p>
 
 ---
 
 ## Vision
 
-VinX est ce qu'Ethereum essaie de devenir : un **settlement layer ZK-natif**, sans la dette technique de l'EVM. Il fait exactement trois choses sur le L1 :
+VinX fait **une seule chose, et la fait bien : transférer de la valeur.** Pas de machine virtuelle, pas de smart contracts, pas de modules applicatifs — un rail de paiement L1 en Proof-of-Stake, volontairement minimaliste (ADR 0064). Sur le L1 :
 
 1. **Arithmétique de solde** — transferts, comptes, bonds de validateurs
-2. **Vérification de preuves ZK SP1** — les Appchains prouvent leur état, le L1 vérifie
-3. **Consensus BFT** — finalité déterministe, un bloc, aucune réorganisation
+2. **Consensus BFT** — finalité déterministe au quorum, un bloc, aucune réorganisation sous finalité
+3. **Émission fair-launch** — minting progressif par le travail, supply immuable
 
-Pas d'EVM. Pas de WASM. Pas de logique applicative sur L1. Plus minimaliste qu'Ethereum L1.
+Pas d'EVM. Pas de WASM. Pas de logique applicative sur L1. La surface d'attaque minimale **est** la feature.
+
+> **Recentrage v6.0 (ADR 0064) :** les subnets / modules / Appchains ZK des versions antérieures sont **gelés hors scope**. VinX n'est plus un settlement layer ZK — c'est un rail de paiement.
 
 ---
 
@@ -26,23 +28,19 @@ Pas d'EVM. Pas de WASM. Pas de logique applicative sur L1. Plus minimaliste qu'E
 
 ```
 ┌──────────────────────────────────────────────────────────────────┐
-│  Appchains (hors-L1, permissionless)                              │
-│  DEX · Lending · Identité · etc.                                  │
-│  → génèrent des preuves SP1 → soumettent au L1                   │
+│  Clients (wallets, PSP, intégrations paiement)                    │
+│  → signent des transactions Ed25519 → soumettent au L1            │
 └────────────────────────────┬─────────────────────────────────────┘
-                             │ AnchorState + SP1 proof
+                             │ Transaction (Transfer / Stake / …)
                              ▼
 ┌──────────────────────────────────────────────────────────────────┐
-│  VinX L1 — settlement layer ZK-natif                              │
-│  • Comptes VINX · bond/slashing · frais                           │
-│  • Vérification preuves SP1 Groth16 (ADR 0050)                   │
-│  • Clearinghouse cross-Appchain (ADR 0049)                        │
-│  • ForceExit / Escape Hatch (ADR 0048)                            │
+│  VinX L1 — rail de paiement PoS                                   │
+│  • Comptes VINX · transferts · bond/slashing · frais forfaitaires │
 │  • Consensus : PoS Algorand-style, comité VRF n≈100, BLS agrégé  │
+│  • Finalité BFT déterministe (≥ 67 % du comité, 1 bloc)           │
+│  • Émission progressive fair-launch (T_half ~20 ans)              │
+│  • Hachage BLAKE3 · adresses Bech32 vinx1 · anti-replay complet   │
 └──────────────────────────────────────────────────────────────────┘
-                             │ DA (state diffs)
-                             ▼
-                         Celestia
 ```
 
 ---
@@ -62,16 +60,7 @@ Le consensus VinX est un **PoS pur avec comité réduit à sélection VRF** :
 
 **Résistance DoS** : le leader est imprévisible jusqu'au dernier moment — contrairement au round-robin, un attaquant ne sait pas qui cibler.
 
----
-
-## Appchains
-
-Les Appchains s'exécutent hors-L1, génèrent des preuves SP1, et les soumettent pour vérification + settlement :
-
-- **Permissionless** : n'importe qui peut déployer une Appchain avec un bond
-- **Sécurité cryptographique** : ZK proof = L1 ne fait pas confiance au séquenceur pour l'exécution
-- **Séquenceur unique + Escape Hatch** : si le séquenceur censure ou tombe, le `ForceExit` (ADR 0048) permet de récupérer ses fonds directement sur le L1
-- **Cross-chain** : le Clearinghouse L1 (ADR 0049) gère les transferts inter-Appchains via message passing asynchrone
+> Le comité VRF (ADR 0029) est la cible ; le socle actuel tourne en PoA Threshold multi-validateur (round-robin + quorum BFT), éprouvé au banc n=3 et au banc adversarial multi-nœuds.
 
 ---
 
@@ -109,7 +98,7 @@ Le nœud expose **http://localhost:8545** :
 - **100 milliards VINX**, supply fixe et immuable.
 - **Aucun pre-mine, aucune réserve.** Les premiers VINX n'existent qu'au moment où le premier bloc est produit.
 - **Émission par le travail** : minting progressif, décroissance exponentielle continue, demi-vie ~20 ans.
-- **Validateurs = fees only (cible)** : à terme, l'émission va aux Appchains via usage réel (melt), les validateurs vivent des frais de transaction.
+- **Validateurs rémunérés par l'émission + les frais** : les co-signataires du comité se partagent l'émission de l'époque (ADR 0028) ; les frais de transaction vont au producteur.
 - **Invariant** : `circulation + pot_époque + détruits = émis ≤ 100 Md` — garanti à chaque bloc.
 
 > Whitepaper : [whitepaper.md](./whitepaper.md)
@@ -120,10 +109,11 @@ Le nœud expose **http://localhost:8545** :
 
 | Phase | Période | Contenu |
 |-------|---------|---------|
-| ✅ **Phase 1 — Fondations** | Terminé | L1 complet (consensus PoA Threshold → base PoS), finalité BFT, fair launch, BLS12-381, jailing, fork-choice, P2P anti-DoS, gouvernance K-of-M, modules bondés |
-| 🔄 **Phase 2 — PoS Algorand** | Q4 2026 | Comité VRF (ECVRF RFC 9381), sélection par VRF, admission PoS permissionless (ADR 0029/0038) |
-| 📅 **Phase 3 — Appchains ZK** | Q1 2027 | SP1 proof verification (ADR 0050), ForceExit / Escape Hatch (ADR 0048), Clearinghouse (ADR 0049), Celestia DA (ADR 0034) |
-| 🔭 **Phase 4 — Écosystème** | 2027+ | Appchains communautaires, émission élastique (ADR 0047), light client, réseau public |
+| ✅ **Phase 1 — Fondations** | Terminé | L1 complet (consensus PoA Threshold → base PoS), finalité BFT, fair launch, BLS12-381, jailing, fork-choice, P2P anti-DoS, gouvernance K-of-M |
+| 🔄 **Phase 1.5 — Durcissement & lancement** | En cours | Série post-audit (ADRs 0069–0080) : BLAKE3, auth proposeur, verrou de vote, `consensus_root` complet, sérialisation injective, checkpoints, enrôlement BLS au bonding, banc adversarial |
+| 🔄 **Phase 2 — PoS Algorand** | Q4 2026 | Comité VRF (ECVRF RFC 9381), sélection par VRF, récompenses par époque (ADR 0029/0038/0028) |
+| 🔭 **Phase 3 — Réseau public** | 2027+ | Mainnet, décentralisation à l'échelle, light client, post-quantique |
+| ❄️ **Gelé hors scope (ADR 0064)** | — | Appchains ZK / SP1 (0050), ForceExit (0048), Clearinghouse (0049), Celestia DA (0034), modules bondés (0010/0024) — abandonnés au profit du rail de paiement pur |
 
 > Index complet des décisions d'architecture : [docs/adr/README.md](./docs/adr/README.md)
 

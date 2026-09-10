@@ -11,7 +11,7 @@
 
 **Pourquoi maintenant** : Le protocole core est complet (consensus PoA + BLS, VRF, compact blocks, snapshot sync, parallel sync). On est à la frontière entre « code qui tourne en dev » et « réseau qui tourne en public ». C'est le moment de franchir ce seuil, pas d'ajouter des features.
 
-**Succès à 6 mois** : Testnet actif avec 3+ validateurs indépendants, bloc produit toutes les 6 s sans interruption depuis 30 jours, wallet fonctionnel, faucet public, au moins une intégration externe (paiement ou pont) en test.
+**Succès à 6 mois** : Testnet actif avec 3+ validateurs indépendants, bloc produit toutes les 12 s sans interruption depuis 30 jours, wallet fonctionnel, faucet public, au moins une intégration externe (paiement ou pont) en test.
 
 ---
 

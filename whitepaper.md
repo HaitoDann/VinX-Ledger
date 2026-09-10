@@ -23,9 +23,9 @@ Construit en solo, sans investisseurs, **sans pre-mine**, sans promesses spécul
 ## 2. Architecture Technique
 
 - **Langage** : Rust, implémentation propriétaire de bout en bout — aucun framework blockchain tiers
-- **Vitesse** : Cadence de bloc fixe à **6 s** — un bloc produit toutes les 6 secondes, même vide. Finalité déterministe **au quorum** via BLS agrégé
+- **Vitesse** : Cadence de bloc fixe à **12 s** — un bloc produit toutes les 12 secondes, même vide. Finalité déterministe **au quorum** via BLS agrégé
 - **Capacité** : jusqu'à **3 000 transactions par bloc** (gouvernable), mempool de **100 000** transactions
-- **Performance** : ~500 TPS (3 000 tx à 12 s) — exécution séquentielle intentionnelle pour l'auditabilité
+- **Performance** : ~250 TPS (3 000 tx toutes les 12 s) — exécution séquentielle intentionnelle pour l'auditabilité
 - **Précision** : 18 décimales internes, 2 décimales affichées à l'utilisateur
 - **Adresses** : Format Bech32 avec préfixe `vinx1`
 - **Cryptographie** : Ed25519 (signatures de transaction), BLS12-381 (co-signatures agrégées du comité), BLAKE3 (hachage), Bech32 (adresses)
@@ -293,9 +293,9 @@ VinX Ledger n'a pas de pression d'agenda. Le projet avance à son rythme.
 | **Type** | Rail de paiement L1 — non-EVM, account-based, sans VM |
 | **Stack** | Rust, implémentation propriétaire |
 | **Cryptographie** | Ed25519 (signatures), BLS12-381 (co-signatures), BLAKE3 (hachage), Bech32 `vinx1` |
-| **Cadence de bloc** | Fixe **6 s** — un bloc toutes les 6 s, même vide |
+| **Cadence de bloc** | Fixe **12 s** — un bloc toutes les 12 s, même vide |
 | **Référence de temps** | Timestamp des blocs (temps réel), pas la hauteur |
-| **Capacité** | 3 000 tx/bloc · ~500 TPS · mempool 100 000 |
+| **Capacité** | 3 000 tx/bloc · ~250 TPS · mempool 100 000 |
 | **Consensus** | PoA + comité ECVRF, BLS12-381 agrégé, finalité BFT déterministe (≥ 67 %) |
 | **Types de tx** | Transfer, Bond, Unbond, ValidatorJoin, ValidatorExit, FeeAdjust — c'est tout |
 | **Full nodes** | Ouverts à tous |

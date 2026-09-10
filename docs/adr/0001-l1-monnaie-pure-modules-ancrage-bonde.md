@@ -1,11 +1,21 @@
 # ADR 0001 — L1 monnaie pure + surcouches par ancrage bondé
 
-- **Statut :** Accepté — **partiellement implémenté** (registre bondé + ancrage Merkle) ; vérification ZK SP1 = ADR 0050 (architecture cible).
-- **Date :** Juillet 2026 · Révisé août 2026
+- **Statut :** ❄️ **Partiellement supersédé (ADR 0064)** — la doctrine « monnaie pure L1 » reste
+  vraie et fondatrice, mais **toute la partie surcouches / modules / Appchains / settlement layer
+  ZK est gelée hors scope**. VinX est un rail de paiement, pas une plateforme d'extensions.
+- **Date :** Juillet 2026 · Révisé août 2026 · gelé (surcouches) septembre 2026
 - **Portée :** Architecture d'extensibilité de VinX Ledger — doctrine fondatrice.
 - **Décideur :** VinX Labs.
+- **Supersédé par :** [ADR 0064](./0064-vinx-rail-paiement-uniquement.md) (recentrage rail de paiement).
 
 ---
+
+> ❄️ **Recentrage v6.0 (ADR 0064).** Ce qui suit décrit l'ambition « monnaie pure + surcouches par
+> ancrage bondé + Appchains ZK » des versions antérieures. La moitié « surcouches / Appchains / ZK »
+> a été **abandonnée** : ni implémentée, ni planifiée. Seule survit la doctrine de base — un L1 de
+> paiement minimal, sans VM, sans smart contracts, sans logique applicative dans le nœud. La
+> primitive `AnchorState` (0x09) subsiste dans le code comme registre de modules bondé (ADR 0010)
+> mais hors du chemin critique du rail de paiement.
 
 ## 1. Contexte
 

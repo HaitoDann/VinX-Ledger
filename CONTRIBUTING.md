@@ -20,10 +20,10 @@ Le développement est organisé en phases nommées, chacune avec un objectif cen
 | Phase | Nom | Objectif | ADRs centraux | État |
 |---|---|---|---|---|
 | 1 | *(à nommer)* | L1 solide : crypto, consensus BFT, émission progressive, finalité, BLS | 0051–0063, 0002–0003, 0005–0011, 0015, 0020–0022, 0026–0027, 0031, 0040, 0043, 0045, 0046 | ✅ Terminé |
+| 1.5 | Durcissement & lancement | Sécurité consensus post-audit, amorçage, release, critères de lancement | 0069–0080, 0064 | 🔄 En cours |
 | 2 | *(à nommer)* | PoS Algorand-style : comité VRF, pool permissionless | 0029, 0038, 0028 | 🔄 En cours |
-| 3 | *(à nommer)* | Appchains ZK : SP1, Celestia DA, ForceExit, Clearinghouse | 0050, 0034, 0048, 0049 | 📅 Suivant |
-| 4 | *(à nommer)* | Économie Appchains : melt, répartition émission, garde-fous | 0039, 0041, 0042, 0044, 0047 | 🔮 Futur |
-| 5 | *(à nommer)* | Réseau public : mainnet, décentralisation à l'échelle | 0013, 0016, 0018, 0019 | 🔮 Vision |
+| 3 | *(à nommer)* | Réseau public : mainnet, décentralisation à l'échelle | 0013, 0016, 0018, 0019 | 🔮 Vision |
+| ❄️ | Gelé hors scope (ADR 0064) | Appchains ZK / SP1 / Celestia / ForceExit / Clearinghouse / modules bondés / tokenomics Appchains | 0050, 0034, 0048, 0049, 0010, 0024, 0039, 0041, 0044, 0047, 0023 | ❌ Abandonné |
 
 > Les noms de phases seront ajoutés ici dès décision. Ce tableau est la feuille de route maître.
 
@@ -124,7 +124,7 @@ Un ADR peut rester Implémenté plusieurs sprints avant d'atteindre Vérifié si
 **Mise à jour obligatoire à chaque ADR Implémenté** :
 - Mettre à jour la constante correspondante (section 18)
 - Mettre à jour le statut dans l'index des ADRs (section 17)
-- Mettre à jour la section fonctionnelle concernée (consensus, frais, appchains, etc.)
+- Mettre à jour la section fonctionnelle concernée (consensus, frais, staking, etc.)
 
 **Mise à jour interdite** : modifier PROTOCOL_SPEC.md pour "coller au code" sans ADR. Si le code a divergé, c'est un bug de process — ouvrir un ADR Proposé pour décider formellement.
 

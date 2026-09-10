@@ -130,9 +130,10 @@ frais = base_fee × poids(type) × multiplicateur_congestion
 | `0x04` | `AnnounceUpgrade` | Annonce d'une mise à jour protocole (admin, ADR 0006) |
 | `0x07` | `SlashValidator` | Slashing pour équivocation (preuve cryptographique requise) |
 | `0x08` | `AdminAction` | Action de gouvernance — mono-admin ou comité K-of-M (ADR 0011) |
-| `0x09` | `AnchorState` | Ancrage de module/Appchain (`ModuleOp` : Register/Anchor/Deregister) |
-| `0x0B` | `ForceExit` 🔴 | Sortie forcée d'une Appchain sur le L1 (ADR 0048) |
-| `0x0C` | `CrossMsgExpire` 🔴 | Expiration d'un message cross-Appchain (remboursement, ADR 0049) |
+| `0x09` | `AnchorState` | Ancrage de module bondé (`ModuleOp` : Register/Anchor/Deregister, ADR 0010 — primitive héritée) |
+| `0x0A` | `RegisterBlsKey` | Le validateur enregistre sa clé BLS12-381 + PoP (ADR 0046/0075) |
+| `0x0B` | `Unjail` | Un validateur jailé demande à réintégrer le set actif (ADR 0027) |
+| `0x0C` | `RegisterVrfKey` | Le validateur enregistre sa clé publique ECVRF (ADR 0029) |
 
 > Les codes `0x05` et `0x06` sont retirés (ADR 0007) — ajout/retrait de validateur passe par `AdminAction`.
 
@@ -284,69 +285,22 @@ frais = base_fee × poids(type) × multiplicateur_congestion
 
 ---
 
-## 13. Appchains ZK (architecture cible) 🔴
+## 13. Appchains ZK — ❄️ gelé hors scope (ADR 0064)
 
-### Principe
-
-Le L1 ne fait que **vérifier et settlémenter** — jamais exécuter. Les Appchains s'exécutent hors-L1 et soumettent des preuves :
-
-```
-Appchain (hors-L1)
-  └─ génère preuve SP1 (RISC-V zkVM, Groth16)
-  └─ publie state diffs sur Celestia (DA)
-        │
-        └─► L1 : AnchorState { sp1_proof, state_diff, da_commitment }
-              L1 vérifie Groth16 + engagement Celestia
-              L1 settlémente les balances
-```
-
-### SP1 Proof Verification (ADR 0050) 🔴
-
-```rust
-AnchorState {
-    appchain_id:    u32,
-    prev_root:      Hash32,
-    new_root:       Hash32,
-    sp1_proof:      Option<Sp1Proof>,   // None = mode Bonded (niveau 1)
-    state_diff:     Vec<(Address, BalanceDelta)>,
-    da_commitment:  Option<DaCommitment>,
-}
-Sp1Proof { verifying_key: Sp1VerifyingKey([u8; 32]), proof_bytes: Vec<u8> }
-```
-
-**Deux modes :**
-- **Niveau 1 (Bonded)** : pas de preuve ZK — le séquenceur poste son bond ; fraude détectable via DA.
-- **Niveau 3 (ZK-verified)** : preuve Groth16 vérifiée on-chain — sécurité cryptographique complète.
-
-### DA Celestia (ADR 0034) 🔴
-
-- Les state diffs + données des Appchains sont publiés sur Celestia.
-- Le L1 stocke un `DaCommitment` dans chaque `AnchorState`.
-- Prérequis du slashing de fraude (ADR 0023).
-
-### ForceExit / Escape Hatch (ADR 0048) 🔴
-
-| Paramètre | Valeur |
-|---|---|
-| Type tx | `0x0B` |
-| Mécanisme | `MerkleProof` du solde dans l'Appchain |
-| Timeout séquenceur | **10 blocs L1** (~120 s) |
-| En cas d'ignorance | Bond du séquenceur **slashé** |
-| Garantie | Aucun utilisateur ne peut être censuré définitivement |
-
-### Clearinghouse cross-Appchain (ADR 0049) 🔴
-
-Flux asynchrone en 4 étapes :
-
-```
-LOCK (src L1) → CrossMsg enregistré L1 → MINT (dst L1) → ACK
-```
-
-| Champ | Description |
-|---|---|
-| `CrossMsg { id, src, dst, sender, recipient, amount, expiry_ts, status }` | Message cross-Appchain |
-| `CrossMsgStatus` | `Pending` / `Delivered` / `Expired` / `Refunded` |
-| Timeout / remboursement | `CrossMsgExpire (0x0C)` — remboursement automatique à expiry |
+> **Le recentrage v6.0 (ADR 0064) a abandonné l'écosystème Appchains / ZK.** VinX est un
+> **rail de paiement minimaliste L1 PoS** : il transfère de la valeur avec finalité BFT et
+> émission progressive, rien de plus. Les composants suivants ne sont **ni implémentés ni
+> planifiés**, et leurs ADR sont gelés (conservés pour mémoire, pas pour exécution) :
+>
+> - **SP1 Proof Verification / Groth16 on-chain** (ADR 0050)
+> - **Disponibilité des données Celestia** (ADR 0034)
+> - **ForceExit / Escape Hatch** (ADR 0048)
+> - **Clearinghouse cross-Appchain** (ADR 0049)
+> - **Modules bondés hors-L1** (ADR 0010, ADR 0024)
+>
+> Aucun type de transaction `ForceExit`, `CrossMsg` ou preuve ZK n'existe dans le code. La seule
+> primitive d'ancrage résiduelle est `AnchorState` (`0x09`, module-registry bondé d'ADR 0010),
+> conservée pour compatibilité mais hors du chemin critique du rail de paiement.
 
 ---
 
@@ -465,29 +419,33 @@ vinx_tx_in_block_total
 | 0038 | Open PoS — pool permissionless, warmup, rotation |
 | 0028 | Récompenses par époque (PROPOSER_SHARE_BPS = 20 %) |
 
-### Phase 3 — Appchains ZK 📐 Acceptés (architecture cible)
+### ❄️ Appchains ZK — gelé hors scope (ADR 0064)
 
-| ADR | Titre résumé |
-|---|---|
-| 0050 | Vérification SP1 Groth16 on-chain |
-| 0034 | Disponibilité des données — Celestia |
-| 0048 | ForceExit / Escape Hatch (0x0B) |
-| 0049 | Clearinghouse cross-Appchain (0x0C) |
+Ces ADR sont **conservés pour mémoire mais abandonnés** par le recentrage v6.0 : ni implémentés
+ni planifiés. VinX est un rail de paiement, pas un settlement layer.
+
+| ADR | Titre résumé | Statut |
+|---|---|---|
+| 0050 | Vérification SP1 Groth16 on-chain | ❄️ Gelé |
+| 0034 | Disponibilité des données — Celestia | ❄️ Gelé |
+| 0048 | ForceExit / Escape Hatch | ❄️ Gelé |
+| 0049 | Clearinghouse cross-Appchain | ❄️ Gelé |
+| 0010 / 0024 | Modules bondés / infrastructure subnets | ❄️ Gelé |
 
 ### Proposés (en discussion) 💡
 
 | ADR | Titre résumé | Phase |
 |---|---|---|
-| 0023 | Adjudication slashing de module (fraude opérateur) | 3 |
-| 0024 | Infrastructure subnets : escrow bondé + racine récompense | 3 |
+| 0023 | Adjudication slashing de module (fraude opérateur) | ❄️ Gelé (0064) |
+| 0024 | Infrastructure subnets : escrow bondé + racine récompense | ❄️ Gelé (0064) |
 | 0030 | Accountability des co-signatures conflictuelles | 2 |
 | 0032 | Garde-fous de gouvernance | 2 |
 | 0033 | Genèse et bootstrap fair launch | 1 |
 | 0035 | Bornes de ressources par transaction | 1 |
 | 0036 | Churn des validateurs | 2 |
 | 0037 | Propagation compacte des blocs (CompactBlock) | — |
-| 0039 | Rémunération opérateurs modules (escrow + fee_schedule) | 4 |
-| 0041 | Répartition émission par melt (Appchains) | 4 |
+| 0039 | Rémunération opérateurs modules (escrow + fee_schedule) | ❄️ Gelé (0064) |
+| 0041 | Répartition émission par melt (Appchains) | ❄️ Gelé (0064) |
 | 0042 | Époque de règlement de l'émission | 4 |
 | 0044 | Garde-fous d'équité et amorçage | 4 |
 | 0047 | Émission élastique à réservoir | 4 |
@@ -536,8 +494,6 @@ N_ACTIVE_DEFAULT          = 21                (gouvernable ±2, cooldown 7 j)
 EPOCH_DURATION_SECS       = 3_600  (1 h, ADR 0028 — cible 🔴)
 PROPOSER_SHARE_BPS        = 20     (ADR 0028 — cible 🔴)
 COMMITTEE_SIZE_TARGET     = 100    (ADR 0029 — cible 🔴)
-
-FORCE_EXIT_TIMEOUT_BLOCKS = 10     (~120 s, ADR 0048 — cible 🔴)
 
 SLASH_BOUNTY_BPS          = 1_000  (10 % au rapporteur)
 SLASH_EPOCH_POT_BPS       = 9_000  (90 % dans epoch_dist_emission_pot)

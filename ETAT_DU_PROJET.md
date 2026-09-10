@@ -33,7 +33,7 @@
 > **Gelé hors scope (v6.0, ADR 0064) :** Appchains ZK / SP1 (ADR 0050), ForceExit (ADR 0048), Clearinghouse (ADR 0049), Celestia DA (ADR 0034), modules bondés (ADR 0010) — abandonnés au profit du rail de paiement pur.
 >
 > ### ⚠️ Chemin critique
-> **Court terme :** tx `Unjail` + règle 2 co-signatures (ADR 0027) ; accountability co-sign (ADR 0030). **Moyen terme :** comité VRF (ADR 0029) — prérequis de tout le reste ; admission PoS (ADR 0038) ; récompenses époque (ADR 0028). **Long terme :** SP1 proof verification (ADR 0050) ; ForceExit (ADR 0048) ; Clearinghouse (ADR 0049) ; Celestia (ADR 0034).
+> **Court terme (lancement) :** cérémonie de genèse multi-validateurs (ADR 0075 §1) ; recoupement multi-pairs des checkpoints (ADR 0074) ; contre-audits externes + SECURITY.md (ADR 0078). **Moyen terme :** comité VRF (ADR 0029) — prérequis de tout le reste ; récompenses époque (ADR 0028) ; accountability co-sign (ADR 0030) ; tx `Unjail` (ADR 0027). **❄️ Hors scope (ADR 0064) :** SP1/ZK (0050), ForceExit (0048), Clearinghouse (0049), Celestia (0034) — abandonnés.
 
 ---
 
@@ -485,16 +485,11 @@ sync_peer_rpc = "http://1.2.3.4:8545"  # Sync depuis un pair au démarrage
 | 🔴 Haute | **Soak fork-choice n=3** sur réseau réel (convergence prouvée au banc ; reste la validation réseau) | 0031 |
 | 🔴 Haute | **Comité VRF Algorand-style** — ECVRF RFC 9381, sélection uniforme parmi les bondés, leader = VRF le plus faible, finalité BFT ≥ 67 % du comité ; n=100 | 0029 (Accepté) |
 | 🔴 Haute | **Open PoS** — admission permissionless par bond, warmup 3 époques, rotation époque top-N par score, bond gouvernable dans bornes immuables | 0038 (Accepté) |
-| 🔴 Haute | **SP1 proof verification L1** — vérification Groth16 on-chain des preuves ZK Appchain, `AnchorState` étendu, deux modes (Bonded / ZK-verified) | 0050 (Accepté) |
-| 🔴 Haute | **ForceExit / Escape Hatch** — tx `0x0B` + MerkleProof solde Appchain, timeout 10 blocs, slash séquenceur si ignoré | 0048 (Accepté) |
-| 🔴 Haute | **Clearinghouse cross-Appchain** — LOCK → CrossMsg L1 → MINT → ACK, timeout + remboursement | 0049 (Accepté) |
-| 🔴 Haute | **Celestia DA** — engagement `DaCommitment` dans `AnchorState`, blobs publiés sur Celestia V1 | 0034 (Accepté) |
+| 🔴 Haute | **Cérémonie de genèse multi-validateurs** + `genesis_hash` (chaque validateur fournit clé BLS + PoP) | 0075 §1, 0033 §1 |
 | 🟠 Moyenne | **Récompenses par époque** — distribuer `epoch_dist_emission_pot` + émission entre proposeurs + co-signataires (1 h, `PROPOSER_SHARE_BPS=20 %`) ; frais restent immédiats au producteur | 0028 (Accepté) |
-| 🟠 Moyenne | **Rémunération des modules par escrow** — `ModuleEscrow`/`ModuleEscrowRefund`, partage via `fee_schedule`, preuve de livraison via `AnchorState` | 0039 (Accepté) |
-| 🟠 Moyenne | **Bootstrap §1** (genèse multi-validateurs + `genesis_hash`), **garde-fous de gouvernance** (🚧 à discuter), **bornes de churn** & **de ressources par tx** | 0033§1, 0032, 0036, 0035 |
-| 🟠 Moyenne | **Slashing de fraude** (prérequis DA Celestia) | 0023 |
-| 🟠 Moyenne | **Tokenomics Appchains** : répartition par usage/melt, époque de règlement, garde-fous d'équité, émission élastique | 0041, 0042, 0044, 0047 |
+| 🟠 Moyenne | **Garde-fous de gouvernance** (🚧 à discuter), **bornes de churn** & **de ressources par tx** | 0032, 0036, 0035 |
 | 🟢 Future | **Blocs compacts**, light client, rent d'état, clés HSM, halt d'urgence, TLS natif, post-quantique, SLO | 0037, 0014, 0013, 0012, 0017, 0019, 0016, 0018 |
+| ❄️ **Gelé (0064)** | **Appchains ZK / SP1 (0050), ForceExit (0048), Clearinghouse (0049), Celestia DA (0034), modules bondés & escrow (0010/0024/0039), tokenomics Appchains (0041/0044/0047), slashing de fraude (0023)** — abandonnés au profit du rail de paiement pur | — |
 
 ### Déjà fait (historique)
 

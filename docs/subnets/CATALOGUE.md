@@ -1,6 +1,16 @@
 # Catalogue des Appchains VinX
 
-- **Statut :** vivant (backlog d'idées, non figé)
+> # ❄️ ARCHIVÉ — HORS SCOPE (ADR 0064)
+>
+> **Ce document est obsolète.** Le recentrage v6.0 (ADR 0064) a **abandonné** tout l'écosystème
+> subnets / Appchains / ZK. VinX est désormais un **rail de paiement minimaliste L1 PoS** : il ne
+> vérifie aucune preuve ZK, n'héberge aucune Appchain, ne s'intègre pas à Celestia. Les ADR
+> référencés ci-dessous (0050, 0048, 0049, 0034, 0039, 0041, 0044, 0001) sont gelés.
+>
+> Le fichier est conservé uniquement comme **trace historique** des idées explorées avant le
+> recentrage. Rien ici ne décrit le produit actuel ni une feuille de route active.
+
+- **Statut :** ❄️ archivé — gelé hors scope (ADR 0064), conservé pour mémoire
 - **Lié :** SP1 proof verification L1 (ADR 0050) ; ForceExit (ADR 0048) ; Clearinghouse (ADR 0049) ;
   Celestia DA (ADR 0034) ; rémunération opérateurs escrow (ADR 0039) ; répartition émission par
   usage/melt (ADR 0041) ; garde-fous d'équité (ADR 0044) ; doctrine settlement layer ZK-natif (ADR 0001).

@@ -21,11 +21,10 @@ Ce dossier trace toutes les décisions d'architecture de VinX Ledger. Chaque ADR
 | Phase | Nom | Objectif | ADRs centraux | État |
 |---|---|---|---|---|
 | 1 | *(à nommer)* | L1 solide : socle crypto, consensus BFT, émission progressive, finalité | 0051–0063, 0002–0003, 0005–0011, 0015, 0020–0022, 0026–0027, 0031, 0040, 0043, 0045, 0046 | ✅ Terminé |
+| **1.5** | **Durcissement & lancement** | **Sécurité du consensus après audit, amorçage, processus de release, critères de lancement** | **0069–0080**, 0064 | 🔄 **En cours** |
 | 2 | *(à nommer)* | PoS Algorand-style : comité VRF, pool permissionless, récompenses époque | 0029, 0038, 0028 | 🔄 En cours |
-| **1.5** | **Durcissement & lancement** | **Sécurité du consensus après audit, amorçage, processus de release, critères de lancement** | **0070–0080**, 0064 | 🔄 **En cours** |
-| 3 | *(à nommer)* | Appchains ZK : SP1, Celestia DA, ForceExit, Clearinghouse | 0050, 0034, 0048, 0049 | ❄️ Gelé par 0064 |
-| 4 | *(à nommer)* | Économie Appchains : melt, répartition émission, garde-fous | 0039, 0041, 0042, 0044, 0047 | ❄️ Gelé par 0064 |
-| 5 | *(à nommer)* | Réseau public : mainnet, décentralisation à l'échelle | 0013, 0016, 0018, 0019 | 🔮 Vision |
+| 3 | *(à nommer)* | Réseau public : mainnet, décentralisation à l'échelle, light client | 0013, 0014, 0016, 0018, 0019 | 🔮 Vision |
+| ❄️ | Gelé hors scope (ADR 0064) | Appchains ZK / SP1 / Celestia / ForceExit / Clearinghouse / modules bondés / tokenomics Appchains | 0010, 0023, 0024, 0034, 0039, 0041, 0044, 0047, 0048, 0049, 0050 | ❌ Abandonné |
 
 > **Périmètre produit :** [ADR 0064](./0064-vinx-rail-paiement-uniquement.md) fixe VinX comme
 > **rail de paiement L1 minimaliste sans VM**. Les phases 3 et 4 sont gelées : aucune
@@ -164,6 +163,7 @@ d'exploitation, correctifs, prompts de contre-audit — vit dans
 
 | ADR | Titre | Statut | Finding |
 |---|---|---|---|
+| [0069](./0069-blake3-remplace-sha256.md) | BLAKE3 remplace SHA-256 ⚠️ *hard fork*, avant genesis | 🔧 Implémenté | — |
 | [0070](./0070-authentification-proposeur-registre-bls.md) | Authentification du proposeur & liaison au registre BLS | 🔧 Implémenté | VINX-01/02/05 |
 | [0071](./0071-verrou-vote-persistant.md) | Verrou de vote persistant — une signature par hauteur | 🔧 Implémenté | VX-RED-003/007 |
 | [0072](./0072-state-root-engage-consensus.md) | `state_root` engage l'état de consensus ⚠️ *hard fork* | 🔧 Implémenté | VINX-04 |
@@ -186,59 +186,42 @@ d'exploitation, correctifs, prompts de contre-audit — vit dans
 | [0079](./0079-release-versioning-upgrade-reseau.md) | Release, versioning & upgrade réseau | 📐 Accepté | 🟠 Moyenne |
 | [0080](./0080-criteres-lancement-testnet-mainnet.md) | **Critères de lancement : testnet → mainnet** | 📐 Accepté | 🔴 Porte de sortie |
 
-> **Le manque le plus important reste le banc adversarial multi-nœuds** (ADR 0080 §2.2) :
-> tous les correctifs de consensus sont validés en un seul processus, alors que les
-> propriétés qu'ils protègent sont des propriétés de réseau.
+> **Le banc adversarial multi-nœuds est désormais en place** (ADR 0080 §2.2) : 6 scénarios
+> avec un `Storage` réel (redb) par nœud, validés par mutation testing (non-équivocation, rejet
+> des intrus, entrées malformées inertes, pas de finalité conflictuelle sous partition). Reste
+> ouvert : la cérémonie de genèse multi-validateurs (0075 §1) et le recoupement multi-pairs des
+> checkpoints (0074).
 
 ---
 
-## Phase 3 — Appchains ZK ❄️ Gelé par ADR 0064
+## ❄️ Appchains ZK & économie de modules — Gelé hors scope (ADR 0064)
 
-### Vérification ZK
+> Le recentrage v6.0 a **abandonné** tout l'écosystème Appchains / ZK / modules bondés. Ces ADR
+> sont **conservés pour mémoire** — ni implémentés, ni planifiés. VinX est un rail de paiement,
+> pas un settlement layer. Aucun type de transaction ZK / ForceExit / CrossMsg n'existe dans le code.
 
-| ADR | Titre | Statut | Priorité |
-|---|---|---|---|
-| [0050](./0050-sp1-proof-verification-l1.md) | Vérification des preuves SP1 Groth16 sur le L1 | 📐 Accepté | 🔴 Haute |
-| [0034](./0034-disponibilite-donnees-verification-ancre.md) | Disponibilité des données — Celestia DA | 📐 Accepté | 🔴 Haute |
-
-### Sécurité utilisateurs
-
-| ADR | Titre | Statut | Priorité |
-|---|---|---|---|
-| [0048](./0048-force-exit-escape-hatch.md) | ForceExit / Escape Hatch (tx 0x0B) | 📐 Accepté | 🔴 Haute |
-| [0049](./0049-clearinghouse-cross-appchain.md) | Clearinghouse cross-Appchain (LOCK→MINT→ACK) | 📐 Accepté | 🔴 Haute |
-| [0023](./0023-adjudication-slashing-module.md) | Adjudication du slashing de module | 💡 Proposé | 🟠 Moyenne |
-
-### Infrastructure modules
-
-| ADR | Titre | Statut | Priorité |
-|---|---|---|---|
-| [0024](./0024-infrastructure-subnets-escrow-recompense.md) | Infrastructure de subnets : escrow bondé + racine de récompense | 💡 Proposé | 🟠 Moyenne |
-
-### Light-client
-
-| ADR | Titre | Statut | Priorité |
-|---|---|---|---|
-| [0014](./0014-standard-light-client.md) | Standard light-client (balance proof + checkpoints) | 💡 Proposé | 🟠 Moyenne |
+| ADR | Titre | Statut |
+|---|---|---|
+| [0050](./0050-sp1-proof-verification-l1.md) | Vérification des preuves SP1 Groth16 sur le L1 | ❄️ Gelé (0064) |
+| [0034](./0034-disponibilite-donnees-verification-ancre.md) | Disponibilité des données — Celestia DA | ❄️ Gelé (0064) |
+| [0048](./0048-force-exit-escape-hatch.md) | ForceExit / Escape Hatch | ❄️ Gelé (0064) |
+| [0049](./0049-clearinghouse-cross-appchain.md) | Clearinghouse cross-Appchain | ❄️ Gelé (0064) |
+| [0023](./0023-adjudication-slashing-module.md) | Adjudication du slashing de module | ❄️ Gelé (0064) |
+| [0024](./0024-infrastructure-subnets-escrow-recompense.md) | Infrastructure de subnets : escrow bondé + racine de récompense | ❄️ Gelé (0064) |
+| [0010](./0010-primitive-ancrage-modules.md) | Primitive d'ancrage de modules (`AnchorState 0x09`) | ❄️ Gelé (0064) — primitive résiduelle conservée |
+| [0039](./0039-remuneration-operateurs-modules.md) | Rémunération des opérateurs de modules | ❄️ Gelé (0064) |
+| [0041](./0041-repartition-emission-usage-melt.md) | Répartition de l'émission entre Appchains par usage (melt) | ❄️ Gelé (0064) |
+| [0044](./0044-garde-fous-equite-amorcage-emission.md) | Garde-fous d'équité et d'amorçage de l'émission | ❄️ Gelé (0064) |
+| [0047](./0047-emission-elastique-reservoir.md) | Émission élastique à réservoir | ❄️ Gelé (0064) |
 
 ---
 
-## Phase 4 — Économie Appchains 🔮 Futur
+## Phase 3 — Réseau public 🔮 Vision mainnet
 
 | ADR | Titre | Statut | Priorité |
 |---|---|---|---|
-| [0039](./0039-remuneration-operateurs-modules.md) | Rémunération des opérateurs de modules (escrow + fee_schedule) | 📐 Accepté | 🟠 Moyenne |
-| [0041](./0041-repartition-emission-usage-melt.md) | Répartition de l'émission entre Appchains par usage (melt) | 💡 Proposé | 🔴 Haute |
-| [0042](./0042-epoque-reglement-emission.md) | Époque de règlement de l'émission | 💡 Proposé | 🔴 Haute |
-| [0044](./0044-garde-fous-equite-amorcage-emission.md) | Garde-fous d'équité et d'amorçage de l'émission | 💡 Proposé | 🔴 Haute |
-| [0047](./0047-emission-elastique-reservoir.md) | Émission élastique à réservoir (tampon de lissage) | 💡 Proposé | 🔴 Haute |
-
----
-
-## Phase 5 — Réseau public 🔮 Vision mainnet
-
-| ADR | Titre | Statut | Priorité |
-|---|---|---|---|
+| [0014](./0014-standard-light-client.md) | Standard light-client (balance proof + checkpoints) — **reste pertinent pour le rail de paiement** | 💡 Proposé | 🟠 Moyenne |
+| [0042](./0042-epoque-reglement-emission.md) | Époque de règlement de l'émission (tokenomics de base, non lié aux Appchains) | 💡 Proposé | 🟠 Moyenne |
 | [0013](./0013-cycle-vie-etat.md) | Cycle de vie de l'état (loyer & expiration des comptes dormants) | 💡 Proposé | 🟢 Futur |
 | [0016](./0016-posture-post-quantique.md) | Posture post-quantique (chemin de migration ML-DSA) | 💡 Proposé | 🟢 Futur |
 | [0018](./0018-observabilite-slo.md) | Observabilité & SLO (métriques, alertes, runbooks) | 💡 Proposé | 🟢 Futur |
@@ -289,8 +272,8 @@ d'exploitation, correctifs, prompts de contre-audit — vit dans
 | [0020](./0020-serialisation-canonique.md) | Sérialisation canonique | ✅ Vérifié | 1 |
 | [0021](./0021-immutabilite-emission.md) | Immutabilité courbe émission | ✅ Accepté | 1 |
 | [0022](./0022-durcissement-p2p.md) | Durcissement P2P anti-DoS | ✅ Vérifié | 1 |
-| [0023](./0023-adjudication-slashing-module.md) | Adjudication slashing module | 💡 Proposé | 3 |
-| [0024](./0024-infrastructure-subnets-escrow-recompense.md) | Infrastructure subnets escrow | 💡 Proposé | 3 |
+| [0023](./0023-adjudication-slashing-module.md) | Adjudication slashing module | ❄️ Gelé (0064) | — |
+| [0024](./0024-infrastructure-subnets-escrow-recompense.md) | Infrastructure subnets escrow | ❄️ Gelé (0064) | — |
 | [0026](./0026-depot-existentiel.md) | Dépôt existentiel anti-bloat | ✅ Vérifié | 1 |
 | [0027](./0027-fiabilite-jailing-validateurs.md) | Fiabilité & jailing validateurs | ✅ Vérifié | 1 |
 | [0028](./0028-partage-emission-quorum.md) | Partage émission par époque | 📐 Accepté | 2 |
@@ -299,27 +282,27 @@ d'exploitation, correctifs, prompts de contre-audit — vit dans
 | [0031](./0031-regle-fork-choice.md) | Règle de fork-choice (canonical_head) | ✅ Vérifié | 1 |
 | [0032](./0032-garde-fous-gouvernance.md) | Garde-fous de gouvernance | 💡 Brouillon | 2 |
 | [0033](./0033-genese-bootstrap-fair-launch.md) | Genèse & bootstrap fair-launch | 📐 Partiellement supersédé | 1 |
-| [0034](./0034-disponibilite-donnees-verification-ancre.md) | Disponibilité données Celestia DA | 📐 Accepté | 3 |
+| [0034](./0034-disponibilite-donnees-verification-ancre.md) | Disponibilité données Celestia DA | ❄️ Gelé (0064) | — |
 | [0035](./0035-bornes-ressources-transaction.md) | Bornes ressources par transaction | 💡 Proposé | 1 |
 | [0036](./0036-bornes-churn-validateurs.md) | Bornes churn validateurs | 💡 Proposé | 2 |
 | [0037](./0037-propagation-compacte-blocs.md) | Propagation compacte blocs | 💡 Proposé | — |
 | [0038](./0038-open-poa-admission.md) | Open PoS admission permissionless | 📐 Accepté | 2 |
-| [0039](./0039-remuneration-operateurs-modules.md) | Rémunération opérateurs modules | 📐 Accepté | 4 |
+| [0039](./0039-remuneration-operateurs-modules.md) | Rémunération opérateurs modules | ❄️ Gelé (0064) | — |
 | [0040](./0040-emission-progressive-sans-fonderie.md) | Émission progressive sans La Fonderie | ✅ Vérifié | 1 |
-| [0041](./0041-repartition-emission-usage-melt.md) | Répartition émission Appchains par melt | 💡 Proposé | 4 |
-| [0042](./0042-epoque-reglement-emission.md) | Époque règlement émission | 💡 Proposé | 4 |
+| [0041](./0041-repartition-emission-usage-melt.md) | Répartition émission Appchains par melt | ❄️ Gelé (0064) | — |
+| [0042](./0042-epoque-reglement-emission.md) | Époque règlement émission | 💡 Proposé | 2 |
 | [0043](./0043-parametres-cadence-consensus.md) | Cadence 12 s, 3 000 tx/bloc | ✅ Vérifié | 1 |
-| [0044](./0044-garde-fous-equite-amorcage-emission.md) | Garde-fous équité amorçage émission | 💡 Proposé | 4 |
+| [0044](./0044-garde-fous-equite-amorcage-emission.md) | Garde-fous équité amorçage émission | ❄️ Gelé (0064) | — |
 | [0045](./0045-cadence-fixe-abolition-heartbeat.md) | Cadence fixe — abolition heartbeat | ✅ Vérifié | 1 |
 | [0046](./0046-bls-aggregate-cosignatures.md) | BLS12-381 agrégation co-signatures | ✅ Vérifié | 1 |
-| [0047](./0047-emission-elastique-reservoir.md) | Émission élastique à réservoir | 💡 Proposé | 4 |
-| [0048](./0048-force-exit-escape-hatch.md) | ForceExit / Escape Hatch (0x0B) | 📐 Accepté | 3 |
-| [0049](./0049-clearinghouse-cross-appchain.md) | Clearinghouse cross-Appchain | 📐 Accepté | 3 |
-| [0050](./0050-sp1-proof-verification-l1.md) | Vérification preuves SP1 Groth16 | 📐 Accepté | 3 |
+| [0047](./0047-emission-elastique-reservoir.md) | Émission élastique à réservoir | ❄️ Gelé (0064) | — |
+| [0048](./0048-force-exit-escape-hatch.md) | ForceExit / Escape Hatch | ❄️ Gelé (0064) | — |
+| [0049](./0049-clearinghouse-cross-appchain.md) | Clearinghouse cross-Appchain | ❄️ Gelé (0064) | — |
+| [0050](./0050-sp1-proof-verification-l1.md) | Vérification preuves SP1 Groth16 | ❄️ Gelé (0064) | — |
 | [0051](./0051-primitives-cryptographiques-ed25519-bech32.md) | Primitives crypto (Ed25519, Bech32, Merkle ; hash → BLAKE3, ADR 0069) | ✅ Vérifié | 1 |
 | [0052](./0052-keystore-chiffrement-wallet.md) | Keystore — chiffrement wallet (Argon2id + AES-256-GCM) | ✅ Vérifié | 1 |
 | [0053](./0053-anti-replay-nonce-chainid-expiry.md) | Anti-replay : nonce, chain_id, expiry_height | ✅ Vérifié | 1 |
-| [0054](./0054-types-transactions-fondamentaux.md) | Types de transactions fondamentaux (0x01–0x0A) | ✅ Vérifié | 1 |
+| [0054](./0054-types-transactions-fondamentaux.md) | Types de transactions fondamentaux (0x01–0x0C) | ✅ Vérifié | 1 |
 | [0055](./0055-modele-frais-forfaitaire.md) | Modèle de frais forfaitaire (flat fee) | ✅ Vérifié | 1 |
 | [0056](./0056-bond-unbonding-mecanism-staking.md) | Bond & queue de déliaison (staking) | ✅ Vérifié | 1 |
 | [0057](./0057-mempool.md) | Mempool — file d'attente de transactions | ✅ Vérifié | 1 |
