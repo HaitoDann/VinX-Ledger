@@ -52,4 +52,28 @@
 # ─── Synchronisation de chaîne ────────────────────────────────────────────────
 # URL RPC d'un pair de confiance depuis lequel rattraper les blocs au démarrage.
 # Utile pour rejoindre un testnet existant sans télécharger le snapshot complet.
-# sync_peer_rpc = "http://192.168.1.10:8545"
+#
+# HTTPS OBLIGATOIRE hors développement local (ADR 0074 §2.2). Une synchronisation par
+# snapshot installe un état du monde entier — soldes, set de validateurs, clé admin :
+# la faire transiter en clair donne ce contrôle à quiconque est sur le chemin réseau.
+# Le texte clair n'est accepté que vers une adresse de loopback.
+# sync_peer_rpc = "https://seed.example.com:8545"     # réseau
+# sync_peer_rpc = "http://127.0.0.1:8545"             # développement local uniquement
+
+# ─── Subjectivité faible (ADR 0074 §2.3) ──────────────────────────────────────
+# Points d'ancrage de confiance, publiés hors-bande et vérifiés par l'opérateur.
+# Un nœud qui rejoint le réseau ne peut pas distinguer deux histoires internement
+# cohérentes : un pair malveillant qui fabrique une chaîne entière, avec ses propres
+# validateurs et ses propres clés BLS, passe tous les contrôles cryptographiques.
+# Seul un hash livré hors-bande tranche — il ne peut pas venir du pair.
+#
+# Sans checkpoint, la synchronisation reste possible mais SANS cette garantie, et le
+# nœud l'avertit au démarrage. À proscrire sur un réseau portant de la valeur.
+#
+# Règles : tout bloc synchronisé à une hauteur de checkpoint doit porter le hash
+# attendu ; un snapshot doit atterrir exactement sur un checkpoint.
+#
+# checkpoints = [
+#   "100000:3f2a...64 caractères hexadécimaux...",
+#   "200000:9c1b...64 caractères hexadécimaux...",
+# ]

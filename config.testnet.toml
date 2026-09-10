@@ -31,7 +31,10 @@ peers = [
 
 # ─── Startup sync ─────────────────────────────────────────────────────────────
 # Point to any live node's RPC for fast snapshot + parallel block catch-up.
-sync_peer_rpc = "http://REPLACE_WITH_BOOTNODE_IP:8545"
+# HTTPS obligatoire hors loopback (ADR 0074 §2.2) : un snapshot installe l'état entier,
+# y compris le set de validateurs et la clé admin. En clair, c'est offert à qui est sur
+# le chemin réseau.
+sync_peer_rpc = "https://REPLACE_WITH_BOOTNODE_HOST:8545"
 
 # ─── Limits ───────────────────────────────────────────────────────────────────
 max_block_txs    = 3000

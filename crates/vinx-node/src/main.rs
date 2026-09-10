@@ -10,6 +10,11 @@ use vinx_state::{create_genesis_state_with_dev_prefund, GenesisConfig};
 
 #[derive(serde::Deserialize, Default)]
 struct NodeConfigFile {
+    /// Checkpoints de confiance `"hauteur:hash_hex"` (ADR 0074 §2.3). Publiés hors-bande
+    /// et livrés avec le binaire ou la configuration : c'est le seul élément qu'un pair
+    /// malveillant ne peut pas fournir.
+    #[serde(default)]
+    checkpoints: Option<Vec<String>>,
     block_time_secs: Option<u64>,
     max_block_txs: Option<usize>,
     max_mempool_size: Option<usize>,
@@ -442,17 +447,48 @@ async fn main() {
         config = config.with_faucet(faucet_kp, amount, cooldown);
     }
 
+    // ADR 0074 §2.3 — points d'ancrage de subjectivité faible.
+    let checkpoints = match vinx_node::checkpoints::Checkpoints::parse(
+        file_cfg.checkpoints.as_deref().unwrap_or(&[]),
+    ) {
+        Ok(c) => c,
+        Err(e) => {
+            eprintln!("\n❌ Checkpoints invalides dans la configuration : {e}\n");
+            std::process::exit(1);
+        }
+    };
+    if checkpoints.is_empty() {
+        tracing::warn!(
+            "Aucun checkpoint configuré : la synchronisation fait confiance au set de \
+             validateurs servi par le pair. Acceptable en devnet, à proscrire sur un réseau \
+             portant de la valeur (ADR 0074)."
+        );
+    } else {
+        tracing::info!(
+            count = checkpoints.len(),
+            highest = checkpoints.highest().unwrap_or(0),
+            "Checkpoints de confiance chargés"
+        );
+    }
+
     // Startup chain sync from trusted peer (if configured)
     if let Some(ref peer_url) = sync_peer_rpc {
         tracing::info!(peer = %peer_url, "Starting chain sync from peer");
         // 1. Snapshot bootstrap — skip replaying history from genesis if gap > 500.
-        vinx_node::sync::snapshot_sync_from_peer(peer_url, &mut state, &mut chain).await;
+        vinx_node::sync::snapshot_sync_from_peer(peer_url, &mut state, &mut chain, &checkpoints)
+            .await;
         // 2. Parallel catch-up — concurrent batch downloads, sequential apply.
-        let applied =
-            vinx_node::sync::parallel_sync_from_peer(peer_url, &mut state, &mut chain).await;
+        let applied = vinx_node::sync::parallel_sync_from_peer(
+            peer_url,
+            &mut state,
+            &mut chain,
+            &checkpoints,
+        )
+        .await;
         // 3. Sequential tail — handles the last few unfinalized blocks the parallel
         //    pass may have stopped at (validate_block rejects non-finalized blocks).
-        let tail = vinx_node::sync::sync_from_peer(peer_url, &mut state, &mut chain).await;
+        let tail =
+            vinx_node::sync::sync_from_peer(peer_url, &mut state, &mut chain, &checkpoints).await;
         let applied = applied + tail;
         if applied > 0 {
             tracing::info!(applied, tip = chain.tip_height(), "Chain sync complete");

@@ -42,6 +42,7 @@ pub async fn sync_from_peer(
     peer_rpc_url: &str,
     state: &mut WorldState,
     chain: &mut Chain,
+    checkpoints: &crate::checkpoints::Checkpoints,
 ) -> usize {
     let client = reqwest::Client::builder()
         .timeout(std::time::Duration::from_secs(30))
@@ -190,6 +191,15 @@ pub async fn sync_from_peer(
                 return applied;
             }
 
+            // ADR 0074 §2.3 — un bloc à une hauteur de checkpoint doit porter le hash
+            // attendu : c'est ce qui empêche un pair de servir une histoire fabriquée mais
+            // internement cohérente. Contrôlé avant `push`, jamais après.
+            if let Err(e) = checkpoints.accepts_block(block.header.height, block.hash()) {
+                tracing::error!(error = %e, "Sync: bloc rejeté par les checkpoints");
+                *state = snapshot;
+                return applied;
+            }
+
             let bh = block.header.height;
             chain.push(block);
             chain.note_quorum(bh, pre_quorum); // ADR 0002/0027 — quorum historique
@@ -234,6 +244,7 @@ pub async fn parallel_sync_from_peer(
     peer_rpc_url: &str,
     state: &mut WorldState,
     chain: &mut Chain,
+    checkpoints: &crate::checkpoints::Checkpoints,
 ) -> usize {
     let client = reqwest::Client::builder()
         .timeout(std::time::Duration::from_secs(30))
@@ -397,6 +408,14 @@ pub async fn parallel_sync_from_peer(
                     *state = snapshot;
                     return total_applied;
                 }
+                // ADR 0074 §2.3 — même garde que la sync séquentielle : un bloc à une
+                // hauteur de checkpoint doit porter le hash attendu.
+                if let Err(e) = checkpoints.accepts_block(block.header.height, block.hash()) {
+                    tracing::error!(error = %e, "Parallel sync: bloc rejeté par les checkpoints");
+                    *state = snapshot;
+                    return total_applied;
+                }
+
                 let bh = block.header.height;
                 chain.push(block);
                 chain.note_quorum(bh, pre_quorum);
@@ -467,6 +486,7 @@ pub async fn snapshot_sync_from_peer(
     peer_rpc_url: &str,
     state: &mut WorldState,
     chain: &mut Chain,
+    checkpoints: &crate::checkpoints::Checkpoints,
 ) -> bool {
     // VINX-10: a snapshot installs an entire world state — balances, validator set, admin
     // key. Fetching that over plain HTTP hands any on-path attacker full control of the
@@ -627,6 +647,23 @@ pub async fn snapshot_sync_from_peer(
             );
             return false;
         }
+    }
+
+    // ADR 0074 §2.3 — subjectivité faible. Les contrôles ci-dessus prouvent que le
+    // snapshot est *internement cohérent* ; ils ne peuvent pas prouver que c'est la bonne
+    // histoire, puisqu'un attaquant qui fabrique une chaîne entière avec ses propres
+    // validateurs les satisfait tous. Seul un point d'ancrage livré avec le binaire
+    // tranche : il ne peut pas venir du pair.
+    if let Err(e) = checkpoints.accepts_snapshot(snap.block.header.height, snap.block.hash()) {
+        tracing::error!(height = snap.height, error = %e, "Snapshot sync: rejeté par les checkpoints");
+        return false;
+    }
+    if checkpoints.is_empty() {
+        tracing::warn!(
+            height = snap.height,
+            "Snapshot sync: aucun checkpoint configuré — le nœud fait confiance au set de \
+             validateurs du snapshot lui-même. À ne pas faire sur un réseau portant de la valeur."
+        );
     }
 
     // 5. Initialize the chain from the snapshot block and replace state.

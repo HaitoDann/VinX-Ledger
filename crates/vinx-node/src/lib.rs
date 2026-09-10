@@ -1,4 +1,5 @@
 pub mod chain;
+pub mod checkpoints;
 pub mod config;
 pub mod consensus;
 pub mod mempool;
