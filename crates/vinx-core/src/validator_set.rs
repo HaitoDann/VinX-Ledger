@@ -143,7 +143,7 @@ mod tests {
     #[test]
     fn test_single_validator_always_leader() {
         let a = addr();
-        let vs = ValidatorSet::single(a.clone());
+        let vs = ValidatorSet::single(a);
         for h in [0, 1, 99, 1000] {
             assert_eq!(vs.leader_at(h), &a);
         }

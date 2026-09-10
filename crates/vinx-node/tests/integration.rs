@@ -39,12 +39,12 @@ async fn start_test_node() -> (Arc<Node>, String) {
     // only has `admin_address`; the compiler will surface any mismatch.
     let state = create_genesis_state(&GenesisConfig {
         chain_id: vinx_core::CHAIN_ID_DEVNET,
-        admin_address: admin_addr.clone(),
-        validator_address: validator_addr.clone(),
+        admin_address: admin_addr,
+        validator_address: validator_addr,
         validator_bls: None,
     });
 
-    let (chain, _genesis_block) = Chain::new_with_genesis(validator_addr.clone(), 0);
+    let (chain, _genesis_block) = Chain::new_with_genesis(validator_addr, 0);
 
     let config = NodeConfig::new(validator_kp)
         // Very long block time so auto-ticking never fires during tests
@@ -119,13 +119,13 @@ async fn test_submit_and_retrieve_tx() {
 
     {
         let mut state = node.state.write().await;
-        state.credit_for_test(sender_addr.clone(), Amount::from_vinx(10_000));
+        state.credit_for_test(sender_addr, Amount::from_vinx(10_000));
     }
 
     // Build and submit a transfer
     let amount = Amount::from_vinx(100);
     let fee = amount.calculate_fee(Amount::from_atoms(DEFAULT_FEE_FLOOR_ATOMS));
-    let tx = Transaction::new_transfer(&sender_kp, receiver_addr.clone(), amount, fee, 0);
+    let tx = Transaction::new_transfer(&sender_kp, receiver_addr, amount, fee, 0);
     let tx_hash = hex::encode(tx.hash());
 
     let submit_resp: serde_json::Value = client
@@ -187,7 +187,7 @@ async fn test_account_balance() {
 
     {
         let mut state = node.state.write().await;
-        state.credit_for_test(addr.clone(), credited);
+        state.credit_for_test(addr, credited);
     }
 
     let resp: serde_json::Value = client
@@ -269,7 +269,7 @@ async fn test_mempool_ordering() {
     // Fund sender with enough for 3 transfers
     {
         let mut state = node.state.write().await;
-        state.credit_for_test(sender_addr.clone(), Amount::from_vinx(100_000));
+        state.credit_for_test(sender_addr, Amount::from_vinx(100_000));
     }
 
     let amount = Amount::from_vinx(1);
@@ -277,7 +277,7 @@ async fn test_mempool_ordering() {
 
     // Submit in deliberately wrong order: nonce 2, then 0, then 1
     for nonce in [2u64, 0, 1] {
-        let tx = Transaction::new_transfer(&sender_kp, receiver_addr.clone(), amount, fee, nonce);
+        let tx = Transaction::new_transfer(&sender_kp, receiver_addr, amount, fee, nonce);
         let submit_resp: serde_json::Value = client
             .post(format!("{}/tx/submit", base_url))
             .json(&tx)
@@ -363,11 +363,11 @@ async fn test_faucet_endpoint() {
 
     let state = create_genesis_state(&GenesisConfig {
         chain_id: vinx_core::CHAIN_ID_DEVNET,
-        admin_address: admin_addr.clone(),
-        validator_address: validator_addr.clone(),
+        admin_address: admin_addr,
+        validator_address: validator_addr,
         validator_bls: None,
     });
-    let (chain, _) = Chain::new_with_genesis(validator_addr.clone(), 0);
+    let (chain, _) = Chain::new_with_genesis(validator_addr, 0);
 
     const FAUCET_ATOMS: u128 = 100 * 1_000_000_000_000_000_000; // 100 VinX
 
@@ -381,7 +381,7 @@ async fn test_faucet_endpoint() {
     // Fund the faucet account
     {
         let mut s = node.state.write().await;
-        s.credit_for_test(faucet_addr.clone(), Amount::from_vinx(10_000));
+        s.credit_for_test(faucet_addr, Amount::from_vinx(10_000));
     }
 
     let rpc_node = std::sync::Arc::clone(&node);
@@ -516,11 +516,11 @@ async fn test_crash_recovery() {
     let (saved_height, saved_supply, saved_sender, saved_receiver) = {
         let state = create_genesis_state(&GenesisConfig {
             chain_id: vinx_core::CHAIN_ID_DEVNET,
-            admin_address: admin_addr.clone(),
-            validator_address: validator_addr.clone(),
+            admin_address: admin_addr,
+            validator_address: validator_addr,
             validator_bls: None,
         });
-        let (chain, _) = Chain::new_with_genesis(validator_addr.clone(), 0);
+        let (chain, _) = Chain::new_with_genesis(validator_addr, 0);
         let config = NodeConfig::new(validator_kp.clone())
             .with_block_time(9_999)
             .with_data_dir(&data_dir);
@@ -531,7 +531,7 @@ async fn test_crash_recovery() {
             let mut s = node.state.write().await;
             // Mint tokens so the supply invariant holds (ADR 0004/ADR 0040): the
             // node produces blocks below, which enforce it in settle_block.
-            s.credit_emit_for_test(sender_addr.clone(), Amount::from_vinx(INITIAL_VINX));
+            s.credit_emit_for_test(sender_addr, Amount::from_vinx(INITIAL_VINX));
         }
 
         let amount = Amount::from_vinx(SEND_VINX);
@@ -539,7 +539,7 @@ async fn test_crash_recovery() {
 
         for nonce in 0..N_TXS {
             let tx =
-                Transaction::new_transfer(&sender_kp, receiver_addr.clone(), amount, fee, nonce);
+                Transaction::new_transfer(&sender_kp, receiver_addr, amount, fee, nonce);
             node.mempool.write().await.add(tx).unwrap();
         }
 
@@ -620,9 +620,9 @@ async fn test_admin_action_adds_validator() {
     // Override admin address, credit the admin, and fund the candidate so it can bond.
     {
         let mut s = node.state.write().await;
-        s.admin_address = Some(admin_addr.clone());
-        s.credit_for_test(admin_addr.clone(), Amount::from_vinx(1_000));
-        s.credit_for_test(new_val_addr.clone(), Amount::from_atoms(bond));
+        s.admin_address = Some(admin_addr);
+        s.credit_for_test(admin_addr, Amount::from_vinx(1_000));
+        s.credit_for_test(new_val_addr, Amount::from_atoms(bond));
     }
 
     // The candidate posts the minimum validator bond (required for admission). Since
@@ -640,7 +640,7 @@ async fn test_admin_action_adds_validator() {
     node.tick().await.expect("tick bond");
 
     // Build AdminAction tx to add new_val_addr as validator
-    let action = vinx_core::GovernanceAction::AddValidator(new_val_addr.clone());
+    let action = vinx_core::GovernanceAction::AddValidator(new_val_addr);
     let nonce = 0u64;
     let tx = vinx_core::Transaction::new_admin_action(&admin_kp, &action, nonce);
 
@@ -843,7 +843,7 @@ async fn test_add_validator_updates_set() {
         // Instead: directly mutate the validator set for this test.
         let new_kp = KeyPair::generate();
         let new_addr = Address::from_public_key(&new_kp.public_key());
-        node.state.write().await.validator_set.add(new_addr.clone());
+        node.state.write().await.validator_set.add(new_addr);
         *node.validator_set.write().await = node.state.read().await.validator_set.clone();
         new_kp
     };
@@ -909,7 +909,7 @@ async fn test_admission_rejects_wrong_chain_id() {
     let receiver = Address::from_public_key(&KeyPair::generate().public_key());
     {
         let mut state = node.state.write().await;
-        state.credit_for_test(sender_addr.clone(), Amount::from_vinx(1_000));
+        state.credit_for_test(sender_addr, Amount::from_vinx(1_000));
     }
 
     let amount = Amount::from_vinx(1);
@@ -940,14 +940,14 @@ async fn test_admission_bounds_nonce_window() {
     let receiver = Address::from_public_key(&KeyPair::generate().public_key());
     {
         let mut state = node.state.write().await;
-        state.credit_for_test(sender_addr.clone(), Amount::from_vinx(1_000));
+        state.credit_for_test(sender_addr, Amount::from_vinx(1_000));
     }
 
     let amount = Amount::from_vinx(1);
     let fee = amount.calculate_fee(Amount::from_atoms(DEFAULT_FEE_FLOOR_ATOMS));
 
     // Way beyond MAX_NONCE_AHEAD (64) → rejected.
-    let far = Transaction::new_transfer(&sender_kp, receiver.clone(), amount, fee, 1_000);
+    let far = Transaction::new_transfer(&sender_kp, receiver, amount, fee, 1_000);
     let resp = client
         .post(format!("{}/tx/submit", base_url))
         .json(&far)
@@ -984,10 +984,10 @@ async fn test_admission_enforces_cumulative_funding() {
     // Fund exactly one transfer (amount + fee) — not two.
     {
         let mut state = node.state.write().await;
-        state.credit_for_test(sender_addr.clone(), amount.checked_add(fee).unwrap());
+        state.credit_for_test(sender_addr, amount.checked_add(fee).unwrap());
     }
 
-    let tx0 = Transaction::new_transfer(&sender_kp, receiver.clone(), amount, fee, 0);
+    let tx0 = Transaction::new_transfer(&sender_kp, receiver, amount, fee, 0);
     let resp = client
         .post(format!("{}/tx/submit", base_url))
         .json(&tx0)

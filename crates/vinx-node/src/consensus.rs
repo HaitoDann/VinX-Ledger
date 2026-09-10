@@ -390,7 +390,7 @@ mod tests {
     fn test_single_validator_produces_and_finalizes_block() {
         let kp = KeyPair::generate();
         let addr = addr_of(&kp);
-        let vs = ValidatorSet::single(addr.clone());
+        let vs = ValidatorSet::single(addr);
 
         let mut block = make_block(1, addr);
         let mut reg_block: Vec<Option<[u8; 48]>> = Vec::new();
@@ -430,7 +430,7 @@ mod tests {
         let addrs: Vec<Address> = validators.iter().map(addr_of).collect();
         let vs = ValidatorSet::new(addrs.clone());
 
-        let mut block = make_block(3, addrs[0].clone());
+        let mut block = make_block(3, addrs[0]);
         let mut reg_block: Vec<Option<[u8; 48]>> = Vec::new();
         cosign_at(&mut block, 0, &mut reg_block);
         cosign_at(&mut block, 1, &mut reg_block);
@@ -444,7 +444,7 @@ mod tests {
         let addrs: Vec<Address> = validators.iter().map(addr_of).collect();
         let vs = ValidatorSet::new(addrs.clone()); // quorum = 4
 
-        let mut block = make_block(5, addrs[0].clone());
+        let mut block = make_block(5, addrs[0]);
         // Only 3 BLS signers (need 4)
         let mut reg_block: Vec<Option<[u8; 48]>> = Vec::new();
         for idx in 0..3usize {
@@ -459,7 +459,7 @@ mod tests {
         let addrs: Vec<Address> = validators.iter().map(addr_of).collect();
         let vs = ValidatorSet::new(addrs.clone()); // quorum = 4
 
-        let mut block = make_block(5, addrs[0].clone());
+        let mut block = make_block(5, addrs[0]);
         let mut reg_block: Vec<Option<[u8; 48]>> = Vec::new();
         for idx in 0..4usize {
             cosign_at(&mut block, idx, &mut reg_block);
@@ -474,7 +474,7 @@ mod tests {
         let vs = ValidatorSet::new(addrs.clone());
         assert_eq!(vs.quorum(), 2);
 
-        let mut block = make_block(3, addrs[0].clone());
+        let mut block = make_block(3, addrs[0]);
         let mut reg_block: Vec<Option<[u8; 48]>> = Vec::new();
         cosign_at(&mut block, 0, &mut reg_block);
         cosign_at(&mut block, 1, &mut reg_block);
@@ -489,7 +489,7 @@ mod tests {
         let vs = ValidatorSet::new(addrs.clone());
         assert_eq!(vs.quorum(), 6);
 
-        let mut block = make_block(9, addrs[0].clone());
+        let mut block = make_block(9, addrs[0]);
         let mut reg_block: Vec<Option<[u8; 48]>> = Vec::new();
         for idx in 0..6usize {
             cosign_at(&mut block, idx, &mut reg_block);
@@ -503,7 +503,7 @@ mod tests {
     fn test_sign_block_bls_initializes_aggregate() {
         let kp = KeyPair::generate();
         let addr = addr_of(&kp);
-        let vs = ValidatorSet::single(addr.clone());
+        let vs = ValidatorSet::single(addr);
         let mut block = make_block(1, addr);
 
         assert!(block.bls_aggregate.is_none());
@@ -521,7 +521,7 @@ mod tests {
     fn test_sign_block_bls_extends_aggregate() {
         let kp = KeyPair::generate();
         let addr = addr_of(&kp);
-        let vs = ValidatorSet::new(vec![addr.clone(), addr_of(&KeyPair::generate())]);
+        let vs = ValidatorSet::new(vec![addr, addr_of(&KeyPair::generate())]);
         let mut block = make_block(1, addr);
 
         // Registered keys, so the registry-bound finality check below can verify them.
@@ -556,7 +556,7 @@ mod tests {
     fn test_validate_block_bls_finalized_accepted() {
         let kp = KeyPair::generate();
         let addr = addr_of(&kp);
-        let vs = ValidatorSet::single(addr.clone()); // quorum = 1
+        let vs = ValidatorSet::single(addr); // quorum = 1
 
         let mut block = make_block(1, addr);
         let mut reg_block: Vec<Option<[u8; 48]>> = Vec::new();
@@ -570,7 +570,7 @@ mod tests {
         let addrs: Vec<Address> = kps3.iter().map(addr_of).collect();
         let vs = ValidatorSet::new(addrs.clone()); // quorum = 2
 
-        let mut block = make_block(1, addrs[0].clone());
+        let mut block = make_block(1, addrs[0]);
         // Only 1 BLS signer — below quorum of 2.
         let mut reg_block: Vec<Option<[u8; 48]>> = Vec::new();
         cosign_at(&mut block, 0, &mut reg_block);
@@ -589,11 +589,11 @@ mod tests {
         let vs = ValidatorSet::new(a.clone()); // quorum = 2
 
         // block_a: 1 BLS sig; block_b: 2 BLS sigs.
-        let mut block_a = make_block(1, a[0].clone());
+        let mut block_a = make_block(1, a[0]);
         let mut reg_block_a: Vec<Option<[u8; 48]>> = Vec::new();
         cosign_at(&mut block_a, 0, &mut reg_block_a);
 
-        let mut block_b = make_block(1, a[0].clone());
+        let mut block_b = make_block(1, a[0]);
         block_b.header.state_root = [0xCCu8; 32];
         let mut reg_block_b: Vec<Option<[u8; 48]>> = Vec::new();
         cosign_at(&mut block_b, 0, &mut reg_block_b);
@@ -622,8 +622,8 @@ mod tests {
         let a: Vec<Address> = v.iter().map(addr_of).collect();
         let vs = ValidatorSet::new(a.clone());
         // height 1 → leader = a[1]. Backup = a[2]. Each has 2 BLS co-sigs (equal weight).
-        let leader = contested_block(1, a[1].clone(), 2);
-        let backup = contested_block(1, a[2].clone(), 2);
+        let leader = contested_block(1, a[1], 2);
+        let backup = contested_block(1, a[2], 2);
 
         let cands = vec![backup, leader];
         let head = canonical_head(&cands, &vs, &test_registry(vs.len())).unwrap();
@@ -639,8 +639,8 @@ mod tests {
         let a: Vec<Address> = v.iter().map(addr_of).collect();
         let vs = ValidatorSet::new(a.clone());
         // Leader (a[1]) with 1 BLS sig vs backup (a[2]) with 2 BLS sigs → weight wins (rule 3).
-        let leader = contested_block(1, a[1].clone(), 1);
-        let backup = contested_block(1, a[2].clone(), 2);
+        let leader = contested_block(1, a[1], 1);
+        let backup = contested_block(1, a[2], 2);
 
         let cands = vec![leader, backup];
         let head = canonical_head(&cands, &vs, &test_registry(vs.len())).unwrap();
@@ -656,8 +656,8 @@ mod tests {
         let a: Vec<Address> = v.iter().map(addr_of).collect();
         let vs = ValidatorSet::new(a.clone());
         // height 1 → leader = a[1]. Two non-leaders (a[0], a[2]) with equal weight → hash tiebreak.
-        let x = contested_block(1, a[0].clone(), 2);
-        let y = contested_block(1, a[2].clone(), 2);
+        let x = contested_block(1, a[0], 2);
+        let y = contested_block(1, a[2], 2);
         let expected = if x.hash() <= y.hash() {
             x.hash()
         } else {
@@ -674,7 +674,7 @@ mod tests {
         let v = kps(3);
         let a: Vec<Address> = v.iter().map(addr_of).collect();
         let vs = ValidatorSet::new(a.clone());
-        let only = contested_block(1, a[1].clone(), 2);
+        let only = contested_block(1, a[1], 2);
         let only_hash = only.hash();
 
         let one = vec![only];
@@ -693,8 +693,8 @@ mod tests {
         let v = kps(3);
         let a: Vec<Address> = v.iter().map(addr_of).collect();
         let vs = ValidatorSet::new(a.clone());
-        let leader = contested_block(1, a[1].clone(), 2);
-        let backup = contested_block(1, a[2].clone(), 2);
+        let leader = contested_block(1, a[1], 2);
+        let backup = contested_block(1, a[2], 2);
 
         let fwd = vec![leader.clone(), backup.clone()];
         let rev = vec![backup, leader];

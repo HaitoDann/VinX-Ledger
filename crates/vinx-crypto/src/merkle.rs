@@ -407,10 +407,10 @@ mod tests {
         let tree = IncrementalMerkleTree::build(&leaves);
         assert_eq!(tree.leaves(), leaves.as_slice());
         let root = tree.root();
-        for idx in 0..leaves.len() {
+        for (idx, leaf) in leaves.iter().enumerate() {
             let proof = merkle_proof_for(tree.leaves(), idx).unwrap();
             assert!(
-                verify_merkle_proof(&leaves[idx], &proof, &root),
+                verify_merkle_proof(leaf, &proof, &root),
                 "proof failed for index {idx}"
             );
         }

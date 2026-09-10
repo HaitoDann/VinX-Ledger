@@ -94,8 +94,7 @@ impl ValidatorPoolEntry {
                 if self.eligible_blocks_in_window == 0 {
                     0
                 } else {
-                    ((self.cosign_count_in_window as u64 * 10_000) / self.eligible_blocks_in_window)
-                        as u32
+                    ((self.cosign_count_in_window * 10_000) / self.eligible_blocks_in_window) as u32
                 }
             }
         }

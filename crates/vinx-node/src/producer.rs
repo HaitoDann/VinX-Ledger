@@ -378,12 +378,12 @@ mod tests {
 
         let state = create_genesis_state(&GenesisConfig {
             admin_address: admin_addr,
-            validator_address: validator_addr.clone(),
+            validator_address: validator_addr,
             chain_id: vinx_core::CHAIN_ID_DEVNET,
             validator_bls: None,
         });
 
-        let (chain, _) = Chain::new_with_genesis(validator_addr.clone(), 0);
+        let (chain, _) = Chain::new_with_genesis(validator_addr, 0);
         let mempool = Mempool::default();
         let config = NodeConfig::new(validator_kp);
 
@@ -495,12 +495,12 @@ mod tests {
         let sender_addr = Address::from_public_key(&sender_kp.public_key());
         let receiver_addr = Address::from_public_key(&KeyPair::generate().public_key());
 
-        state.credit_emit_for_test(sender_addr.clone(), Amount::from_vinx(10_000));
+        state.credit_emit_for_test(sender_addr, Amount::from_vinx(10_000));
 
         let amount = Amount::from_vinx(100);
         let fee = amount.calculate_fee(Amount::from_atoms(DEFAULT_FEE_FLOOR_ATOMS));
         let tx =
-            vinx_core::Transaction::new_transfer(&sender_kp, receiver_addr.clone(), amount, fee, 0);
+            vinx_core::Transaction::new_transfer(&sender_kp, receiver_addr, amount, fee, 0);
 
         mempool.add(tx).unwrap();
 
@@ -575,12 +575,12 @@ mod tests {
 
         let sender_kp = KeyPair::generate();
         let sender_addr = Address::from_public_key(&sender_kp.public_key());
-        state.credit_emit_for_test(sender_addr.clone(), Amount::from_vinx(10_000));
+        state.credit_emit_for_test(sender_addr, Amount::from_vinx(10_000));
 
         let amount = Amount::from_vinx(1_000);
         let fee = Amount::from_vinx(1); // explicit fee > floor
         let tx =
-            vinx_core::Transaction::new_transfer(&sender_kp, sender_addr.clone(), amount, fee, 0);
+            vinx_core::Transaction::new_transfer(&sender_kp, sender_addr, amount, fee, 0);
         mempool.add(tx).unwrap();
 
         let epoch_pot_before = state.epoch_dist_emission_pot;

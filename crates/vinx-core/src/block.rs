@@ -120,7 +120,7 @@ impl Block {
         let bit_pos = validator_idx % 8;
         self.bls_bitmap
             .get(byte_idx)
-            .map_or(false, |b| b & (1 << bit_pos) != 0)
+            .is_some_and(|b| b & (1 << bit_pos) != 0)
     }
 
     /// Number of bits set in `bls_bitmap` (popcount).
@@ -339,7 +339,7 @@ mod tests {
     fn test_genesis_always_finalized() {
         let kp = KeyPair::generate();
         let addr = Address::from_public_key(&kp.public_key());
-        let vs = ValidatorSet::single(addr.clone());
+        let vs = ValidatorSet::single(addr);
         let genesis = make_block(0, addr);
         assert!(genesis.is_finalized(&vs, &[]));
     }
@@ -411,7 +411,7 @@ mod tests {
         use vinx_crypto::BlsSecretKey;
         let ed_kp = KeyPair::generate();
         let addr = Address::from_public_key(&ed_kp.public_key());
-        let vs = ValidatorSet::single(addr.clone());
+        let vs = ValidatorSet::single(addr);
 
         let mut block = make_block(1, addr);
         let header_hash = block.hash();
@@ -435,7 +435,7 @@ mod tests {
         use vinx_crypto::BlsSecretKey;
         let ed_kp = KeyPair::generate();
         let addr = Address::from_public_key(&ed_kp.public_key());
-        let vs = ValidatorSet::single(addr.clone());
+        let vs = ValidatorSet::single(addr);
 
         let mut block = make_block(1, addr);
         let header_hash = block.hash();
@@ -486,7 +486,7 @@ mod tests {
         use vinx_crypto::BlsSecretKey;
         let kp = KeyPair::generate();
         let addr = Address::from_public_key(&kp.public_key());
-        let vs = ValidatorSet::single(addr.clone());
+        let vs = ValidatorSet::single(addr);
         let mut block = make_block(1, addr);
         let header_hash = block.hash();
 

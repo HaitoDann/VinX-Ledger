@@ -419,8 +419,9 @@ mod tests {
         );
         // Sanity: ED must be negligible for a user yet far below the validator bond, so a
         // staked account is never dust (the `staked > 0` exemption stays coherent).
-        assert!(EXISTENTIAL_DEPOSIT_ATOMS < MIN_STAKE_ATOMS);
-        assert!(EXISTENTIAL_DEPOSIT_ATOMS < MIN_VALIDATOR_BOND_ATOMS);
+        // Compile-time assertions — these relationships between graved constants must hold.
+        const _: () = assert!(EXISTENTIAL_DEPOSIT_ATOMS < MIN_STAKE_ATOMS);
+        const _: () = assert!(EXISTENTIAL_DEPOSIT_ATOMS < MIN_VALIDATOR_BOND_ATOMS);
     }
 
     #[test]

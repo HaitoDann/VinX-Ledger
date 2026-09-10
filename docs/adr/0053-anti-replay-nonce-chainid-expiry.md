@@ -33,7 +33,7 @@ Chaque transaction inclut `chain_id: u32`. La règle de validation rejette toute
 `chain_id` ne correspond pas au `chain_id` du nœud.
 
 - Valeur par défaut sûre : voir ADR 0008 (pas de défaut silencieux).
-- `CHAIN_ID_MAINNET = 42`, `CHAIN_ID_DEVNET = 1` (cf. PROTOCOL_SPEC.md §2).
+- `CHAIN_ID_MAINNET = 1`, `CHAIN_ID_TESTNET = 7`, `CHAIN_ID_DEVNET = 42` (cf. `chain_id.rs` ; le devnet est le défaut des constructeurs de tx en local).
 
 ### 2.3 Expiry height (expiration automatique)
 

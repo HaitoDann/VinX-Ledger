@@ -788,53 +788,12 @@ mod tests {
         tx.commit().unwrap();
     }
 
-    /// Overwrites just the version marker on an existing db (leaves all data).
-    fn set_version(dir: &Path, version: u64) {
-        let db = Database::create(dir.join("vinx.redb")).unwrap();
-        let tx = db.begin_write().unwrap();
-        {
-            let mut m = tx.open_table(META).unwrap();
-            m.insert("schema_version", version).unwrap();
-        }
-        tx.commit().unwrap();
-    }
-
     fn read_version(dir: &Path) -> Option<u64> {
         let db = Database::create(dir.join("vinx.redb")).unwrap();
         let tx = db.begin_read().unwrap();
         let m = tx.open_table(META).unwrap();
         let v = m.get("schema_version").unwrap().map(|v| v.value());
         v
-    }
-
-    fn has_state_key(dir: &Path, key: &str) -> bool {
-        let db = Database::create(dir.join("vinx.redb")).unwrap();
-        let tx = db.begin_read().unwrap();
-        let s = tx.open_table(STATE).unwrap();
-        s.get(key).unwrap().is_some()
-    }
-
-    /// Strips the appended v8 (governance), v9 (module registry), v10 (ADR 0040),
-    /// and v11 (reliability) suffixes from the persisted meta blob, turning a
-    /// current-format meta back into its v7 prefix so the append migrations can be
-    /// exercised on data that genuinely predates ADR 0010/0011/0040/0027.
-    fn downgrade_meta_to_v7(dir: &Path) {
-        let db = Database::create(dir.join("vinx.redb")).unwrap();
-        let tx = db.begin_write().unwrap();
-        {
-            let mut s = tx.open_table(STATE).unwrap();
-            let compressed = s.get("world_state_meta").unwrap().unwrap().value().to_vec();
-            let mut meta = zstd::decode_all(&compressed[..]).unwrap();
-            let suffix_len = vinx_state::v8_meta_suffix().len()
-                + vinx_state::v9_meta_suffix().len()
-                + vinx_state::v10_meta_suffix().len()
-                + vinx_state::v11_meta_suffix().len();
-            meta.truncate(meta.len() - suffix_len);
-            let recompressed = zstd::encode_all(&meta[..], ZSTD_LEVEL).unwrap();
-            s.insert("world_state_meta", recompressed.as_slice())
-                .unwrap();
-        }
-        tx.commit().unwrap();
     }
 
     /// ADR 0069 — toute base antérieure à BLAKE3 est refusée, **et laissée intacte**.
@@ -891,40 +850,6 @@ mod tests {
         Storage::open(&tmp.0).expect("current version opens cleanly");
         assert_eq!(read_version(&tmp.0), Some(STORAGE_VERSION));
     }
-
-    // End-to-end: real data (accounts + chain) survives a v6 → current migration,
-    // and the derived tx index is rebuilt from the chain — no wipe, no data loss.
-
-    /// Strips the last 8 bytes from every block row in the BLOCKS table, simulating the
-    /// v14 on-disk format (no `bls_bitmap` field) so the v14→v15 migration can be tested.
-    fn downgrade_blocks_to_v14(dir: &Path) {
-        const BLS_BITMAP_SUFFIX_LEN: usize = 8; // bincode empty Vec<u8> = 0u64 LE
-        let db = Database::create(dir.join("vinx.redb")).unwrap();
-        let tx = db.begin_write().unwrap();
-        {
-            let rows: Vec<(u64, Vec<u8>)> = {
-                let tbl = tx.open_table(BLOCKS).unwrap();
-                tbl.iter()
-                    .unwrap()
-                    .map(|r| r.map(|(k, v)| (k.value(), v.value().to_vec())).unwrap())
-                    .collect()
-            };
-            let mut tbl = tx.open_table(BLOCKS).unwrap();
-            for (height, compressed) in rows {
-                let mut data = zstd::decode_all(&compressed[..]).unwrap();
-                assert!(
-                    data.len() >= BLS_BITMAP_SUFFIX_LEN,
-                    "block row too short to strip"
-                );
-                data.truncate(data.len() - BLS_BITMAP_SUFFIX_LEN);
-                let recompressed = zstd::encode_all(&data[..], ZSTD_LEVEL).unwrap();
-                tbl.insert(height, recompressed.as_slice()).unwrap();
-            }
-        }
-        tx.commit().unwrap();
-    }
-
-    // ADR 0029 Phase 1 — Storage migration v14→v15: bls_bitmap field appended to blocks.
 
     // ADR 0026: a reaped account must be *erased* from the store, not merely dropped from
     // the in-memory map — otherwise it resurrects on the next load.

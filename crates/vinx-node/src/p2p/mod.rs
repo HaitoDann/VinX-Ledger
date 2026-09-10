@@ -117,6 +117,7 @@ const TOPICS: &[&str] = &[
     "vinx/compact/1",
 ];
 
+#[allow(clippy::too_many_arguments)]
 pub async fn start(
     config: &NodeConfig,
     chain: Arc<RwLock<Chain>>,
@@ -267,6 +268,7 @@ pub async fn start(
 }
 
 #[allow(clippy::too_many_arguments)]
+#[allow(clippy::type_complexity)]
 async fn run_event_loop(
     mut swarm: libp2p::Swarm<VinxBehaviour>,
     mut cmd_rx: mpsc::UnboundedReceiver<P2pCommand>,
@@ -327,6 +329,7 @@ async fn run_event_loop(
 }
 
 #[allow(clippy::too_many_arguments)]
+#[allow(clippy::type_complexity)]
 async fn handle_swarm_event(
     event: SwarmEvent<VinxBehaviourEvent>,
     chain: &Arc<RwLock<Chain>>,
@@ -538,6 +541,7 @@ async fn consider_competing_block(
 }
 
 #[allow(clippy::too_many_arguments)]
+#[allow(clippy::type_complexity)]
 async fn dispatch_message(
     msg: P2pMessage,
     chain: &Arc<RwLock<Chain>>,

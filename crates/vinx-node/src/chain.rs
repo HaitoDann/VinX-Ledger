@@ -1062,14 +1062,14 @@ mod tests {
     #[test]
     fn test_prune_drops_tx_and_sig_data_but_keeps_headers() {
         let v = validator();
-        let (mut chain, _) = Chain::new_with_genesis(v.clone(), 0);
+        let (mut chain, _) = Chain::new_with_genesis(v, 0);
         for h in 1u64..=10 {
             let block = Block {
                 header: BlockHeader {
                     height: h,
                     prev_hash: chain.tip_hash(),
                     timestamp: h,
-                    validator: v.clone(),
+                    validator: v,
                     tx_count: 0,
                     state_root: [0u8; 32],
                     base_fee: 0,
@@ -1097,7 +1097,7 @@ mod tests {
     #[test]
     fn test_prune_noop_when_chain_shorter_than_keep_last() {
         let v = validator();
-        let (mut chain, _) = Chain::new_with_genesis(v.clone(), 0);
+        let (mut chain, _) = Chain::new_with_genesis(v, 0);
         // Only genesis — prune with keep_last=100 should be a no-op
         chain.prune(100);
         assert_eq!(chain.tip_height(), 0);
@@ -1107,7 +1107,7 @@ mod tests {
     #[test]
     fn test_compact_old_txs_preserves_headers() {
         let v = validator();
-        let (mut chain, _) = Chain::new_with_genesis(v.clone(), 0);
+        let (mut chain, _) = Chain::new_with_genesis(v, 0);
         // Push 5 empty blocks
         for h in 1u64..=5 {
             let block = Block {
@@ -1115,7 +1115,7 @@ mod tests {
                     height: h,
                     prev_hash: chain.tip_hash(),
                     timestamp: h,
-                    validator: v.clone(),
+                    validator: v,
                     tx_count: 0,
                     state_root: [0u8; 32],
                     base_fee: 0,

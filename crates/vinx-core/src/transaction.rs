@@ -831,7 +831,7 @@ mod tests {
         let sender = KeyPair::generate();
         let to = Address::from_public_key(&KeyPair::generate().public_key());
         let fee = Amount::from_atoms(DEFAULT_FEE_FLOOR_ATOMS);
-        let tx0 = Transaction::new_transfer(&sender, to.clone(), Amount::from_vinx(10), fee, 0);
+        let tx0 = Transaction::new_transfer(&sender, to, Amount::from_vinx(10), fee, 0);
         let tx1 = Transaction::new_transfer(&sender, to, Amount::from_vinx(10), fee, 1);
         assert_ne!(tx0.signing_bytes(), tx1.signing_bytes());
         assert_ne!(tx0.hash(), tx1.hash());

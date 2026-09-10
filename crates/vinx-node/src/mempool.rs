@@ -448,7 +448,7 @@ mod tests {
         let mut mp = Mempool::new(10);
         let kp = KeyPair::generate();
         let to = dummy_addr();
-        mp.add(make_tx(&kp, to.clone(), 0)).unwrap();
+        mp.add(make_tx(&kp, to, 0)).unwrap();
         mp.add(make_tx(&kp, to, 1)).unwrap();
         assert_eq!(mp.size(), 2);
         let drained = mp.drain(1);
@@ -471,7 +471,7 @@ mod tests {
         let mut mp = Mempool::new(1);
         let kp = KeyPair::generate();
         let to = dummy_addr();
-        mp.add(make_tx(&kp, to.clone(), 0)).unwrap();
+        mp.add(make_tx(&kp, to, 0)).unwrap();
         assert_eq!(mp.add(make_tx(&kp, to, 1)), Err(MempoolError::Full));
     }
 
@@ -481,7 +481,7 @@ mod tests {
         let kp = KeyPair::generate();
         let to = dummy_addr();
         for i in 0..5 {
-            mp.add(make_tx(&kp, to.clone(), i)).unwrap();
+            mp.add(make_tx(&kp, to, i)).unwrap();
         }
         let drained = mp.drain(100);
         assert_eq!(drained.len(), 5);
@@ -493,9 +493,9 @@ mod tests {
         let mut mp = Mempool::new(10);
         let kp = KeyPair::generate();
         let to = dummy_addr();
-        mp.add(make_tx(&kp, to.clone(), 2)).unwrap();
-        mp.add(make_tx(&kp, to.clone(), 0)).unwrap();
-        mp.add(make_tx(&kp, to.clone(), 1)).unwrap();
+        mp.add(make_tx(&kp, to, 2)).unwrap();
+        mp.add(make_tx(&kp, to, 0)).unwrap();
+        mp.add(make_tx(&kp, to, 1)).unwrap();
 
         let drained = mp.drain(10);
         assert_eq!(drained.len(), 3);
@@ -545,10 +545,10 @@ mod tests {
         let kp_high = KeyPair::generate();
         let to = dummy_addr();
         // Fill mempool with a low-fee tx
-        mp.add(make_tx_with_fee(&kp_low, to.clone(), 0, 1)).unwrap();
+        mp.add(make_tx_with_fee(&kp_low, to, 0, 1)).unwrap();
         assert_eq!(mp.size(), 1);
         // Higher-fee tx should evict the low-fee one
-        mp.add(make_tx_with_fee(&kp_high, to.clone(), 0, 10))
+        mp.add(make_tx_with_fee(&kp_high, to, 0, 10))
             .unwrap();
         assert_eq!(mp.size(), 1);
         // The remaining tx should have the high fee
@@ -561,7 +561,7 @@ mod tests {
         let mut mp = Mempool::new(1);
         let kp = KeyPair::generate();
         let to = dummy_addr();
-        mp.add(make_tx_with_fee(&kp, to.clone(), 0, 5)).unwrap();
+        mp.add(make_tx_with_fee(&kp, to, 0, 5)).unwrap();
         // Same fee — no eviction, returns Full
         let kp2 = KeyPair::generate();
         assert_eq!(
@@ -577,8 +577,8 @@ mod tests {
         let kp_a = KeyPair::generate();
         let kp_b = KeyPair::generate();
         let to = dummy_addr();
-        mp.add(make_tx_with_fee(&kp_a, to.clone(), 0, 1)).unwrap();
-        mp.add(make_tx_with_fee(&kp_b, to.clone(), 0, 10)).unwrap();
+        mp.add(make_tx_with_fee(&kp_a, to, 0, 1)).unwrap();
+        mp.add(make_tx_with_fee(&kp_b, to, 0, 10)).unwrap();
         let drained = mp.drain(10);
         assert_eq!(drained.len(), 2);
         assert_eq!(drained[0].fee, Amount::from_vinx(10));
@@ -590,8 +590,8 @@ mod tests {
         let mut mp = Mempool::new(10);
         let kp = KeyPair::generate();
         let to = dummy_addr();
-        mp.add(make_tx_with_fee(&kp, to.clone(), 0, 5)).unwrap();
-        mp.add(make_tx_with_fee(&kp, to.clone(), 1, 100)).unwrap();
+        mp.add(make_tx_with_fee(&kp, to, 0, 5)).unwrap();
+        mp.add(make_tx_with_fee(&kp, to, 1, 100)).unwrap();
         let drained = mp.drain(10);
         assert_eq!(drained.len(), 2);
         assert_eq!(drained[0].nonce, 0);
@@ -604,10 +604,10 @@ mod tests {
         let kp_a = KeyPair::generate();
         let kp_b = KeyPair::generate();
         let to = dummy_addr();
-        mp.add(make_tx(&kp_a, to.clone(), 0)).unwrap();
-        mp.add(make_tx(&kp_a, to.clone(), 1)).unwrap();
-        mp.add(make_tx(&kp_b, to.clone(), 0)).unwrap();
-        mp.add(make_tx(&kp_b, to.clone(), 1)).unwrap();
+        mp.add(make_tx(&kp_a, to, 0)).unwrap();
+        mp.add(make_tx(&kp_a, to, 1)).unwrap();
+        mp.add(make_tx(&kp_b, to, 0)).unwrap();
+        mp.add(make_tx(&kp_b, to, 1)).unwrap();
         let drained = mp.drain(10);
         assert_eq!(drained.len(), 4);
         assert_eq!(mp.size(), 0);
@@ -621,7 +621,7 @@ mod tests {
 
         // Stage 10 valid transactions
         for i in 0..10u64 {
-            mp.stage(make_tx(&kp, to.clone(), i));
+            mp.stage(make_tx(&kp, to, i));
         }
         assert_eq!(mp.size(), 0); // not admitted yet
 
@@ -654,11 +654,11 @@ mod tests {
         confirmed.insert(addr, 2u64);
         mp.update_confirmed_nonces(&confirmed);
         assert_eq!(
-            mp.add(make_tx(&kp, to.clone(), 0)),
+            mp.add(make_tx(&kp, to, 0)),
             Err(MempoolError::StaleNonce)
         );
         assert_eq!(
-            mp.add(make_tx(&kp, to.clone(), 1)),
+            mp.add(make_tx(&kp, to, 1)),
             Err(MempoolError::StaleNonce)
         );
         mp.add(make_tx(&kp, to, 2)).unwrap();
@@ -670,8 +670,8 @@ mod tests {
         let mut mp = Mempool::new(10);
         let kp = KeyPair::generate();
         let to = dummy_addr();
-        mp.add(make_tx_with_fee(&kp, to.clone(), 0, 1)).unwrap();
-        mp.add(make_tx_with_fee(&kp, to.clone(), 0, 10)).unwrap();
+        mp.add(make_tx_with_fee(&kp, to, 0, 1)).unwrap();
+        mp.add(make_tx_with_fee(&kp, to, 0, 10)).unwrap();
         assert_eq!(mp.size(), 1);
         let drained = mp.drain(10);
         assert_eq!(drained[0].fee, Amount::from_vinx(10));
@@ -682,7 +682,7 @@ mod tests {
         let mut mp = Mempool::new(10);
         let kp = KeyPair::generate();
         let to = dummy_addr();
-        mp.add(make_tx_with_fee(&kp, to.clone(), 0, 5)).unwrap();
+        mp.add(make_tx_with_fee(&kp, to, 0, 5)).unwrap();
         // Different amount → different hash, but same nonce and same fee → NonceTaken
         let tx2 = vinx_core::Transaction::new_transfer(
             &kp,
@@ -700,9 +700,9 @@ mod tests {
         let mut mp = Mempool::new(10);
         let kp = KeyPair::generate();
         let to = dummy_addr();
-        mp.add(make_tx(&kp, to.clone(), 0)).unwrap();
-        mp.add(make_tx(&kp, to.clone(), 1)).unwrap();
-        mp.add(make_tx(&kp, to.clone(), 2)).unwrap();
+        mp.add(make_tx(&kp, to, 0)).unwrap();
+        mp.add(make_tx(&kp, to, 1)).unwrap();
+        mp.add(make_tx(&kp, to, 2)).unwrap();
         assert_eq!(mp.size(), 3);
         let addr = vinx_crypto::Address::from_public_key(&kp.public_key());
         let mut confirmed = std::collections::HashMap::new();

@@ -62,7 +62,6 @@ const BLOCK_TIME: u64 = 12;
 struct SimNode {
     idx: usize,
     addr: Address,
-    kp: KeyPair,
     bls: BlsSecretKey,
     state: WorldState,
     chain: Chain,
@@ -117,10 +116,6 @@ struct Network {
 }
 
 impl Network {
-    fn new(n: usize) -> Self {
-        Self::named(n, "net")
-    }
-
     fn named(n: usize, tag: &str) -> Self {
         let dir = TmpDir::new(tag);
         let kps: Vec<KeyPair> = (0..n).map(|_| KeyPair::generate()).collect();
@@ -175,7 +170,6 @@ impl Network {
                 SimNode {
                     idx: i,
                     addr: addrs[i],
-                    kp: kps[i].clone(),
                     bls: blss[i].clone(),
                     state,
                     chain,

@@ -29,12 +29,12 @@ mod tests {
         let validator_addr = Address::from_public_key(&validator_kp.public_key());
         let mut state = create_genesis_state(&GenesisConfig {
             chain_id: vinx_core::CHAIN_ID_DEVNET,
-            admin_address: sender_addr.clone(),
+            admin_address: sender_addr,
             validator_address: validator_addr,
             validator_bls: None,
         });
         // Fair launch grants nothing at genesis — fund the sender for these unit tests.
-        state.credit_for_test(sender_addr.clone(), Amount::from_vinx(1_000_000_000));
+        state.credit_for_test(sender_addr, Amount::from_vinx(1_000_000_000));
         (state, sender_kp, sender_addr)
     }
 
@@ -54,7 +54,7 @@ mod tests {
         let receiver = Address::from_public_key(&KeyPair::generate().public_key());
         let amount = Amount::from_vinx(1_000);
         let tx =
-            Transaction::new_transfer(&sender_kp, receiver.clone(), amount, fee_for(amount), 0);
+            Transaction::new_transfer(&sender_kp, receiver, amount, fee_for(amount), 0);
 
         state.apply_transaction(&tx).unwrap();
 
@@ -67,7 +67,7 @@ mod tests {
         let receiver = Address::from_public_key(&KeyPair::generate().public_key());
         let amount = Amount::from_vinx(1_000);
         let mut tx =
-            Transaction::new_transfer(&sender_kp, receiver.clone(), amount, fee_for(amount), 0);
+            Transaction::new_transfer(&sender_kp, receiver, amount, fee_for(amount), 0);
 
         // Tamper a signed field *after* signing so the Ed25519 signature no longer
         // verifies, without changing any economic field (TTL is far in the future).
@@ -99,7 +99,7 @@ mod tests {
 
         // Wrong chain-id is rejected even on the trusted path (cheap replay guard).
         let mut wrong_chain =
-            Transaction::new_transfer(&sender_kp, receiver.clone(), amount, fee_for(amount), 0);
+            Transaction::new_transfer(&sender_kp, receiver, amount, fee_for(amount), 0);
         wrong_chain.chain_id = vinx_core::CHAIN_ID_MAINNET;
         assert!(state.apply_transaction_trusted(&wrong_chain).is_err());
 
@@ -165,7 +165,7 @@ mod tests {
         let amount = Amount::from_vinx(1);
 
         let tx0 =
-            Transaction::new_transfer(&sender_kp, receiver.clone(), amount, fee_for(amount), 0);
+            Transaction::new_transfer(&sender_kp, receiver, amount, fee_for(amount), 0);
         state.apply_transaction(&tx0).unwrap();
         assert_eq!(state.accounts[&sender_addr].nonce, 1);
 

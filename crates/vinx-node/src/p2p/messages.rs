@@ -499,7 +499,7 @@ mod tests {
     #[test]
     fn test_oversized_raw_frame_is_rejected() {
         let mut framed = vec![FLAG_RAW];
-        framed.extend(std::iter::repeat(0u8).take(MAX_DECODED_BYTES + 1));
+        framed.extend(std::iter::repeat_n(0u8, MAX_DECODED_BYTES + 1));
         assert!(P2pMessage::decode(&framed).is_none());
     }
 

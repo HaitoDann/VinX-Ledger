@@ -17,7 +17,7 @@
 |---|---|
 | Nom | VinX Ledger |
 | Ticker | VINX |
-| Chain ID | `42` |
+| Chain ID | **mainnet = 1**, **testnet = 7**, **devnet = 42** (défaut local) |
 | Adresses | Bech32, préfixe `vinx1` |
 | Unité minimale | atom = 10⁻¹⁸ VINX (18 décimales) |
 | RPC par défaut | `http://127.0.0.1:8545` |
@@ -501,5 +501,7 @@ SLASH_EPOCH_POT_BPS       = 9_000  (90 % dans epoch_dist_emission_pot)
 SCORE_WINDOW_SECS         = 604_800  (7 jours glissants, ADR 0038 — cible 🔴)
 WARMUP_EPOCHS             = 3        (ADR 0038 — cible 🔴)
 
-CHAIN_ID                  = 42
+CHAIN_ID_MAINNET          = 1
+CHAIN_ID_TESTNET          = 7
+CHAIN_ID_DEVNET           = 42   (défaut des constructeurs de tx en local)
 ```

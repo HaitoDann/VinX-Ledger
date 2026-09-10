@@ -108,7 +108,7 @@ proptest! {
         let mut state = WorldState::new();
         let initial   = Amount::from_vinx(initial_vinx);
         // Use credit_emit_for_test to keep the supply invariant consistent.
-        state.credit_emit_for_test(sender_addr.clone(), initial);
+        state.credit_emit_for_test(sender_addr, initial);
 
         let amount = Amount::from_vinx(amount_vinx);
         let fee    = amount.calculate_fee(state.base_fee);
@@ -141,7 +141,7 @@ proptest! {
 
         let mut state = WorldState::new();
         let initial   = Amount::from_vinx(initial_vinx);
-        state.credit_emit_for_test(sender_addr.clone(), initial);
+        state.credit_emit_for_test(sender_addr, initial);
 
         let amount = Amount::from_vinx(amount_vinx);
         let fee    = amount.calculate_fee(state.base_fee);
@@ -172,7 +172,7 @@ proptest! {
         let receiver_addr = Address::from_public_key(&receiver_kp.public_key());
 
         let mut state = WorldState::new();
-        state.credit_for_test(sender_addr.clone(), Amount::from_vinx(initial_vinx));
+        state.credit_for_test(sender_addr, Amount::from_vinx(initial_vinx));
 
         let amount = Amount::from_vinx(1);
         let fee    = amount.calculate_fee(state.base_fee);
@@ -199,7 +199,7 @@ proptest! {
         let producer = Address::from_public_key(&KeyPair::generate().public_key());
 
         let mut state = WorldState::new();
-        state.credit_emit_for_test(sender_addr.clone(), Amount::from_vinx(initial_vinx));
+        state.credit_emit_for_test(sender_addr, Amount::from_vinx(initial_vinx));
 
         let amount = Amount::from_vinx(amount_vinx);
         let fee    = amount.calculate_fee(state.base_fee);
@@ -234,7 +234,7 @@ proptest! {
         let receiver_addr = Address::from_public_key(&receiver_kp.public_key());
 
         let mut state = WorldState::new();
-        state.credit_for_test(sender_addr.clone(), Amount::from_vinx(initial_vinx));
+        state.credit_for_test(sender_addr, Amount::from_vinx(initial_vinx));
 
         // Sender's confirmed nonce is 0; use wrong_nonce (always >= 1) to trigger rejection.
         let amount = Amount::from_vinx(1);

@@ -2303,11 +2303,7 @@ impl WorldState {
                 }
                 let current = self.min_validator_bond_atoms;
                 let max_delta = current * BOND_STEP_BPS / BPS_DENOM;
-                let delta = if atoms > current {
-                    atoms - current
-                } else {
-                    current - atoms
-                };
+                let delta = atoms.abs_diff(current);
                 if delta > max_delta {
                     return Err(CoreError::InvalidTransaction(format!(
                         "bond change {delta} exceeds BOND_STEP_BPS ({BOND_STEP_BPS} bps) limit {max_delta}"
@@ -2677,8 +2673,8 @@ mod tests {
         let admin_kp = KeyPair::generate();
         let admin_addr = Address::from_public_key(&admin_kp.public_key());
         let mut state = WorldState::new();
-        state.admin_address = Some(admin_addr.clone());
-        state.credit_for_test(admin_addr.clone(), Amount::from_vinx(1_000));
+        state.admin_address = Some(admin_addr);
+        state.credit_for_test(admin_addr, Amount::from_vinx(1_000));
         (state, admin_kp, admin_addr)
     }
 
@@ -3579,6 +3575,7 @@ mod tests {
     /// fix, two states differing on the validator set, the admin key and the epoch beacon
     /// produced *equal* roots, so the divergence was silent on every validation path.
     #[test]
+    #[allow(clippy::type_complexity)]
     fn test_state_root_commits_to_consensus_state() {
         let addr = || Address::from_public_key(&KeyPair::generate().public_key());
 
@@ -3694,7 +3691,7 @@ mod tests {
     fn test_state_root_changes_on_balance_change() {
         let mut s = WorldState::new();
         let addr = Address::from_public_key(&KeyPair::generate().public_key());
-        s.credit_for_test(addr.clone(), Amount::from_vinx(100));
+        s.credit_for_test(addr, Amount::from_vinx(100));
         let root_before = s.compute_state_root();
         s.credit_for_test(addr, Amount::from_vinx(1));
         assert_ne!(root_before, s.compute_state_root());
@@ -3708,8 +3705,8 @@ mod tests {
         let addr2 = Address::from_public_key(&kp2.public_key());
 
         let mut s1 = WorldState::new();
-        s1.credit_for_test(addr1.clone(), Amount::from_vinx(50));
-        s1.credit_for_test(addr2.clone(), Amount::from_vinx(200));
+        s1.credit_for_test(addr1, Amount::from_vinx(50));
+        s1.credit_for_test(addr2, Amount::from_vinx(200));
 
         let mut s2 = WorldState::new();
         s2.credit_for_test(addr2, Amount::from_vinx(200));
@@ -3724,7 +3721,7 @@ mod tests {
         let mut s = WorldState::new();
         let kp = KeyPair::generate();
         let addr = Address::from_public_key(&kp.public_key());
-        s.credit_for_test(addr.clone(), Amount::from_vinx(10));
+        s.credit_for_test(addr, Amount::from_vinx(10));
         let below_min = Amount::from_atoms(DECIMAL_FACTOR - 1);
         let tx = Transaction::new_stake(&kp, below_min, Amount::ZERO, 0);
         assert_eq!(
@@ -4438,7 +4435,7 @@ mod tests {
     #[test]
     fn test_verify_committee_vrf_proof_no_key_rejected() {
         use vinx_crypto::VrfSecretKey;
-        let (mut s, _, addr) = validator_pool_state();
+        let (s, _, addr) = validator_pool_state();
         // Pool entry exists but no VRF key registered.
         let vrf_sk = VrfSecretKey::generate();
         let alpha = s.committee_alpha(1);

@@ -5,7 +5,14 @@
 - **Portée :** Infrastructure — persistance de la chaîne et du WorldState entre redémarrages.
 - **Décideur :** VinX Labs.
 - **Crate :** `crates/vinx-node` — `src/storage.rs`
-- **STORAGE_VERSION actuelle :** 14
+- **STORAGE_VERSION actuelle :** **20** (backend **redb**, fichier `vinx.redb`)
+
+> ⚠️ **Mises à jour depuis la rédaction :**
+> - **Backend = `redb`** (et non sled/RocksDB) : base KV transactionnelle en Rust pur, fichier `vinx.redb`.
+> - **`STORAGE_VERSION = 20`** (la migration automatique décrite en §2.2 reste vraie pour les
+>   sauts intra-protocole ; **exception BLAKE3** : depuis v20, une base pré-BLAKE3 (≤ v19) est
+>   **refusée** avec un message actionnable et laissée intacte — aucune migration possible, les
+>   empreintes stockées appartiennent à un autre protocole de hachage, ADR 0069).
 
 ---
 
@@ -18,16 +25,17 @@ indispensable.
 
 ## 2. Décision
 
-### 2.1 Base de données — sled (ou RocksDB)
+### 2.1 Base de données — redb
 
-**Choix :** sled (base KV en Rust pur, embarquée) — pas de dépendance externe (C++, librocksdb),
-suffisant pour les volumes actuels. RocksDB pourrait être envisagé si le débit d'écriture
-devient un goulot à grande échelle.
+**Choix retenu (implémenté) :** `redb` — base KV transactionnelle en Rust pur, embarquée, une
+seule dépendance, pas de portage C++. Les écritures passent par des transactions ACID (une
+migration partielle ne peut donc pas corrompre la base). Fichier unique `vinx.redb` dans le
+répertoire de données.
 
 ### 2.2 STORAGE_VERSION
 
 ```rust
-const STORAGE_VERSION: u64 = 14;
+const STORAGE_VERSION: u64 = 20;
 ```
 
 À chaque démarrage du nœud :
@@ -85,5 +93,5 @@ les réorganisations (ADR 0031) et le fast-sync.
 - **Compromis :** bincode n'est pas auto-descriptif — si un champ est mal ordonné ou
   manquant, la migration peut corrompre des données silencieusement (risque mitigé par
   les tests de migration).
-- **Compromis :** sled n'est pas aussi mature que RocksDB pour les gros volumes — à réévaluer
-  à Phase 5 (mainnet).
+- **Compromis :** redb reste jeune face à RocksDB pour de très gros volumes — à réévaluer à
+  l'échelle mainnet ; en contrepartie, zéro dépendance C++ et des transactions ACID natives.

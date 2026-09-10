@@ -43,17 +43,17 @@ fn test_storage_roundtrip() {
 
     let mut state = create_genesis_state(&GenesisConfig {
         chain_id: vinx_core::CHAIN_ID_DEVNET,
-        admin_address: admin.clone(),
-        validator_address: validator.clone(),
+        admin_address: admin,
+        validator_address: validator,
         validator_bls: None,
     });
-    let (mut chain, _) = Chain::new_with_genesis(validator.clone(), 0);
+    let (mut chain, _) = Chain::new_with_genesis(validator, 0);
 
     let storage = Storage::new(tmp.path());
     assert!(!storage.exists());
 
     // Fair launch: genesis grants nothing — seed a balance so the roundtrip is meaningful.
-    state.credit_for_test(admin.clone(), Amount::from_vinx(500));
+    state.credit_for_test(admin, Amount::from_vinx(500));
     storage.save(&mut state, &mut chain).unwrap();
     assert!(storage.exists());
 
@@ -131,20 +131,20 @@ fn test_incremental_persist_writes_only_dirty_rows() {
 
     let mut state = create_genesis_state(&GenesisConfig {
         chain_id: vinx_core::CHAIN_ID_DEVNET,
-        admin_address: admin.clone(),
-        validator_address: validator.clone(),
+        admin_address: admin,
+        validator_address: validator,
         validator_bls: None,
     });
-    let (mut chain, _) = Chain::new_with_genesis(validator.clone(), 0);
+    let (mut chain, _) = Chain::new_with_genesis(validator, 0);
     let storage = Storage::new(tmp.path());
 
     // Seed one account, then full-save so it is persisted and the dirty set cleared.
-    state.credit_for_test(admin.clone(), Amount::from_vinx(1_000));
+    state.credit_for_test(admin, Amount::from_vinx(1_000));
     storage.save(&mut state, &mut chain).unwrap();
 
     // Touch a single new account, then persist incrementally.
     let (_, bob) = make_addr();
-    state.credit_for_test(bob.clone(), Amount::from_vinx(500));
+    state.credit_for_test(bob, Amount::from_vinx(500));
     let write = Storage::serialize_incremental(&mut state, &mut chain).unwrap();
     // Only the changed account is written — not the whole account set.
     assert_eq!(write.account_rows.len(), 1);
@@ -174,11 +174,11 @@ async fn test_state_persists_across_node_restarts() {
     {
         let state = create_genesis_state(&GenesisConfig {
             chain_id: vinx_core::CHAIN_ID_DEVNET,
-            admin_address: admin_addr.clone(),
-            validator_address: validator_addr.clone(),
+            admin_address: admin_addr,
+            validator_address: validator_addr,
             validator_bls: None,
         });
-        let (chain, _) = Chain::new_with_genesis(validator_addr.clone(), 0);
+        let (chain, _) = Chain::new_with_genesis(validator_addr, 0);
         let config = NodeConfig::new(validator_kp.clone()).with_data_dir(tmp.path());
         let node = Node::new(state, chain, config);
 

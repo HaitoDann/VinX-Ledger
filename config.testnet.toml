@@ -10,7 +10,8 @@ validator_key_file = "testnet-data/validator.json"
 admin_key_file     = "testnet-data/admin.json"
 
 # ─── Block cadence ────────────────────────────────────────────────────────────
-block_time_secs = 6
+# Cadence fixe du protocole : 12 s (ADR 0043 + ADR 0045). Doit être identique sur tous les nœuds.
+block_time_secs = 12
 
 # ─── RPC ─────────────────────────────────────────────────────────────────────
 rpc_listen = "0.0.0.0:8545"

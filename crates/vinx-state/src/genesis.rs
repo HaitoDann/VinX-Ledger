@@ -128,7 +128,7 @@ mod tests {
         let validator_kp = KeyPair::generate();
         let validator_addr = Address::from_public_key(&validator_kp.public_key());
         let state = create_genesis_state(&GenesisConfig {
-            admin_address: admin_addr.clone(),
+            admin_address: admin_addr,
             validator_address: validator_addr,
             chain_id: CHAIN_ID_DEVNET,
             validator_bls: None,
@@ -173,7 +173,7 @@ mod tests {
         let admin_addr = Address::from_public_key(&admin_kp.public_key());
         let state = create_genesis_state(&GenesisConfig {
             admin_address: admin_addr,
-            validator_address: validator_addr.clone(),
+            validator_address: validator_addr,
             chain_id: CHAIN_ID_DEVNET,
             validator_bls: None,
         });
