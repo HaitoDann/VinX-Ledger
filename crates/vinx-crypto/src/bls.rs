@@ -14,7 +14,25 @@ use rand::RngCore;
 /// Domain-separation tag for VinX block co-signatures (BLS Proof-of-Possession scheme).
 pub const BLS_COSIG_DST: &[u8] = b"VINX_BLS_COSIG_V1";
 /// Domain-separation tag used for the Proof-of-Possession registration signature.
-pub const BLS_POP_DST: &[u8] = b"VINX_BLS_POP_V1";
+pub const BLS_POP_DST: &[u8] = b"VINX_BLS_POP_V2";
+
+/// Message signé par une Proof-of-Possession : `bls_pub_key ‖ validator_address ‖ chain_id`.
+///
+/// # Pourquoi la clé seule ne suffit pas (VINX-11)
+///
+/// Une PoP signée sur `pk_bytes` seul prouve la possession de la clé secrète et **rien
+/// d'autre**. Elle n'est liée ni au validateur qui l'enregistre, ni à la chaîne : elle est
+/// donc rejouable telle quelle sur une autre chaîne VinX, et — les clés et PoP étant
+/// stockées en clair dans l'état, donc publiquement lisibles — recopiable par un autre
+/// validateur du même réseau. Lier les trois éléments rend la preuve non transférable :
+/// elle ne vaut que pour *cette* clé, *ce* validateur, *cette* chaîne.
+pub fn pop_message(pk: &[u8; 48], validator_address: &[u8; 20], chain_id: u32) -> Vec<u8> {
+    let mut m = Vec::with_capacity(48 + 20 + 4);
+    m.extend_from_slice(pk);
+    m.extend_from_slice(validator_address);
+    m.extend_from_slice(&chain_id.to_be_bytes());
+    m
+}
 
 /// A BLS12-381 secret key (32 bytes scalar).
 pub struct BlsSecretKey(SecretKey);
@@ -78,10 +96,14 @@ impl BlsSecretKey {
         BlsSignature(sig.compress())
     }
 
-    /// Produce a Proof-of-Possession signature over the public key bytes.
-    pub fn proof_of_possession(&self) -> BlsSignature {
-        let pk_bytes = self.public_key().0;
-        let sig = self.0.sign(&pk_bytes, BLS_POP_DST, &[]);
+    /// Produit une Proof-of-Possession liée au validateur et à la chaîne (VINX-11).
+    ///
+    /// Le message est `bls_pub_key ‖ validator_address ‖ chain_id` (voir [`pop_message`]),
+    /// et non la clé seule : une PoP ne doit valoir que pour l'identité et le réseau qui
+    /// l'enregistrent.
+    pub fn proof_of_possession(&self, validator_address: &[u8; 20], chain_id: u32) -> BlsSignature {
+        let msg = pop_message(&self.public_key().0, validator_address, chain_id);
+        let sig = self.0.sign(&msg, BLS_POP_DST, &[]);
         BlsSignature(sig.compress())
     }
 }
@@ -97,11 +119,21 @@ impl BlsPubKey {
         PublicKey::from_bytes(&self.0).map_err(|_| BlsError::InvalidKey)
     }
 
-    /// Verify a Proof-of-Possession signature (registered at validator admission).
-    pub fn verify_pop(&self, pop: &BlsSignature) -> Result<(), BlsError> {
+    /// Vérifie une Proof-of-Possession contre l'identité du validateur et la chaîne.
+    ///
+    /// `validator_address` et `chain_id` doivent être ceux sous lesquels la clé est
+    /// enregistrée : une PoP produite pour une autre adresse ou une autre chaîne échoue
+    /// ici, ce qui est précisément le but (VINX-11).
+    pub fn verify_pop(
+        &self,
+        pop: &BlsSignature,
+        validator_address: &[u8; 20],
+        chain_id: u32,
+    ) -> Result<(), BlsError> {
         let pk = self.inner()?;
         let sig = Signature::from_bytes(&pop.0).map_err(|_| BlsError::InvalidSignature)?;
-        let err = sig.verify(true, &self.0, BLS_POP_DST, &[], &pk, true);
+        let msg = pop_message(&self.0, validator_address, chain_id);
+        let err = sig.verify(true, &msg, BLS_POP_DST, &[], &pk, true);
         if err == BLST_ERROR::BLST_SUCCESS {
             Ok(())
         } else {
@@ -219,20 +251,50 @@ mod tests {
         assert!(verify_aggregate(&[pk1, wrong_pk], &agg, msg).is_err());
     }
 
+    const ADDR_A: [u8; 20] = [0xAA; 20];
+    const ADDR_B: [u8; 20] = [0xBB; 20];
+    const CHAIN_A: u32 = 1;
+    const CHAIN_B: u32 = 42;
+
     #[test]
     fn test_proof_of_possession_valid() {
         let sk = BlsSecretKey::generate();
         let pk = sk.public_key();
-        let pop = sk.proof_of_possession();
-        assert!(pk.verify_pop(&pop).is_ok());
+        let pop = sk.proof_of_possession(&ADDR_A, CHAIN_A);
+        assert!(pk.verify_pop(&pop, &ADDR_A, CHAIN_A).is_ok());
     }
 
     #[test]
     fn test_proof_of_possession_wrong_key_rejected() {
         let sk = BlsSecretKey::generate();
-        let pop = sk.proof_of_possession();
+        let pop = sk.proof_of_possession(&ADDR_A, CHAIN_A);
         let (_, other_pk) = keypair();
-        assert!(other_pk.verify_pop(&pop).is_err());
+        assert!(other_pk.verify_pop(&pop, &ADDR_A, CHAIN_A).is_err());
+    }
+
+    /// VINX-11 — la PoP doit être **non transférable** : liée à l'adresse du validateur
+    /// qui l'enregistre et à la chaîne. Sans cela, elle est recopiable depuis l'état
+    /// public par un autre validateur, et rejouable sur une autre chaîne VinX.
+    #[test]
+    fn test_proof_of_possession_is_bound_to_identity_and_chain() {
+        let sk = BlsSecretKey::generate();
+        let pk = sk.public_key();
+        let pop = sk.proof_of_possession(&ADDR_A, CHAIN_A);
+
+        assert!(
+            pk.verify_pop(&pop, &ADDR_B, CHAIN_A).is_err(),
+            "une PoP d'un autre validateur ne doit pas être réutilisable"
+        );
+        assert!(
+            pk.verify_pop(&pop, &ADDR_A, CHAIN_B).is_err(),
+            "une PoP d'une autre chaîne ne doit pas être rejouable"
+        );
+        assert!(
+            pk.verify_pop(&pop, &ADDR_B, CHAIN_B).is_err(),
+            "ni l'un ni l'autre"
+        );
+        // Et la PoP correcte fonctionne toujours.
+        assert!(pk.verify_pop(&pop, &ADDR_A, CHAIN_A).is_ok());
     }
 
     #[test]

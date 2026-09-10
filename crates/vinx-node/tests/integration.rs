@@ -625,9 +625,17 @@ async fn test_admin_action_adds_validator() {
         s.credit_for_test(new_val_addr.clone(), Amount::from_atoms(bond));
     }
 
-    // The candidate posts the minimum validator bond (required for admission).
-    let stake_tx =
-        vinx_core::Transaction::new_stake(&new_val_kp, Amount::from_atoms(bond), Amount::ZERO, 0);
+    // The candidate posts the minimum validator bond (required for admission). Since
+    // ADR 0075 §3.1 the bond that enters the pool must carry the validator's BLS key.
+    let chain_id = node.state.read().await.chain_id;
+    let stake_tx = vinx_core::Transaction::new_stake_with_bls(
+        &new_val_kp,
+        Amount::from_atoms(bond),
+        Amount::ZERO,
+        0,
+        &vinx_crypto::BlsSecretKey::generate(),
+        chain_id,
+    );
     node.mempool.write().await.add(stake_tx).unwrap();
     node.tick().await.expect("tick bond");
 

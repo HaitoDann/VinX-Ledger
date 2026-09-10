@@ -1560,6 +1560,32 @@ impl WorldState {
                 "stake amount below minimum 1 VINX".to_string(),
             ));
         }
+
+        // ADR 0075 §3.1 — un bond qui fait ENTRER au pool doit porter la clé BLS du
+        // validateur et sa PoP.
+        //
+        // Sans cette exigence, « tout validateur actif est authentifiable » n'était qu'une
+        // propriété de convergence : un validateur pouvait bonder puis enregistrer sa clé
+        // plus tard, ou jamais. Or `quorum()` compte **tous** les membres du set, y compris
+        // ceux qui ne peuvent pas produire de bloc accepté (ADR 0070) : au-delà d'un tiers
+        // de membres sans clé, le quorum devient inatteignable et la finalité se fige. La
+        // liaison au bonding en fait un invariant structurel.
+        //
+        // Validé avant toute mutation : un bond refusé ne doit pas consommer le nonce.
+        let creates_pool_entry = {
+            let staked_after = self
+                .account_staked(&tx.from)
+                .checked_add(tx.amount)
+                .ok_or(CoreError::AmountOverflow)?;
+            staked_after.atoms() >= self.min_validator_bond_atoms
+                && !self.banned_validator_keys.contains(&tx.from)
+                && !self.validator_pool.contains_key(&tx.from)
+        };
+        let entry_bls = if creates_pool_entry {
+            Some(self.validate_bls_registration(tx.from, &tx.payload)?)
+        } else {
+            None
+        };
         // Compute new staked total in a scoped borrow so we can modify self.validator_pool after.
         let new_staked = {
             let account = self
@@ -1591,10 +1617,17 @@ impl WorldState {
             if let Some(entry) = self.validator_pool.get_mut(&tx.from) {
                 entry.bond_atoms = bond;
             } else {
-                self.validator_pool.insert(
-                    tx.from,
-                    vinx_core::ValidatorPoolEntry::new(bond, self.current_block_ts),
-                );
+                let mut entry = vinx_core::ValidatorPoolEntry::new(bond, self.current_block_ts);
+                // `creates_pool_entry` a été calculé sur le même prédicat, donc la clé est
+                // présente ici — mais on ne suppose pas : sans elle, pas d'entrée.
+                let (pk, pop) = entry_bls.clone().ok_or_else(|| {
+                    CoreError::InvalidTransaction(
+                        "bond entering the validator pool must carry a BLS key".to_string(),
+                    )
+                })?;
+                entry.bls_pub_key = Some(pk);
+                entry.bls_pop = Some(pop);
+                self.validator_pool.insert(tx.from, entry);
                 tracing::info!(addr = %tx.from, bond, "ADR 0038: validator auto-entered pool");
             }
         }
@@ -2437,6 +2470,54 @@ impl WorldState {
     /// required. Validates the PoP cryptographically before writing, so the pool never holds
     /// an unverified BLS key. Like `apply_admin_action`, validation happens before mutation,
     /// so a rejected payload does not consume the sender's nonce.
+    /// Décode et valide une `RegisterBlsKeyPayload` pour `owner` : longueurs, point G1 valide,
+    /// PoP liée à `(clé, owner, chain_id)` (VINX-11), et unicité de la clé G1 dans le pool.
+    ///
+    /// Partagé par `apply_register_bls_key` et par le chemin de bonding (ADR 0075 §3.1) —
+    /// une clé qui entre dans l'état doit passer les mêmes contrôles quel que soit le
+    /// chemin, sinon l'un des deux devient la faille.
+    fn validate_bls_registration(
+        &self,
+        owner: Address,
+        payload_bytes: &[u8],
+    ) -> Result<(Vec<u8>, Vec<u8>), CoreError> {
+        let payload: RegisterBlsKeyPayload = bincode::deserialize(payload_bytes).map_err(|_| {
+            CoreError::InvalidTransaction("malformed RegisterBlsKey payload".to_string())
+        })?;
+        if payload.bls_pub_key.len() != 48 {
+            return Err(CoreError::InvalidTransaction(
+                "BLS public key must be 48 bytes (G1 compressed)".to_string(),
+            ));
+        }
+        if payload.bls_pop.len() != 96 {
+            return Err(CoreError::InvalidTransaction(
+                "BLS Proof-of-Possession must be 96 bytes (G2 compressed)".to_string(),
+            ));
+        }
+        let pk_arr: [u8; 48] = payload.bls_pub_key.as_slice().try_into().unwrap();
+        let pop_arr: [u8; 96] = payload.bls_pop.as_slice().try_into().unwrap();
+        let bls_pub = BlsPubKey::from_bytes(&pk_arr).map_err(|_| {
+            CoreError::InvalidTransaction("BLS public key is not a valid G1 point".to_string())
+        })?;
+        bls_pub
+            .verify_pop(&BlsSignature(pop_arr), owner.as_bytes(), self.chain_id)
+            .map_err(|_| {
+                CoreError::InvalidTransaction(
+                    "BLS Proof-of-Possession verification failed".to_string(),
+                )
+            })?;
+        if self
+            .validator_pool
+            .iter()
+            .any(|(a, e)| a != &owner && e.bls_pub_key.as_deref() == Some(&pk_arr[..]))
+        {
+            return Err(CoreError::InvalidTransaction(
+                "BLS public key already registered by another validator".to_string(),
+            ));
+        }
+        Ok((payload.bls_pub_key, payload.bls_pop))
+    }
+
     fn apply_register_bls_key(&mut self, tx: &Transaction) -> Result<(), CoreError> {
         let account = self
             .accounts
@@ -2455,54 +2536,17 @@ impl WorldState {
             ));
         }
 
-        let payload: RegisterBlsKeyPayload = bincode::deserialize(&tx.payload).map_err(|_| {
-            CoreError::InvalidTransaction("malformed RegisterBlsKey payload".to_string())
-        })?;
+        // Contrôle unique, partagé avec le chemin de bonding (ADR 0075 §3.1) : longueurs,
+        // point G1 valide, PoP liée à (clé, validateur, chain_id), unicité de la clé.
+        // Validation avant mutation — un payload refusé ne consomme pas le nonce.
+        let (pk, pop) = self.validate_bls_registration(tx.from, &tx.payload)?;
 
-        if payload.bls_pub_key.len() != 48 {
-            return Err(CoreError::InvalidTransaction(
-                "BLS public key must be 48 bytes (G1 compressed)".to_string(),
-            ));
-        }
-        if payload.bls_pop.len() != 96 {
-            return Err(CoreError::InvalidTransaction(
-                "BLS Proof-of-Possession must be 96 bytes (G2 compressed)".to_string(),
-            ));
-        }
-
-        let pk_arr: [u8; 48] = payload.bls_pub_key.as_slice().try_into().unwrap();
-        let pop_arr: [u8; 96] = payload.bls_pop.as_slice().try_into().unwrap();
-
-        let bls_pub = BlsPubKey::from_bytes(&pk_arr).map_err(|_| {
-            CoreError::InvalidTransaction("BLS public key is not a valid G1 point".to_string())
-        })?;
-        let bls_pop_sig = BlsSignature(pop_arr);
-
-        bls_pub.verify_pop(&bls_pop_sig).map_err(|_| {
-            CoreError::InvalidTransaction("BLS Proof-of-Possession verification failed".to_string())
-        })?;
-
-        // VINX-11: the PoP proves possession but binds the key to no identity. Without a
-        // uniqueness check, validator B re-registers validator A's published key/PoP; two
-        // bitmap bits then resolve to the same G1 key and one real signature is counted
-        // twice, corrupting reliability accounting and epoch-pot distribution.
-        if self
-            .validator_pool
-            .iter()
-            .any(|(addr, e)| addr != &tx.from && e.bls_pub_key.as_deref() == Some(&pk_arr[..]))
-        {
-            return Err(CoreError::InvalidTransaction(
-                "BLS public key already registered by another validator".to_string(),
-            ));
-        }
-
-        // Verification passed — mutate.
         let entry = self
             .validator_pool
             .get_mut(&tx.from)
             .expect("existence checked above");
-        entry.bls_pub_key = Some(payload.bls_pub_key);
-        entry.bls_pop = Some(payload.bls_pop);
+        entry.bls_pub_key = Some(pk);
+        entry.bls_pop = Some(pop);
 
         self.accounts
             .get_mut(&tx.from)
@@ -2908,7 +2952,7 @@ mod tests {
         let (kp, addr) = kp_addr();
         let stake = Amount::from_vinx(10);
         s.credit_for_test(addr, stake);
-        s.apply_transaction(&Transaction::new_stake(&kp, stake, Amount::ZERO, 0))
+        s.apply_transaction(&stake_with_bls(&kp, stake, 0, s.chain_id))
             .unwrap();
         assert_eq!(s.accounts[&addr].balance, Amount::ZERO);
         s.set_block_context(1_000);
@@ -3277,11 +3321,11 @@ mod tests {
         let (kp, addr) = kp_addr();
         let bond = MIN_VALIDATOR_BOND_ATOMS;
         s.credit_for_test(addr, Amount::from_atoms(bond * 2));
-        s.apply_transaction(&Transaction::new_stake(
+        s.apply_transaction(&stake_with_bls(
             &kp,
             Amount::from_atoms(bond),
-            Amount::ZERO,
             0,
+            s.chain_id,
         ))
         .unwrap();
         s.validator_set = ValidatorSet::single(addr);
@@ -3694,6 +3738,19 @@ mod tests {
     // ─── ADR 0046: BLS key registration ──────────────────────────────────────
 
     /// Build a minimal state where `kp`'s address is in the validator pool.
+    /// Bond de test portant une clé BLS — ce qu'un validateur réel doit faire depuis
+    /// ADR 0075 §3.1. Les tests qui bondent pour *entrer* au pool passent par ici.
+    fn stake_with_bls(kp: &KeyPair, amount: Amount, nonce: u64, chain_id: u32) -> Transaction {
+        Transaction::new_stake_with_bls(
+            kp,
+            amount,
+            Amount::ZERO,
+            nonce,
+            &vinx_crypto::BlsSecretKey::generate(),
+            chain_id,
+        )
+    }
+
     fn validator_pool_state() -> (WorldState, KeyPair, Address) {
         use vinx_core::validator_pool::ValidatorPoolEntry;
         let mut s = WorldState::new();
@@ -3715,7 +3772,7 @@ mod tests {
 
         let bls_sk = BlsSecretKey::generate();
         let bls_pk = bls_sk.public_key();
-        let pop = bls_sk.proof_of_possession();
+        let pop = bls_sk.proof_of_possession(addr.as_bytes(), s.chain_id);
         let payload = RegisterBlsKeyPayload {
             bls_pub_key: bls_pk.0.to_vec(),
             bls_pop: pop.0.to_vec(),
@@ -3741,7 +3798,7 @@ mod tests {
         s.credit_for_test(addr, Amount::from_vinx(10));
 
         let bls_sk = BlsSecretKey::generate();
-        let pop = bls_sk.proof_of_possession();
+        let pop = bls_sk.proof_of_possession(addr.as_bytes(), s.chain_id);
         let payload = RegisterBlsKeyPayload {
             bls_pub_key: bls_sk.public_key().0.to_vec(),
             bls_pop: pop.0.to_vec(),
@@ -3762,7 +3819,7 @@ mod tests {
         let bls_sk = BlsSecretKey::generate();
         let wrong_sk = BlsSecretKey::generate();
         // PoP from a different key — cryptographic verification must reject this.
-        let bad_pop = wrong_sk.proof_of_possession();
+        let bad_pop = wrong_sk.proof_of_possession(addr.as_bytes(), s.chain_id);
         let payload = RegisterBlsKeyPayload {
             bls_pub_key: bls_sk.public_key().0.to_vec(),
             bls_pop: bad_pop.0.to_vec(),
@@ -3812,7 +3869,7 @@ mod tests {
 
         // Register once with key A.
         let sk_a = BlsSecretKey::generate();
-        let pop_a = sk_a.proof_of_possession();
+        let pop_a = sk_a.proof_of_possession(addr.as_bytes(), s.chain_id);
         let payload_a = RegisterBlsKeyPayload {
             bls_pub_key: sk_a.public_key().0.to_vec(),
             bls_pop: pop_a.0.to_vec(),
@@ -3822,7 +3879,7 @@ mod tests {
 
         // Re-register with key B — should overwrite.
         let sk_b = BlsSecretKey::generate();
-        let pop_b = sk_b.proof_of_possession();
+        let pop_b = sk_b.proof_of_possession(addr.as_bytes(), s.chain_id);
         let payload_b = RegisterBlsKeyPayload {
             bls_pub_key: sk_b.public_key().0.to_vec(),
             bls_pop: pop_b.0.to_vec(),
@@ -3847,11 +3904,11 @@ mod tests {
         s.credit_for_test(addr, Amount::from_atoms(MIN_VALIDATOR_BOND_ATOMS));
         assert!(!s.validator_pool.contains_key(&addr));
 
-        s.apply_transaction(&Transaction::new_stake(
+        s.apply_transaction(&stake_with_bls(
             &kp,
             Amount::from_atoms(MIN_VALIDATOR_BOND_ATOMS),
-            Amount::ZERO,
             0,
+            s.chain_id,
         ))
         .unwrap();
 
@@ -3892,11 +3949,11 @@ mod tests {
         s.credit_for_test(addr, Amount::from_atoms(MIN_VALIDATOR_BOND_ATOMS));
         s.banned_validator_keys.insert(addr);
 
-        s.apply_transaction(&Transaction::new_stake(
+        s.apply_transaction(&stake_with_bls(
             &kp,
             Amount::from_atoms(MIN_VALIDATOR_BOND_ATOMS),
-            Amount::ZERO,
             0,
+            s.chain_id,
         ))
         .unwrap();
 
@@ -3917,11 +3974,11 @@ mod tests {
         s.credit_for_test(addr, Amount::from_atoms(MIN_VALIDATOR_BOND_ATOMS * 2));
 
         // Stake enough to enter the pool.
-        s.apply_transaction(&Transaction::new_stake(
+        s.apply_transaction(&stake_with_bls(
             &kp,
             Amount::from_atoms(MIN_VALIDATOR_BOND_ATOMS),
-            Amount::ZERO,
             0,
+            s.chain_id,
         ))
         .unwrap();
         assert!(s.validator_pool.contains_key(&addr));
@@ -4470,11 +4527,11 @@ mod tests {
         let mut s = WorldState::new();
         s.credit_for_test(addr, Amount::from_atoms(MIN_VALIDATOR_BOND_ATOMS * 3));
         // Stake bond.
-        s.apply_transaction(&Transaction::new_stake(
+        s.apply_transaction(&stake_with_bls(
             &kp,
             Amount::from_atoms(MIN_VALIDATOR_BOND_ATOMS),
-            Amount::ZERO,
             0,
+            s.chain_id,
         ))
         .unwrap();
         // Force pool entry to Active so floor checks are meaningful.
@@ -4530,11 +4587,11 @@ mod tests {
         for i in 0..n_exit {
             let (kp, addr) = kp_addr();
             s.credit_for_test(addr, Amount::from_atoms(MIN_VALIDATOR_BOND_ATOMS * 2));
-            s.apply_transaction(&Transaction::new_stake(
+            s.apply_transaction(&stake_with_bls(
                 &kp,
                 Amount::from_atoms(MIN_VALIDATOR_BOND_ATOMS),
-                Amount::ZERO,
                 0,
+                s.chain_id,
             ))
             .unwrap();
             // Set Active so floor checks apply.

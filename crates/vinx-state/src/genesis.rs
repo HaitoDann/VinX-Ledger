@@ -63,7 +63,13 @@ pub fn create_genesis_state(config: &GenesisConfig) -> WorldState {
     // empty and every block it produces is refused by peers.
     if let Some(ref bls) = config.validator_bls {
         let pop_ok = BlsPubKey::from_bytes(&bls.pub_key)
-            .and_then(|pk| pk.verify_pop(&BlsSignature(bls.pop)))
+            .and_then(|pk| {
+                pk.verify_pop(
+                    &BlsSignature(bls.pop),
+                    config.validator_address.as_bytes(),
+                    config.chain_id,
+                )
+            })
             .is_ok();
         assert!(
             pop_ok,

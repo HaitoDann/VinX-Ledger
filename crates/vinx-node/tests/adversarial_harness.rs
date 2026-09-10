@@ -142,7 +142,9 @@ impl Network {
                     validator_address: addrs[0],
                     validator_bls: Some(GenesisBlsKey {
                         pub_key: blss[0].public_key().0,
-                        pop: blss[0].proof_of_possession().0,
+                        pop: blss[0]
+                            .proof_of_possession(addrs[0].as_bytes(), vinx_core::CHAIN_ID_DEVNET)
+                            .0,
                     }),
                 });
                 state.validator_set = vs.clone();
@@ -157,7 +159,12 @@ impl Network {
                     );
                     e.status = vinx_core::PoolStatus::Active;
                     e.bls_pub_key = Some(blss[j].public_key().0.to_vec());
-                    e.bls_pop = Some(blss[j].proof_of_possession().0.to_vec());
+                    e.bls_pop = Some(
+                        blss[j]
+                            .proof_of_possession(a.as_bytes(), vinx_core::CHAIN_ID_DEVNET)
+                            .0
+                            .to_vec(),
+                    );
                     state.validator_pool.insert(*a, e);
                 }
                 let (chain, _g) = Chain::new_with_genesis(addrs[0], GENESIS_TS);

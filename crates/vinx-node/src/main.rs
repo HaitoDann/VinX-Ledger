@@ -162,10 +162,13 @@ fn write_secret_file(path: &Path, contents: &str) {
 struct BlsKeyFile {
     /// G1 compressed public key, hex (48 bytes).
     pub_key_hex: String,
-    /// Proof-of-Possession over the public key, hex (96 bytes).
-    pop_hex: String,
     secret_key_hex: String,
 }
+
+// NB : la Proof-of-Possession n'est **pas** stockée. Depuis VINX-11 elle est liée à
+// `(bls_pub_key, validator_address, chain_id)` : une PoP figée sur disque deviendrait
+// silencieusement périmée si l'une de ces valeurs changeait, et un enregistrement avec une
+// PoP périmée est refusé on-chain. Elle est donc dérivée à la demande de la clé secrète.
 
 impl BlsKeyFile {
     fn load_or_generate(path: &Path) -> (Self, vinx_crypto::BlsSecretKey) {
@@ -180,7 +183,6 @@ impl BlsKeyFile {
             let sk = vinx_crypto::BlsSecretKey::generate();
             let kf = Self {
                 pub_key_hex: hex::encode(sk.public_key().0),
-                pop_hex: hex::encode(sk.proof_of_possession().0),
                 secret_key_hex: hex::encode(sk.to_bytes()),
             };
             let json = serde_json::to_string_pretty(&kf).unwrap();
@@ -370,7 +372,9 @@ async fn main() {
                     // otherwise it could never produce a block its peers accept.
                     validator_bls: Some(vinx_state::GenesisBlsKey {
                         pub_key: bls_sk.public_key().0,
-                        pop: bls_sk.proof_of_possession().0,
+                        pop: bls_sk
+                            .proof_of_possession(validator_addr.as_bytes(), chain_id)
+                            .0,
                     }),
                 };
                 // VINX_DEV_PREFUND_VINX : pré-finance le validateur de genèse (mono-nœud dev).
@@ -496,8 +500,14 @@ async fn main() {
                 let chain_id = st.chain_id;
                 drop(st);
                 let payload = vinx_core::RegisterBlsKeyPayload {
-                    bls_pub_key: hex::decode(&bls_kf.pub_key_hex).expect("own BLS pubkey hex"),
-                    bls_pop: hex::decode(&bls_kf.pop_hex).expect("own BLS PoP hex"),
+                    bls_pub_key: node.config.bls_secret_key.public_key().0.to_vec(),
+                    // PoP dérivée pour CETTE adresse et CETTE chaîne (VINX-11).
+                    bls_pop: node
+                        .config
+                        .bls_secret_key
+                        .proof_of_possession(me.as_bytes(), chain_id)
+                        .0
+                        .to_vec(),
                 };
                 let mut tx = vinx_core::Transaction::new_register_bls_key(
                     &node.config.validator_keypair,

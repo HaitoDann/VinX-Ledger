@@ -254,6 +254,54 @@ impl Transaction {
         tx
     }
 
+    /// Construit et signe un `Stake` portant la clé BLS du validateur (ADR 0075 §3.1).
+    ///
+    /// Un bond qui fait **entrer** au pool de validateurs doit transporter la clé BLS et sa
+    /// Proof-of-Possession : `quorum()` compte tous les membres du set, y compris ceux qui
+    /// ne pourraient pas produire de bloc accepté, donc un membre sans clé rapproche le
+    /// réseau d'un quorum inatteignable. Utiliser [`Transaction::new_stake`] pour un simple
+    /// abondement d'un bond existant.
+    ///
+    /// `chain_id` est requis parce que la PoP y est liée (VINX-11) : elle ne vaut que pour
+    /// cette clé, ce validateur et cette chaîne.
+    pub fn new_stake_with_bls(
+        keypair: &KeyPair,
+        amount: Amount,
+        fee: Amount,
+        nonce: u64,
+        bls_sk: &vinx_crypto::BlsSecretKey,
+        chain_id: u32,
+    ) -> Self {
+        let pk = keypair.public_key();
+        let from = Address::from_public_key(&pk);
+        let payload = RegisterBlsKeyPayload {
+            bls_pub_key: bls_sk.public_key().0.to_vec(),
+            bls_pop: bls_sk
+                .proof_of_possession(from.as_bytes(), chain_id)
+                .0
+                .to_vec(),
+        };
+        let mut tx = Self {
+            tx_type: TransactionType::Stake,
+            from,
+            to: from,
+            amount,
+            fee,
+            nonce,
+            chain_id,
+            expires_at_height: None,
+            payload: bincode::serialize(&payload)
+                .expect("RegisterBlsKeyPayload serialization is infallible"),
+            pub_key: Some(pk),
+            signature: None,
+            sponsor: None,
+            sponsor_pub_key: None,
+            sponsor_signature: None,
+        };
+        tx.signature = Some(keypair.sign(&tx.signing_bytes()));
+        tx
+    }
+
     /// Constructs and signs an Unstake transaction.
     pub fn new_unstake(keypair: &KeyPair, amount: Amount, fee: Amount, nonce: u64) -> Self {
         let pk = keypair.public_key();

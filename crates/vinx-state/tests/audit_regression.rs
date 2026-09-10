@@ -128,8 +128,13 @@ fn genuinely_sponsored_transaction_still_applies() {
     );
 }
 
-/// VINX-11 — the same BLS G1 key must not be registrable by two different validators,
-/// or one real signature counts twice in the bitmap.
+/// VINX-11 — deux protections distinctes, à vérifier séparément.
+///
+/// 1. Une PoP recopiée depuis l'état public d'un autre validateur échoue à la
+///    **vérification** : elle est liée à l'adresse de son propriétaire (`pop_message`).
+/// 2. Même avec une PoP correctement forgée pour lui-même, un validateur ne peut pas
+///    revendiquer une clé G1 déjà enregistrée — l'unicité reste nécessaire, sinon deux bits
+///    du bitmap résoudraient vers la même clé et une signature réelle compterait deux fois.
 #[test]
 fn bls_key_cannot_be_registered_by_two_validators() {
     use vinx_crypto::BlsSecretKey;
@@ -140,30 +145,135 @@ fn bls_key_cannot_be_registered_by_two_validators() {
     let v2_addr = Address::from_public_key(&v2.public_key());
 
     let mut state = genesis_with(v1_addr);
+    let chain_id = state.chain_id;
     let bond = Amount::from_vinx(200_000);
-    for (kp, a) in [(&v1, v1_addr), (&v2, v2_addr)] {
-        state.credit_for_test(a, bond.saturating_add(Amount::from_vinx(1_000)));
-        let fee = bond.calculate_fee(floor());
-        let stake = Transaction::new_stake(kp, bond, fee, 0);
-        state.apply_transaction(&stake).expect("bond must succeed");
-    }
 
-    let bls_sk = BlsSecretKey::generate();
-    let payload = vinx_core::transaction::RegisterBlsKeyPayload {
-        bls_pub_key: bls_sk.public_key().0.to_vec(),
-        bls_pop: bls_sk.proof_of_possession().0.to_vec(),
-    };
-
-    let reg1 = Transaction::new_register_bls_key(&v1, &payload, 1);
+    // v1 entre au pool avec SA clé BLS (ADR 0075 §3.1 : le bond la porte).
+    let v1_bls = BlsSecretKey::generate();
+    state.credit_for_test(v1_addr, bond.saturating_add(Amount::from_vinx(1_000)));
     state
-        .apply_transaction(&reg1)
-        .expect("first registration succeeds");
+        .apply_transaction(&Transaction::new_stake_with_bls(
+            &v1,
+            bond,
+            Amount::ZERO,
+            0,
+            &v1_bls,
+            chain_id,
+        ))
+        .expect("v1 bonds with its own BLS key");
 
-    // v2 copies v1's published key and PoP straight out of the state.
-    let reg2 = Transaction::new_register_bls_key(&v2, &payload, 1);
+    // v2 entre au pool avec une clé différente.
+    let v2_bls = BlsSecretKey::generate();
+    state.credit_for_test(v2_addr, bond.saturating_add(Amount::from_vinx(1_000)));
+    state
+        .apply_transaction(&Transaction::new_stake_with_bls(
+            &v2,
+            bond,
+            Amount::ZERO,
+            0,
+            &v2_bls,
+            chain_id,
+        ))
+        .expect("v2 bonds with its own BLS key");
+
+    // (1) v2 recopie la clé ET la PoP de v1, telles qu'elles figurent dans l'état.
+    let copied = vinx_core::transaction::RegisterBlsKeyPayload {
+        bls_pub_key: v1_bls.public_key().0.to_vec(),
+        bls_pop: v1_bls
+            .proof_of_possession(v1_addr.as_bytes(), chain_id)
+            .0
+            .to_vec(),
+    };
     assert!(
-        state.apply_transaction(&reg2).is_err(),
-        "the same G1 key must not be claimed by a second validator"
+        state
+            .apply_transaction(&Transaction::new_register_bls_key(&v2, &copied, 1))
+            .is_err(),
+        "une PoP liée à v1 ne doit pas valider pour v2"
+    );
+
+    // (2) v2 forge une PoP correcte pour lui-même sur la clé de v1 — impossible sans la
+    //     clé secrète, simulé ici pour isoler le contrôle d'unicité.
+    let own_pop = vinx_core::transaction::RegisterBlsKeyPayload {
+        bls_pub_key: v1_bls.public_key().0.to_vec(),
+        bls_pop: v1_bls
+            .proof_of_possession(v2_addr.as_bytes(), chain_id)
+            .0
+            .to_vec(),
+    };
+    assert!(
+        state
+            .apply_transaction(&Transaction::new_register_bls_key(&v2, &own_pop, 1))
+            .is_err(),
+        "la même clé G1 ne doit pas être revendiquée par un second validateur"
+    );
+}
+
+/// ADR 0075 §3.1 — un bond qui fait entrer au pool doit porter la clé BLS. Sans elle,
+/// « tout validateur actif est authentifiable » n'est qu'une convergence, et `quorum()`
+/// comptant tous les membres, un set peuplé de membres sans clé fige la finalité.
+#[test]
+fn bond_entering_the_pool_must_carry_a_bls_key() {
+    use vinx_crypto::BlsSecretKey;
+
+    let v = KeyPair::generate();
+    let addr = Address::from_public_key(&v.public_key());
+    let mut state = genesis_with(addr);
+    let chain_id = state.chain_id;
+    let bond = Amount::from_vinx(200_000);
+    state.credit_for_test(addr, bond.saturating_add(Amount::from_vinx(2_000)));
+
+    // Bond nu : refusé, et le nonce ne doit pas être consommé.
+    let nonce_before = state.get_account(&addr).map(|a| a.nonce).unwrap_or(0);
+    assert!(
+        state
+            .apply_transaction(&Transaction::new_stake(&v, bond, Amount::ZERO, 0))
+            .is_err(),
+        "un bond sans clé BLS ne doit pas faire entrer au pool"
+    );
+    assert!(!state.validator_pool.contains_key(&addr));
+    assert_eq!(
+        state.get_account(&addr).map(|a| a.nonce).unwrap_or(0),
+        nonce_before,
+        "un bond refusé ne doit pas consommer le nonce"
+    );
+
+    // Bond portant la clé : accepté, et la clé est enregistrée d'emblée.
+    let bls = BlsSecretKey::generate();
+    state
+        .apply_transaction(&Transaction::new_stake_with_bls(
+            &v,
+            bond,
+            Amount::ZERO,
+            0,
+            &bls,
+            chain_id,
+        ))
+        .expect("un bond portant la clé BLS entre au pool");
+    assert_eq!(
+        state
+            .validator_pool
+            .get(&addr)
+            .and_then(|e| e.bls_pub_key.clone()),
+        Some(bls.public_key().0.to_vec()),
+        "la clé doit être enregistrée dès l'entrée au pool"
+    );
+
+    // Un bond portant une PoP d'une autre chaîne est refusé (VINX-11).
+    let other = KeyPair::generate();
+    let other_addr = Address::from_public_key(&other.public_key());
+    state.credit_for_test(other_addr, bond.saturating_add(Amount::from_vinx(2_000)));
+    assert!(
+        state
+            .apply_transaction(&Transaction::new_stake_with_bls(
+                &other,
+                bond,
+                Amount::ZERO,
+                0,
+                &BlsSecretKey::generate(),
+                chain_id.wrapping_add(1),
+            ))
+            .is_err(),
+        "une PoP d'une autre chaîne ne doit pas être acceptée au bonding"
     );
 }
 
@@ -198,7 +308,9 @@ fn genesis_registers_the_validator_bls_key() {
         validator_address: validator,
         validator_bls: Some(vinx_state::GenesisBlsKey {
             pub_key: sk.public_key().0,
-            pop: sk.proof_of_possession().0,
+            pop: sk
+                .proof_of_possession(validator.as_bytes(), vinx_core::CHAIN_ID_DEVNET)
+                .0,
         }),
     });
     assert_eq!(
@@ -226,7 +338,10 @@ fn genesis_rejects_an_invalid_bls_pop() {
         validator_address: validator,
         validator_bls: Some(vinx_state::GenesisBlsKey {
             pub_key: sk.public_key().0,
-            pop: other.proof_of_possession().0, // PoP of a different key
+            // PoP d'une autre clé — la genèse doit refuser d'écrire une clé invérifiable.
+            pop: other
+                .proof_of_possession(validator.as_bytes(), vinx_core::CHAIN_ID_DEVNET)
+                .0,
         }),
     });
 }
