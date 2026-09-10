@@ -5,6 +5,21 @@ Format : `MAJEUR.MINEUR.CORRECTIF` — les versions `0.x.y` sont des versions de
 
 ---
 
+## [0.51.0] — 2026-09-10 — Durcissement post-audit & prérequis de lancement (ADRs 0069–0080)
+
+> Transforme trois audits indépendants (Claude, ChatGPT, Gemini) en correctifs de sécurité vérifiés et reproductibles, plus les prérequis de lancement. Chaque correctif est adossé à un test PoC échouant avant / vert après. **Breaking protocole** (hachage, `signing_bytes`, formats disque & wire) — réalisé en pré-mainnet, coût de coordination minimal. `STORAGE_VERSION 19 → 20` (bases pré-BLAKE3 refusées, pas de migration). **429 tests verts, clippy `-D warnings` propre.**
+
+- **ADR 0069 — BLAKE3 remplace SHA-256 (implémenté).** `vinx_crypto::sha256 → hash256`, adossé au crate `blake3`. Touche tout : dérivation d'adresse (`BLAKE3(pubkey)[..20]`), Merkle, `block_hash`, `tx_hash`, `state_root`, tiebreakers. Vecteurs de référence verrouillés ; test-garde `test_hash256_is_not_sha256` contre une régression silencieuse. `STORAGE_VERSION 19 → 20` : les bases pré-BLAKE3 sont **refusées avec un message actionnable** et laissées intactes (migration transactionnelle — les empreintes stockées appartiennent à un autre protocole, aucune migration possible). Le ciphersuite BLS (`..._XMD:SHA-256_...`) garde SHA-256 en interne — indépendant du hash protocole.
+- **ADR 0070 — Authentification du proposeur & registre BLS indexé.** `validate_incoming_block` canonique + `verify_block_tx_signatures` partagés ; registre BLS indexé pour la vérification d'agrégat.
+- **ADR 0071 — Verrou de vote persistant.** `Storage::claim_vote` — verrou de vote durable (redb) empêchant l'équivocation même après redémarrage (VX-RED-003/007).
+- **ADR 0072 — `consensus_root` engage tout l'état de consensus.** `consensus_root = BLAKE3(DST ‖ accounts_root ‖ consensus_root)` ; `emission_started` et `foundry` ajoutés au `ConsensusCommitment` (étaient omis).
+- **ADR 0073 — Injectivité de la sérialisation signée.** `signing_bytes` gagne un `payload_len(u32 BE)` écrit inconditionnellement + marqueur de sponsor (corrige VINX-12 : collision de txid pour un sponsor finissant par `0x00`).
+- **ADR 0074 — Checkpoints de subjectivité faible.** `crates/vinx-node/src/checkpoints.rs` : garde bloc-par-bloc et snapshot ; parsing strict (refus des hauteurs dupliquées). Garde de transport réécrite via le crate `url` (corrige le contournement `evil.com\@127.0.0.1`).
+- **ADR 0075 — Genèse & enrôlement des validateurs.** Clé BLS **obligatoire au bonding** (invariant de liveness). PoP liée à l'identité : signe `bls_pub_key ‖ validator_address ‖ chain_id` (DST `V1 → V2`) — plus rejouable sous une autre adresse/chaîne. `Transaction::new_stake_with_bls`. La PoP n'est plus stockée sur disque (dérivée à la demande — évite un piège de valeur périmée).
+- **ADR 0080 — Banc adversarial multi-nœuds.** `tests/adversarial_harness.rs` : 6 scénarios avec `Storage` réel (redb) par nœud, validés par mutation testing. Non-équivocation, rejet des intrus, entrées malformées inertes, pas de finalité conflictuelle sous partition.
+- **Correctifs additionnels.** `check_admin` fail-closed (moitié VINX-20 manquante, protégeait `AnnounceUpgrade`) ; `validate_bls_registration` partagé (nonce non consommé sur rejet) ; taille de payload vérifiée **avant** la signature dans les handlers RPC ; passe auto-adversariale : 4 défauts trouvés en attaquant mes propres correctifs.
+- **Recentrage v6.0 (ADR 0064).** Documentation alignée : VinX est un rail de paiement minimaliste L1 PoS ; subnets / modules / Appchains ZK gelés hors scope.
+
 ## [0.50.0] — 2026-08-12 — Fusion consensus audit + émission progressive sans La Fonderie (ADR 0040 implémenté)
 
 > Intègre toutes les améliorations consensus/sécurité de la branche d'audit avec l'implémentation ADR 0040 (émission progressive pure). `STORAGE_VERSION → 11` ; `cargo test --workspace` vert. Décisions : cadence 12 s fixe, 3 000 tx/bloc (250 TPS), escrow modules simple, pas d'émission subnet.

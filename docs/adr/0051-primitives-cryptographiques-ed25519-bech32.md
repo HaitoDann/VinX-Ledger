@@ -5,8 +5,20 @@
 - **Portée :** Fondation cryptographique — identité, hachage, preuves d'appartenance.
 - **Décideur :** VinX Labs.
 - **Crate :** `crates/vinx-crypto`
+- **Révisé par :** [ADR 0069](./0069-blake3-remplace-sha256.md) — la primitive de hachage **n'est plus SHA-256 mais BLAKE3**, décidée et implémentée avant toute genèse publique.
 
 ---
+
+> ⚠️ **Révision (septembre 2026, ADR 0069).** Les §2.2, §2.3 et §2.4 ci-dessous décrivent
+> SHA-256 comme fonction de hachage — c'était vrai jusqu'au pré-mainnet. **Le protocole hache
+> désormais en BLAKE3** (`vinx_crypto::hash256`, adossé au crate `blake3`). Concrètement :
+> - **Dérivation d'adresse** : `address = BLAKE3(public_key)[..20]` (et non SHA-256).
+> - **Arbre de Merkle** : feuilles `BLAKE3(leaf)`, nœuds `BLAKE3(left ‖ right)`.
+> - **Tous les `block_hash`, `tx_hash`, `state_root`, tiebreakers** passent à BLAKE3.
+>
+> Le reste de cet ADR (Ed25519, Bech32, structure de l'arbre de Merkle) reste valide.
+> `STORAGE_VERSION` est passé à 20 : les bases pré-BLAKE3 sont refusées (pas de migration
+> possible — les empreintes stockées appartiennent à un autre protocole).
 
 ## 1. Contexte
 

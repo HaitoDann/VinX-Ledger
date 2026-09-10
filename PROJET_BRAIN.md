@@ -20,6 +20,31 @@
 > ⬆️ **Mis à jour à chaque fin de session. C'est la première chose à lire au retour.**
 
 ```
+[10/09/2026 — série de durcissement post-audit]
+✅ Fait :     Trois audits (Claude/ChatGPT/Gemini) → correctifs vérifiés, chacun avec PoC échouant/vert
+              ADR 0069 — BLAKE3 remplace SHA-256 IMPLÉMENTÉ (avant genesis, breaking) — STORAGE_VERSION 19→20
+              ADR 0070 — Auth proposeur + registre BLS indexé
+              ADR 0071 — Verrou de vote persistant (Storage::claim_vote)
+              ADR 0072 — consensus_root engage tout l'état (emission_started + foundry ajoutés)
+              ADR 0073 — signing_bytes injectif (payload_len u32 BE) — corrige collision txid VINX-12
+              ADR 0074 — Checkpoints de subjectivité faible + garde transport via crate url
+              ADR 0075 — Clé BLS obligatoire au bonding + PoP liée à identité (DST V1→V2)
+              ADR 0080 — Banc adversarial multi-nœuds (6 scénarios, mutation testing)
+              check_admin fail-closed (VINX-20) ; passe auto-adversariale → 4 défauts trouvés
+              Doc + ADR balayés et alignés (BLAKE3, PoP V2, BLS-au-bonding, recentrage v6.0)
+              429 tests verts, clippy propre, tout intégré sur main
+
+🔜 Next :     Cérémonie de genèse multi-validateurs (ADR 0075 §1) — chaque validateur fournit clé BLS + PoP
+              Recoupement multi-pairs des checkpoints (ADR 0074, partiel)
+              Contre-audits externes (prompts prêts) + publication SECURITY.md (ADR 0078)
+              Remplir genesis-testnet.json avec les vraies adresses
+
+🤖 AI :       Demandé → auditer, écrire les PoC, corriger, rédiger les ADR manquants pour lancer
+              Codé → correctifs 0069-0080, banc adversarial, balayage documentaire complet
+              ⚠️ Divergence → —
+
+🚧 Bloqué :   Besoin des adresses admin + validateur réelles + cérémonie multi-validateurs
+
 [02/09/2026 — ~2h]
 ✅ Fait :     Décision produit formalisée : VinX = rail de paiement uniquement, abandon ZK (ADR 0064)
               ADR 0064 — VinX rail de paiement (supersède modules/ZK/Appchains)
@@ -47,8 +72,8 @@
 
 > **3 items maximum.** Tout le reste attend dans le Backlog.
 
-- [ ] Implémenter ADR 0069 (BLAKE3) — breaking change, **impératif avant genesis**
-- [ ] Remplir `genesis-testnet.json` (admin_address, initial_validator, genesis_timestamp fixé)
+- [x] ~~Implémenter ADR 0069 (BLAKE3)~~ — **fait** (10/09/2026, avant genesis)
+- [ ] Cérémonie de genèse multi-validateurs (ADR 0075 §1) + remplir `genesis-testnet.json`
 - [ ] Déployer le nœud de genèse sur serveur public + HTTPS
 
 ---
@@ -179,12 +204,12 @@ Date : 02/09/2026 | Statut : **Décidé** | Fichier : `docs/adr/0068-batch-verif
 ---
 
 ### ADR 0069 : BLAKE3 remplace SHA-256 ⚠️ avant genesis
-Date : 02/09/2026 | Statut : **Décidé — à implémenter avant genesis** | Fichier : `docs/adr/0069-blake3-remplace-sha256.md`
+Date : 02/09/2026 | Statut : **🔧 Implémenté (10/09/2026, avant genesis)** | Fichier : `docs/adr/0069-blake3-remplace-sha256.md`
 
 **Contexte** : SHA-256 hérité — lent. BLAKE3 est 5-8x plus rapide sur matériel moderne (AVX2/NEON).
-**Choix** : Remplacer SHA-256 par BLAKE3 dans `block.rs`, `transaction.rs`, `merkle.rs`.
-**Pourquoi** : Gain sur hot path (hash par tx, hash d'en-tête). Changement breaking — impraticable après genesis.
-**Implémenté dans** : `crates/vinx-core/src/block.rs`, `transaction.rs`, `merkle.rs`. Bump `STORAGE_VERSION`.
+**Choix** : `vinx_crypto::sha256 → hash256` (crate `blake3`). Touche adresse, Merkle, block/tx hash, state_root, tiebreakers.
+**Pourquoi** : Gain sur hot path. Changement breaking — impraticable après genesis, donc fait maintenant.
+**Implémenté dans** : `crates/vinx-crypto/src/hash.rs` (+ address.rs, tout le workspace). `STORAGE_VERSION 19→20` — bases pré-BLAKE3 refusées (pas de migration possible). Test-garde `test_hash256_is_not_sha256`. Le ciphersuite BLS garde SHA-256 en interne (indépendant).
 **⚠️ Contrainte** : fusionner AVANT le premier bloc du testnet. Après = hard fork.
 
 ---

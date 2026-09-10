@@ -265,14 +265,16 @@ Sans calendrier engagé, par étapes :
 **✅ Fait**
 - Protocole core complet : consensus PoA + BLS, ECVRF RFC 9381, compact blocks (ADR 0037), snapshot sync + parallel sync (ADR 0038), storage persistant, RPC REST
 - Modèle fair launch implémenté : émission par le travail, bond validateur, slashing prouvable, frais au producteur
-- Consensus multi-validateur éprouvé (banc n=3 : finalité au quorum, tolérance à 1 panne, sûreté à 1/3)
+- Consensus multi-validateur éprouvé (banc n=3 + banc adversarial multi-nœuds : finalité au quorum, tolérance à 1 panne, sûreté à 1/3)
+- **BLAKE3** intégré avant toute genèse publique (ADR 0069) — remplace SHA-256, breaking assumé en pré-mainnet
+- **Durcissement post-audit (ADRs 0069–0080)** : auth proposeur + registre BLS (0070), verrou de vote persistant (0071), `consensus_root` complet (0072), `signing_bytes` injectif (0073), checkpoints de subjectivité faible (0074), clé BLS + PoP liée à l'identité au bonding (0075)
 - Infrastructure testnet : Dockerfile, docker-compose, genesis-testnet.json
 
 **🔜 Prochaines étapes (dans l'ordre)**
-1. **BLAKE3** avant genesis (ADR 0069) — changement de protocole, breaking, impraticable après le premier bloc
-2. **Genesis testnet** — fixer les adresses réelles, timestamp coordonné, lancer le nœud public
-3. **HTTPS** sur le RPC public (nginx + Let's Encrypt)
-4. **3+ validateurs indépendants** — procédure documentée, vérification du genesis hash
+1. **Genesis testnet** — fixer les adresses réelles, timestamp coordonné, lancer le nœud public
+2. **HTTPS** sur le RPC public (nginx + Let's Encrypt)
+3. **3+ validateurs indépendants** — cérémonie de genèse documentée (ADR 0075 §1), vérification du genesis hash, recoupement multi-pairs des checkpoints (ADR 0074)
+4. **Contre-audits externes** + publication SECURITY.md (ADR 0078)
 
 **📋 Backlog**
 - Monitoring : Prometheus + Grafana sur `/metrics`

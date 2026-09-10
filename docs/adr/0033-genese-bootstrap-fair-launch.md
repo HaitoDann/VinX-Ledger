@@ -15,6 +15,12 @@
 >   structurellement le front-loading sans toucher la courbe elle-même.
 > - **§1 (genèse multi-validateurs + genesis_hash)** reste à implémenter — c'est la
 >   partie la plus concrète et la seule encore ouverte de cet ADR.
+>
+> **Complément (septembre 2026, ADR 0075) :** la genèse **mono-validateur** enrôle désormais
+> la clé BLS du validateur initial et vérifie sa PoP (ADR 0075 §3.2, implémenté) — un validateur
+> de genèse sans clé BLS ne pourrait pas co-signer. La **cérémonie multi-validateurs** (choisir
+> les N initiaux, le comité admin K-of-M, empreinter le `genesis_hash`) reste le seul volet ouvert
+> de cet ADR ; chaque validateur initial devra fournir sa clé BLS + PoP dans le `GenesisConfig`.
 
 ## Contexte
 

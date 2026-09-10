@@ -12,6 +12,15 @@
 > n'est plus par score mais par **VRF Algorand-style** (ADR 0029). Les deux ADR sont
 > complémentaires : 0038 = qui peut être dans le pool ; 0029 = qui est dans le comité du bloc.
 
+> ⚠️ **Révision (septembre 2026, ADRs 0069/0075) :**
+> - **Condition d'entrée renforcée.** Poster le bond ne suffit plus : l'entrée dans le pool
+>   exige aussi une **clé BLS valide + une Proof-of-Possession** liée à
+>   `bls_pub_key ‖ validator_address ‖ chain_id` (ADR 0075 §3.1). C'est un invariant de liveness —
+>   un validateur qui ne peut pas co-signer ne doit pas pouvoir compter dans un quorum.
+> - **Tiebreaker.** Les formules `SHA-256(epoch_number_le ‖ validator_address)` de cet ADR
+>   (§2.2, §2.6, §3) se lisent désormais **`BLAKE3(...)`** — le protocole hache en BLAKE3
+>   (ADR 0069). La sémantique (déterministe, uniforme, varie par époque) est inchangée.
+
 ---
 
 ## 1. Contexte

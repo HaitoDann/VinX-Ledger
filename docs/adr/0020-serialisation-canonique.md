@@ -3,7 +3,16 @@
 - **Statut :** Accepté — ✅ tranches 1 & 2 implémentées (vecteurs dorés hex sur tous les
   encodages consensus-critiques)
 - **Catégorie :** Robustesse · **Priorité :** 🟠 moyenne
-- **Date :** Juillet 2026
+- **Date :** Juillet 2026 · vecteurs re-figés septembre 2026
+- **Complété par :** [ADR 0073](./0073-injectivite-serialisation-signee.md) (préfixe de longueur
+  `u32` BE dans `signing_bytes` — injectivité) et [ADR 0069](./0069-blake3-remplace-sha256.md)
+  (BLAKE3 remplace SHA-256).
+
+> ⚠️ **Note (septembre 2026).** Les vecteurs dorés hex de `BlockHeader::hash` et de
+> `Transaction::signing_bytes` ont été **recalculés** : le hachage passe à BLAKE3 (ADR 0069) et
+> le layout de `signing_bytes` gagne un `payload_len(u32 BE)` écrit inconditionnellement (ADR 0073,
+> corrige la collision de txid VINX-12). Les tests `test_block_header_hash_golden_vector` et
+> `test_signing_bytes_golden_vector` portent les nouvelles valeurs faisant foi.
 
 ## Contexte
 

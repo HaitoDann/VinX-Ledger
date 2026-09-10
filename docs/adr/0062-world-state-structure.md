@@ -70,16 +70,26 @@ Account {
 
 ## 4. Calcul du state_root
 
+> ⚠️ **Layout révisé (ADRs 0072 & 0069).** L'esquisse ci-dessous est conservée pour l'intuition,
+> mais **le layout faisant foi est celui d'ADR 0072** : `state_root = hash256(DST ‖ accounts_root ‖
+> consensus_root)`, où `consensus_root` engage **tous** les champs de consensus (dont
+> `emission_started` et `foundry`, ajoutés depuis). Le hachage est **BLAKE3** (`hash256`, ADR 0069),
+> plus SHA-256.
+
 ```
-state_root = merkle_root(
-    sha256(account_0) ‖ sha256(account_1) ‖ … ‖ sha256(account_n) ‖
-    sha256(validators) ‖ sha256(modules) ‖ sha256(admin_policy) ‖
-    sha256(reliability) ‖ emitted_atoms ‖ epoch_pot ‖ destroyed_atoms
-)
+accounts_root = merkle_root( hash256(account_0) ‖ hash256(account_1) ‖ … ‖ hash256(account_n) )
+
+consensus_root = hash256(
+    validators ‖ validator_pool ‖ admin_policy ‖ reliability ‖ epoch_beacon ‖
+    emitted_atoms ‖ epoch_pot ‖ destroyed_atoms ‖ emission_started ‖ foundry ‖ …
+)   // liste exhaustive et faisant foi dans ADR 0072 (ConsensusCommitment)
+
+state_root = hash256(DST ‖ accounts_root ‖ consensus_root)
 ```
 
 Le `state_root` est inclus dans l'en-tête de bloc et co-signé par les validateurs →
-garantit que tous les nœuds ont appliqué les mêmes transitions.
+garantit que tous les nœuds ont appliqué les mêmes transitions **et** partagent le même état
+de consensus (VINX-04).
 
 ## 5. Transition (settle_block)
 

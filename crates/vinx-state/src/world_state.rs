@@ -395,8 +395,8 @@ pub fn v19_meta_suffix() -> Vec<u8> {
     bincode::serialize(&0u64).expect("serialize u64")
 }
 
-/// SHA-256(epoch_number_le || address) — deterministic sort key for tiebreaking
-/// validators with identical reliability scores at epoch rotation (ADR 0038).
+/// BLAKE3(epoch_number_le || address) — deterministic sort key for tiebreaking
+/// validators with identical reliability scores at epoch rotation (ADR 0038; hash → BLAKE3 per ADR 0069).
 fn epoch_tiebreaker(epoch: u64, addr: &Address) -> [u8; 32] {
     let mut buf = [0u8; 8 + 20];
     buf[..8].copy_from_slice(&epoch.to_le_bytes());
@@ -674,7 +674,7 @@ impl WorldState {
     }
 
     /// Closes the current epoch: decays score windows, ticks warmup, rotates the active
-    /// set by score (SHA-256 tiebreaker), distributes the epoch pot, and updates
+    /// set by score (BLAKE3 tiebreaker), distributes the epoch pot, and updates
     /// `validator_set` to the new active set (ADR 0028 + ADR 0038).
     ///
     /// Called automatically from `settle_block` when `EPOCH_DURATION_SECS` have elapsed.
@@ -754,7 +754,7 @@ impl WorldState {
             entry.tick_warmup();
         }
 
-        // 3. Rank eligible validators by score, SHA-256 tiebreaker.
+        // 3. Rank eligible validators by score, BLAKE3 tiebreaker.
         let n = self.active_set_size as usize;
         let mut eligible: Vec<(Address, u32)> = self
             .validator_pool

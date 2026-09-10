@@ -43,7 +43,7 @@ Ce dossier trace toutes les décisions d'architecture de VinX Ledger. Chaque ADR
 
 | ADR | Titre | Statut |
 |---|---|---|
-| [0051](./0051-primitives-cryptographiques-ed25519-bech32.md) | Primitives crypto : Ed25519, Bech32, SHA-256, Merkle | ✅ Vérifié |
+| [0051](./0051-primitives-cryptographiques-ed25519-bech32.md) | Primitives crypto : Ed25519, Bech32, Merkle (hash → BLAKE3, ADR 0069) | ✅ Vérifié |
 | [0052](./0052-keystore-chiffrement-wallet.md) | Keystore — chiffrement du fichier portefeuille | ✅ Vérifié |
 | [0046](./0046-bls-aggregate-cosignatures.md) | BLS12-381 — agrégation des co-signatures | ✅ Vérifié |
 
@@ -316,7 +316,7 @@ d'exploitation, correctifs, prompts de contre-audit — vit dans
 | [0048](./0048-force-exit-escape-hatch.md) | ForceExit / Escape Hatch (0x0B) | 📐 Accepté | 3 |
 | [0049](./0049-clearinghouse-cross-appchain.md) | Clearinghouse cross-Appchain | 📐 Accepté | 3 |
 | [0050](./0050-sp1-proof-verification-l1.md) | Vérification preuves SP1 Groth16 | 📐 Accepté | 3 |
-| [0051](./0051-primitives-cryptographiques-ed25519-bech32.md) | Primitives crypto (Ed25519, Bech32, SHA-256, Merkle) | ✅ Vérifié | 1 |
+| [0051](./0051-primitives-cryptographiques-ed25519-bech32.md) | Primitives crypto (Ed25519, Bech32, Merkle ; hash → BLAKE3, ADR 0069) | ✅ Vérifié | 1 |
 | [0052](./0052-keystore-chiffrement-wallet.md) | Keystore — chiffrement wallet (Argon2id + AES-256-GCM) | ✅ Vérifié | 1 |
 | [0053](./0053-anti-replay-nonce-chainid-expiry.md) | Anti-replay : nonce, chain_id, expiry_height | ✅ Vérifié | 1 |
 | [0054](./0054-types-transactions-fondamentaux.md) | Types de transactions fondamentaux (0x01–0x0A) | ✅ Vérifié | 1 |

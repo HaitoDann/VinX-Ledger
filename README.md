@@ -133,7 +133,7 @@ Le nœud expose **http://localhost:8545** :
 
 ```
 crates/
-├── vinx-crypto/        Ed25519, BLS12-381, adresses Bech32, SHA-256, Merkle
+├── vinx-crypto/        Ed25519, BLS12-381, adresses Bech32, BLAKE3, Merkle
 ├── vinx-core/          Amount, Account, Transaction, Block
 ├── vinx-state/         WorldState, genesis, apply_transaction, émission
 ├── vinx-node/          Nœud, mempool, RPC HTTP, producteur de blocs, persistance

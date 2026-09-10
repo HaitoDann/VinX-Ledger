@@ -1,12 +1,27 @@
 # ADR 0046 — BLS aggregate co-signatures for block finality
 
-- **Statut :** 🟡 En cours d'implémentation.
+- **Statut :** 🔧 Implémenté (`vinx-crypto/bls.rs`, co-signatures BLS dans les blocs).
 - **Catégorie :** Cryptographie · Consensus · **Priorité :** 🔴 haute
-- **Date :** Août 2026
+- **Date :** Août 2026 · durci septembre 2026
 - **Liens :** remplace les N signatures Ed25519 individuelles dans les blocs par une
   signature BLS12-381 agrégée unique ; permet de supprimer `MAX_ACTIVE_SET_SIZE` (ADR 0038).
+- **Révisé par :** [ADR 0070](./0070-authentification-proposeur-registre-bls.md) (registre BLS
+  indexé, auth proposeur) et [ADR 0075](./0075-genese-enrolement-validateurs.md) (clé BLS **obligatoire**
+  au bonding, PoP liée à l'identité).
 
 ---
+
+> ⚠️ **Révision (septembre 2026, ADRs 0070/0075).** Deux points de cet ADR ont évolué depuis
+> la rédaction initiale :
+> - **La clé BLS n'est plus optionnelle.** Le « mode dégradé Ed25519-only » évoqué en §4 et §6
+>   est **supprimé** : une clé BLS valide **et** une Proof-of-Possession sont exigées au bonding
+>   (ADR 0075 §3.1 — invariant de liveness ; un validateur sans clé BLS ne peut pas co-signer,
+>   donc ne doit pas pouvoir bloquer un quorum). `bls_pub_key` et `bls_pop` ne sont plus `Option`
+>   côté validation d'entrée.
+> - **La PoP est liée à l'identité.** Elle ne signe plus la seule clé BLS mais
+>   `bls_pub_key ‖ validator_address ‖ chain_id` (DST `VINX_BLS_POP_V2`, voir `pop_message`), ce
+>   qui empêche de rejouer une PoP sous une autre adresse ou une autre chaîne (ADR 0075 §3.2).
+> - Le DST des co-signatures est `VINX_BLS_COSIG_V1`.
 
 ## 1. Contexte
 

@@ -7,10 +7,10 @@ use std::str::FromStr;
 
 pub const BECH32_HRP: &str = "vinx";
 
-/// Length in bytes of an address payload (first 20 bytes of SHA-256(pubkey)).
+/// Length in bytes of an address payload (first 20 bytes of BLAKE3(pubkey)).
 pub const ADDRESS_LEN: usize = 20;
 
-/// A VinX Ledger address: the raw 20-byte payload (`SHA-256(public_key)[..20]`).
+/// A VinX Ledger address: the raw 20-byte payload (`BLAKE3(public_key)[..20]`, ADR 0069).
 ///
 /// The canonical form is the raw bytes — signatures ([`crate::Address::as_bytes`]
 /// via `signing_bytes`), Merkle leaf hashing and on-disk/wire encodings all operate

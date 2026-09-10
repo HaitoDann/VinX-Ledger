@@ -1,17 +1,19 @@
 # VinX Ledger — État du Projet
 
 > Document de référence interne — mis à jour à chaque sprint.
-> Dernière mise à jour : août 2026 (**consensus multi-validateur éprouvé : banc n=3 réel, finalité au quorum, jailing/rotation, fork-choice câblé de bout en bout** + **ADR 0040 implémenté** : émission progressive sans La Fonderie, T_half ~20 ans — whitepaper v5.0). **Cadence de consensus révisée** (12 s fixe, 3 000 tx/bloc max — anti-fork).
+> Dernière mise à jour : **septembre 2026** — **recentrage v6.0 (ADR 0064) : rail de paiement minimaliste L1 PoS** ; les subnets / modules / Appchains ZK sont gelés hors scope. **Série de durcissement post-audit (ADRs 0069–0080)** : BLAKE3 remplace SHA-256 avant genesis (ADR 0069), authentification proposeur + registre BLS (0070), verrou de vote persistant (0071), `consensus_root` complet (0072), sérialisation signée injective (0073), checkpoints de subjectivité faible (0074), clé BLS + PoP liée à l'identité exigée au bonding (0075), banc adversarial multi-nœuds (0080). **429 tests verts, clippy propre.**
 
 ---
 
 > ## 🧭 Où en est le projet (lis ceci en premier)
 >
-> **Le socle L1 est solide** (banc n=3 éprouvé, 309 tests verts, clippy propre). **L'architecture cible est désormais décidée** : VinX est un **settlement layer ZK-natif** avec consensus **PoS Algorand-style** (comité VRF n≈100, BLS agrégé) et un écosystème d'**Appchains** générant des preuves SP1.
+> **Le socle L1 est solide** (banc n=3 éprouvé + banc adversarial multi-nœuds, 429 tests verts, clippy propre). **Recentrage v6.0 acté (ADR 0064)** : VinX est un **rail de paiement minimaliste L1 PoS** — pas de settlement layer ZK, pas d'Appchains. Le consensus cible reste **PoS Algorand-style** (comité VRF n≈100, BLS agrégé).
 >
-> **Deux pivots architecturaux actés en août 2026 :**
-> 1. **PoA Threshold → PoS Algorand** : le consensus cible est le comité VRF (ADR 0029, promu Accepté). Le pool de validateurs devient permissionless (ADR 0038). La sélection par score est remplacée par la sélection par VRF.
-> 2. **Modules bondés → Appchains ZK** : les modules hors-L1 génèrent des preuves SP1 soumises au L1 (ADR 0050). Le L1 passe du niveau 1 (bond + réputation) au niveau 3 (vérification cryptographique). ForceExit (ADR 0048) et Clearinghouse (ADR 0049) complètent l'écosystème.
+> **Pivot architectural acté (v6.0, ADR 0064) :**
+> - **Recentrage sur le rail de paiement** : les subnets / modules bondés / Appchains ZK (ADRs 0001, 0010, 0024, 0034, 0048, 0049, 0050) sont **gelés hors scope**. VinX fait une chose : transférer de la valeur, avec finalité BFT et émission progressive.
+> - **PoA Threshold → PoS Algorand** : le consensus cible est le comité VRF (ADR 0029). Le pool de validateurs est permissionless (ADR 0038), avec **clé BLS + PoP obligatoire au bonding** (ADR 0075).
+>
+> **Durcissement pré-lancement (ADRs 0069–0080, septembre 2026)** : audit externe transformé en correctifs vérifiés — BLAKE3 (0069), auth proposeur (0070), verrou de vote (0071), `consensus_root` complet (0072), `signing_bytes` injectif (0073), checkpoints (0074), enrôlement validateurs (0075), banc adversarial (0080).
 >
 > **La source de vérité de la feuille de route, c'est [`docs/adr/README.md`](./docs/adr/README.md).** Ce document-ci décrit le **code tel qu'il tourne** ; l'index ADR décrit **ce qui est décidé et ce qui reste**.
 >
@@ -26,7 +28,9 @@
 > **0015** (vérif parallèle signatures) · **0026** (dépôt existentiel) · **0022** (P2P anti-DoS) · **0011** (gouvernance K-of-M) · **0010** (registre modules bondés) · **0020** (sérialisation canonique) · **0005** (MTP) · **0043** (cadence fixe 12 s) · **0045** (abolition heartbeat).
 >
 > ### Architecture cible décidée — à implémenter
-> **PoS Algorand (🔴 priorité haute) :** comité VRF ECVRF RFC 9381 (ADR 0029), admission permissionless PoS (ADR 0038). **Appchains ZK (🔴 priorité haute) :** SP1 proof verification L1 (ADR 0050), ForceExit/Escape Hatch (ADR 0048), Clearinghouse cross-chain (ADR 0049), Celestia DA (ADR 0034). **Économie (🟠) :** récompenses par époque (ADR 0028), rémunération modules escrow (ADR 0039). **Sûreté (🟠) :** accountability co-sign (ADR 0030), churn validateurs (ADR 0036), bornes ressources tx (ADR 0035).
+> **PoS Algorand (🔴 priorité haute) :** comité VRF ECVRF RFC 9381 (ADR 0029), admission permissionless PoS (ADR 0038). **Lancement (🔴) :** cérémonie de genèse multi-validateurs (ADR 0075 §1), recoupement multi-pairs des checkpoints (ADR 0074), critères testnet/mainnet (ADR 0080). **Économie (🟠) :** récompenses par époque (ADR 0028). **Sûreté (🟠) :** accountability co-sign (ADR 0030), churn validateurs (ADR 0036), bornes ressources tx (ADR 0035).
+>
+> **Gelé hors scope (v6.0, ADR 0064) :** Appchains ZK / SP1 (ADR 0050), ForceExit (ADR 0048), Clearinghouse (ADR 0049), Celestia DA (ADR 0034), modules bondés (ADR 0010) — abandonnés au profit du rail de paiement pur.
 >
 > ### ⚠️ Chemin critique
 > **Court terme :** tx `Unjail` + règle 2 co-signatures (ADR 0027) ; accountability co-sign (ADR 0030). **Moyen terme :** comité VRF (ADR 0029) — prérequis de tout le reste ; admission PoS (ADR 0038) ; récompenses époque (ADR 0028). **Long terme :** SP1 proof verification (ADR 0050) ; ForceExit (ADR 0048) ; Clearinghouse (ADR 0049) ; Celestia (ADR 0034).
@@ -52,7 +56,7 @@
 VinX Ledger est une blockchain L1 de paiement écrite intégralement en Rust, sans framework tiers. Voici la liste complète des fonctionnalités implémentées :
 
 ### Protocole de base
-- [x] Cryptographie Ed25519 + SHA-256 + adresses Bech32 (`vinx1...`)
+- [x] Cryptographie Ed25519 + **BLAKE3** (ADR 0069, remplace SHA-256) + adresses Bech32 (`vinx1...`)
 - [x] Arbre de Merkle avec preuves d'inclusion vérifiables
 - [x] 7 types de transactions (transfer, stake, unstake, announce-upgrade, slash-validator, admin-action, anchor-state) — voir §2
 - [x] État mondial (`WorldState`) avec validation complète
@@ -142,7 +146,7 @@ sdk/
 
 | Élément | Description |
 |---------|-------------|
-| `sha256(data)` | Hachage SHA-256 |
+| `hash256(data)` | Hachage **BLAKE3** (ADR 0069) |
 | `KeyPair` | Paire de clés Ed25519 |
 | `PublicKey` | Clé publique 32 octets |
 | `VinxSignature` | Signature Ed25519 64 octets |
@@ -448,7 +452,7 @@ Lance 3 nœuds en réseau isolé :
 
 | Job | Ce qu'il vérifie |
 |-----|-----------------|
-| `cargo test` | ~309 tests unitaires et d'intégration (workspace) |
+| `cargo test` | ~429 tests unitaires et d'intégration (workspace) |
 | `clippy` | Qualité du code Rust (zéro warning autorisé) |
 | `rustfmt` | Formatage du code |
 | `sdk-test` | 19 tests TypeScript Jest |
@@ -501,12 +505,12 @@ sync_peer_rpc = "http://1.2.3.4:8545"  # Sync depuis un pair au démarrage
 
 ### 🧭 Reprendre le travail (prochaine session)
 
-**Architecture cible décidée en août 2026 :** VinX = settlement layer ZK-natif, consensus PoS Algorand-style (comité VRF n≈100, BLS agrégé), Appchains ZK (SP1 + Celestia DA).
+**Architecture cible (v6.0, ADR 0064) :** VinX = **rail de paiement minimaliste L1 PoS**, consensus PoS Algorand-style (comité VRF n≈100, BLS agrégé). Les Appchains ZK / SP1 / Celestia sont **gelées hors scope**.
 
-Le **socle L1 est solide** (banc n=3, 309 tests). Les prochains chantiers par priorité :
-1. **(Court terme)** tx `Unjail` + règle 2 co-signatures absentes (ADR 0027) ; accountability co-sign (ADR 0030) ; soak fork-choice n=3 réseau réel.
-2. **(Moyen terme — PoS Algorand)** Comité VRF ECVRF RFC 9381 (ADR 0029) — **prérequis de tout le reste** ; admission PoS permissionless (ADR 0038) ; récompenses par époque (ADR 0028).
-3. **(Long terme — Appchains ZK)** SP1 proof verification L1 (ADR 0050) ; ForceExit (ADR 0048) ; Clearinghouse (ADR 0049) ; Celestia DA (ADR 0034).
+Le **socle L1 est solide** (banc n=3 + banc adversarial multi-nœuds, 429 tests, série de durcissement 0069–0080 intégrée). Les prochains chantiers par priorité :
+1. **(Court terme — lancement)** cérémonie de genèse multi-validateurs (ADR 0075 §1) ; recoupement multi-pairs des checkpoints (ADR 0074) ; contre-audits externes (ChatGPT/Gemini) ; publication SECURITY.md (ADR 0078).
+2. **(Moyen terme — PoS Algorand)** Comité VRF ECVRF RFC 9381 (ADR 0029) — **prérequis de tout le reste** ; récompenses par époque (ADR 0028) ; accountability co-sign (ADR 0030).
+3. **(Optimisations, non bloquant)** allocateur mimalloc (ADR 0065), memoïsation hash tx (0066), cache de signatures (0067), batch-verify Ed25519 (0068).
 
 ---
 

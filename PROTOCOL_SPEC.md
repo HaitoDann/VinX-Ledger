@@ -29,9 +29,10 @@
 | Rôle | Algorithme |
 |---|---|
 | Signatures de transactions | Ed25519 |
-| Co-signatures de blocs | BLS12-381 (`blst`) |
-| Hachage | SHA-256 |
-| Arbre d'état | Merkle SHA-256 |
+| Co-signatures de blocs | BLS12-381 (`blst`) — PoP liée à `bls_pub_key ‖ validator_address ‖ chain_id` (ADR 0070/0075) |
+| Hachage | **BLAKE3** (ADR 0069 — remplace SHA-256 avant genesis) |
+| Arbre d'état | Merkle **BLAKE3** |
+| Dérivation d'adresse | `BLAKE3(public_key)[..20]` |
 | Encodage des adresses | Bech32 |
 | VRF (consensus cible) 🔴 | ECVRF RFC 9381 |
 
@@ -198,6 +199,7 @@ frais = base_fee × poids(type) × multiplicateur_congestion
 | Règle | Valeur |
 |---|---|
 | Mode | **Permissionless** — bond suffit, aucune approbation admin |
+| Clé BLS obligatoire | **Oui** — clé BLS + PoP valide exigées au bonding (ADR 0075 §3.1, invariant de liveness ; plus de mode dégradé Ed25519-only) |
 | Bond requis par défaut | **100 000 VinX** (gouvernable dans les bornes immuables) |
 | `MIN_BOND_HARD_FLOOR` | **10 000 VinX** — immuable |
 | `MAX_BOND_HARD_CAP` | **100 000 000 VinX** — immuable |
@@ -215,7 +217,7 @@ frais = base_fee × poids(type) × multiplicateur_congestion
 | N gouvernable | ±2 par décision, cooldown 7 j |
 | Score | Taux de co-signature sur une fenêtre glissante de **7 jours** |
 | Rotation | À chaque clôture d'époque — top-N par score |
-| Tiebreaker | `SHA-256(epoch_number_le ‖ validator_address)` |
+| Tiebreaker | `BLAKE3(epoch_number_le ‖ validator_address)` (ADR 0069) |
 
 ### 9.4 Déliaison ✅
 
@@ -404,7 +406,7 @@ vinx_tx_in_block_total
 
 | ADR | Titre résumé |
 |---|---|
-| 0051 | Primitives crypto : Ed25519, Bech32 `vinx1...`, SHA-256, Merkle |
+| 0051 | Primitives crypto : Ed25519, Bech32 `vinx1...`, Merkle (hachage → **BLAKE3**, ADR 0069) |
 | 0052 | Keystore wallet — Argon2id + AES-256-GCM |
 | 0053 | Anti-replay : nonce, chain_id, expiry_height |
 | 0054 | Types de transactions fondamentaux (0x01–0x0A) |
@@ -414,7 +416,7 @@ vinx_tx_in_block_total
 | 0058 | Couche P2P de base (libp2p + gossipsub) |
 | 0059 | API RPC REST (routes publiques + admin fail-closed + faucet) |
 | 0060 | Explorateur de blocs embarqué (UI HTML statique) |
-| 0061 | Stockage persistant (STORAGE_VERSION=14, migrations auto) |
+| 0061 | Stockage persistant (STORAGE_VERSION=20 ; bases pré-BLAKE3 refusées, pas de migration — ADR 0069) |
 | 0062 | WorldState — structure BTreeMap canonique |
 | 0063 | Consensus PoA Threshold initial (round-robin + quorum BFT) |
 | 0002 | Finalité au quorum (prefix-closed, `⌈2n/3⌉`) |
@@ -437,6 +439,23 @@ vinx_tx_in_block_total
 | 0043 | Cadence fixe 12 s, 3 000 tx/bloc |
 | 0045 | Abolition du heartbeat |
 | 0046 | BLS12-381 agrégé (co-signatures) |
+
+### Phase 1b — Durcissement pré-lancement 🔧 Implémenté (post-audit)
+
+| ADR | Titre résumé |
+|---|---|
+| 0069 | BLAKE3 remplace SHA-256 — avant genesis (breaking) |
+| 0070 | Authentification du proposeur & registre BLS indexé |
+| 0071 | Verrou de vote persistant (`Storage::claim_vote`) |
+| 0072 | `consensus_root` engage tout l'état de consensus |
+| 0073 | Injectivité de la sérialisation signée (`signing_bytes` length-prefixed) |
+| 0074 | Synchronisation d'état & checkpoints de subjectivité faible |
+| 0075 | Genèse — enrôlement validateurs, clé BLS + PoP liée à l'identité au bonding |
+| 0076 | Gestion opérationnelle des clés validateur |
+| 0077 | Finalité de paiement — garanties de confirmation |
+| 0078 | Divulgation de vulnérabilités & réponse incident |
+| 0079 | Release, versioning & upgrade réseau |
+| 0080 | Critères de lancement testnet/mainnet (banc adversarial) |
 
 ### Phase 2 — PoS Algorand-style 📐 Acceptés (architecture cible)
 
