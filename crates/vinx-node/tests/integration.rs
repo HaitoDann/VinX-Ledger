@@ -538,8 +538,7 @@ async fn test_crash_recovery() {
         let fee = amount.calculate_fee(Amount::from_atoms(DEFAULT_FEE_FLOOR_ATOMS));
 
         for nonce in 0..N_TXS {
-            let tx =
-                Transaction::new_transfer(&sender_kp, receiver_addr, amount, fee, nonce);
+            let tx = Transaction::new_transfer(&sender_kp, receiver_addr, amount, fee, nonce);
             node.mempool.write().await.add(tx).unwrap();
         }
 

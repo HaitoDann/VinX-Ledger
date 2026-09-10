@@ -548,8 +548,7 @@ mod tests {
         mp.add(make_tx_with_fee(&kp_low, to, 0, 1)).unwrap();
         assert_eq!(mp.size(), 1);
         // Higher-fee tx should evict the low-fee one
-        mp.add(make_tx_with_fee(&kp_high, to, 0, 10))
-            .unwrap();
+        mp.add(make_tx_with_fee(&kp_high, to, 0, 10)).unwrap();
         assert_eq!(mp.size(), 1);
         // The remaining tx should have the high fee
         let drained = mp.drain(10);
@@ -653,14 +652,8 @@ mod tests {
         let mut confirmed = std::collections::HashMap::new();
         confirmed.insert(addr, 2u64);
         mp.update_confirmed_nonces(&confirmed);
-        assert_eq!(
-            mp.add(make_tx(&kp, to, 0)),
-            Err(MempoolError::StaleNonce)
-        );
-        assert_eq!(
-            mp.add(make_tx(&kp, to, 1)),
-            Err(MempoolError::StaleNonce)
-        );
+        assert_eq!(mp.add(make_tx(&kp, to, 0)), Err(MempoolError::StaleNonce));
+        assert_eq!(mp.add(make_tx(&kp, to, 1)), Err(MempoolError::StaleNonce));
         mp.add(make_tx(&kp, to, 2)).unwrap();
         assert_eq!(mp.size(), 1);
     }

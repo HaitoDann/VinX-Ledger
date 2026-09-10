@@ -53,8 +53,7 @@ mod tests {
         let (mut state, sender_kp, _sender_addr) = funded_state();
         let receiver = Address::from_public_key(&KeyPair::generate().public_key());
         let amount = Amount::from_vinx(1_000);
-        let tx =
-            Transaction::new_transfer(&sender_kp, receiver, amount, fee_for(amount), 0);
+        let tx = Transaction::new_transfer(&sender_kp, receiver, amount, fee_for(amount), 0);
 
         state.apply_transaction(&tx).unwrap();
 
@@ -66,8 +65,7 @@ mod tests {
         let (mut state, sender_kp, _sender_addr) = funded_state();
         let receiver = Address::from_public_key(&KeyPair::generate().public_key());
         let amount = Amount::from_vinx(1_000);
-        let mut tx =
-            Transaction::new_transfer(&sender_kp, receiver, amount, fee_for(amount), 0);
+        let mut tx = Transaction::new_transfer(&sender_kp, receiver, amount, fee_for(amount), 0);
 
         // Tamper a signed field *after* signing so the Ed25519 signature no longer
         // verifies, without changing any economic field (TTL is far in the future).
@@ -164,8 +162,7 @@ mod tests {
         let receiver = Address::from_public_key(&KeyPair::generate().public_key());
         let amount = Amount::from_vinx(1);
 
-        let tx0 =
-            Transaction::new_transfer(&sender_kp, receiver, amount, fee_for(amount), 0);
+        let tx0 = Transaction::new_transfer(&sender_kp, receiver, amount, fee_for(amount), 0);
         state.apply_transaction(&tx0).unwrap();
         assert_eq!(state.accounts[&sender_addr].nonce, 1);
 

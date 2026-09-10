@@ -499,8 +499,7 @@ mod tests {
 
         let amount = Amount::from_vinx(100);
         let fee = amount.calculate_fee(Amount::from_atoms(DEFAULT_FEE_FLOOR_ATOMS));
-        let tx =
-            vinx_core::Transaction::new_transfer(&sender_kp, receiver_addr, amount, fee, 0);
+        let tx = vinx_core::Transaction::new_transfer(&sender_kp, receiver_addr, amount, fee, 0);
 
         mempool.add(tx).unwrap();
 
@@ -579,8 +578,7 @@ mod tests {
 
         let amount = Amount::from_vinx(1_000);
         let fee = Amount::from_vinx(1); // explicit fee > floor
-        let tx =
-            vinx_core::Transaction::new_transfer(&sender_kp, sender_addr, amount, fee, 0);
+        let tx = vinx_core::Transaction::new_transfer(&sender_kp, sender_addr, amount, fee, 0);
         mempool.add(tx).unwrap();
 
         let epoch_pot_before = state.epoch_dist_emission_pot;
