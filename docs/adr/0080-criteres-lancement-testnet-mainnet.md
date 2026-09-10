@@ -43,12 +43,8 @@ Réseau ouvert, jetons sans valeur, plusieurs opérateurs indépendants.
 - [x] Le `state_root` engage l'état de consensus (ADR 0072).
 - [x] La sérialisation signée est injective (ADR 0073).
 - [x] Une signature par validateur et par hauteur, verrou durable (ADR 0071).
-- [ ] **ADR 0069 (BLAKE3) tranché.** Il se déclare « à implémenter avant genesis block 0 »
-      et change **tous** les hachages du protocole, mais `grep -rn blake3 crates/` ne
-      retourne rien : le code hache en SHA-256. Soit il est implémenté avant la genèse du
-      testnet, soit il est explicitement repoussé derrière une hauteur d'activation
-      (ADR 0079 §2.3). Le laisser en suspens garantit un hard fork non planifié.
-      Les ADR 0065–0068 (performance) sont dans le même état « Décidé, non implémenté » —
+- [x] **ADR 0069 (BLAKE3) tranché et implémenté** avant toute genèse publique, comme
+      l'ADR l'exigeait. Les ADR 0065–0068 (performance) restent « Décidé, non implémenté » —
       sans impact consensus, donc non bloquants.
 - [ ] **Contre-audit externe** des correctifs traité : les prompts existent
       (`audit/post-fix/`), les retours ne sont pas revenus. Tout nouveau finding CONFIRMED
@@ -60,16 +56,26 @@ Tout ce qui précède est validé **en un seul processus**. Les propriétés pro
 propriétés **de réseau**. Un banc à 4 ou 7 validateurs, avec partitions contrôlées et un
 nœud attaquant, doit vérifier automatiquement :
 
-- [ ] deux blocs finalisés à la même hauteur n'ont jamais des hachages différents ;
-- [ ] un validateur ne signe jamais deux hachages à la même hauteur ;
-- [ ] aucun bloc ne devient final sans signatures de clés de validateurs réelles ;
-- [ ] tous les nœuds recevant un bloc s'accordent sur la validité cryptographique de ses
+- [x] deux blocs finalisés à la même hauteur n'ont jamais des hachages différents ;
+- [x] un validateur ne signe jamais deux hachages à la même hauteur ;
+- [x] aucun bloc ne devient final sans signatures de clés de validateurs réelles ;
+- [x] tous les nœuds recevant un bloc s'accordent sur la validité cryptographique de ses
       transactions ;
-- [ ] le fork-choice ne peut jamais remplacer un bloc finalisé ;
-- [ ] une entrée P2P malformée ne modifie jamais l'état de consensus ;
-- [ ] un producteur ne peut jamais valider localement ce qu'un validateur honnête rejette.
+- [x] le fork-choice ne peut jamais remplacer un bloc finalisé ;
+- [x] une entrée P2P malformée ne modifie jamais l'état de consensus ;
+- [x] un producteur ne peut jamais valider localement ce qu'un validateur honnête rejette.
 
-Ces invariants sont ceux proposés par l'audit ChatGPT ; ils sont adoptés tels quels.
+Ces invariants sont ceux proposés par l'audit ChatGPT ; ils sont adoptés tels quels et
+couverts par `crates/vinx-node/tests/adversarial_harness.rs` (4 à 7 nœuds, partitions
+contrôlées, nœud attaquant). Le banc pilote le vrai code — production, validation et
+application passent par les primitives partagées avec le chemin P2P — et il est **vérifié
+par mutation** : neutraliser l'authentification du proposeur ou le verrou de vote le fait
+échouer.
+
+**Ce que le banc ne couvre pas, et qui reste ouvert :** il simule le transport libp2p. Le
+gossip réel, la pression réseau, la latence et le comportement de GossipSub face à des pairs
+hostiles ne sont pas exercés. Un banc à processus séparés reste souhaitable avant le
+mainnet.
 
 ### 2.3 Amorçage et exploitation
 
@@ -92,9 +98,10 @@ Tout ce qui précède, **plus** :
 
 ### 3.1 Sécurité du protocole
 
-- [ ] Subjectivité faible : checkpoints livrés avec le binaire, recoupement multi-pairs
-      (ADR 0074 §2.3).
-- [ ] Clé BLS exigée au bonding, PoP liée à `adresse ‖ chain_id` (ADR 0075 §3.1–3.2).
+- [x] Subjectivité faible : checkpoints de confiance appliqués à la sync bloc à bloc et au
+      snapshot (ADR 0074 §2.3). **Reste ouvert :** le recoupement auprès de plusieurs pairs
+      indépendants, et la publication effective des checkpoints par VinX Labs.
+- [x] Clé BLS exigée au bonding, PoP liée à `adresse ‖ chain_id` (ADR 0075 §3.1–3.2).
 - [ ] Vecteur doré figeant l'encodage `consensus_root` (ADR 0072).
 - [ ] Fuzzing de collision sur `signing_bytes` (ADR 0073).
 - [ ] **Audit externe humain** — les audits IA de septembre 2026 ont trouvé des failles

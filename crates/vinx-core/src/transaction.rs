@@ -3,7 +3,7 @@ use crate::chain_id::CHAIN_ID_DEVNET;
 use crate::protocol::ProtocolVersion;
 use borsh::{BorshDeserialize, BorshSerialize};
 use serde::{Deserialize, Serialize};
-use vinx_crypto::{sha256, Address, Hash32, KeyPair, PublicKey, VinxSignature};
+use vinx_crypto::{hash256, Address, Hash32, KeyPair, PublicKey, VinxSignature};
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, BorshSerialize, BorshDeserialize)]
 pub enum TransactionType {
@@ -167,7 +167,7 @@ impl Transaction {
         // (`0x00`, or `0x01 ‖ sponsor[20]`). That encoding is not injective: for any
         // sponsor address whose last byte is 0x00 (1 in 256), a sponsored transaction and
         // an unsponsored one with a re-cut payload produce identical signing bytes — and
-        // therefore an identical txid, since `hash()` is `sha256(signing_bytes())`. One
+        // therefore an identical txid, since `hash()` is `hash256(signing_bytes())`. One
         // signature was valid for two economically different transactions, and the fee
         // payer differed between them (sponsor vs sender).
         //
@@ -188,7 +188,7 @@ impl Transaction {
     }
 
     pub fn hash(&self) -> Hash32 {
-        sha256(&self.signing_bytes())
+        hash256(&self.signing_bytes())
     }
 
     /// Signs the transaction in place using the provided keypair.

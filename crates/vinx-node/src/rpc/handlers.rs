@@ -32,7 +32,7 @@ fn check_admin_auth(headers: &axum::http::HeaderMap, expected: Option<&str>) -> 
         .and_then(|v| v.to_str().ok())
         .and_then(|s| s.strip_prefix("Bearer "));
     match provided {
-        Some(p) => vinx_crypto::sha256(p.as_bytes()) == vinx_crypto::sha256(token.as_bytes()),
+        Some(p) => vinx_crypto::hash256(p.as_bytes()) == vinx_crypto::hash256(token.as_bytes()),
         None => false,
     }
 }
@@ -887,7 +887,7 @@ pub async fn get_account_proof(
     State(node): State<Arc<Node>>,
     Path(raw_address): Path<String>,
 ) -> ApiResult<MerkleProofResponse> {
-    use vinx_crypto::{merkle_proof_for, merkle_root, sha256, verify_merkle_proof};
+    use vinx_crypto::{hash256, merkle_proof_for, merkle_root, verify_merkle_proof};
 
     let address = node.parse_address(&raw_address).await?;
 
@@ -911,7 +911,7 @@ pub async fn get_account_proof(
             buf.extend_from_slice(&a.balance.atoms().to_be_bytes());
             buf.extend_from_slice(&a.nonce.to_be_bytes());
             buf.extend_from_slice(&a.staked.atoms().to_be_bytes());
-            sha256(&buf)
+            hash256(&buf)
         })
         .collect();
 

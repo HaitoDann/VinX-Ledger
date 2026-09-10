@@ -285,6 +285,9 @@ async fn main() {
     // Persisted so the on-chain BLS registration stays valid across restarts.
     let bls_key_path = data_dir.join("validator_bls.json");
     let (bls_kf, bls_sk) = BlsKeyFile::load_or_generate(&bls_key_path);
+    // Utile à l'opérateur : c'est cette clé qui doit figurer au registre on-chain pour que
+    // les blocs du nœud soient acceptés (ADR 0070/0075).
+    tracing::info!(bls_pub_key = %bls_kf.pub_key_hex, "Clé BLS du validateur chargée");
 
     let admin_addr: Address = admin_kf.address.parse().expect("admin address");
     let validator_addr: Address = validator_kf.address.parse().expect("validator address");

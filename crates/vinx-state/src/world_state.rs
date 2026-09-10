@@ -21,7 +21,7 @@ use vinx_core::{
     ValidatorSet,
 };
 use vinx_crypto::{
-    sha256, vrf_verify, Address, BlsPubKey, BlsSignature, Hash32, IncrementalMerkleTree, VrfProof,
+    hash256, vrf_verify, Address, BlsPubKey, BlsSignature, Hash32, IncrementalMerkleTree, VrfProof,
     VrfPublicKey,
 };
 
@@ -239,7 +239,7 @@ pub struct AdminPolicy {
 }
 
 /// A governance action accumulating committee approvals until it reaches the threshold and
-/// executes (ADR 0011). Identified by `action_hash = sha256(bincode(action))` so identical
+/// executes (ADR 0011). Identified by `action_hash = hash256(bincode(action))` so identical
 /// actions proposed by different signers converge on the same tally.
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
 pub struct GovernanceProposal {
@@ -401,7 +401,7 @@ fn epoch_tiebreaker(epoch: u64, addr: &Address) -> [u8; 32] {
     let mut buf = [0u8; 8 + 20];
     buf[..8].copy_from_slice(&epoch.to_le_bytes());
     buf[8..].copy_from_slice(addr.as_bytes());
-    sha256(&buf)
+    hash256(&buf)
 }
 
 fn default_fee_floor() -> Amount {
@@ -848,14 +848,14 @@ impl WorldState {
         // If the pool is empty (e.g. genesis before any bonds), leave validator_set as-is.
 
         // 7. Advance the epoch beacon (ADR 0029 Phase 2): chain-of-hashes accumulator.
-        //    beacon' = sha256(beacon || epoch_number_le64 || block_ts_le64)
+        //    beacon' = hash256(beacon || epoch_number_le64 || block_ts_le64)
         //    SHA-256 placeholder for ECVRF RFC 9381 (integrated in Phase 2b).
         {
             let mut buf = [0u8; 32 + 8 + 8];
             buf[..32].copy_from_slice(&self.epoch_beacon);
             buf[32..40].copy_from_slice(&epoch_number.to_le_bytes());
             buf[40..48].copy_from_slice(&self.current_block_ts.to_le_bytes());
-            self.epoch_beacon = sha256(&buf);
+            self.epoch_beacon = hash256(&buf);
         }
 
         self.last_epoch_close_ts = self.current_block_ts;
@@ -880,7 +880,7 @@ impl WorldState {
     /// the caller must supply their VRF proofs via `committee_from_vrf_proofs`.
     ///
     /// This function uses SHA-256 as a fallback for validators without VRF keys —
-    /// ranking by `sha256(beacon || height_le64 || addr_bytes)`. Mixed pools (some with
+    /// ranking by `hash256(beacon || height_le64 || addr_bytes)`. Mixed pools (some with
     /// VRF keys, some without) are handled by always ranking VRF-enabled validators
     /// ahead of fallback validators.
     pub fn committee_for_height(&self, height: u64, k: usize) -> Vec<Address> {
@@ -898,7 +898,7 @@ impl WorldState {
                     let mut buf = [0u8; 21];
                     buf[..20].copy_from_slice(addr.as_bytes());
                     buf[20] = 0xFF;
-                    let mut score = sha256(&buf);
+                    let mut score = hash256(&buf);
                     score[0] = 0x00; // ensure VRF validators sort before fallback
                     (*addr, score)
                 } else {
@@ -907,7 +907,7 @@ impl WorldState {
                     buf[..32].copy_from_slice(beacon);
                     buf[32..40].copy_from_slice(&height.to_le_bytes());
                     buf[40..60].copy_from_slice(addr.as_bytes());
-                    let mut score = sha256(&buf);
+                    let mut score = hash256(&buf);
                     score[0] |= 0x80; // ensure fallback validators sort after VRF ones
                     (*addr, score)
                 }
@@ -1811,7 +1811,7 @@ impl WorldState {
         buf.extend_from_slice(STATE_ROOT_DST);
         buf.extend_from_slice(&accounts_root);
         buf.extend_from_slice(&consensus_root);
-        sha256(&buf)
+        hash256(&buf)
     }
 
     /// Merkle-equivalent commitment to the **consensus** portion of the state
@@ -1914,7 +1914,7 @@ impl WorldState {
         let mut buf = Vec::with_capacity(CONSENSUS_ROOT_DST.len() + encoded.len());
         buf.extend_from_slice(CONSENSUS_ROOT_DST);
         buf.extend_from_slice(&encoded);
-        sha256(&buf)
+        hash256(&buf)
     }
 
     /// Returns the registered BLS G1 keys for every validator in `validator_set`,
@@ -2143,7 +2143,7 @@ impl WorldState {
         approver: Address,
         threshold: u16,
     ) -> Result<(), CoreError> {
-        let action_hash = sha256(&bincode::serialize(&action).map_err(|_| {
+        let action_hash = hash256(&bincode::serialize(&action).map_err(|_| {
             CoreError::InvalidTransaction("cannot serialize governance action".to_string())
         })?);
         let existing = self
@@ -2658,7 +2658,7 @@ fn hash_account(account: &Account) -> Hash32 {
     buf.extend_from_slice(&account.balance.atoms().to_be_bytes());
     buf.extend_from_slice(&account.nonce.to_be_bytes());
     buf.extend_from_slice(&account.staked.atoms().to_be_bytes());
-    sha256(&buf)
+    hash256(&buf)
 }
 
 #[cfg(test)]
@@ -4522,7 +4522,7 @@ mod tests {
 
     fn bonded_active_validator() -> (WorldState, vinx_crypto::KeyPair, Address) {
         use vinx_core::amount::MIN_VALIDATOR_BOND_ATOMS;
-        use vinx_core::validator_pool::{PoolStatus, ValidatorPoolEntry};
+        use vinx_core::validator_pool::PoolStatus;
         let (kp, addr) = kp_addr();
         let mut s = WorldState::new();
         s.credit_for_test(addr, Amount::from_atoms(MIN_VALIDATOR_BOND_ATOMS * 3));
@@ -4542,7 +4542,7 @@ mod tests {
     #[test]
     fn test_exit_queue_dedup_same_validator() {
         use vinx_core::amount::MIN_VALIDATOR_BOND_ATOMS;
-        let (mut s, kp, addr) = bonded_active_validator();
+        let (mut s, kp, _addr) = bonded_active_validator();
         s.set_block_context(1_000);
 
         // First unstake — drops below floor → queued.
@@ -4747,7 +4747,7 @@ mod tests {
 
     #[test]
     fn test_exit_queue_floor_guard_defers_exit() {
-        use vinx_core::amount::{MIN_ACTIVE_SET_SIZE, MIN_VALIDATOR_BOND_ATOMS};
+        use vinx_core::amount::MIN_ACTIVE_SET_SIZE;
         use vinx_core::validator_pool::{PoolStatus, ValidatorPoolEntry};
         use vinx_core::ValidatorExitRequest;
 

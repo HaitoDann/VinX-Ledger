@@ -131,8 +131,8 @@ pub async fn start(
 
     let validator_secret = config.validator_keypair.secret_bytes();
     let p2p_secret = {
-        use vinx_crypto::sha256;
-        let mut derived = sha256(&validator_secret);
+        use vinx_crypto::hash256;
+        let mut derived = hash256(&validator_secret);
         derived[0] &= 0xf8;
         derived[31] = (derived[31] & 0x1f) | 0x40;
         derived

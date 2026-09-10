@@ -3,7 +3,7 @@ use crate::validator_set::ValidatorSet;
 use borsh::{BorshDeserialize, BorshSerialize};
 use serde::{Deserialize, Serialize};
 use vinx_crypto::{
-    bls_verify_aggregate, sha256, Address, BlsError, BlsPubKey, BlsSignature, Hash32, PublicKey,
+    bls_verify_aggregate, hash256, Address, BlsError, BlsPubKey, BlsSignature, Hash32, PublicKey,
     VinxSignature,
 };
 
@@ -38,7 +38,7 @@ impl BlockHeader {
         bytes.extend_from_slice(&self.state_root);
         bytes.extend_from_slice(&self.base_fee.to_be_bytes());
         bytes.extend_from_slice(&self.receipts_root);
-        sha256(&bytes)
+        hash256(&bytes)
     }
 }
 
@@ -350,6 +350,9 @@ mod tests {
         // manual big-endian layout is consensus-critical across implementations — pin the
         // hash of a fixed header so any layout change (field order, width, extra field) is
         // a conscious, breaking act caught here.
+        //
+        // Valeur mise à jour par ADR 0069 (BLAKE3 remplace SHA-256) : ce vecteur fige à la
+        // fois le layout **et** la fonction de hachage. Les deux sont consensus-critiques.
         let h = BlockHeader {
             height: 5,
             prev_hash: [0u8; 32],
@@ -362,7 +365,7 @@ mod tests {
         };
         assert_eq!(
             hex::encode(h.hash()),
-            "9456af3f0cb75ac60b2a5559e918a9f7eae17198361f5a3cdebc9383e7bf2640"
+            "c112230d5d05663dcaffa0cc4a58e2973306098cb2488c7c3197dfb073df3bf4"
         );
     }
 

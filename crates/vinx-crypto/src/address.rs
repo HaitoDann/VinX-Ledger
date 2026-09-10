@@ -1,4 +1,4 @@
-use crate::{hash::sha256, CryptoError, PublicKey};
+use crate::{hash::hash256, CryptoError, PublicKey};
 use bech32::{self, FromBase32, ToBase32, Variant};
 use borsh::{BorshDeserialize, BorshSerialize};
 use serde::{Deserialize, Deserializer, Serialize, Serializer};
@@ -22,7 +22,7 @@ pub struct Address([u8; ADDRESS_LEN]);
 
 impl Address {
     pub fn from_public_key(pk: &PublicKey) -> Self {
-        let hash = sha256(pk.as_bytes());
+        let hash = hash256(pk.as_bytes());
         let mut payload = [0u8; ADDRESS_LEN];
         payload.copy_from_slice(&hash[..ADDRESS_LEN]);
         Address(payload)
@@ -181,7 +181,7 @@ mod tests {
         let kp = KeyPair::generate();
         let pk = kp.public_key();
         let addr = Address::from_public_key(&pk);
-        assert_eq!(addr.as_bytes(), &sha256(pk.as_bytes())[..ADDRESS_LEN]);
+        assert_eq!(addr.as_bytes(), &hash256(pk.as_bytes())[..ADDRESS_LEN]);
     }
 
     #[test]

@@ -1,12 +1,35 @@
 # ADR 0069 — BLAKE3 remplace SHA-256
 
-- **Statut :** Décidé — à implémenter avant genesis block 0
+- **Statut :** Implémenté 🔧 — septembre 2026, avant toute genèse publique
 - **Date :** Septembre 2026
 - **Portée :** Protocole — fonction de hachage de base
 - **Décideur :** VinX Labs
 - **Crates :** `crates/vinx-core` — `src/block.rs`, `src/transaction.rs`, `src/merkle.rs` (si existe)
 - **Liens :** ADR 0020 (sérialisation canonique — base du hachage) ; ADR 0051 (primitives cryptographiques — mis à jour par cet ADR)
 - **⚠️ Contrainte absolue :** ce changement modifie tous les hashes produits. Il doit être fusionné **avant** que tout nœud produise le genesis block. Après le premier bloc, c'est un hard fork.
+
+> ✅ **Implémenté (septembre 2026).** `vinx_crypto::sha256` devient `hash256` et calcule
+> BLAKE3. Le renommage est délibéré : une fonction nommée `sha256` qui calcule BLAKE3 est un
+> piège pour le prochain lecteur. Les 59 sites d'appel du protocole passent par ce point
+> d'étranglement unique, donc un seul changement les couvre tous : hachage de bloc et de
+> transaction, racines de Merkle, dérivation d'adresse, `consensus_root`, départages
+> déterministes.
+>
+> **Épargné volontairement :** `vrf.rs` conserve SHA-512, exigé par ECVRF (RFC 9381) ; BLS
+> et Ed25519 utilisent leurs propres primitives internes ; le keystore garde Argon2id +
+> AES-256-GCM. Ce ne sont pas des hachages *de protocole*.
+>
+> **Conséquence sur le stockage :** `STORAGE_VERSION` passe à 20 **sans chemin de
+> migration**. Le format sur disque est inchangé, mais tous les hachages stockés — hash de
+> blocs, chaînage `prev_hash`, `state_root`, index de transactions — ont été calculés avec
+> l'ancienne fonction. Une base antérieure appartient littéralement à un autre protocole :
+> la migrer silencieusement corromprait l'état. `Storage::open` la refuse avec une consigne
+> explicite, et la migration étant transactionnelle, la base est **laissée intacte** —
+> l'opérateur peut encore exporter avec l'ancien binaire.
+>
+> Vecteurs de référence officiels BLAKE3 figés dans `hash.rs`, plus une garde explicite
+> contre un retour silencieux à SHA-256. Le vecteur doré d'en-tête de bloc est mis à jour :
+> il fige désormais le layout **et** la fonction de hachage.
 
 ---
 

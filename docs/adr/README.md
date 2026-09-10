@@ -334,7 +334,7 @@ d'exploitation, correctifs, prompts de contre-audit — vit dans
 | [0066](./0066-hash-transaction-memoize.md) | Hash de transaction mémoïsé | 📐 Décidé — non implémenté | 1 |
 | [0067](./0067-cache-signatures-mempool-bloc.md) | Cache de signatures mempool → bloc | 📐 Décidé — non implémenté | 1 |
 | [0068](./0068-batch-verify-ed25519.md) | Vérification Ed25519 par lot | 📐 Décidé — non implémenté | 1 |
-| [0069](./0069-blake3-remplace-sha256.md) | BLAKE3 en remplacement de SHA-256 ⚠️ | 📐 Décidé — **avant genesis** | 1.5 |
+| [0069](./0069-blake3-remplace-sha256.md) | BLAKE3 en remplacement de SHA-256 ⚠️ | 🔧 Implémenté | 1.5 |
 | [0070](./0070-authentification-proposeur-registre-bls.md) | Authentification du proposeur & registre BLS | 🔧 Implémenté | 1.5 |
 | [0071](./0071-verrou-vote-persistant.md) | Verrou de vote persistant (1 vote / hauteur) | 🔧 Implémenté | 1.5 |
 | [0072](./0072-state-root-engage-consensus.md) | `state_root` engage l'état de consensus ⚠️ | 🔧 Implémenté | 1.5 |
@@ -353,11 +353,10 @@ d'exploitation, correctifs, prompts de contre-audit — vit dans
 >
 > *Le numéro 0025 n'a jamais été attribué.*
 >
-> **ADR 0065–0069 sont décidés mais non implémentés** — `grep -rn blake3 crates/` ne retourne
-> rien, le code hache encore en SHA-256. ADR 0069 change **tous** les hachages du protocole
-> et se déclare « à implémenter avant genesis block 0 » : c'est un changement
-> consensus-breaking à faire avant le lancement, ou à repousser explicitement après une
-> hauteur d'activation (ADR 0079 §2.3). Il est suivi à ce titre dans ADR 0080.
+> **ADR 0069 est implémenté** (septembre 2026) : le protocole hache en BLAKE3, avant toute
+> genèse publique, comme l'ADR l'exigeait. **ADR 0065–0068 restent décidés mais non
+> implémentés** — ce sont des optimisations sans impact consensus, donc non bloquantes pour
+> le lancement.
 
 ---
 

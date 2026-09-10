@@ -52,7 +52,7 @@ use zstd;
 ///      to WorldState meta.
 /// v18: ADR 0036 validator churn bounds — `exit_queue` (Vec<ValidatorExitRequest> = [])
 ///      appended to WorldState meta. Migration appends 8 zero bytes (bincode empty Vec).
-const STORAGE_VERSION: u64 = 19;
+const STORAGE_VERSION: u64 = 20;
 
 /// zstd compression level — level 3 is the sweet spot: ~60-70% size reduction,
 /// negligible latency compared to disk I/O.
@@ -216,6 +216,23 @@ impl Storage {
                 17 => Self::append_meta_suffix(tx, &vinx_state::v18_meta_suffix())?,
                 // v18 → v19 (ADR 0027 / VINX-06 slot timeout): append last_block_ts (u64 = 0).
                 18 => Self::append_meta_suffix(tx, &vinx_state::v19_meta_suffix())?,
+                // v19 → v20 (ADR 0069) : BLAKE3 remplace SHA-256. Il n'existe **pas** de
+                // migration possible. Le format sur disque est inchangé, mais tous les
+                // hachages stockés — hash de blocs, chaînage `prev_hash`, `state_root`,
+                // index de transactions — ont été calculés avec l'ancienne fonction. Les
+                // recalculer donnerait d'autres valeurs : la chaîne persistée appartient
+                // littéralement à un autre protocole. Migrer silencieusement corromprait
+                // l'état ; on refuse avec une consigne explicite.
+                19 => {
+                    return Err(Self::io_err(
+                        "cette base a été écrite avant le passage à BLAKE3 (ADR 0069). \
+                         Tous les hachages du protocole ont changé, donc la chaîne persistée \
+                         n'est pas migrable : elle appartient à un autre protocole. \
+                         Repartez d'un dossier de données vide (nouvelle genèse), ou \
+                         resynchronisez depuis un pair déjà sur BLAKE3."
+                            .to_string(),
+                    ));
+                }
                 unknown => {
                     return Err(Self::io_err(format!(
                         "no automatic migration from schema v{unknown} to v{STORAGE_VERSION}. \
@@ -820,22 +837,35 @@ mod tests {
         tx.commit().unwrap();
     }
 
+    /// ADR 0069 — toute base antérieure à BLAKE3 est refusée, **et laissée intacte**.
+    ///
+    /// La migration est transactionnelle : elle bute sur le mur v19→v20 et annule
+    /// l'ensemble. C'est le comportement voulu — une base à moitié migrée serait pire que
+    /// pas de migration du tout, et l'opérateur peut encore exporter ses données avec
+    /// l'ancien binaire.
     #[test]
-    fn test_migrate_v6_rebuilds_indexes_and_bumps() {
-        let tmp = Tmp::new();
-        stamp(&tmp.0, 6, true);
-        assert!(has_state_key(&tmp.0, "tx_index"));
-
-        // Open → migrates v6 → current in place (drops the stale derived indexes).
-        let storage = Storage::open(&tmp.0).expect("v6 must auto-migrate, not wipe");
-        drop(storage);
-
-        assert_eq!(read_version(&tmp.0), Some(STORAGE_VERSION));
-        assert!(
-            !has_state_key(&tmp.0, "tx_index"),
-            "stale tx_index should be dropped so load() rebuilds it"
-        );
-        assert!(!has_state_key(&tmp.0, "account_tx_index"));
+    fn test_pre_blake3_database_is_refused_and_left_intact() {
+        for from in [6u64, 9, 14, 19] {
+            let tmp = Tmp::new();
+            stamp(&tmp.0, from, true);
+            let err = Storage::open(&tmp.0)
+                .err()
+                .unwrap_or_else(|| panic!("une base v{from} doit être refusée"));
+            let msg = err.to_string();
+            assert!(
+                msg.contains("BLAKE3"),
+                "consigne attendue pour v{from} : {msg}"
+            );
+            assert!(
+                msg.contains("dossier de données vide") || msg.contains("resynchronisez"),
+                "le message doit dire quoi faire : {msg}"
+            );
+            assert_eq!(
+                read_version(&tmp.0),
+                Some(from),
+                "la base v{from} doit rester intacte (migration atomique)"
+            );
+        }
     }
 
     #[test]
@@ -864,82 +894,6 @@ mod tests {
 
     // End-to-end: real data (accounts + chain) survives a v6 → current migration,
     // and the derived tx index is rebuilt from the chain — no wipe, no data loss.
-    #[test]
-    fn test_migration_preserves_accounts_and_rebuilds_tx_index() {
-        use vinx_core::amount::Amount;
-        use vinx_core::{Block, BlockHeader, Transaction};
-        use vinx_crypto::{Address, KeyPair};
-        use vinx_state::{create_genesis_state, GenesisConfig};
-
-        let tmp = Tmp::new();
-        let kp = KeyPair::generate();
-        let admin = Address::from_public_key(&kp.public_key());
-        let validator = Address::from_public_key(&KeyPair::generate().public_key());
-        let bob = Address::from_public_key(&KeyPair::generate().public_key());
-
-        let mut state = create_genesis_state(&GenesisConfig {
-            chain_id: vinx_core::CHAIN_ID_DEVNET,
-            admin_address: admin,
-            validator_address: validator,
-            validator_bls: None,
-        });
-        // Fair launch: genesis grants nothing, so seed a balance to check it survives.
-        state.credit_for_test(admin, Amount::from_vinx(500));
-        let (mut chain, _) = Chain::new_with_genesis(validator, 0);
-        let tx =
-            Transaction::new_transfer(&kp, bob, Amount::from_vinx(10), Amount::from_vinx(1), 0);
-        let tx_hash = tx.hash();
-        let block = Block {
-            header: BlockHeader {
-                height: 1,
-                prev_hash: chain.tip_hash(),
-                timestamp: 1,
-                validator,
-                tx_count: 1,
-                state_root: [0u8; 32],
-                base_fee: 0,
-                receipts_root: [0u8; 32],
-            },
-            transactions: vec![tx],
-            bls_aggregate: None,
-            bls_cosigner_pks: vec![],
-            bls_bitmap: vec![],
-        };
-        chain.push(block);
-
-        // Save at the current version, then simulate genuinely old on-disk data: strip the
-        // v8 governance suffix so the meta is v7-format, and stamp an older (v6) marker.
-        {
-            let storage = Storage::open(&tmp.0).unwrap();
-            storage.save(&mut state, &mut chain).unwrap();
-        }
-        downgrade_meta_to_v7(&tmp.0);
-        set_version(&tmp.0, 6);
-
-        // Reopen → migrates in place (v6→v7 drops indexes; v7→v8 re-appends governance
-        // defaults); load rebuilds the derived index.
-        let storage = Storage::open(&tmp.0).expect("v6 must migrate, not wipe");
-        let (loaded_state, loaded_chain) = storage.load().expect("data survives migration");
-
-        assert_eq!(
-            loaded_state.account_balance(&admin),
-            Amount::from_vinx(500),
-            "account balance must survive migration"
-        );
-        // ADR 0011/0010: the appended governance + module fields load with their defaults.
-        assert!(loaded_state.admin_policy.is_none());
-        assert!(loaded_state.pending_governance.is_empty());
-        assert!(loaded_state.modules.is_empty());
-        assert!(
-            loaded_state.reliability.is_empty(),
-            "ADR 0027 reliability loads empty (v11)"
-        );
-        assert_eq!(loaded_chain.tip_height(), 1, "chain must survive migration");
-        assert!(
-            loaded_chain.get_tx_by_hash(&tx_hash).is_some(),
-            "tx index must be rebuilt after migration"
-        );
-    }
 
     /// Strips the last 8 bytes from every block row in the BLOCKS table, simulating the
     /// v14 on-disk format (no `bls_bitmap` field) so the v14→v15 migration can be tested.
@@ -971,80 +925,6 @@ mod tests {
     }
 
     // ADR 0029 Phase 1 — Storage migration v14→v15: bls_bitmap field appended to blocks.
-    #[test]
-    fn test_migration_v14_v15_bitmap_field() {
-        use vinx_core::{Block, BlockHeader};
-        use vinx_crypto::{Address, KeyPair};
-        use vinx_state::{create_genesis_state, GenesisConfig};
-
-        let tmp = Tmp::new();
-        let validator = Address::from_public_key(&KeyPair::generate().public_key());
-        let admin = Address::from_public_key(&KeyPair::generate().public_key());
-
-        let mut state = create_genesis_state(&GenesisConfig {
-            chain_id: vinx_core::CHAIN_ID_DEVNET,
-            admin_address: admin,
-            validator_address: validator,
-            validator_bls: None,
-        });
-        let (mut chain, _) = Chain::new_with_genesis(validator, 0);
-
-        // Push 3 blocks (v15 format, bls_bitmap = vec![]).
-        for h in 1..=3u64 {
-            let block = Block {
-                header: BlockHeader {
-                    height: h,
-                    prev_hash: chain.tip_hash(),
-                    timestamp: h,
-                    validator,
-                    tx_count: 0,
-                    state_root: [0u8; 32],
-                    base_fee: 0,
-                    receipts_root: [0u8; 32],
-                },
-                transactions: vec![],
-                bls_aggregate: None,
-                bls_cosigner_pks: vec![],
-                bls_bitmap: vec![],
-            };
-            chain.push(block);
-        }
-
-        // Save at STORAGE_VERSION (v15).
-        {
-            let storage = Storage::open(&tmp.0).unwrap();
-            storage.save(&mut state, &mut chain).unwrap();
-        }
-
-        // Simulate v14 on-disk: strip bls_bitmap from each block row, downgrade version marker.
-        downgrade_blocks_to_v14(&tmp.0);
-        set_version(&tmp.0, 14);
-
-        // Reopen → migration v14→v15 runs automatically.
-        let loaded_chain = {
-            let storage = Storage::open(&tmp.0).expect("v14 must auto-migrate to v15, not wipe");
-            let (_, chain) = storage.load().expect("data must survive v14→v15 migration");
-            chain
-        }; // storage dropped here so read_version can reopen the file
-
-        assert_eq!(
-            read_version(&tmp.0),
-            Some(STORAGE_VERSION),
-            "version marker bumped to current after migration"
-        );
-        assert_eq!(loaded_chain.tip_height(), 3, "chain height preserved");
-
-        for h in 0..=3u64 {
-            let block = loaded_chain
-                .get_block(h)
-                .unwrap_or_else(|| panic!("block {h} must exist after migration"));
-            assert_eq!(
-                block.bls_bitmap,
-                Vec::<u8>::new(),
-                "h={h}: bls_bitmap defaults to [] after v14→v15 migration"
-            );
-        }
-    }
 
     // ADR 0026: a reaped account must be *erased* from the store, not merely dropped from
     // the in-memory map — otherwise it resurrects on the next load.
@@ -1178,55 +1058,4 @@ mod tests {
 
     // v9 → v10: a monolithic v9 "chain" blob is exploded into per-height rows on
     // open, the blob removed, and the chain loads identically afterwards.
-    #[test]
-    fn test_migrate_v9_chain_blob_to_block_rows() {
-        use vinx_crypto::KeyPair;
-        use vinx_state::{create_genesis_state, GenesisConfig};
-
-        let tmp = Tmp::new();
-        let admin = Address::from_public_key(&KeyPair::generate().public_key());
-        let validator = Address::from_public_key(&KeyPair::generate().public_key());
-        let mut state = create_genesis_state(&GenesisConfig {
-            chain_id: vinx_core::CHAIN_ID_DEVNET,
-            admin_address: admin,
-            validator_address: validator,
-            validator_bls: None,
-        });
-        let (mut chain, _) = Chain::new_with_genesis(validator, 0);
-        chain.push(make_test_block(1, chain.tip_hash(), validator));
-        chain.push(make_test_block(2, chain.tip_hash(), validator));
-        let tip_hash = chain.tip_hash();
-
-        // Save at the current version, then rewrite the chain the way a v9 binary
-        // stored it: one compressed bincode blob under "chain", no per-height rows.
-        {
-            let storage = Storage::open(&tmp.0).unwrap();
-            storage.save(&mut state, &mut chain).unwrap();
-        }
-        {
-            let db = Database::create(tmp.0.join("vinx.redb")).unwrap();
-            let tx = db.begin_write().unwrap();
-            {
-                let mut s = tx.open_table(STATE).unwrap();
-                let blob = bincode::serialize(&chain).unwrap();
-                let compressed = zstd::encode_all(&blob[..], ZSTD_LEVEL).unwrap();
-                s.insert("chain", compressed.as_slice()).unwrap();
-                s.remove("chain_meta").unwrap();
-            }
-            tx.delete_table(BLOCKS).unwrap();
-            tx.commit().unwrap();
-        }
-        set_version(&tmp.0, 9);
-
-        // Scoped so the redb handle is released before has_state_key reopens the file.
-        let loaded = {
-            let storage = Storage::open(&tmp.0).expect("v9 must migrate, not wipe");
-            let (_, loaded) = storage.load().expect("chain survives v9→v10 migration");
-            loaded
-        };
-        assert_eq!(loaded.tip_height(), 2);
-        assert_eq!(loaded.tip_hash(), tip_hash);
-        assert!(!has_state_key(&tmp.0, "chain"), "v9 blob removed");
-        assert!(has_state_key(&tmp.0, "chain_meta"), "chain_meta written");
-    }
 }

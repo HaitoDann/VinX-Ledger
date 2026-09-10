@@ -4,7 +4,7 @@ use vinx_core::{
     Transaction,
 };
 use vinx_crypto::{
-    merkle_proof_for, merkle_root, sha256, verify_merkle_proof, Address, Hash32, KeyPair,
+    hash256, merkle_proof_for, merkle_root, verify_merkle_proof, Address, Hash32, KeyPair,
 };
 use vinx_state::WorldState;
 
@@ -42,7 +42,7 @@ proptest! {
         seed in any::<u64>(),
     ) {
         let leaves: Vec<Hash32> = (0..n)
-            .map(|i| sha256(&[seed.wrapping_shr((i % 64) as u32) as u8, i as u8]))
+            .map(|i| hash256(&[seed.wrapping_shr((i % 64) as u32) as u8, i as u8]))
             .collect();
         prop_assert_eq!(merkle_root(&leaves), merkle_root(&leaves));
     }
@@ -54,7 +54,7 @@ proptest! {
         seed in any::<u64>(),
     ) {
         let leaves: Vec<Hash32> = (0..n)
-            .map(|i| sha256(&[seed.wrapping_shr((i % 64) as u32) as u8, i as u8]))
+            .map(|i| hash256(&[seed.wrapping_shr((i % 64) as u32) as u8, i as u8]))
             .collect();
         let root = merkle_root(&leaves);
         for idx in 0..n {
@@ -74,7 +74,7 @@ proptest! {
         seed in any::<u64>(),
     ) {
         let leaves: Vec<Hash32> = (0..n)
-            .map(|i| sha256(&[seed.wrapping_shr((i % 64) as u32) as u8, i as u8]))
+            .map(|i| hash256(&[seed.wrapping_shr((i % 64) as u32) as u8, i as u8]))
             .collect();
         let correct_root = merkle_root(&leaves);
         // Build a wrong root by flipping a byte

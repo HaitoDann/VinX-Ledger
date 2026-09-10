@@ -8,7 +8,7 @@ use vinx_core::{
     amount::{Amount, MAX_UNFINALIZED_DEPTH},
     reliability, Block, BlockHeader, Transaction, ValidatorSet,
 };
-use vinx_crypto::{bls_aggregate, sha256};
+use vinx_crypto::{bls_aggregate, hash256};
 use vinx_state::WorldState;
 
 /// ADR 0002 — **refus de bâtir dans le vide.** Empêche un producteur d'empiler un bloc dont
@@ -349,7 +349,7 @@ fn produce_block_inner(
 }
 
 /// Computes a SHA-256 receipts root from the ordered list of included transactions.
-/// Empty blocks get the zero hash.  Non-empty blocks: sha256(hash0 || hash1 || ...).
+/// Empty blocks get the zero hash.  Non-empty blocks: hash256(hash0 || hash1 || ...).
 fn compute_receipts_root(txs: &[Transaction]) -> [u8; 32] {
     if txs.is_empty() {
         return [0u8; 32];
@@ -358,7 +358,7 @@ fn compute_receipts_root(txs: &[Transaction]) -> [u8; 32] {
     for tx in txs {
         bytes.extend_from_slice(&tx.hash());
     }
-    sha256(&bytes)
+    hash256(&bytes)
 }
 
 #[cfg(test)]

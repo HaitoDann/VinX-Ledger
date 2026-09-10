@@ -1,4 +1,4 @@
-use crate::hash::{sha256, Hash32};
+use crate::hash::{hash256, Hash32};
 use serde::{Deserialize, Serialize};
 
 // ── Incremental Merkle tree ───────────────────────────────────────────────────
@@ -100,7 +100,7 @@ fn hash_pair(l: Hash32, r: Hash32) -> Hash32 {
     let mut buf = [0u8; 64];
     buf[..32].copy_from_slice(&l);
     buf[32..].copy_from_slice(&r);
-    sha256(&buf)
+    hash256(&buf)
 }
 
 /// Computes the Merkle root of a list of 32-byte leaf hashes.
@@ -125,7 +125,7 @@ pub fn merkle_root(leaves: &[Hash32]) -> Hash32 {
                         let mut buf = [0u8; 64];
                         buf[..32].copy_from_slice(&pair[0]);
                         buf[32..].copy_from_slice(&pair[1]);
-                        sha256(&buf)
+                        hash256(&buf)
                     })
                     .collect();
             }
@@ -173,7 +173,7 @@ pub fn merkle_proof_for(leaves: &[Hash32], index: usize) -> Option<Vec<MerklePro
                 let mut buf = [0u8; 64];
                 buf[..32].copy_from_slice(&p[0]);
                 buf[32..].copy_from_slice(&p[1]);
-                sha256(&buf)
+                hash256(&buf)
             })
             .collect();
         idx /= 2;
@@ -198,7 +198,7 @@ pub fn verify_merkle_proof(
         let mut buf = [0u8; 64];
         buf[..32].copy_from_slice(&left);
         buf[32..].copy_from_slice(&right);
-        current = sha256(&buf);
+        current = hash256(&buf);
     }
     &current == expected_root
 }
@@ -214,49 +214,49 @@ mod tests {
 
     #[test]
     fn test_single_leaf_returns_itself() {
-        let leaf = sha256(b"vinx");
+        let leaf = hash256(b"vinx");
         assert_eq!(merkle_root(&[leaf]), leaf);
     }
 
     #[test]
     fn test_two_leaves() {
-        let l = sha256(b"left");
-        let r = sha256(b"right");
+        let l = hash256(b"left");
+        let r = hash256(b"right");
         let mut buf = [0u8; 64];
         buf[..32].copy_from_slice(&l);
         buf[32..].copy_from_slice(&r);
-        let expected = sha256(&buf);
+        let expected = hash256(&buf);
         assert_eq!(merkle_root(&[l, r]), expected);
     }
 
     #[test]
     fn test_deterministic() {
-        let leaves: Vec<Hash32> = (0u8..6).map(|i| sha256(&[i])).collect();
+        let leaves: Vec<Hash32> = (0u8..6).map(|i| hash256(&[i])).collect();
         assert_eq!(merkle_root(&leaves), merkle_root(&leaves));
     }
 
     #[test]
     fn test_order_matters() {
-        let a = sha256(b"a");
-        let b = sha256(b"b");
+        let a = hash256(b"a");
+        let b = hash256(b"b");
         assert_ne!(merkle_root(&[a, b]), merkle_root(&[b, a]));
     }
 
     #[test]
     fn test_odd_count_is_deterministic() {
-        let leaves: Vec<Hash32> = (0u8..5).map(|i| sha256(&[i])).collect();
+        let leaves: Vec<Hash32> = (0u8..5).map(|i| hash256(&[i])).collect();
         let r1 = merkle_root(&leaves);
         let r2 = merkle_root(&leaves);
         assert_eq!(r1, r2);
-        let leaves6: Vec<Hash32> = (0u8..6).map(|i| sha256(&[i])).collect();
+        let leaves6: Vec<Hash32> = (0u8..6).map(|i| hash256(&[i])).collect();
         assert_ne!(r1, merkle_root(&leaves6));
     }
 
     #[test]
     fn test_different_leaves_different_root() {
-        let a: Vec<Hash32> = (0u8..4).map(|i| sha256(&[i])).collect();
+        let a: Vec<Hash32> = (0u8..4).map(|i| hash256(&[i])).collect();
         let mut b = a.clone();
-        b[2] = sha256(b"changed");
+        b[2] = hash256(b"changed");
         assert_ne!(merkle_root(&a), merkle_root(&b));
     }
 
@@ -269,13 +269,13 @@ mod tests {
 
     #[test]
     fn test_proof_out_of_bounds_returns_none() {
-        let leaves: Vec<Hash32> = vec![sha256(b"a")];
+        let leaves: Vec<Hash32> = vec![hash256(b"a")];
         assert!(merkle_proof_for(&leaves, 1).is_none());
     }
 
     #[test]
     fn test_proof_single_leaf_empty_proof() {
-        let leaf = sha256(b"single");
+        let leaf = hash256(b"single");
         let proof = merkle_proof_for(&[leaf], 0).unwrap();
         assert!(proof.is_empty());
         // Verify: root = leaf
@@ -284,8 +284,8 @@ mod tests {
 
     #[test]
     fn test_proof_two_leaves_index_0() {
-        let l = sha256(b"left");
-        let r = sha256(b"right");
+        let l = hash256(b"left");
+        let r = hash256(b"right");
         let root = merkle_root(&[l, r]);
         let proof = merkle_proof_for(&[l, r], 0).unwrap();
         assert!(verify_merkle_proof(&l, &proof, &root));
@@ -293,8 +293,8 @@ mod tests {
 
     #[test]
     fn test_proof_two_leaves_index_1() {
-        let l = sha256(b"left");
-        let r = sha256(b"right");
+        let l = hash256(b"left");
+        let r = hash256(b"right");
         let root = merkle_root(&[l, r]);
         let proof = merkle_proof_for(&[l, r], 1).unwrap();
         assert!(verify_merkle_proof(&r, &proof, &root));
@@ -302,7 +302,7 @@ mod tests {
 
     #[test]
     fn test_proof_four_leaves_all_indices() {
-        let leaves: Vec<Hash32> = (0u8..4).map(|i| sha256(&[i])).collect();
+        let leaves: Vec<Hash32> = (0u8..4).map(|i| hash256(&[i])).collect();
         let root = merkle_root(&leaves);
         for idx in 0..4 {
             let proof = merkle_proof_for(&leaves, idx).unwrap();
@@ -316,7 +316,7 @@ mod tests {
 
     #[test]
     fn test_proof_five_leaves_odd_count() {
-        let leaves: Vec<Hash32> = (0u8..5).map(|i| sha256(&[i])).collect();
+        let leaves: Vec<Hash32> = (0u8..5).map(|i| hash256(&[i])).collect();
         let root = merkle_root(&leaves);
         for idx in 0..5 {
             let proof = merkle_proof_for(&leaves, idx).unwrap();
@@ -330,18 +330,18 @@ mod tests {
 
     #[test]
     fn test_proof_wrong_root_fails() {
-        let leaves: Vec<Hash32> = (0u8..4).map(|i| sha256(&[i])).collect();
+        let leaves: Vec<Hash32> = (0u8..4).map(|i| hash256(&[i])).collect();
         let proof = merkle_proof_for(&leaves, 0).unwrap();
-        let wrong_root = sha256(b"wrong");
+        let wrong_root = hash256(b"wrong");
         assert!(!verify_merkle_proof(&leaves[0], &proof, &wrong_root));
     }
 
     #[test]
     fn test_proof_wrong_leaf_fails() {
-        let leaves: Vec<Hash32> = (0u8..4).map(|i| sha256(&[i])).collect();
+        let leaves: Vec<Hash32> = (0u8..4).map(|i| hash256(&[i])).collect();
         let root = merkle_root(&leaves);
         let proof = merkle_proof_for(&leaves, 0).unwrap();
-        let wrong_leaf = sha256(b"wrong");
+        let wrong_leaf = hash256(b"wrong");
         assert!(!verify_merkle_proof(&wrong_leaf, &proof, &root));
     }
 
@@ -357,7 +357,7 @@ mod tests {
     #[test]
     fn test_incremental_root_matches_batch_for_various_counts() {
         for n in 1u8..=10 {
-            let leaves: Vec<Hash32> = (0..n).map(|i| sha256(&[i])).collect();
+            let leaves: Vec<Hash32> = (0..n).map(|i| hash256(&[i])).collect();
             let tree = IncrementalMerkleTree::build(&leaves);
             assert_eq!(tree.root(), merkle_root(&leaves), "root mismatch for n={n}");
         }
@@ -365,9 +365,9 @@ mod tests {
 
     #[test]
     fn test_incremental_update_leaf_matches_full_rebuild() {
-        let mut leaves: Vec<Hash32> = (0u8..6).map(|i| sha256(&[i])).collect();
+        let mut leaves: Vec<Hash32> = (0u8..6).map(|i| hash256(&[i])).collect();
         let mut tree = IncrementalMerkleTree::build(&leaves);
-        let new_hash = sha256(b"updated");
+        let new_hash = hash256(b"updated");
         leaves[2] = new_hash;
         tree.update_leaf(2, new_hash);
         assert_eq!(tree.root(), merkle_root(&leaves));
@@ -376,10 +376,10 @@ mod tests {
     #[test]
     fn test_incremental_update_all_leaves() {
         let n = 7usize;
-        let mut leaves: Vec<Hash32> = (0..n).map(|i| sha256(&[i as u8])).collect();
+        let mut leaves: Vec<Hash32> = (0..n).map(|i| hash256(&[i as u8])).collect();
         let mut tree = IncrementalMerkleTree::build(&leaves);
         for i in 0..n {
-            let h = sha256(&[i as u8, 0xff]);
+            let h = hash256(&[i as u8, 0xff]);
             leaves[i] = h;
             tree.update_leaf(i, h);
             assert_eq!(
@@ -392,10 +392,10 @@ mod tests {
 
     #[test]
     fn test_incremental_rebuild_resets_correctly() {
-        let leaves_a: Vec<Hash32> = (0u8..4).map(|i| sha256(&[i])).collect();
+        let leaves_a: Vec<Hash32> = (0u8..4).map(|i| hash256(&[i])).collect();
         let mut tree = IncrementalMerkleTree::build(&leaves_a);
         assert_eq!(tree.root(), merkle_root(&leaves_a));
-        let leaves_b: Vec<Hash32> = (0u8..5).map(|i| sha256(&[i, 1])).collect();
+        let leaves_b: Vec<Hash32> = (0u8..5).map(|i| hash256(&[i, 1])).collect();
         tree.rebuild(&leaves_b);
         assert_eq!(tree.root(), merkle_root(&leaves_b));
         assert_eq!(tree.len(), 5);
@@ -403,7 +403,7 @@ mod tests {
 
     #[test]
     fn test_incremental_proof_compatible_with_batch() {
-        let leaves: Vec<Hash32> = (0u8..5).map(|i| sha256(&[i])).collect();
+        let leaves: Vec<Hash32> = (0u8..5).map(|i| hash256(&[i])).collect();
         let tree = IncrementalMerkleTree::build(&leaves);
         assert_eq!(tree.leaves(), leaves.as_slice());
         let root = tree.root();
