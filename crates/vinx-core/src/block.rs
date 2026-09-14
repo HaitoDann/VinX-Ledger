@@ -91,6 +91,59 @@ pub struct Block {
     /// Bit `i` = 1 means the validator at index `i` in the ValidatorSet signed.
     #[serde(default)]
     pub bls_bitmap: Vec<u8>,
+    /// ADR 0029 Phase 2a — the proposer's ECVRF proof (80 bytes) over
+    /// `WorldState::committee_alpha(height) = epoch_beacon ‖ height_le64`, evaluated
+    /// against the proposer's registered VRF key. Present on VRF-selected leader blocks;
+    /// `None` on round-robin / backup blocks (backward-compatible).
+    ///
+    /// The proof lives **outside** `BlockHeader` (so the signed header hash and its golden
+    /// vector are unchanged) and is self-authenticating: it verifies only against the
+    /// proposer's on-chain VRF key at the block's own height, so it cannot be forged for
+    /// another proposer nor ground (one deterministic output per key+height).
+    #[serde(default)]
+    pub vrf_proof: Option<Vec<u8>>,
+}
+
+/// ADR 0029 Phase 2a — expected number of VRF-selected leader candidates per height.
+///
+/// The self-selection threshold is calibrated so that, on average, this many active
+/// validators draw a VRF output below it. More than one candidate is resolved by
+/// fork-choice (lowest output wins); zero candidates (a slot nobody won) is covered by
+/// the existing backup-after-timeout path (ADR 0027) — so liveness never depends on a
+/// leader being drawn.
+pub const VRF_LEADER_EXPECTATION: u64 = 2;
+
+/// The self-selection threshold for `active_count` active validators: a validator is a
+/// leader candidate at a height iff its VRF priority is `<=` this value.
+///
+/// With `active_count <= VRF_LEADER_EXPECTATION` every validator is a candidate (the
+/// threshold saturates to `u64::MAX`) and fork-choice simply keeps the lowest output —
+/// the correct degenerate behavior at tiny validator counts (at `n = 1` the lone
+/// validator is always leader).
+pub fn vrf_leader_threshold(active_count: usize) -> u64 {
+    let n = active_count as u64;
+    if n <= VRF_LEADER_EXPECTATION {
+        return u64::MAX;
+    }
+    // Expected selected ≈ VRF_LEADER_EXPECTATION: P(priority <= MAX/n * E) ≈ E/n per validator.
+    (u64::MAX / n).saturating_mul(VRF_LEADER_EXPECTATION)
+}
+
+/// True if a validator drawing `priority` is a leader candidate among `active_count`.
+pub fn vrf_is_selected(priority: u64, active_count: usize) -> bool {
+    priority <= vrf_leader_threshold(active_count)
+}
+
+/// Fork-choice priority derived from a raw VRF proof: the first 8 bytes of the VRF
+/// output as a big-endian `u64`. **Lower is higher priority** (closer to leader).
+///
+/// Returns `None` if the bytes are not a well-formed 80-byte proof. Callers use this only
+/// for ordering already-validated blocks (ingress verifies the proof against the
+/// proposer's key), so a `None` here means "treat as a non-VRF block".
+pub fn vrf_priority(proof_bytes: &[u8]) -> Option<u64> {
+    let arr: [u8; vinx_crypto::VRF_PROOF_LEN] = proof_bytes.try_into().ok()?;
+    let output = vinx_crypto::vrf_proof_to_hash(&vinx_crypto::VrfProof(arr)).ok()?;
+    Some(u64::from_be_bytes(output[..8].try_into().unwrap()))
 }
 
 impl Block {
@@ -270,6 +323,50 @@ mod tests {
         Address::from_public_key(&KeyPair::generate().public_key())
     }
 
+    // ─── ADR 0029 Phase 2a — VRF leader selection helpers ───────────────────────
+
+    #[test]
+    fn vrf_threshold_saturates_at_or_below_expectation() {
+        // At or below the expected candidate count, every validator is a candidate.
+        assert_eq!(vrf_leader_threshold(0), u64::MAX);
+        assert_eq!(vrf_leader_threshold(1), u64::MAX);
+        assert_eq!(
+            vrf_leader_threshold(VRF_LEADER_EXPECTATION as usize),
+            u64::MAX
+        );
+        // Beyond it the per-validator threshold shrinks as the set grows.
+        let t100 = vrf_leader_threshold(100);
+        let t1000 = vrf_leader_threshold(1000);
+        assert!(t100 < u64::MAX);
+        assert!(t1000 < t100, "more validators → smaller selection window");
+    }
+
+    #[test]
+    fn vrf_selection_degenerates_at_tiny_sets_and_bounds_large_ones() {
+        // n <= expectation: always selected (single-validator chain always has its leader).
+        assert!(vrf_is_selected(u64::MAX, 1));
+        assert!(vrf_is_selected(u64::MAX, 2));
+        // Large set: a near-zero draw wins, a near-max draw loses.
+        assert!(vrf_is_selected(0, 1000));
+        assert!(!vrf_is_selected(u64::MAX, 1000));
+    }
+
+    #[test]
+    fn vrf_priority_matches_output_and_rejects_malformed() {
+        use vinx_crypto::VrfSecretKey;
+        let sk = VrfSecretKey::generate();
+        let (proof, output) = sk.evaluate(b"alpha-height-1");
+        let priority = vrf_priority(&proof.0).expect("a valid 80-byte proof yields a priority");
+        assert_eq!(
+            priority,
+            u64::from_be_bytes(output[..8].try_into().unwrap()),
+            "priority is the first 8 bytes of the VRF output, big-endian"
+        );
+        // Wrong length is not a proof.
+        assert!(vrf_priority(&[0u8; 10]).is_none());
+        assert!(vrf_priority(&[]).is_none());
+    }
+
     fn make_genesis_header() -> BlockHeader {
         BlockHeader {
             height: 0,
@@ -299,6 +396,7 @@ mod tests {
             bls_aggregate: None,
             bls_cosigner_pks: vec![],
             bls_bitmap: vec![],
+            vrf_proof: None,
         }
     }
 
@@ -325,6 +423,7 @@ mod tests {
             bls_aggregate: None,
             bls_cosigner_pks: vec![],
             bls_bitmap: vec![],
+            vrf_proof: None,
         };
         assert!(block.is_genesis());
         assert_eq!(block.header.prev_hash, GENESIS_PREV_HASH);

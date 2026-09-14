@@ -102,6 +102,11 @@ pub enum P2pMessage {
         /// Bitmap of signing validator indices, matching `bls_aggregate`.
         #[serde(default)]
         bls_bitmap: Vec<u8>,
+        /// ADR 0029 Phase 2a — the proposer's VRF proof, carried so the reconstructed
+        /// block keeps the same fork-choice priority on every node (dropping it here
+        /// would let two nodes disagree on the canonical head).
+        #[serde(default)]
+        vrf_proof: Option<Vec<u8>>,
     },
 
     /// Request a set of transactions by hash from a peer that announced them
@@ -187,6 +192,7 @@ impl P2pMessage {
             tx_hashes,
             bls_aggregate: block.bls_aggregate.clone(),
             bls_bitmap: block.bls_bitmap.clone(),
+            vrf_proof: block.vrf_proof.clone(),
         }
     }
 }
@@ -228,6 +234,7 @@ mod tests {
                 base_fee: 0,
                 receipts_root: [0u8; 32],
             },
+            vrf_proof: None,
             transactions: vec![],
             bls_aggregate: None,
             bls_cosigner_pks: vec![],
@@ -390,6 +397,7 @@ mod tests {
                 tx_hashes: vec![],
                 bls_aggregate: None,
                 bls_bitmap: vec![],
+                vrf_proof: None,
             }
             .topic(),
             "vinx/compact/1"

@@ -169,27 +169,29 @@ frais = base_fee × poids(type) × multiplicateur_congestion
 
 ## 8. Consensus
 
-### 8.1 Consensus implémenté — PoA Threshold ✅
+### 8.1 Consensus implémenté — PoA Threshold + sélection VRF du leader ✅
 
 | Règle | Valeur |
 |---|---|
-| Leader | Round-robin sur le **set actif** (jailés sautés — ADR 0027) |
-| Quorum de finalité | `⌈2n/3⌉` sur le **set complet bondé** à cette hauteur |
+| Leader (défaut) | Round-robin sur le **set actif** (jailés sautés — ADR 0027) |
+| Leader (VRF, ADR 0029 Phase 2a) 🔧 | Auto-sélection VRF : candidat si `VRF(epoch_beacon ‖ height) ≤ seuil` (espérance ≈ 2) ; le fork-choice garde la **plus petite sortie**. Repli round-robin si pas de clé VRF |
+| Preuve VRF | ECVRF RFC 9381, portée par `Block::vrf_proof` (hors en-tête), vérifiée contre la clé VRF enregistrée on-chain |
+| Quorum de finalité | `⌈2n/3⌉` sur le **set complet bondé** à cette hauteur (inchangé par la Phase 2a) |
 | Jailing | Jamais ne réduit le quorum — sûreté sous partition |
 | Finalité | Prefix-closed — `finalized_height` avance sur le plus long préfixe contigu ≥ quorum |
+| Signatures | BLS12-381 agrégé + bitmap (ADR 0029 Phase 1) — vérification O(1) |
 | Sûreté vérifiée | Banc n=3 : à 2/3 vivant la finalité avance, à 1/3 elle gèle |
-| Fork-choice | `canonical_head` pur, réorg par snapshot+rejeu (ADR 0031) |
+| Fork-choice | `canonical_head` pur, réorg par snapshot+rejeu (ADR 0031) ; priorité VRF puis round-robin |
 
-### 8.2 Consensus cible — PoS Algorand-style 🔴 (ADR 0029)
+### 8.2 Consensus cible — comité VRF échantillonné 🔴 (ADR 0029 Phase 2b/2c)
 
 | Règle | Valeur |
 |---|---|
-| VRF | ECVRF RFC 9381 |
-| Taille du comité | **n ≈ 100** — tirage uniforme parmi les bondés |
-| Leader | Validateur avec la **sortie VRF la plus faible** (imprévisible) |
-| Signatures | BLS12-381 agrégé — 100 signatures → 1, vérification O(1) |
-| Finalité | BFT ≥ 67 % du comité |
-| Anti-DoS | Leader inconnu jusqu'au dernier moment (contrairement au round-robin) |
+| Taille du comité | **k ≈ 100** — tirage uniforme parmi les bondés (`k < N`) |
+| Co-signature | **Seuls les `k` tirés** co-signent (aujourd'hui : tout le set actif) |
+| Finalité | BFT ≥ 67 % **du comité** (aujourd'hui : du set complet) |
+| Beacon | Accumulation de sorties VRF anti-grinding (Cardano 2/3-freeze) — remplace le beacon `hash(beacon ‖ epoch ‖ ts)` actuel, influençable via `ts` |
+| Anti-DoS | Leader inconnu jusqu'au dernier moment (déjà acquis en Phase 2a) |
 
 ---
 

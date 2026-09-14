@@ -72,6 +72,7 @@ impl Chain {
             bls_aggregate: None,
             bls_cosigner_pks: vec![],
             bls_bitmap: vec![],
+            vrf_proof: None,
         };
         let hash = genesis.hash();
         let chain = Self {
@@ -780,6 +781,7 @@ mod tests {
             bls_aggregate: None,
             bls_cosigner_pks: vec![],
             bls_bitmap: vec![],
+            vrf_proof: None,
         };
         for idx in 0..n_sigs {
             crate::consensus::sign_block_bls(&mut block, &test_bls_sk(idx), idx).unwrap();
@@ -1079,6 +1081,7 @@ mod tests {
                 bls_aggregate: None,
                 bls_cosigner_pks: vec![],
                 bls_bitmap: vec![],
+                vrf_proof: None,
             };
             chain.push(block);
         }
@@ -1125,6 +1128,7 @@ mod tests {
                 bls_aggregate: None,
                 bls_cosigner_pks: vec![],
                 bls_bitmap: vec![],
+                vrf_proof: None,
             };
             chain.push(block);
         }

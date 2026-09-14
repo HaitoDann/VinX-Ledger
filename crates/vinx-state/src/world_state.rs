@@ -4487,6 +4487,75 @@ mod tests {
         assert_eq!(committee, committee2);
     }
 
+    /// ADR 0029 Phase 2a — the VRF leader (top-1 committee) **rotates** across heights and
+    /// no validator dominates. This is the headline property that distinguishes VRF
+    /// selection from a static round-robin: because `alpha = beacon ‖ height` changes every
+    /// height, the lowest-output validator moves around, and over many heights the crown is
+    /// shared roughly uniformly.
+    #[test]
+    fn test_vrf_leader_rotates_and_is_roughly_uniform() {
+        use std::collections::HashMap;
+        use vinx_core::validator_pool::PoolStatus;
+        use vinx_crypto::VrfSecretKey;
+
+        let n = 5usize;
+        let mut s = WorldState::new();
+        let mut pairs: Vec<(Address, VrfSecretKey)> = Vec::new();
+        for _ in 0..n {
+            let kp = KeyPair::generate();
+            let addr = Address::from_public_key(&kp.public_key());
+            s.credit_for_test(addr, Amount::from_vinx(1_000));
+            let mut entry = vinx_core::ValidatorPoolEntry::new(MIN_VALIDATOR_BOND_ATOMS, 0);
+            entry.status = PoolStatus::Active;
+            s.validator_pool.insert(addr, entry);
+            let vrf_sk = VrfSecretKey::generate();
+            s.apply_transaction(&Transaction::new_register_vrf_key(
+                &kp,
+                &vrf_sk.public_key().0,
+                0,
+            ))
+            .unwrap();
+            pairs.push((addr, vrf_sk));
+        }
+
+        // We measure the SELECTION property (lowest VRF output leads), so we evaluate each
+        // validator's output locally (one ECVRF prove each) and pick the min — no need to
+        // re-verify every proof each round (verification is exercised elsewhere and is far
+        // more expensive). `committee_from_vrf_proofs` uses this exact min-output rule.
+        let rounds = 60u64;
+        let mut wins: HashMap<Address, u64> = HashMap::new();
+        for h in 1..=rounds {
+            let alpha = s.committee_alpha(h);
+            let leader = pairs
+                .iter()
+                .map(|(a, sk)| {
+                    let (_, output) = sk.evaluate(&alpha);
+                    (*a, output)
+                })
+                .min_by_key(|(_, o)| *o)
+                .map(|(a, _)| a)
+                .expect("non-empty validator set");
+            *wins.entry(leader).or_insert(0) += 1;
+        }
+
+        // Rotation: every validator wins at least once over 60 heights (P(a given validator
+        // never wins) = (4/5)^60 ≈ 1.5·10⁻⁶ — deterministic in practice).
+        assert_eq!(
+            wins.len(),
+            n,
+            "every validator should lead at least once — the crown rotates"
+        );
+        // Fairness: nobody wins more than 3× the uniform mean (12). A static schedule or a
+        // biased VRF would blow past this; uniform selection stays well under.
+        let mean = rounds / n as u64; // 12
+        for (addr, w) in &wins {
+            assert!(
+                *w <= mean * 3,
+                "validator {addr} led {w} times, far above the fair share (~{mean})"
+            );
+        }
+    }
+
     #[test]
     fn test_committee_excludes_unbonding_and_warmup() {
         use vinx_core::validator_pool::{PoolStatus, ValidatorPoolEntry};

@@ -34,6 +34,9 @@ struct CompactBlockState {
     /// must be re-authenticated, so the aggregate/bitmap cannot be dropped here.
     bls_aggregate: Option<Vec<u8>>,
     bls_bitmap: Vec<u8>,
+    /// ADR 0029 Phase 2a — the proposer's VRF proof, preserved so the reassembled block
+    /// keeps the fork-choice priority every node computes identically.
+    vrf_proof: Option<Vec<u8>>,
 }
 use vinx_state::WorldState;
 
@@ -676,11 +679,19 @@ async fn dispatch_message(
             // honest validator and have the block applied. Require a co-signature from the
             // proposer's *registered* BLS key over this exact header.
             {
-                let indexed_pks = state.read().await.indexed_bls_keys(&vs);
+                let st = state.read().await;
+                let indexed_pks = st.indexed_bls_keys(&vs);
                 if let Err(e) =
                     crate::consensus::verify_proposer_authenticated(&block, &vs, &indexed_pks)
                 {
                     warn!(height, error = %e, "P2P block failed proposer authentication");
+                    return;
+                }
+                // ADR 0029 Phase 2a — si le bloc revendique une élection VRF, la preuve doit
+                // vérifier contre la clé VRF enregistrée du proposeur et son tirage passer sous
+                // le seuil. Les blocs sans VRF (round-robin/backup) passent inchangés.
+                if let Err(e) = crate::consensus::verify_vrf_leadership(&block, &st, vs.len()) {
+                    warn!(height, error = %e, "P2P block failed VRF leadership check");
                     return;
                 }
             }
@@ -1184,6 +1195,7 @@ async fn dispatch_message(
             tx_hashes,
             bls_aggregate,
             bls_bitmap,
+            vrf_proof,
         } => {
             let height = header.height;
 
@@ -1232,6 +1244,7 @@ async fn dispatch_message(
                 resolved: HashMap::new(),
                 bls_aggregate: bls_aggregate.clone(),
                 bls_bitmap: bls_bitmap.clone(),
+                vrf_proof: vrf_proof.clone(),
             };
             for tx in resolved_txs {
                 state_entry.resolved.insert(tx.hash(), tx);
@@ -1251,6 +1264,7 @@ async fn dispatch_message(
                     bls_aggregate,
                     bls_cosigner_pks: vec![],
                     bls_bitmap,
+                    vrf_proof,
                 };
                 info!(height, "CompactBlock: all txs known, applying immediately");
                 // Re-dispatch as a full NewBlock through the existing path.
@@ -1366,6 +1380,7 @@ async fn dispatch_message(
                 }
                 let bls_aggregate = entry.bls_aggregate.clone();
                 let bls_bitmap = entry.bls_bitmap.clone();
+                let vrf_proof = entry.vrf_proof.clone();
                 pending_compact.remove(&height);
                 let block = Block {
                     header,
@@ -1373,6 +1388,7 @@ async fn dispatch_message(
                     bls_aggregate,
                     bls_cosigner_pks: vec![],
                     bls_bitmap,
+                    vrf_proof,
                 };
                 info!(height, "CompactBlock: reassembly complete, applying");
                 Box::pin(dispatch_message(

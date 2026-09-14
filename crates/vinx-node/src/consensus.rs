@@ -1,5 +1,5 @@
 use vinx_core::{Block, Transaction, ValidatorSet};
-use vinx_crypto::{BlsSecretKey, Hash32};
+use vinx_crypto::{BlsSecretKey, Hash32, VrfProof};
 use vinx_state::WorldState;
 
 use crate::NodeError;
@@ -132,6 +132,56 @@ pub fn validate_incoming_block(
     if !verify_block_tx_signatures(&block.transactions) {
         return Err(NodeError::Consensus(format!(
             "block {} has invalid transaction signature(s)",
+            block.header.height
+        )));
+    }
+    Ok(())
+}
+
+/// ADR 0029 Phase 2a — verifies a block's VRF leadership claim, if it carries one.
+///
+/// A block with `vrf_proof = None` is a round-robin / backup block (backward-compatible)
+/// and passes unchanged — its proposer legitimacy is covered by the round-robin schedule
+/// and `verify_proposer_authenticated`. A block that **does** carry a proof must satisfy
+/// two consensus-critical checks, or it is rejected:
+///
+/// 1. The proof verifies against the proposer's **on-chain registered** VRF key over the
+///    canonical `alpha = committee_alpha(height)` (so it cannot be forged for another
+///    proposer, nor computed for a different height/beacon).
+/// 2. The resulting VRF draw is below the self-selection threshold for `active_count`
+///    validators — i.e. the proposer really was entitled to propose. A proposer whose
+///    draw is above threshold is not a valid leader even with a genuine proof.
+///
+/// `active_count` must be the size of the active set the proposer selected against
+/// (`validator_set.len()`), so every node computes the same threshold.
+pub fn verify_vrf_leadership(
+    block: &Block,
+    state: &WorldState,
+    active_count: usize,
+) -> Result<(), NodeError> {
+    let proof_bytes = match &block.vrf_proof {
+        None => return Ok(()),
+        Some(b) => b,
+    };
+    let arr: [u8; vinx_crypto::VRF_PROOF_LEN] =
+        proof_bytes.as_slice().try_into().map_err(|_| {
+            NodeError::Consensus(format!(
+                "block {} carries a malformed VRF proof",
+                block.header.height
+            ))
+        })?;
+    let output = state
+        .verify_committee_vrf_proof(&block.header.validator, block.header.height, &VrfProof(arr))
+        .map_err(|e| {
+            NodeError::Consensus(format!(
+                "block {} VRF proof rejected: {e}",
+                block.header.height
+            ))
+        })?;
+    let priority = u64::from_be_bytes(output[..8].try_into().unwrap());
+    if !vinx_core::block::vrf_is_selected(priority, active_count) {
+        return Err(NodeError::Consensus(format!(
+            "block {} claims VRF leadership but its draw is above the selection threshold",
             block.header.height
         )));
     }
@@ -305,7 +355,27 @@ pub(crate) fn more_canonical<'a>(
     if ca != cb {
         return if ca > cb { a } else { b };
     }
-    // 4. Priorité au leader prévu.
+    // 4. Priorité au leader (ADR 0029 Phase 2a puis ADR 0063).
+    //    a) Un bloc au tirage VRF valide bat un bloc sans VRF (backup) ; entre deux blocs
+    //       VRF, la plus petite sortie l'emporte (le leader « le plus légitime »). Les
+    //       preuves ont déjà été vérifiées à l'ingestion (`verify_vrf_leadership`), donc on
+    //       se contente ici de lire la sortie pour l'ordre — une preuve illisible retombe
+    //       sur `None` et est traitée comme un bloc sans VRF.
+    let (va, vb) = (
+        a.vrf_proof
+            .as_deref()
+            .and_then(vinx_core::block::vrf_priority),
+        b.vrf_proof
+            .as_deref()
+            .and_then(vinx_core::block::vrf_priority),
+    );
+    match (va, vb) {
+        (Some(pa), Some(pb)) if pa != pb => return if pa < pb { a } else { b },
+        (Some(_), None) => return a,
+        (None, Some(_)) => return b,
+        _ => {}
+    }
+    //    b) À défaut de VRF (ou tirages égaux), priorité au leader round-robin prévu.
     let (la, lb) = (is_scheduled_leader(a, vs), is_scheduled_leader(b, vs));
     if la != lb {
         return if la { a } else { b };
@@ -375,6 +445,7 @@ mod tests {
             bls_aggregate: None,
             bls_cosigner_pks: vec![],
             bls_bitmap: vec![],
+            vrf_proof: None,
         }
     }
 
@@ -706,6 +777,127 @@ mod tests {
                 .unwrap()
                 .hash(),
             "l'élection est indépendante de l'ordre d'itération (ordre total)"
+        );
+    }
+
+    // ─── ADR 0029 Phase 2a — VRF leadership verification & fork-choice priority ──────
+
+    use vinx_crypto::VrfSecretKey;
+
+    /// A WorldState with one bonded validator that has a registered VRF key.
+    /// Returns (state, its keypair, its address, its VRF secret key).
+    fn vrf_validator_state() -> (WorldState, KeyPair, Address, VrfSecretKey) {
+        use vinx_core::amount::{Amount, MIN_VALIDATOR_BOND_ATOMS};
+        use vinx_core::{Transaction, ValidatorPoolEntry};
+        let mut s = WorldState::new();
+        let kp = KeyPair::generate();
+        let addr = addr_of(&kp);
+        s.credit_for_test(addr, Amount::from_vinx(1_000));
+        s.validator_pool
+            .insert(addr, ValidatorPoolEntry::new(MIN_VALIDATOR_BOND_ATOMS, 0));
+        let vrf_sk = VrfSecretKey::generate();
+        s.apply_transaction(&Transaction::new_register_vrf_key(
+            &kp,
+            &vrf_sk.public_key().0,
+            0,
+        ))
+        .unwrap();
+        (s, kp, addr, vrf_sk)
+    }
+
+    #[test]
+    fn vrf_leadership_none_proof_passes() {
+        // A round-robin / backup block carries no VRF proof — it must pass unchanged.
+        let (state, _kp, addr, _vrf) = vrf_validator_state();
+        let block = make_block(7, addr); // vrf_proof defaults to None
+        assert!(block.vrf_proof.is_none());
+        assert!(verify_vrf_leadership(&block, &state, 1).is_ok());
+    }
+
+    #[test]
+    fn vrf_leadership_accepts_valid_selected_proof() {
+        let (state, _kp, addr, vrf_sk) = vrf_validator_state();
+        let height = 7;
+        let alpha = state.committee_alpha(height);
+        let proof = vrf_sk.prove(&alpha);
+        let mut block = make_block(height, addr);
+        block.vrf_proof = Some(proof.0.to_vec());
+        // active_count = 1 → threshold saturates, the draw is always selected.
+        assert!(verify_vrf_leadership(&block, &state, 1).is_ok());
+    }
+
+    #[test]
+    fn vrf_leadership_rejects_foreign_proof() {
+        // A proof from a key that is NOT the proposer's registered VRF key must be rejected.
+        let (state, _kp, addr, _vrf_sk) = vrf_validator_state();
+        let height = 7;
+        let alpha = state.committee_alpha(height);
+        let impostor = VrfSecretKey::generate();
+        let proof = impostor.prove(&alpha);
+        let mut block = make_block(height, addr);
+        block.vrf_proof = Some(proof.0.to_vec());
+        assert!(
+            verify_vrf_leadership(&block, &state, 1).is_err(),
+            "a proof not matching the proposer's registered VRF key must be rejected"
+        );
+    }
+
+    #[test]
+    fn vrf_leadership_rejects_malformed_proof() {
+        let (state, _kp, addr, _vrf_sk) = vrf_validator_state();
+        let mut block = make_block(7, addr);
+        block.vrf_proof = Some(vec![0u8; 10]); // not an 80-byte proof
+        assert!(verify_vrf_leadership(&block, &state, 1).is_err());
+    }
+
+    #[test]
+    fn fork_choice_prefers_vrf_block_over_backup_at_equal_weight() {
+        // Two blocks, same height, zero co-signatures each (equal weight). One carries a
+        // valid VRF proof, the other none → the VRF block is canonical.
+        let v = kps(3);
+        let a: Vec<Address> = v.iter().map(addr_of).collect();
+        let vs = ValidatorSet::new(a.clone());
+        let registry = test_registry(vs.len());
+
+        let sk = VrfSecretKey::generate();
+        let (proof, _) = sk.evaluate(b"h1");
+        let mut vrf_block = make_block(1, a[0]);
+        vrf_block.vrf_proof = Some(proof.0.to_vec());
+        let backup_block = make_block(1, a[2]); // no VRF proof
+
+        let winner = more_canonical(&vrf_block, &backup_block, &vs, &registry);
+        assert_eq!(
+            winner.header.validator, a[0],
+            "a validly-drawn VRF block beats a VRF-less backup at equal co-signature weight"
+        );
+        // Order-independent.
+        let winner_rev = more_canonical(&backup_block, &vrf_block, &vs, &registry);
+        assert_eq!(winner_rev.header.validator, a[0]);
+    }
+
+    #[test]
+    fn fork_choice_lowest_vrf_output_wins() {
+        let v = kps(3);
+        let a: Vec<Address> = v.iter().map(addr_of).collect();
+        let vs = ValidatorSet::new(a.clone());
+        let registry = test_registry(vs.len());
+
+        // Draw proofs from two keys and order them by priority so the assertion is exact.
+        let (p0, _) = VrfSecretKey::generate().evaluate(b"h1");
+        let (p1, _) = VrfSecretKey::generate().evaluate(b"h1");
+        let pr0 = vinx_core::block::vrf_priority(&p0.0).unwrap();
+        let pr1 = vinx_core::block::vrf_priority(&p1.0).unwrap();
+        let (low, high) = if pr0 <= pr1 { (&p0, &p1) } else { (&p1, &p0) };
+
+        let mut block_low = make_block(1, a[0]);
+        block_low.vrf_proof = Some(low.0.to_vec());
+        let mut block_high = make_block(1, a[1]);
+        block_high.vrf_proof = Some(high.0.to_vec());
+
+        let winner = more_canonical(&block_low, &block_high, &vs, &registry);
+        assert_eq!(
+            winner.header.validator, a[0],
+            "the block with the lower VRF output is canonical at equal weight"
         );
     }
 }

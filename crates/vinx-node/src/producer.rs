@@ -49,17 +49,46 @@ pub fn produce_block(
     let next_height = chain.tip_height() + 1;
     let prev_hash = chain.tip_hash();
 
-    // ADR 0027 — leader tournant sur le set ACTIF : les validateurs en prison (jailed)
-    // sont sautés dans la rotation round-robin. Le calcul est déterministe (dérivé de
-    // `state.reliability`, elle-même dérivée de faits on-chain), donc tous les nœuds
-    // s'accordent sur le leader attendu à chaque hauteur.
-    let expected_leader =
-        reliability::active_leader_at(validator_set, &state.reliability, next_height);
-    if expected_leader != config.validator_address {
-        return Err(NodeError::Consensus(format!(
-            "not the leader for block {next_height}: expected {expected_leader}"
-        )));
-    }
+    // ADR 0029 Phase 2a — sélection VRF du leader. Si ce nœud a une clé VRF enregistrée
+    // on-chain, il ne propose que lorsque son tirage VRF pour cette hauteur passe sous le
+    // seuil (espérance ≈ VRF_LEADER_EXPECTATION candidats ; le fork-choice garde la plus
+    // petite sortie). alpha = committee_alpha(height) = epoch_beacon ‖ height, calculé
+    // AVANT settle_block pour que producteur et vérificateur utilisent le même beacon
+    // (celui de la hauteur h-1). Les nœuds sans clé VRF retombent sur le round-robin
+    // (ADR 0063) — un réseau mixte continue de produire. Les créneaux vides (personne de
+    // tiré) sont couverts par le backup après timeout (ADR 0027), donc la liveness ne
+    // dépend jamais d'un tirage.
+    let vrf_proof_bytes: Option<Vec<u8>> = match &config.vrf_secret_key {
+        Some(vrf_sk)
+            if state
+                .validator_pool
+                .get(&config.validator_address)
+                .and_then(|e| e.vrf_pub_key)
+                == Some(vrf_sk.public_key().0) =>
+        {
+            let alpha = state.committee_alpha(next_height);
+            let (proof, output) = vrf_sk.evaluate(&alpha);
+            let priority = u64::from_be_bytes(output[..8].try_into().unwrap());
+            if !vinx_core::block::vrf_is_selected(priority, validator_set.len()) {
+                return Err(NodeError::Consensus(format!(
+                    "not VRF-selected for block {next_height} (VRF draw above threshold)"
+                )));
+            }
+            Some(proof.0.to_vec())
+        }
+        _ => {
+            // ADR 0027/0063 — repli round-robin sur le set ACTIF (jailés sautés). Calcul
+            // déterministe (dérivé de `state.reliability`) : tous les nœuds s'accordent.
+            let expected_leader =
+                reliability::active_leader_at(validator_set, &state.reliability, next_height);
+            if expected_leader != config.validator_address {
+                return Err(NodeError::Consensus(format!(
+                    "not the leader for block {next_height}: expected {expected_leader}"
+                )));
+            }
+            None
+        }
+    };
 
     // ADR 0002/0027 — SÛRETÉ : le quorum de finalité reste sur le set **complet** bondé
     // (⌈2n/3⌉), jamais sur le set actif. Le jailing est dérivé (meta, hors state_root) et
@@ -177,6 +206,7 @@ pub fn produce_block(
         bls_aggregate: None,
         bls_cosigner_pks: vec![],
         bls_bitmap: vec![],
+        vrf_proof: vrf_proof_bytes,
     };
 
     // ADR 0029 Phase 1 — BLS co-signature: the proposer contributes its own BLS sig.
@@ -323,6 +353,7 @@ fn produce_block_inner(
         bls_aggregate: None,
         bls_cosigner_pks: vec![],
         bls_bitmap: vec![],
+        vrf_proof: None,
     };
     let header_hash = block.hash();
     {
@@ -621,5 +652,84 @@ mod tests {
         .unwrap();
         // At zero mempool load, base_fee == fee_floor
         assert_eq!(block.header.base_fee, DEFAULT_FEE_FLOOR_ATOMS as u64);
+    }
+
+    /// ADR 0029 Phase 2a — a validator with a registered VRF key produces a block that
+    /// carries its VRF proof, and that proof verifies as valid leadership.
+    #[test]
+    fn test_vrf_registered_validator_attaches_verifiable_proof() {
+        use vinx_core::amount::MIN_VALIDATOR_BOND_ATOMS;
+        use vinx_core::{Transaction, ValidatorPoolEntry};
+        use vinx_crypto::VrfSecretKey;
+
+        let validator_kp = KeyPair::generate();
+        let addr = Address::from_public_key(&validator_kp.public_key());
+        let admin = Address::from_public_key(&KeyPair::generate().public_key());
+        let mut state = create_genesis_state(&GenesisConfig {
+            admin_address: admin,
+            validator_address: addr,
+            chain_id: vinx_core::CHAIN_ID_DEVNET,
+            validator_bls: None,
+        });
+        let (mut chain, _) = Chain::new_with_genesis(addr, 0);
+        let mut mempool = Mempool::default();
+        let mut config = NodeConfig::new(validator_kp.clone());
+
+        // Bond the validator into the pool and register a VRF key matching the config.
+        state.credit_for_test(addr, Amount::from_vinx(1_000));
+        state
+            .validator_pool
+            .insert(addr, ValidatorPoolEntry::new(MIN_VALIDATOR_BOND_ATOMS, 0));
+        let vrf_sk = VrfSecretKey::generate();
+        state
+            .apply_transaction(&Transaction::new_register_vrf_key(
+                &validator_kp,
+                &vrf_sk.public_key().0,
+                0,
+            ))
+            .unwrap();
+        config.vrf_secret_key = Some(vrf_sk);
+
+        let block = produce_block(
+            &mut state,
+            &mut chain,
+            &mut mempool,
+            &config,
+            &config.validator_set,
+            1_000,
+        )
+        .unwrap();
+
+        assert!(
+            block.vrf_proof.is_some(),
+            "a VRF-registered, VRF-selected validator must attach its VRF proof"
+        );
+        // active_count = 1 (single-validator set) → always selected; the proof must verify
+        // against the on-chain registered key at this height.
+        assert!(
+            crate::consensus::verify_vrf_leadership(&block, &state, 1).is_ok(),
+            "the attached proof must verify as valid VRF leadership"
+        );
+    }
+
+    /// Without a registered VRF key, production falls back to the round-robin path and the
+    /// block carries no VRF proof (backward-compatible / mixed-network behavior).
+    #[test]
+    fn test_no_vrf_key_falls_back_to_round_robin_no_proof() {
+        let (mut state, mut chain, mut mempool, config) = setup();
+        assert!(config.vrf_secret_key.is_none());
+        let block = produce_block(
+            &mut state,
+            &mut chain,
+            &mut mempool,
+            &config,
+            &config.validator_set,
+            1_000,
+        )
+        .unwrap();
+        assert!(
+            block.vrf_proof.is_none(),
+            "a validator with no registered VRF key produces a round-robin block (no proof)"
+        );
     }
 }

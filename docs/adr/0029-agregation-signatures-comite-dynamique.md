@@ -1,6 +1,8 @@
 # ADR 0029 — Décentralisation à grande échelle : agrégation de signatures & comité dynamique
 
-- **Statut :** En cours — Phase 1 (agrégation BLS + bitmap) implémentée, Phase 2 (VRF comité) planifiée
+- **Statut :** En cours — Phase 1 (agrégation BLS + bitmap) ✅ et **Phase 2a (sélection VRF du
+  leader)** 🔧 implémentées ; Phase 2b/2c (comité échantillonné `k < N`, finalité au quorum du
+  comité, beacon VRF anti-grinding) planifiées
 - **Catégorie :** Consensus & finalité · **Priorité :** 🔴 haute
 - **Date :** Juillet 2026 · Révisé août 2026 (décision architecture VinX PoS)
 - **Liens :** étend la finalité (ADR 0002) ; généralise la rémunération (ADR 0028) et le
@@ -189,10 +191,42 @@ validateur (`ValidatorSet::index_of`). Consensus-critique (ADR 0020).
 - [x] Test de propriété : bitmap popcount = nombre de validateurs ayant co-signé, sur 6 blocs — `n3_bls_bitmap_popcount_matches_signer_count`
 - [x] Vecteur doré (ADR 0020) : un même set de signatures BLS produit toujours le même bitmap — `n3_bls_golden_vector_deterministic_bitmap`
 
-### Critères de validation Phase 2 (à venir)
+### Phase 2a — Sélection VRF du leader (implémentée, septembre 2026)
 
-- [ ] Banc n=1 : tirage VRF dégénère correctement à n=1 (un seul leader possible)
-- [ ] Banc n=3 : les 3 leaders sont distincts sur 100 blocs consécutifs (rotation VRF effective)
-- [ ] Banc n=3 : si 1 nœud tombe, finalité gèle mais ne bifurque pas
+Premier incrément de la Phase 2, **sans toucher au modèle de finalité** (le quorum reste sur
+le set actif complet, `⌈2N/3⌉` — ADR 0002/0027 inchangés). Il supprime la **prévisibilité du
+round-robin** (bénéfice anti-DoS de l'ADR) au moindre risque.
+
+**Mécanique :**
+- Chaque validateur avec une clé VRF enregistrée évalue `alpha = committee_alpha(height) =
+  epoch_beacon ‖ height_le64` et **s'auto-sélectionne** comme candidat-leader si son tirage passe
+  sous le seuil (espérance ≈ `VRF_LEADER_EXPECTATION = 2` candidats ; `vinx_core::block`).
+- Le bloc porte la **preuve VRF du proposeur** (`Block::vrf_proof`, 80 octets, **hors en-tête** —
+  le hash signé et son vecteur doré sont inchangés). Elle est auto-authentifiante : elle ne vérifie
+  que contre la clé VRF **enregistrée on-chain** du proposeur, à la hauteur du bloc → non forgeable
+  pour autrui, non *grindable* (une sortie déterministe par clé+hauteur).
+- **Vérification** à l'ingestion (`consensus::verify_vrf_leadership`) : preuve valide **et** tirage
+  sous le seuil, sinon rejet. Propagée aussi par le chemin CompactBlock (ADR 0037) pour que tous
+  les nœuds calculent le même ordre.
+- **Fork-choice** (`consensus::more_canonical`, règle 4) : à poids de co-signatures égal, un bloc
+  VRF bat un bloc sans VRF, et entre deux blocs VRF la **plus petite sortie** gagne.
+- **Liveness** : les créneaux sans tiré (probabilité non nulle) sont couverts par le **backup après
+  timeout** (ADR 0027) ; les nœuds **sans clé VRF** retombent sur le round-robin (ADR 0063) — réseau
+  mixte compatible. `STORAGE_VERSION 20 → 21` (champ `vrf_proof` ajouté aux rows de bloc).
+
+**Critères Phase 2a :**
+- [x] `vrf_leader_threshold` / `vrf_is_selected` / `vrf_priority` — seuil, sélection, priorité (unit tests `vinx-core`)
+- [x] n=1 : le tirage VRF dégénère en leader unique (le seul validateur est toujours sélectionné) — `test_vrf_registered_validator_attaches_verifiable_proof`
+- [x] Le leader (top-1 VRF) **tourne** et est ~uniforme sur 60 hauteurs, aucun validateur ne domine — `test_vrf_leader_rotates_and_is_roughly_uniform`
+- [x] `verify_vrf_leadership` accepte une preuve valide+sélectionnée, rejette une preuve étrangère / malformée — tests `vinx-node/consensus`
+- [x] Fork-choice : bloc VRF > backup, et plus petite sortie gagne — `fork_choice_prefers_vrf_block_over_backup_at_equal_weight`, `fork_choice_lowest_vrf_output_wins`
+- [x] Le proposeur non tiré ne produit pas (repli backup) ; réseau mixte VRF/round-robin compatible — `test_no_vrf_key_falls_back_to_round_robin_no_proof`
+
+### Critères de validation Phase 2b/2c (à venir)
+
+- [ ] Banc n=3 multi-nœuds : les leaders varient sur 100 blocs réels (rotation VRF de bout en bout sur le transport)
+- [ ] Banc n=3 : si 1 nœud tombe, finalité gèle mais ne bifurque pas (avec production VRF active)
+- [ ] Comité échantillonné `k < N` : seuls les `k` tirés co-signent ; finalité = quorum **du comité** (`⌈2k/3⌉`)
+- [ ] Beacon VRF anti-grinding (Cardano 2/3-freeze) — le beacon actuel `hash(beacon ‖ epoch ‖ ts)` est influençable par le producteur via `ts` ; à remplacer par une accumulation de sorties VRF
 - [ ] Test de propriété : aucun validateur n'est leader plus de 2× la moyenne sur 1 000 blocs
-- [ ] PROTOCOL_SPEC.md §8.2 correspond à l'implémentation Phase 2
+- [ ] PROTOCOL_SPEC.md §8.2 correspond à l'implémentation Phase 2 complète

@@ -133,7 +133,7 @@ Ce dossier trace toutes les décisions d'architecture de VinX Ledger. Chaque ADR
 
 | ADR | Titre | Statut | Priorité |
 |---|---|---|---|
-| [0029](./0029-agregation-signatures-comite-dynamique.md) | Comité VRF Algorand-style : ECVRF RFC 9381 + BLS12-381 | 📐 Accepté | 🔴 Haute (prérequis de tout) |
+| [0029](./0029-agregation-signatures-comite-dynamique.md) | Comité VRF Algorand-style : ECVRF RFC 9381 + BLS12-381 | 🔧 Phase 1 + 2a implémentées (comité `k<N` & finalité par comité = 2b/2c) | 🔴 Haute |
 | [0038](./0038-open-poa-admission.md) | Open PoS — admission permissionless au pool de validateurs | 🔧 Implémenté (sélection VRF en attente de 0029) | 🔴 Haute |
 | [0036](./0036-bornes-churn-validateurs.md) | Bornes de churn du set de validateurs | 💡 Proposé | 🟠 Moyenne |
 
@@ -277,7 +277,7 @@ d'exploitation, correctifs, prompts de contre-audit — vit dans
 | [0026](./0026-depot-existentiel.md) | Dépôt existentiel anti-bloat | ✅ Vérifié | 1 |
 | [0027](./0027-fiabilite-jailing-validateurs.md) | Fiabilité & jailing validateurs | ✅ Vérifié | 1 |
 | [0028](./0028-partage-emission-quorum.md) | Partage émission par époque | 📐 Accepté | 2 |
-| [0029](./0029-agregation-signatures-comite-dynamique.md) | Comité VRF Algorand-style + BLS | 📐 Accepté | 2 |
+| [0029](./0029-agregation-signatures-comite-dynamique.md) | Comité VRF Algorand-style + BLS | 🔧 Phase 1 + 2a implémentées | 2 |
 | [0030](./0030-accountability-cosignatures-conflictuelles.md) | Accountability co-signatures conflictuelles | 💡 Proposé | 2 |
 | [0031](./0031-regle-fork-choice.md) | Règle de fork-choice (canonical_head) | ✅ Vérifié | 1 |
 | [0032](./0032-garde-fous-gouvernance.md) | Garde-fous de gouvernance | 💡 Brouillon | 2 |

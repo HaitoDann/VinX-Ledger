@@ -29,6 +29,7 @@ fn make_block(height: u64, prev: Hash32, proposer: Address) -> Block {
         bls_aggregate: None,
         bls_cosigner_pks: vec![],
         bls_bitmap: vec![],
+        vrf_proof: None,
     }
 }
 

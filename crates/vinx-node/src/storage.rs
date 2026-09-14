@@ -52,7 +52,11 @@ use zstd;
 ///      to WorldState meta.
 /// v18: ADR 0036 validator churn bounds — `exit_queue` (Vec<ValidatorExitRequest> = [])
 ///      appended to WorldState meta. Migration appends 8 zero bytes (bincode empty Vec).
-const STORAGE_VERSION: u64 = 20;
+/// v21: ADR 0029 Phase 2a VRF leader selection — each Block row gains a trailing
+///      `vrf_proof: Option<Vec<u8>>` (None). bincode is positional, so this changes the
+///      block-row layout; as with the BLAKE3 wall (v20), a pre-v21 database is refused
+///      rather than migrated (no live network predates it — genesis has not shipped).
+const STORAGE_VERSION: u64 = 21;
 
 /// zstd compression level — level 3 is the sweet spot: ~60-70% size reduction,
 /// negligible latency compared to disk I/O.
@@ -934,6 +938,7 @@ mod tests {
             bls_aggregate: None,
             bls_cosigner_pks: vec![],
             bls_bitmap: vec![],
+            vrf_proof: None,
         }
     }
 
