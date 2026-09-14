@@ -7,7 +7,7 @@
 
 > ## 🧭 Où en est le projet (lis ceci en premier)
 >
-> **Le socle L1 est solide** (banc n=3 éprouvé + banc adversarial multi-nœuds, 429 tests verts, clippy propre). **Recentrage v6.0 acté (ADR 0064)** : VinX est un **rail de paiement minimaliste L1 PoS** — pas de settlement layer ZK, pas d'Appchains. Le consensus cible reste **PoS Algorand-style** (comité VRF n≈100, BLS agrégé).
+> **Le socle L1 est solide** (banc n=3 éprouvé + banc adversarial multi-nœuds, 441 tests verts, clippy propre). **Recentrage v6.0 acté (ADR 0064)** : VinX est un **rail de paiement minimaliste L1 PoS** — pas de settlement layer ZK, pas d'Appchains. Le consensus cible reste **PoS Algorand-style** (comité VRF n≈100, BLS agrégé) ; la **sélection VRF du leader est implémentée** (ADR 0029 Phase 2a), le comité échantillonné `k<N` et la finalité par comité restent à venir (Phase 2b/2c).
 >
 > **Pivot architectural acté (v6.0, ADR 0064) :**
 > - **Recentrage sur le rail de paiement** : les subnets / modules bondés / Appchains ZK (ADRs 0001, 0010, 0024, 0034, 0048, 0049, 0050) sont **gelés hors scope**. VinX fait une chose : transférer de la valeur, avec finalité BFT et émission progressive.
@@ -61,7 +61,7 @@ VinX Ledger est une blockchain L1 de paiement écrite intégralement en Rust, sa
 - [x] 7 types de transactions (transfer, stake, unstake, announce-upgrade, slash-validator, admin-action, anchor-state) — voir §2
 - [x] État mondial (`WorldState`) avec validation complète
 - [x] État de genèse configurable (admin + validateur initial)
-- [x] Consensus PoA Threshold *(implémenté)* — quorum `⌈2n/3⌉` sur le **set complet bondé**, leader round-robin sur le **set actif** (jailés sautés, ADR 0027). *Architecture cible : PoS Algorand-style comité VRF n≈100 (ADR 0029, non encore implémenté).*
+- [x] Consensus PoA Threshold *(implémenté)* — quorum `⌈2n/3⌉` sur le **set complet bondé**, leader round-robin sur le **set actif** (jailés sautés, ADR 0027), **+ sélection VRF du leader (ADR 0029 Phase 2a)** : auto-sélection par tirage VRF, preuve dans le bloc, fork-choice par sortie VRF ; finalité inchangée. *Reste (Phase 2b/2c) : comité échantillonné n≈100 + finalité au quorum du comité + beacon anti-grinding.*
 - [x] **Finalité au quorum** (ADR 0002) — pointeur `finalized_height` explicite, **prefix-closed**, évalué contre le **quorum historique à chaque hauteur** ; à n=1 immédiate, à n≥2 suit les co-signatures. Éprouvée au **banc n=3** (liveness / tolérance 1 panne / sûreté à 1/3)
 - [x] **Refus de bâtir dans le vide** — le producteur (leader et backup) ne scelle pas au-delà de `MAX_UNFINALIZED_DEPTH` (64) blocs non finalisés (ADR 0002)
 - [x] **Fork-choice déterministe câblé** (ADR 0031 t1+t2a+t2b) — `canonical_head` pure + candidats concurrents + réorg par snapshot+rejeu (`reorg`) déclenchée dans le handler P2P ; convergence indépendante de l'ordre **prouvée au banc n=3** ; *reste : soak réseau réel*
@@ -483,7 +483,8 @@ sync_peer_rpc = "http://1.2.3.4:8545"  # Sync depuis un pair au démarrage
 | 🔴 **Haute** | **Jailing — finir** : tx `Unjail` (opérateur, après cooldown) + règle 2 (co-signatures absentes) | 0027 |
 | 🔴 Haute | **Accountability co-sign** (détection des co-signatures conflictuelles → finalité *accountable*) ; reste de la finalité (view-change formel) | 0030, 0002 |
 | 🔴 Haute | **Soak fork-choice n=3** sur réseau réel (convergence prouvée au banc ; reste la validation réseau) | 0031 |
-| 🔴 Haute | **Comité VRF Algorand-style** — ECVRF RFC 9381, sélection uniforme parmi les bondés, leader = VRF le plus faible, finalité BFT ≥ 67 % du comité ; n=100 | 0029 (Accepté) |
+| 🔧 Phase 2a faite | **Sélection VRF du leader** — ECVRF RFC 9381, auto-sélection sous seuil, leader = VRF le plus faible (fork-choice), preuve dans le bloc ; finalité inchangée | 0029 (Phase 2a) |
+| 🔴 Haute | **Comité VRF échantillonné** — `k≈100` co-signataires tirés, finalité BFT ≥ 67 % **du comité**, beacon anti-grinding | 0029 (Phase 2b/2c) |
 | 🔴 Haute | **Open PoS** — admission permissionless par bond, warmup 3 époques, rotation époque top-N par score, bond gouvernable dans bornes immuables | 0038 (Accepté) |
 | 🔴 Haute | **Cérémonie de genèse multi-validateurs** + `genesis_hash` (chaque validateur fournit clé BLS + PoP) | 0075 §1, 0033 §1 |
 | 🟠 Moyenne | **Récompenses par époque** — distribuer `epoch_dist_emission_pot` + émission entre proposeurs + co-signataires (1 h, `PROPOSER_SHARE_BPS=20 %`) ; frais restent immédiats au producteur | 0028 (Accepté) |

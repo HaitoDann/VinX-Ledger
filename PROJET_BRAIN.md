@@ -20,6 +20,24 @@
 > ⬆️ **Mis à jour à chaque fin de session. C'est la première chose à lire au retour.**
 
 ```
+[14/09/2026 — consensus PoS Algorand, 1re brique]
+✅ Fait :     ADR 0038 relevé 📐→🔧 (pool/warmup/score/rotation déjà dans le code)
+              ADR 0029 Phase 2a IMPLÉMENTÉE — sélection VRF du leader :
+                auto-sélection par tirage VRF sous seuil (espérance ≈2), preuve dans Block::vrf_proof
+                (hors en-tête → hash signé inchangé), verify_vrf_leadership à l'ingestion +
+                propagation CompactBlock, fork-choice par sortie VRF, repli round-robin sans clé VRF
+                FINALITÉ INCHANGÉE (quorum set complet ⌈2N/3⌉) — la partie risquée (comité k<N)
+                reste Phase 2b/2c. STORAGE_VERSION 20→21. 12 tests (rotation/équité, fork-choice,
+                verify, producteur). 441 tests verts, clippy+fmt propres.
+
+🔜 Next :     Phase 2b/2c : comité échantillonné k≈100, finalité au quorum du comité,
+              beacon VRF anti-grinding (le beacon actuel hash(beacon‖epoch‖ts) est influençable via ts)
+              Banc n=3 multi-nœuds réel avec production VRF (rotation de bout en bout)
+
+🤖 AI :       Demandé → relever 0038 puis implémenter 0029
+              Codé → Phase 2a bout en bout + tests + docs (ADR 0029/0038, PROTOCOL_SPEC §8)
+              ⚠️ Divergence → périmètre 0029 réduit à la Phase 2a (leader seul) sur validation utilisateur
+
 [10/09/2026 — série de durcissement post-audit]
 ✅ Fait :     Trois audits (Claude/ChatGPT/Gemini) → correctifs vérifiés, chacun avec PoC échouant/vert
               ADR 0069 — BLAKE3 remplace SHA-256 IMPLÉMENTÉ (avant genesis, breaking) — STORAGE_VERSION 19→20
