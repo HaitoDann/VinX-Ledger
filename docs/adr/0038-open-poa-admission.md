@@ -1,8 +1,9 @@
 # ADR 0038 — Open PoS : admission permissionless, pool bondé
 
-- **Statut :** Accepté — **non implémenté** à ce jour.
+- **Statut :** 🔧 **Implémenté** (pool bondé, warmup, score, rotation d'époque) — la **sélection
+  du comité par bloc** reste round-robin (ADR 0063) tant que la sortition VRF (ADR 0029) n'est pas activée.
 - **Catégorie :** Consensus & finalité / Tokenomics · **Priorité :** 🔴 haute
-- **Date :** Août 2026 (révision majeure — remplace la version « bond + veto collectif »)
+- **Date :** Août 2026 (révision majeure — remplace la version « bond + veto collectif ») · statut relevé septembre 2026
 - **Liens :** concrétise le fair launch (ADR 0021, ADR 0033) ; s'articule avec les récompenses
   par époque (ADR 0028) ; prérequis du comité VRF (ADR 0029) ; dépend du consensus multi-validateur
   éprouvé (ADR 0002/0027/0031) avant d'ouvrir le pool.
@@ -11,6 +12,21 @@
 > bond, warmup, unbonding, slashing). La **sélection pour un bloc donné** (qui signe quoi)
 > n'est plus par score mais par **VRF Algorand-style** (ADR 0029). Les deux ADR sont
 > complémentaires : 0038 = qui peut être dans le pool ; 0029 = qui est dans le comité du bloc.
+
+> ✅ **État d'implémentation (septembre 2026).** La mécanique de pool de cet ADR est **dans le
+> code et exécutée à chaque bloc** (`crates/vinx-state/src/world_state.rs`) :
+> - `validator_pool: BTreeMap<Address, ValidatorPoolEntry>` avec `PoolStatus`
+>   (`Warmup`/`Active`/`Benched`/`Unbonding`), `banned_validator_keys`, `active_set_size`.
+> - Admission **permissionless par bond** : `apply_stake` fait entrer au pool tout compte qui
+>   atteint `MIN_VALIDATOR_BOND_ATOMS`, **clé BLS + PoP exigées à l'entrée** (ADR 0075 §3.1).
+> - **Warmup, score de co-signature glissant, rotation top-N par score à chaque clôture d'époque**
+>   via `tick_epoch_close()` (appelé dans `settle_block`), tiebreaker `BLAKE3(epoch ‖ addr)`.
+> - Bornes de bond immuables, cooldowns gouvernables ; slash + blacklist sur équivocation.
+>
+> **Ce qui reste (couvert par ADR 0029, non par cet ADR) :** la sélection *par bloc* est encore
+> le **round-robin** sur le set actif (ADR 0063) — pas encore la sortition VRF. Autrement dit,
+> « qui est dans le pool et le set actif » est fait ; « qui est tiré pour signer ce bloc-ci »
+> reste round-robin jusqu'à l'activation de 0029.
 
 > ⚠️ **Révision (septembre 2026, ADRs 0069/0075) :**
 > - **Condition d'entrée renforcée.** Poster le bond ne suffit plus : l'entrée dans le pool

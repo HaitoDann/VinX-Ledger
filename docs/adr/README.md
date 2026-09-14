@@ -134,7 +134,7 @@ Ce dossier trace toutes les décisions d'architecture de VinX Ledger. Chaque ADR
 | ADR | Titre | Statut | Priorité |
 |---|---|---|---|
 | [0029](./0029-agregation-signatures-comite-dynamique.md) | Comité VRF Algorand-style : ECVRF RFC 9381 + BLS12-381 | 📐 Accepté | 🔴 Haute (prérequis de tout) |
-| [0038](./0038-open-poa-admission.md) | Open PoS — admission permissionless au pool de validateurs | 📐 Accepté | 🔴 Haute (dépend de 0029) |
+| [0038](./0038-open-poa-admission.md) | Open PoS — admission permissionless au pool de validateurs | 🔧 Implémenté (sélection VRF en attente de 0029) | 🔴 Haute |
 | [0036](./0036-bornes-churn-validateurs.md) | Bornes de churn du set de validateurs | 💡 Proposé | 🟠 Moyenne |
 
 ### Économie validateurs
@@ -286,7 +286,7 @@ d'exploitation, correctifs, prompts de contre-audit — vit dans
 | [0035](./0035-bornes-ressources-transaction.md) | Bornes ressources par transaction | 💡 Proposé | 1 |
 | [0036](./0036-bornes-churn-validateurs.md) | Bornes churn validateurs | 💡 Proposé | 2 |
 | [0037](./0037-propagation-compacte-blocs.md) | Propagation compacte blocs | 💡 Proposé | — |
-| [0038](./0038-open-poa-admission.md) | Open PoS admission permissionless | 📐 Accepté | 2 |
+| [0038](./0038-open-poa-admission.md) | Open PoS admission permissionless | 🔧 Implémenté (VRF en attente 0029) | 2 |
 | [0039](./0039-remuneration-operateurs-modules.md) | Rémunération opérateurs modules | ❄️ Gelé (0064) | — |
 | [0040](./0040-emission-progressive-sans-fonderie.md) | Émission progressive sans La Fonderie | ✅ Vérifié | 1 |
 | [0041](./0041-repartition-emission-usage-melt.md) | Répartition émission Appchains par melt | ❄️ Gelé (0064) | — |
