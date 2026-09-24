@@ -448,9 +448,9 @@ fn announce_upgrade_is_refused_when_no_authority_is_configured() {
 
 /// Passe adversariale — `emission_started` gouverne l'émission *et* la clôture d'époque,
 /// et n'était engagé qu'indirectement via `emission_epoch_ts`, donc invisible quand
-/// celui-ci vaut 0. `foundry` est dormant mais persisté. Les deux sont désormais engagés.
+/// celui-ci vaut 0. Il est désormais engagé.
 #[test]
-fn state_root_commits_emission_flag_and_foundry() {
+fn state_root_commits_emission_flag() {
     let admin = Address::from_public_key(&KeyPair::generate().public_key());
 
     let base = genesis_with(admin);

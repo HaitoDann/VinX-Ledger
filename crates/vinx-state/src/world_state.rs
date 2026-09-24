@@ -5,16 +5,14 @@ use vinx_core::{
         cumulative_emission_atoms, Amount, ACTIVE_SET_COOLDOWN_SECS, ACTIVE_SET_STEP,
         BOND_COOLDOWN_SECS, BOND_STEP_BPS, BPS_DENOM, DEFAULT_ACTIVE_SET_SIZE,
         DEFAULT_FEE_FLOOR_ATOMS, EPOCH_DURATION_SECS, EXISTENTIAL_DEPOSIT_ATOMS,
-        FEE_PRODUCER_SHARE_BPS, MAX_BOND_HARD_CAP, MAX_MODULES, MAX_NONCE_AHEAD,
-        MAX_TX_PAYLOAD_BYTES, MAX_VALIDATOR_EXITS_PER_EPOCH, MIN_ACTIVE_SET_SIZE,
-        MIN_BOND_HARD_FLOOR, MIN_MODULE_BOND_ATOMS, MIN_STAKE_ATOMS, MIN_VALIDATOR_BOND_ATOMS,
-        PROPOSER_SHARE_BPS, SLASH_BOUNTY_BPS, SLASH_EQUIVOCATION_BPS, UNBONDING_SECS,
-        VALIDATOR_SCORE_WINDOW_SECS,
+        FEE_PRODUCER_SHARE_BPS, MAX_BOND_HARD_CAP, MAX_NONCE_AHEAD, MAX_TX_PAYLOAD_BYTES,
+        MAX_VALIDATOR_EXITS_PER_EPOCH, MIN_ACTIVE_SET_SIZE, MIN_BOND_HARD_FLOOR, MIN_STAKE_ATOMS,
+        MIN_VALIDATOR_BOND_ATOMS, PROPOSER_SHARE_BPS, SLASH_BOUNTY_BPS, SLASH_EQUIVOCATION_BPS,
+        UNBONDING_SECS, VALIDATOR_SCORE_WINDOW_SECS,
     },
     block::SlashEvidence,
     chain_id::CHAIN_ID_DEVNET,
     governance::GovernanceAction,
-    module::ModuleOp,
     protocol::{ProtocolVersion, ScheduledUpgrade},
     reliability::{self, ReliabilityMap},
     validator_pool::PoolStatus,
@@ -42,11 +40,6 @@ pub struct WorldState {
     /// `epoch_dist_emission_pot` and `destroyed_atoms` this always equals `emitted_atoms`.
     pub circulating_supply: Amount,
     pub block_height: u64,
-    /// Dormant — kept for bincode backward-compatibility (v9 on-disk layout).
-    /// Not used in any logic after ADR 0040. Always `Amount::ZERO` on new chains.
-    #[serde(default)]
-    #[allow(dead_code)]
-    pub(crate) foundry: Amount,
     /// Timestamp (unix seconds) of the first block — the emission epoch. Established
     /// lazily on the first block; `emission_started` guards initialization (so a
     /// genesis timestamp of 0 does not collide with an "unset" sentinel).
@@ -125,15 +118,8 @@ pub struct WorldState {
     /// `pending_unbonds`: derived deterministically from the same transaction history.
     #[serde(default)]
     pub pending_governance: Vec<GovernanceProposal>,
-    /// Bonded module registry (ADR 0010): `module_id → ModuleEntry`. The L1 stores only the
-    /// operator, its bond, and the latest committed anchor — never module logic. Appended
-    /// after `pending_governance` so the v8→v9 storage migration can append its default
-    /// (empty map). `serde(default)` for pre-0010 state.
-    #[serde(default)]
-    pub modules: BTreeMap<Hash32, ModuleEntry>,
     /// Slash proceeds awaiting distribution to honest validators (ADR 0040).
     /// 90 % of every slashed bond flows here; distributed at epoch close (ADR 0028).
-    /// Appended after `modules` — the v9→v10 migration appends its default encoding.
     #[serde(default)]
     pub epoch_dist_emission_pot: Amount,
     /// Cumulative atoms permanently destroyed by reaping dust (ADR 0026 + ADR 0040).
@@ -250,21 +236,6 @@ pub struct GovernanceProposal {
     pub approvals: Vec<Address>,
 }
 
-/// A registered module in the bonded anchor registry (ADR 0010). The L1 keeps only this
-/// commitment — never the module's logic or full state.
-#[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
-pub struct ModuleEntry {
-    /// Address that registered the module and alone may anchor or deregister it.
-    pub operator: Address,
-    /// Locked bond, returned to the operator on deregistration. Circulation-neutral while
-    /// locked (the operator still owns it).
-    pub bond: Amount,
-    /// Latest committed state root of the off-chain module. All-zero until first anchored.
-    pub anchor_head: Hash32,
-    /// Number of successful anchors — a monotonic activity counter.
-    pub anchored_count: u64,
-}
-
 /// Upper bound on committee size (ADR 0011) — bounds the signer set stored in state and the
 /// work to authorize an action. Generous for a realistic governance council.
 pub const MAX_ADMIN_SIGNERS: usize = 64;
@@ -300,100 +271,6 @@ fn validate_admin_policy(signers: Vec<Address>, threshold: u16) -> Result<AdminP
         ));
     }
     Ok(AdminPolicy { signers, threshold })
-}
-
-/// The bincode bytes appended to a pre-0011 (v7) `WorldState` meta blob to bring it to v8
-/// (ADR 0011): the default `admin_policy` (`None`) followed by the default
-/// `pending_governance` (empty vec). Because bincode concatenates struct fields with no
-/// framing and these are the last two *serialized* fields, appending exactly these bytes to
-/// a v7 blob yields a valid v8 blob. Shared by the storage v7→v8 migration and its tests.
-pub fn v8_meta_suffix() -> Vec<u8> {
-    let mut out = bincode::serialize(&None::<AdminPolicy>).expect("serialize None");
-    out.extend(bincode::serialize(&Vec::<GovernanceProposal>::new()).expect("serialize empty vec"));
-    out
-}
-
-/// The bincode bytes appended to a v8 `WorldState` meta blob to bring it to v9 (ADR 0010):
-/// the default `modules` registry (empty map). Same append-only rationale as
-/// [`v8_meta_suffix`] — `modules` is the last serialized field. Shared by the storage
-/// v8→v9 migration and its tests.
-pub fn v9_meta_suffix() -> Vec<u8> {
-    bincode::serialize(&BTreeMap::<Hash32, ModuleEntry>::new()).expect("serialize empty map")
-}
-
-/// The bincode bytes appended to a v9 `WorldState` meta blob to bring it to v10
-/// (ADR 0040): the default `epoch_dist_emission_pot` (Amount::ZERO) followed by the
-/// default `destroyed_atoms` (0u128). Same append-only rationale as prior suffixes.
-pub fn v10_meta_suffix() -> Vec<u8> {
-    let mut out = bincode::serialize(&Amount::ZERO).expect("serialize Amount::ZERO");
-    out.extend(bincode::serialize(&0u128).expect("serialize 0u128"));
-    out
-}
-
-/// The bincode bytes appended to a v10 `WorldState` meta blob to bring it to v11 (ADR 0027):
-/// the default `reliability` table (empty map). Same append-only rationale as
-/// [`v9_meta_suffix`] — `reliability` is the last serialized field. Shared by the storage
-/// v10→v11 migration and its tests.
-pub fn v11_meta_suffix() -> Vec<u8> {
-    bincode::serialize(&ReliabilityMap::new()).expect("serialize empty map")
-}
-
-/// The bincode bytes appended to a v11 `WorldState` meta blob to bring it to v12 (ADR 0038
-/// Open PoA). Appends the defaults of five new fields in declaration order:
-///   1. `validator_pool`                  — empty `BTreeMap<Address, ValidatorPoolEntry>`
-///   2. `banned_validator_keys`           — empty `HashSet<Address>`
-///   3. `active_set_size`                 — `u32 = DEFAULT_ACTIVE_SET_SIZE` (21)
-///   4. `last_active_set_size_change_ts`  — `u64 = 0`
-///   5. `last_bond_change_ts`             — `u64 = 0`
-pub fn v12_meta_suffix() -> Vec<u8> {
-    use std::collections::{BTreeMap, HashSet};
-    use vinx_core::ValidatorPoolEntry;
-    let mut out = bincode::serialize(&BTreeMap::<Address, ValidatorPoolEntry>::new())
-        .expect("serialize empty pool");
-    out.extend(bincode::serialize(&HashSet::<Address>::new()).expect("serialize empty ban set"));
-    out.extend(bincode::serialize(&DEFAULT_ACTIVE_SET_SIZE).expect("serialize active_set_size"));
-    out.extend(bincode::serialize(&0u64).expect("serialize 0u64"));
-    out.extend(bincode::serialize(&0u64).expect("serialize 0u64"));
-    out
-}
-
-/// The bincode bytes appended to a v12 `WorldState` meta blob to bring it to v13 (ADR 0028
-/// epoch close). Appends the default for one new field:
-///   1. `last_epoch_close_ts` — `u64 = 0`
-pub fn v13_meta_suffix() -> Vec<u8> {
-    bincode::serialize(&0u64).expect("serialize 0u64")
-}
-
-/// The bincode bytes appended to a v15 `WorldState` meta blob to bring it to v16 (ADR 0038
-/// governable bond floor). Appends the default for one new field:
-///   1. `min_validator_bond_atoms` — `u128 = MIN_VALIDATOR_BOND_ATOMS`
-pub fn v16_meta_suffix() -> Vec<u8> {
-    bincode::serialize(&MIN_VALIDATOR_BOND_ATOMS).expect("serialize u128")
-}
-
-/// The bincode bytes appended to a v16 `WorldState` meta blob to bring it to v17 (ADR 0029
-/// Phase 2 epoch beacon). Appends the default for one new field:
-///   1. `epoch_beacon` — `Hash32 = [0u8; 32]`
-pub fn v17_meta_suffix() -> Vec<u8> {
-    bincode::serialize(&[0u8; 32]).expect("serialize Hash32")
-}
-
-/// The bincode bytes appended to a v17 `WorldState` meta blob to bring it to v18 (ADR 0036
-/// churn bounds). Appends the default for one new field:
-///   1. `exit_queue` — `Vec<ValidatorExitRequest> = []` (8 zero bytes: bincode u64 length)
-pub fn v18_meta_suffix() -> Vec<u8> {
-    bincode::serialize(&Vec::<ValidatorExitRequest>::new()).expect("serialize empty Vec")
-}
-
-/// The bincode bytes appended to a v18 `WorldState` meta blob to bring it to v19
-/// (ADR 0027 / VINX-06 slot timeout). Appends the default for one new field:
-///   1. `last_block_ts` — `u64 = 0`
-///
-/// Zero is the correct default: it makes the first block after a migration look like a
-/// fully elapsed slot, which only means the first missed-proposal charge behaves as it
-/// did before the fix. It never jails anyone on its own.
-pub fn v19_meta_suffix() -> Vec<u8> {
-    bincode::serialize(&0u64).expect("serialize u64")
 }
 
 /// BLAKE3(epoch_number_le || address) — deterministic sort key for tiebreaking
@@ -434,7 +311,6 @@ impl WorldState {
             accounts: BTreeMap::new(),
             circulating_supply: Amount::ZERO,
             block_height: 0,
-            foundry: Amount::ZERO,
             emission_epoch_ts: 0,
             emission_started: false,
             emitted_atoms: 0,
@@ -456,7 +332,6 @@ impl WorldState {
             persist_dirty: HashSet::new(),
             admin_policy: None,
             pending_governance: Vec::new(),
-            modules: BTreeMap::new(),
             epoch_dist_emission_pot: Amount::ZERO,
             destroyed_atoms: 0,
             reliability: ReliabilityMap::new(),
@@ -1198,8 +1073,8 @@ impl WorldState {
     /// claim for free:
     ///
     /// - `chain_id` matches (no cross-network replay filling the mempool),
-    /// - the fee meets the current `base_fee` for fee-bearing types (Transfer,
-    ///   AnchorState — stake/unstake/slash are exempt per ADR 0009),
+    /// - the fee meets the current `base_fee` for fee-bearing types (Transfer —
+    ///   stake/unstake/slash are exempt per ADR 0009),
     /// - the sender account **exists** and its balance covers the transaction's
     ///   worst-case debit (`admission_cost_atoms`) — so the fee used for mempool
     ///   priority is actually funded, not just declared,
@@ -1227,12 +1102,8 @@ impl WorldState {
             )));
         }
 
-        // Fee floor for the fee-bearing types (mirrors apply_transfer / apply_anchor_state).
-        if matches!(
-            tx.tx_type,
-            TransactionType::Transfer | TransactionType::AnchorState
-        ) && tx.fee < self.base_fee
-        {
+        // Fee floor for the fee-bearing type (mirrors apply_transfer).
+        if tx.tx_type == TransactionType::Transfer && tx.fee < self.base_fee {
             return Err(CoreError::InvalidTransaction(format!(
                 "fee {} is below the current base fee {}",
                 tx.fee, self.base_fee
@@ -1426,7 +1297,6 @@ impl WorldState {
             TransactionType::AnnounceUpgrade => self.apply_announce_upgrade(tx),
             TransactionType::SlashValidator => self.apply_slash_validator(tx),
             TransactionType::AdminAction => self.apply_admin_action(tx),
-            TransactionType::AnchorState => self.apply_anchor_state(tx),
             TransactionType::RegisterBlsKey => self.apply_register_bls_key(tx),
             TransactionType::Unjail => self.apply_unjail(tx),
             TransactionType::RegisterVrfKey => self.apply_register_vrf_key(tx),
@@ -1866,7 +1736,6 @@ impl WorldState {
             exit_queue: &'a [ValidatorExitRequest],
             reliability: &'a ReliabilityMap,
             epoch_beacon: &'a Hash32,
-            modules: &'a BTreeMap<Hash32, ModuleEntry>,
             fee_floor: u128,
             base_fee: u128,
             circulating_supply: u128,
@@ -1879,7 +1748,6 @@ impl WorldState {
             last_bond_change_ts: u64,
             last_block_ts: u64,
             emission_started: bool,
-            foundry: u128,
         }
 
         let commitment = ConsensusCommitment {
@@ -1899,7 +1767,6 @@ impl WorldState {
             exit_queue: &self.exit_queue,
             reliability: &self.reliability,
             epoch_beacon: &self.epoch_beacon,
-            modules: &self.modules,
             fee_floor: self.fee_floor.atoms(),
             base_fee: self.base_fee.atoms(),
             circulating_supply: self.circulating_supply.atoms(),
@@ -1917,7 +1784,6 @@ impl WorldState {
             emission_started: self.emission_started,
             // Dormant depuis ADR 0040, mais persisté et désérialisé : l'engager coûte
             // 16 octets et supprime la question « est-il vraiment mort ? ».
-            foundry: self.foundry.atoms(),
         };
 
         let encoded = bincode::serialize(&commitment)
@@ -2336,137 +2202,6 @@ impl WorldState {
                 tracing::info!(atoms, "Admin: min_validator_bond updated (ADR 0038)");
             }
         }
-        Ok(())
-    }
-
-    /// Applies an `AnchorState` transaction: a bonded module-registry operation (ADR 0010).
-    /// The L1 records the operator, bond, and latest anchor — never module logic.
-    ///
-    /// Every op pays the base fee (anti-spam; credited to the producer like a transfer) and
-    /// leaves the operator with a live account (`balance >= ED`) — module operators are
-    /// never dust and never reaped. Each arm validates fully before mutating, so a rejected
-    /// op consumes no nonce (the producer skips a failed tx without rollback, cf. ADR 0026).
-    fn apply_anchor_state(&mut self, tx: &Transaction) -> Result<(), CoreError> {
-        let op: ModuleOp = bincode::deserialize(&tx.payload).map_err(|_| {
-            CoreError::InvalidTransaction("malformed module operation payload".to_string())
-        })?;
-
-        // Fee floor (same anti-spam forfait as a transfer).
-        if tx.fee < self.base_fee {
-            return Err(CoreError::InvalidTransaction(format!(
-                "fee {} is below minimum {}",
-                tx.fee, self.base_fee
-            )));
-        }
-        let ed = EXISTENTIAL_DEPOSIT_ATOMS;
-
-        let operator = tx.from;
-        let (nonce, balance) = {
-            let acc = self
-                .accounts
-                .get(&operator)
-                .ok_or(CoreError::InsufficientBalance)?;
-            (acc.nonce, acc.balance.atoms())
-        };
-        if nonce != tx.nonce {
-            return Err(CoreError::InvalidNonce {
-                expected: nonce,
-                got: tx.nonce,
-            });
-        }
-
-        // Compute the operator's balance debit for this op, validating fully before any
-        // mutation. Register locks a bond on top of the fee; Anchor/Deregister pay the fee
-        // only (Deregister also refunds the bond, applied after removal below).
-        let fee = tx.fee.atoms();
-        match &op {
-            ModuleOp::Register {
-                module_id,
-                bond_atoms,
-            } => {
-                if *bond_atoms < MIN_MODULE_BOND_ATOMS {
-                    return Err(CoreError::InvalidTransaction(
-                        "module bond is below the minimum".to_string(),
-                    ));
-                }
-                if self.modules.contains_key(module_id) {
-                    return Err(CoreError::InvalidTransaction(
-                        "module id is already registered".to_string(),
-                    ));
-                }
-                if self.modules.len() >= MAX_MODULES {
-                    return Err(CoreError::InvalidTransaction(
-                        "module registry is full".to_string(),
-                    ));
-                }
-                let debit = bond_atoms
-                    .checked_add(fee)
-                    .ok_or(CoreError::AmountOverflow)?;
-                if balance < debit {
-                    return Err(CoreError::InsufficientBalance);
-                }
-                // Operators keep a live account (>= ED): they must exist to anchor later.
-                if balance - debit < ed {
-                    return Err(CoreError::BelowExistentialDeposit);
-                }
-                let acc = self.accounts.get_mut(&operator).expect("checked above");
-                acc.balance = Amount::from_atoms(balance - debit);
-                acc.nonce += 1;
-                self.modules.insert(
-                    *module_id,
-                    ModuleEntry {
-                        operator,
-                        bond: Amount::from_atoms(*bond_atoms),
-                        anchor_head: [0u8; 32],
-                        anchored_count: 0,
-                    },
-                );
-            }
-            ModuleOp::Anchor {
-                module_id,
-                anchor_head,
-            } => {
-                let entry = self
-                    .modules
-                    .get(module_id)
-                    .ok_or_else(|| CoreError::InvalidTransaction("unknown module".to_string()))?;
-                if entry.operator != operator {
-                    return Err(CoreError::Unauthorized);
-                }
-                if balance < fee || balance - fee < ed {
-                    return Err(CoreError::InsufficientBalance);
-                }
-                let new_head = *anchor_head;
-                let acc = self.accounts.get_mut(&operator).expect("checked above");
-                acc.balance = Amount::from_atoms(balance - fee);
-                acc.nonce += 1;
-                let entry = self.modules.get_mut(module_id).expect("checked above");
-                entry.anchor_head = new_head;
-                entry.anchored_count += 1;
-            }
-            ModuleOp::Deregister { module_id } => {
-                let entry = self
-                    .modules
-                    .get(module_id)
-                    .ok_or_else(|| CoreError::InvalidTransaction("unknown module".to_string()))?;
-                if entry.operator != operator {
-                    return Err(CoreError::Unauthorized);
-                }
-                if balance < fee {
-                    return Err(CoreError::InsufficientBalance);
-                }
-                let refund = entry.bond.atoms();
-                let acc = self.accounts.get_mut(&operator).expect("checked above");
-                // Net: −fee +refunded bond. Refund keeps the account well above ED.
-                acc.balance = Amount::from_atoms(balance - fee + refund);
-                acc.nonce += 1;
-                self.modules.remove(module_id);
-            }
-        }
-
-        // The fee changes hands into the block pool → credited to the producer at settle.
-        self.block_fees = self.block_fees.saturating_add(tx.fee);
-        self.mark_dirty(&operator);
         Ok(())
     }
 
@@ -3134,172 +2869,6 @@ mod tests {
             .unwrap(); // threshold → executes, clears pending
         assert_eq!(s.admin_policy.as_ref().unwrap().threshold, 1);
         assert!(s.pending_governance.is_empty());
-    }
-
-    // ─── ADR 0010: bonded module registry ────────────────────────────────────
-    use vinx_core::amount::MIN_MODULE_BOND_ATOMS;
-    use vinx_core::module::ModuleOp;
-
-    fn operator_state() -> (WorldState, KeyPair, Address) {
-        let mut s = WorldState::new();
-        let kp = KeyPair::generate();
-        let addr = Address::from_public_key(&kp.public_key());
-        s.credit_for_test(addr, Amount::from_vinx(5_000));
-        s.circulating_supply = Amount::from_vinx(5_000);
-        (s, kp, addr)
-    }
-
-    #[test]
-    fn test_module_register_locks_bond_and_conserves_supply() {
-        let (mut s, kp, addr) = operator_state();
-        let fee = s.base_fee;
-        let supply_before = s.circulating_supply;
-        let id = [7u8; 32];
-        let op = ModuleOp::Register {
-            module_id: id,
-            bond_atoms: MIN_MODULE_BOND_ATOMS,
-        };
-        s.apply_transaction(&Transaction::new_anchor_state(&kp, &op, fee, 0))
-            .unwrap();
-
-        let entry = s.modules.get(&id).unwrap();
-        assert_eq!(entry.operator, addr);
-        assert_eq!(entry.bond.atoms(), MIN_MODULE_BOND_ATOMS);
-        assert_eq!(entry.anchor_head, [0u8; 32]);
-        // Balance debited by bond + fee; bond is locked (not destroyed) so circulation holds.
-        let expected = Amount::from_vinx(5_000).atoms() - MIN_MODULE_BOND_ATOMS - fee.atoms();
-        assert_eq!(s.accounts[&addr].balance.atoms(), expected);
-        assert_eq!(s.circulating_supply, supply_before);
-    }
-
-    #[test]
-    fn test_module_register_rejects_low_bond_and_duplicate() {
-        let (mut s, kp, _) = operator_state();
-        let fee = s.base_fee;
-        // Below the minimum bond.
-        let low = ModuleOp::Register {
-            module_id: [1u8; 32],
-            bond_atoms: MIN_MODULE_BOND_ATOMS - 1,
-        };
-        assert!(s
-            .apply_transaction(&Transaction::new_anchor_state(&kp, &low, fee, 0))
-            .is_err());
-        assert!(s.modules.is_empty());
-        // Register, then a duplicate id is rejected.
-        let id = [2u8; 32];
-        let ok = ModuleOp::Register {
-            module_id: id,
-            bond_atoms: MIN_MODULE_BOND_ATOMS,
-        };
-        s.apply_transaction(&Transaction::new_anchor_state(&kp, &ok, fee, 0))
-            .unwrap();
-        let dup = ModuleOp::Register {
-            module_id: id,
-            bond_atoms: MIN_MODULE_BOND_ATOMS,
-        };
-        assert!(s
-            .apply_transaction(&Transaction::new_anchor_state(&kp, &dup, fee, 1))
-            .is_err());
-    }
-
-    #[test]
-    fn test_module_anchor_is_operator_only() {
-        let (mut s, kp, _) = operator_state();
-        let fee = s.base_fee;
-        let id = [3u8; 32];
-        s.apply_transaction(&Transaction::new_anchor_state(
-            &kp,
-            &ModuleOp::Register {
-                module_id: id,
-                bond_atoms: MIN_MODULE_BOND_ATOMS,
-            },
-            fee,
-            0,
-        ))
-        .unwrap();
-
-        // Operator advances the anchor.
-        let head = [9u8; 32];
-        s.apply_transaction(&Transaction::new_anchor_state(
-            &kp,
-            &ModuleOp::Anchor {
-                module_id: id,
-                anchor_head: head,
-            },
-            fee,
-            1,
-        ))
-        .unwrap();
-        assert_eq!(s.modules[&id].anchor_head, head);
-        assert_eq!(s.modules[&id].anchored_count, 1);
-
-        // A non-operator cannot anchor.
-        let outsider = KeyPair::generate();
-        s.credit_for_test(
-            Address::from_public_key(&outsider.public_key()),
-            Amount::from_vinx(1),
-        );
-        let r = s.apply_transaction(&Transaction::new_anchor_state(
-            &outsider,
-            &ModuleOp::Anchor {
-                module_id: id,
-                anchor_head: [1u8; 32],
-            },
-            fee,
-            0,
-        ));
-        assert_eq!(r, Err(CoreError::Unauthorized));
-        assert_eq!(s.modules[&id].anchor_head, head); // unchanged
-    }
-
-    #[test]
-    fn test_module_deregister_returns_bond() {
-        let (mut s, kp, addr) = operator_state();
-        let fee = s.base_fee;
-        let id = [4u8; 32];
-        s.apply_transaction(&Transaction::new_anchor_state(
-            &kp,
-            &ModuleOp::Register {
-                module_id: id,
-                bond_atoms: MIN_MODULE_BOND_ATOMS,
-            },
-            fee,
-            0,
-        ))
-        .unwrap();
-        let bal_after_register = s.accounts[&addr].balance.atoms();
-        s.apply_transaction(&Transaction::new_anchor_state(
-            &kp,
-            &ModuleOp::Deregister { module_id: id },
-            fee,
-            1,
-        ))
-        .unwrap();
-        assert!(s.modules.is_empty());
-        // Bond refunded, minus the deregister fee.
-        assert_eq!(
-            s.accounts[&addr].balance.atoms(),
-            bal_after_register + MIN_MODULE_BOND_ATOMS - fee.atoms()
-        );
-    }
-
-    #[test]
-    fn test_module_register_insufficient_balance_rejected() {
-        let mut s = WorldState::new();
-        let kp = KeyPair::generate();
-        s.credit_for_test(
-            Address::from_public_key(&kp.public_key()),
-            Amount::from_vinx(500), // below the 1000 VINX bond
-        );
-        let fee = s.base_fee;
-        let op = ModuleOp::Register {
-            module_id: [5u8; 32],
-            bond_atoms: MIN_MODULE_BOND_ATOMS,
-        };
-        assert!(s
-            .apply_transaction(&Transaction::new_anchor_state(&kp, &op, fee, 0))
-            .is_err());
-        assert!(s.modules.is_empty());
     }
 
     #[test]
@@ -4989,38 +4558,5 @@ mod tests {
             s.exit_queue.is_empty(),
             "ghost exit must be silently discarded"
         );
-    }
-
-    #[test]
-    fn test_v19_meta_suffix_round_trips_into_a_v18_blob() {
-        // The v18→v19 migration relies on the bincode prefix-append property: a v18 meta
-        // blob must be a strict prefix of a v19 one, so appending the suffix yields a
-        // deserializable v19 state with last_block_ts = 0.
-        let s = WorldState::new();
-        let full = bincode::serialize(&s).expect("serialize v19 state");
-        let suffix = v19_meta_suffix();
-        assert_eq!(suffix, 0u64.to_le_bytes().to_vec());
-        assert!(
-            full.ends_with(&suffix),
-            "last_block_ts must be the last serialized field for the append migration"
-        );
-        let v18_blob = &full[..full.len() - suffix.len()];
-        let mut migrated = v18_blob.to_vec();
-        migrated.extend_from_slice(&suffix);
-        let back: WorldState =
-            bincode::deserialize(&migrated).expect("migrated blob must deserialize");
-        assert_eq!(back.last_block_ts, 0);
-    }
-
-    #[test]
-    fn test_v18_meta_suffix_is_eight_zero_bytes() {
-        // bincode empty Vec<ValidatorExitRequest> = 0u64 LE = [0;8]
-        let suffix = v18_meta_suffix();
-        assert_eq!(
-            suffix.len(),
-            8,
-            "v18 suffix must be 8 bytes (empty Vec length prefix)"
-        );
-        assert_eq!(suffix, vec![0u8; 8]);
     }
 }

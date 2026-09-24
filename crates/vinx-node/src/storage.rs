@@ -10,53 +10,15 @@ use vinx_crypto::{Address, Hash32};
 use vinx_state::WorldState;
 use zstd;
 
-/// Schema version stored in the meta table. Increment when the on-disk layout
-/// changes; older data is migrated forward in place by `Storage::migrate_forward`
-/// (add a step there for the new bump), so nodes upgrade without a data wipe.
-/// v2: blobs are zstd-compressed (level 3) before insertion.
-/// v3: tx_index and account_tx_index are persisted (no rebuild_tx_index on boot).
-/// v4: accounts persisted per-key in a dedicated table; only changed rows are
-///     written each block (O(dirty) instead of O(total accounts) per persist).
-/// v5: addresses are stored as raw 20 bytes (Address is `[u8; 20]`); the accounts
-///     table is keyed by those bytes and bincode encodes addresses as 20 bytes.
-/// v6: "Fonderie" tokenomics — Account drops `frozen`/`frozen_since`; WorldState
-///     replaces the pools (staking/melt/distribution/treasury/coffre) with `foundry`.
-/// v7: tx indexes are keyed by raw bytes (`Hash32`, `Address`) instead of hex/bech32
-///     Strings, and hashed with ahash. The persisted index blobs change layout;
-///     they are derived data, so a fresh start simply rebuilds them from blocks.
-/// v8: WorldState meta gains ADR 0011 governance fields (`admin_policy`,
-///     `pending_governance`), appended last. A v7 meta blob is a strict prefix of a v8
-///     one, so the migration simply appends those fields' default encodings.
-/// v9: WorldState meta gains the ADR 0010 module registry (`modules`), appended last —
-///     same prefix property, migrated by appending the empty-map encoding.
-/// v10: WorldState meta gains ADR 0040 fields `epoch_dist_emission_pot` (Amount::ZERO)
-///     and `destroyed_atoms` (0u128), appended after `modules`. The dormant `foundry`
-///     field is retained in-place for bincode compatibility.
-/// v11: (1) blocks are persisted per-height in BLOCKS table; the monolithic "chain"
-///      blob is replaced by a tiny "chain_meta" entry (finalized height). (2) WorldState
-///      meta gains ADR 0027 `reliability` map appended last — same prefix property.
-/// v12: Open PoA (ADR 0038) — `validator_pool`, `banned_validator_keys`,
-///      `active_set_size`, `last_active_set_size_change_ts`, `last_bond_change_ts`
-///      appended after `reliability`. Migration appends their default encodings.
-/// v13: Epoch close (ADR 0028/0038) — `last_epoch_close_ts` appended after
-///      `last_bond_change_ts`. Migration appends `u64 = 0`.
-/// v14: BLS co-signatures (ADR 0046 Phase 2) — each Block row gains two trailing fields:
-///      `bls_aggregate: Option<[u8;96]>` (None) and `bls_cosigner_pks: Vec<[u8;48]>` ([]).
-///      `ValidatorPoolEntry` also gains `bls_pub_key` and `bls_pop` (None each), but since
-///      the pool is expected empty during this alpha migration, no entry-level patching is done.
-/// v15: BLS bitmap (ADR 0029 Phase 1) — each Block row gains `bls_bitmap: Vec<u8>` ([]).
-///      8 bytes appended per block row (bincode empty Vec<u8> = 0u64 LE).
-/// v16: ADR 0038 governable bond floor — `min_validator_bond_atoms` (u128 =
-///      MIN_VALIDATOR_BOND_ATOMS) appended to WorldState meta.
-/// v17: ADR 0029 Phase 2 epoch beacon — `epoch_beacon` (Hash32 = [0u8; 32]) appended
-///      to WorldState meta.
-/// v18: ADR 0036 validator churn bounds — `exit_queue` (Vec<ValidatorExitRequest> = [])
-///      appended to WorldState meta. Migration appends 8 zero bytes (bincode empty Vec).
-/// v21: ADR 0029 Phase 2a VRF leader selection — each Block row gains a trailing
-///      `vrf_proof: Option<Vec<u8>>` (None). bincode is positional, so this changes the
-///      block-row layout; as with the BLAKE3 wall (v20), a pre-v21 database is refused
-///      rather than migrated (no live network predates it — genesis has not shipped).
-const STORAGE_VERSION: u64 = 21;
+/// Schema version stored in the meta table. Increment when the on-disk layout changes.
+///
+/// v22 (ADR 0081): pre-genesis reset. The protocol changed incompatibly (1 Md supply,
+/// 9 decimals, Bech32m, module registry removed, fee split), so there is no migration
+/// path from any older database: a pre-v22 database belongs to another protocol and is
+/// refused, left untouched. Every earlier step (v2–v21) predates the public genesis and
+/// its migration code has been retired. From v22 on, layout changes that must preserve
+/// a live network add an explicit step to `Storage::open`.
+const STORAGE_VERSION: u64 = 22;
 
 /// zstd compression level — level 3 is the sweet spot: ~60-70% size reduction,
 /// negligible latency compared to disk I/O.
@@ -108,10 +70,8 @@ pub struct StateWrite {
 
 impl Storage {
     /// Opens (or creates) the storage at `dir`, returning an error instead of
-    /// panicking so callers can fail gracefully. Older on-disk schemas are
-    /// **migrated forward in place** (see [`Storage::migrate_forward`]); a newer
-    /// on-disk schema, or one with no known migration path, is a clean, actionable
-    /// error rather than a wipe.
+    /// panicking so callers can fail gracefully. An older or newer on-disk schema is a
+    /// clean, actionable error — never a silent wipe.
     pub fn open(dir: impl Into<PathBuf>) -> io::Result<Self> {
         let dir: PathBuf = dir.into();
         std::fs::create_dir_all(&dir)
@@ -146,234 +106,21 @@ impl Storage {
                          Use a matching or newer VinX build; downgrade is not supported."
                     )));
                 }
-                // Older — migrate forward step by step, then stamp the new version.
+                // Older — pre-genesis protocol (ADR 0081): refuse, leave the data intact.
                 Some(v) => {
-                    Self::migrate_forward(&tx, v)?;
-                    let mut meta = tx.open_table(META).map_err(Self::io_err)?;
-                    meta.insert("schema_version", STORAGE_VERSION)
-                        .map_err(Self::io_err)?;
-                    tracing::info!(
-                        from = v,
-                        to = STORAGE_VERSION,
-                        "Storage schema migrated in place — no wipe"
-                    );
+                    return Err(Self::io_err(format!(
+                        "cette base (schéma v{v}) a été écrite par une version antérieure au \
+                         genesis ADR 0081 (supply, décimales, adresses Bech32m, format d'état) : \
+                         elle appartient à un autre protocole et n'est pas migrable. Repartez \
+                         d'un dossier de données vide (nouvelle genèse) ou resynchronisez \
+                         depuis un pair à jour."
+                    )));
                 }
             }
             tx.commit().map_err(Self::io_err)?;
         }
 
         Ok(Self { db: Arc::new(db) })
-    }
-
-    /// Applies forward migrations from on-disk `from` up to [`STORAGE_VERSION`],
-    /// operating on an open write transaction. Each step transforms the data so
-    /// this binary can read it. Returns a clear error if a step is unknown, so the
-    /// operator can fall back to the snapshot export/import path instead of losing data.
-    ///
-    /// VinX's on-disk layout separates the *source of truth* (per-account rows,
-    /// world-state meta, chain blocks) from *derived data* (the tx indexes, which
-    /// are rebuildable from the chain). A version bump that changed only derived
-    /// data therefore migrates by dropping the stale index blobs — `load()` then
-    /// rebuilds them from the chain. Bumps that change the on-disk layout of
-    /// accounts / meta / blocks need an explicit transform step added to the match.
-    fn migrate_forward(tx: &redb::WriteTransaction, from: u64) -> io::Result<()> {
-        let mut v = from;
-        while v < STORAGE_VERSION {
-            match v {
-                // v6 → v7: tx indexes switched to raw-byte keys (Hash32 / Address).
-                // Derived data — drop the stale blobs; load() rebuilds from the chain.
-                6 => {
-                    let mut state = tx.open_table(STATE).map_err(Self::io_err)?;
-                    state.remove("tx_index").map_err(Self::io_err)?;
-                    state.remove("account_tx_index").map_err(Self::io_err)?;
-                }
-                // v7 → v8 (ADR 0011): the WorldState meta gained two trailing serialized
-                // fields. A v7 blob is a strict prefix of a v8 one, so append their default
-                // encodings in place — no wipe, accounts and chain untouched.
-                7 => Self::append_meta_suffix(tx, &vinx_state::v8_meta_suffix())?,
-                // v8 → v9 (ADR 0010): the module registry was appended last — same prefix
-                // property, migrated by appending the empty-map encoding.
-                8 => Self::append_meta_suffix(tx, &vinx_state::v9_meta_suffix())?,
-                // v9 → v10 (ADR 0040): epoch_dist_emission_pot and destroyed_atoms appended.
-                9 => Self::append_meta_suffix(tx, &vinx_state::v10_meta_suffix())?,
-                // v10 → v11: (1) split monolithic chain blob into per-height BLOCKS rows,
-                // (2) append reliability map (ADR 0027) to WorldState meta.
-                10 => {
-                    Self::migrate_v9_chain_blob(tx)?;
-                    Self::append_meta_suffix(tx, &vinx_state::v11_meta_suffix())?;
-                }
-                // v11 → v12 (ADR 0038 Open PoA): append validator_pool (empty BTreeMap),
-                // banned_validator_keys (empty HashSet), active_set_size (u32 = 21),
-                // last_active_set_size_change_ts (u64 = 0), last_bond_change_ts (u64 = 0).
-                11 => Self::append_meta_suffix(tx, &vinx_state::v12_meta_suffix())?,
-                // v12 → v13 (ADR 0028 epoch close): append last_epoch_close_ts (u64 = 0).
-                12 => Self::append_meta_suffix(tx, &vinx_state::v13_meta_suffix())?,
-                // v13 → v14 (ADR 0046 Phase 2 BLS): append BLS fields to every block row.
-                13 => Self::migrate_v13_block_bls_fields(tx)?,
-                // v14 → v15 (ADR 0029 Phase 1 bitmap): append bls_bitmap (empty Vec<u8>) to every block row.
-                14 => Self::migrate_v14_block_bitmap_field(tx)?,
-                // v15 → v16 (ADR 0038 governable bond floor): append min_validator_bond_atoms.
-                15 => Self::append_meta_suffix(tx, &vinx_state::v16_meta_suffix())?,
-                // v16 → v17 (ADR 0029 Phase 2 epoch beacon): append epoch_beacon ([0u8;32]).
-                16 => Self::append_meta_suffix(tx, &vinx_state::v17_meta_suffix())?,
-                // v17 → v18 (ADR 0036 churn bounds): append exit_queue (empty Vec = 8 zero bytes).
-                17 => Self::append_meta_suffix(tx, &vinx_state::v18_meta_suffix())?,
-                // v18 → v19 (ADR 0027 / VINX-06 slot timeout): append last_block_ts (u64 = 0).
-                18 => Self::append_meta_suffix(tx, &vinx_state::v19_meta_suffix())?,
-                // v19 → v20 (ADR 0069) : BLAKE3 remplace SHA-256. Il n'existe **pas** de
-                // migration possible. Le format sur disque est inchangé, mais tous les
-                // hachages stockés — hash de blocs, chaînage `prev_hash`, `state_root`,
-                // index de transactions — ont été calculés avec l'ancienne fonction. Les
-                // recalculer donnerait d'autres valeurs : la chaîne persistée appartient
-                // littéralement à un autre protocole. Migrer silencieusement corromprait
-                // l'état ; on refuse avec une consigne explicite.
-                19 => {
-                    return Err(Self::io_err(
-                        "cette base a été écrite avant le passage à BLAKE3 (ADR 0069). \
-                         Tous les hachages du protocole ont changé, donc la chaîne persistée \
-                         n'est pas migrable : elle appartient à un autre protocole. \
-                         Repartez d'un dossier de données vide (nouvelle genèse), ou \
-                         resynchronisez depuis un pair déjà sur BLAKE3."
-                            .to_string(),
-                    ));
-                }
-                unknown => {
-                    return Err(Self::io_err(format!(
-                        "no automatic migration from schema v{unknown} to v{STORAGE_VERSION}. \
-                         To migrate: run the previous VinX build, GET /snapshot to export the \
-                         state, then POST /snapshot into a fresh data directory on this build."
-                    )));
-                }
-            }
-            v += 1;
-        }
-        Ok(())
-    }
-
-    /// v9 → v10: explodes the monolithic compressed chain blob into per-height rows
-    /// in the BLOCKS table and a "chain_meta" entry, then removes the blob. A no-op
-    /// if no chain has been written yet.
-    fn migrate_v9_chain_blob(tx: &redb::WriteTransaction) -> io::Result<()> {
-        let mut state = tx.open_table(STATE).map_err(Self::io_err)?;
-        let compressed = state
-            .get("chain")
-            .map_err(Self::io_err)?
-            .map(|g| g.value().to_vec());
-        let Some(compressed) = compressed else {
-            return Ok(());
-        };
-        let chain_bytes = Self::decompress(&compressed)?;
-        let chain: Chain = bincode::deserialize(&chain_bytes)
-            .map_err(|e| Self::io_err(format!("v10 migration: decode chain blob: {e}")))?;
-
-        let mut blocks_tbl = tx.open_table(BLOCKS).map_err(Self::io_err)?;
-        let mut height = 0u64;
-        while let Some(row) = chain.block_row(height) {
-            let bytes = bincode::serialize(row)
-                .map_err(|e| Self::io_err(format!("v10 migration: encode block {height}: {e}")))?;
-            let compressed_row = Self::compress(&bytes)?;
-            blocks_tbl
-                .insert(height, compressed_row.as_slice())
-                .map_err(Self::io_err)?;
-            height += 1;
-        }
-
-        let meta = bincode::serialize(&chain.finalized_height())
-            .map_err(|e| Self::io_err(format!("v10 migration: encode chain_meta: {e}")))?;
-        let meta_c = Self::compress(&meta)?;
-        state
-            .insert("chain_meta", meta_c.as_slice())
-            .map_err(Self::io_err)?;
-        state.remove("chain").map_err(Self::io_err)?;
-        tracing::info!(
-            blocks = height,
-            "Chain blob migrated to per-height rows (v10)"
-        );
-        Ok(())
-    }
-
-    /// Appends `suffix` to the persisted (compressed) WorldState meta blob in place — the
-    /// append-only bincode migration used by every meta-field addition (ADR 0010/0011).
-    /// A no-op if no meta has been written yet.
-    fn append_meta_suffix(tx: &redb::WriteTransaction, suffix: &[u8]) -> io::Result<()> {
-        let mut state = tx.open_table(STATE).map_err(Self::io_err)?;
-        let compressed = state
-            .get("world_state_meta")
-            .map_err(Self::io_err)?
-            .map(|g| g.value().to_vec());
-        if let Some(compressed) = compressed {
-            let mut meta = Self::decompress(&compressed)?;
-            meta.extend_from_slice(suffix);
-            let recompressed = Self::compress(&meta)?;
-            state
-                .insert("world_state_meta", recompressed.as_slice())
-                .map_err(Self::io_err)?;
-        }
-        Ok(())
-    }
-
-    /// v13 → v14 (ADR 0046 Phase 2 BLS): appends two new trailing fields to each Block's
-    /// bincode data in the BLOCKS table. Each Block gains:
-    ///   `bls_aggregate: Option<[u8; 96]>` = None   → 1 byte  (bincode discriminant 0)
-    ///   `bls_cosigner_pks: Vec<[u8; 48]>` = []     → 8 bytes (bincode u64 length = 0)
-    /// Total suffix per block: 9 bytes. Decompress → append → recompress in place.
-    fn migrate_v13_block_bls_fields(tx: &redb::WriteTransaction) -> io::Result<()> {
-        // bincode v1: None<Option<T>> = 0u8 (1 byte); empty Vec<T> = 0u64 LE (8 bytes).
-        const SUFFIX: [u8; 9] = [0u8; 9];
-        let rows: Vec<(u64, Vec<u8>)> = {
-            let tbl = tx.open_table(BLOCKS).map_err(Self::io_err)?;
-            tbl.iter()
-                .map_err(Self::io_err)?
-                .map(|r| {
-                    r.map(|(k, v)| (k.value(), v.value().to_vec()))
-                        .map_err(Self::io_err)
-                })
-                .collect::<io::Result<_>>()?
-        };
-        let count = rows.len() as u64;
-        let mut tbl = tx.open_table(BLOCKS).map_err(Self::io_err)?;
-        for (height, compressed) in rows {
-            let mut data = Self::decompress(&compressed)?;
-            data.extend_from_slice(&SUFFIX);
-            let recompressed = Self::compress(&data)?;
-            tbl.insert(height, recompressed.as_slice())
-                .map_err(Self::io_err)?;
-        }
-        tracing::info!(
-            blocks = count,
-            "v14 migration: BLS fields appended to block rows"
-        );
-        Ok(())
-    }
-
-    /// v14 → v15 (ADR 0029 Phase 1 bitmap): appends `bls_bitmap: Vec<u8>` (empty) to each
-    /// Block's bincode data. bincode encodes an empty `Vec<u8>` as `0u64` LE (8 bytes).
-    fn migrate_v14_block_bitmap_field(tx: &redb::WriteTransaction) -> io::Result<()> {
-        const SUFFIX: [u8; 8] = [0u8; 8]; // bincode empty Vec<u8> = 0u64 LE
-        let rows: Vec<(u64, Vec<u8>)> = {
-            let tbl = tx.open_table(BLOCKS).map_err(Self::io_err)?;
-            tbl.iter()
-                .map_err(Self::io_err)?
-                .map(|r| {
-                    r.map(|(k, v)| (k.value(), v.value().to_vec()))
-                        .map_err(Self::io_err)
-                })
-                .collect::<io::Result<_>>()?
-        };
-        let count = rows.len() as u64;
-        let mut tbl = tx.open_table(BLOCKS).map_err(Self::io_err)?;
-        for (height, compressed) in rows {
-            let mut data = Self::decompress(&compressed)?;
-            data.extend_from_slice(&SUFFIX);
-            let recompressed = Self::compress(&data)?;
-            tbl.insert(height, recompressed.as_slice())
-                .map_err(Self::io_err)?;
-        }
-        tracing::info!(
-            blocks = count,
-            "v15 migration: bls_bitmap field appended to block rows"
-        );
-        Ok(())
     }
 
     /// Convenience wrapper that panics on failure — kept for internal callers and
@@ -800,15 +547,10 @@ mod tests {
         v
     }
 
-    /// ADR 0069 — toute base antérieure à BLAKE3 est refusée, **et laissée intacte**.
-    ///
-    /// La migration est transactionnelle : elle bute sur le mur v19→v20 et annule
-    /// l'ensemble. C'est le comportement voulu — une base à moitié migrée serait pire que
-    /// pas de migration du tout, et l'opérateur peut encore exporter ses données avec
-    /// l'ancien binaire.
+    /// ADR 0081 — toute base antérieure au schéma courant est refusée **et laissée intacte**.
     #[test]
-    fn test_pre_blake3_database_is_refused_and_left_intact() {
-        for from in [6u64, 9, 14, 19] {
+    fn test_older_database_is_refused_and_left_intact() {
+        for from in [3u64, 6, 19, 21] {
             let tmp = Tmp::new();
             stamp(&tmp.0, from, true);
             let err = Storage::open(&tmp.0)
@@ -816,27 +558,15 @@ mod tests {
                 .unwrap_or_else(|| panic!("une base v{from} doit être refusée"));
             let msg = err.to_string();
             assert!(
-                msg.contains("BLAKE3"),
-                "consigne attendue pour v{from} : {msg}"
-            );
-            assert!(
-                msg.contains("dossier de données vide") || msg.contains("resynchronisez"),
+                msg.contains("dossier de données vide") && msg.contains("ADR 0081"),
                 "le message doit dire quoi faire : {msg}"
             );
             assert_eq!(
                 read_version(&tmp.0),
                 Some(from),
-                "la base v{from} doit rester intacte (migration atomique)"
+                "la base v{from} doit rester intacte"
             );
         }
-    }
-
-    #[test]
-    fn test_unknown_old_version_errors_with_guidance() {
-        let tmp = Tmp::new();
-        stamp(&tmp.0, 3, false); // no migration path from v3 → snapshot fallback
-        let err = Storage::open(&tmp.0).err().unwrap();
-        assert!(err.to_string().contains("no automatic migration"));
     }
 
     #[test]

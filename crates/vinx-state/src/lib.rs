@@ -4,11 +4,7 @@ pub mod world_state;
 pub use genesis::{
     create_genesis_state, create_genesis_state_with_dev_prefund, GenesisBlsKey, GenesisConfig,
 };
-pub use world_state::{
-    v10_meta_suffix, v11_meta_suffix, v12_meta_suffix, v13_meta_suffix, v16_meta_suffix,
-    v17_meta_suffix, v18_meta_suffix, v19_meta_suffix, v8_meta_suffix, v9_meta_suffix, AdminPolicy,
-    GovernanceProposal, ModuleEntry, WorldState,
-};
+pub use world_state::{AdminPolicy, GovernanceProposal, WorldState};
 
 #[cfg(test)]
 mod tests {
