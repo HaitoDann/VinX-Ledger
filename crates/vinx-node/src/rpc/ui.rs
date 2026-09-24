@@ -311,8 +311,8 @@ const HTML: &str = r####"<!DOCTYPE html>
 <script>
 // ─── Constants ────────────────────────────────────────────────────────────────
 const BASE = window.location.origin;
-const DECIMAL = 1_000_000_000_000_000_000n;
-const FEE_FLOOR = DECIMAL / 100n;
+const DECIMAL = 1_000_000_000n; // 9 decimals (ADR 0081)
+const FEE_FLOOR = DECIMAL / 10_000n; // 0.0001 VINX — DEFAULT_FEE_FLOOR_ATOMS
 
 // ─── State ────────────────────────────────────────────────────────────────────
 let netHeight = 0;
@@ -330,7 +330,7 @@ const bytesToHex = b => Array.from(b, x => x.toString(16).padStart(2,'0')).join(
 function parseVinx(s) {
   s = s.trim().replace(',', '.');
   const [w, f = ''] = s.split('.');
-  const frac = (f + '0'.repeat(18)).slice(0, 18);
+  const frac = (f + '0'.repeat(9)).slice(0, 9);
   return BigInt(w || 0) * DECIMAL + BigInt(frac);
 }
 
@@ -452,7 +452,7 @@ async function refreshEconStats() {
   try {
     const s = await (await fetch(BASE + '/network/stats')).json();
     document.getElementById('e-fee').textContent       = Number(BigInt(s.base_fee_atoms)).toLocaleString();
-    document.getElementById('e-supply').textContent    = fmtAtoms(s.circulating_supply.split(' ')[0] + '000000000000000000').replace('.00 VINX','');
+    document.getElementById('e-supply').textContent    = fmtAtoms(parseVinx(s.circulating_supply.split(' ')[0])).replace('.00 VINX','');
     document.getElementById('e-remaining').textContent = s.remaining_supply;
   } catch {}
 }
@@ -667,15 +667,16 @@ async function sendTx(txType) {
   const chainId = wallet.chainId ?? 42;
   const discriminants = { Transfer:0x01, Stake:0x02, Unstake:0x03 };
   // Canonical signing bytes — must match vinx-core Transaction::signing_bytes():
-  // disc(1) ‖ from(20) ‖ to(20) ‖ amount(16 BE) ‖ fee(16 BE) ‖ nonce(8 BE)
+  // disc(1) ‖ key_type(1=0x00 Ed25519) ‖ pub_key(32) ‖ to(20) ‖ amount(16 BE) ‖ fee(16 BE) ‖ nonce(8 BE)
   // ‖ chain_id(4 BE) ‖ expiry(1=0x00) ‖ payload_len(4 BE) ‖ payload(empty) ‖ sponsor(1=0x00)
-  let fromB, toB;
-  try { fromB = bech32Decode20(wallet.address); toB = bech32Decode20(to); }
+  let toB;
+  try { toB = bech32Decode20(to); }
   catch (e) { result.innerHTML = `<p class="msg err">Adresse invalide : ${e.message}</p>`; return; }
-  const sigBytes = new Uint8Array(1+20+20+16+16+8+4+1+4+1);
+  const sigBytes = new Uint8Array(1+1+32+20+16+16+8+4+1+4+1);
   let i = 0;
   sigBytes[i++] = discriminants[txType];
-  sigBytes.set(fromB, i); i += 20;
+  sigBytes[i++] = 0x00; // key type: Ed25519 (ADR 0081 D6)
+  sigBytes.set(wallet.publicKey32, i); i += 32;
   sigBytes.set(toB, i);   i += 20;
   sigBytes.set(bigIntTo16BE(amountAtoms), i); i += 16;
   sigBytes.set(bigIntTo16BE(feeAtoms), i);    i += 16;
@@ -687,7 +688,7 @@ async function sendTx(txType) {
   const signature = nacl.sign.detached(sigBytes, wallet.secretKey64);
   const pubKeyArr = '['+Array.from(wallet.publicKey32).join(',')+']';
   const sigHex = bytesToHex(signature);
-  const body = `{"tx_type":"${txType}","from":"${wallet.address}","to":"${to}","amount":${amountAtoms},"fee":${feeAtoms},"nonce":${nonce},"chain_id":${chainId},"payload":[],"pub_key":${pubKeyArr},"signature":"${sigHex}"}`;
+  const body = `{"tx_type":"${txType}","to":"${to}","amount":${amountAtoms},"fee":${feeAtoms},"nonce":${nonce},"chain_id":${chainId},"payload":[],"pub_key":${pubKeyArr},"signature":"${sigHex}"}`;
   try {
     const resp = await fetch(BASE+'/tx/submit', { method:'POST', headers:{'Content-Type':'application/json'}, body });
     const json = await resp.json();
@@ -1047,7 +1048,7 @@ const ADMIN_HTML: &str = r####"<!DOCTYPE html>
 </main>
 <script>
 const BASE = window.location.origin;
-const DECIMAL = 1_000_000_000_000_000_000n;
+const DECIMAL = 1_000_000_000n; // 9 decimals (ADR 0081)
 let wallet = null, isAdmin = false, adminAddress = null, opToken = '';
 
 // ─── Byte / hex helpers ───────────────────────────────────────────────────────
@@ -1117,19 +1118,20 @@ function updateGate(){
 
 // ─── Governance signing ───────────────────────────────────────────────────────
 // Canonical signing bytes — must match vinx-core Transaction::signing_bytes():
-// disc(1) ‖ from(20) ‖ to(20) ‖ amount(16 BE) ‖ fee(16 BE) ‖ nonce(8 BE)
+// disc(1) ‖ key_type(1=0x00 Ed25519) ‖ pub_key(32) ‖ to(20) ‖ amount(16 BE) ‖ fee(16 BE) ‖ nonce(8 BE)
 // ‖ chain_id(4 BE) ‖ expiry(1=0x00) ‖ payload_len(4 BE) ‖ payload ‖ sponsor(1=0x00)
 async function submitGov(txName, disc, toAddr, payloadBytes){
   if(!wallet||!isAdmin)throw new Error('Clé admin requise.');
   let nonce=0;
   try{const a=await (await fetch(BASE+'/account/'+wallet.address)).json();nonce=a.nonce??0;}catch{}
   const chainId=wallet.chainId??42;
-  const fromB=bech32Decode20(wallet.address), toB=bech32Decode20(toAddr);
+  const toB=bech32Decode20(toAddr);
   const payload=payloadBytes||new Uint8Array(0);
-  const sig=new Uint8Array(1+20+20+16+16+8+4+1+4+payload.length+1);
+  const sig=new Uint8Array(1+1+32+20+16+16+8+4+1+4+payload.length+1);
   let i=0;
   sig[i++]=disc;
-  sig.set(fromB,i);i+=20;
+  sig[i++]=0x00; // key type: Ed25519 (ADR 0081 D6)
+  sig.set(wallet.publicKey32,i);i+=32;
   sig.set(toB,i);i+=20;
   sig.set(bigIntTo16BE(0n),i);i+=16; // amount 0
   sig.set(bigIntTo16BE(0n),i);i+=16; // fee 0
@@ -1142,7 +1144,7 @@ async function submitGov(txName, disc, toAddr, payloadBytes){
   const signature=nacl.sign.detached(sig,wallet.secretKey64);
   const pubKeyArr='['+Array.from(wallet.publicKey32).join(',')+']';
   const payloadArr='['+Array.from(payload).join(',')+']';
-  const body=`{"tx_type":"${txName}","from":"${wallet.address}","to":"${toAddr}","amount":0,"fee":0,"nonce":${nonce},"chain_id":${chainId},"payload":${payloadArr},"pub_key":${pubKeyArr},"signature":"${bytesToHex(signature)}"}`;
+  const body=`{"tx_type":"${txName}","to":"${toAddr}","amount":0,"fee":0,"nonce":${nonce},"chain_id":${chainId},"payload":${payloadArr},"pub_key":${pubKeyArr},"signature":"${bytesToHex(signature)}"}`;
   const resp=await fetch(BASE+'/tx/submit',{method:'POST',headers:{'Content-Type':'application/json'},body});
   const json=await resp.json();
   if(!resp.ok)throw new Error(json.error||('HTTP '+resp.status));
@@ -1150,13 +1152,13 @@ async function submitGov(txName, disc, toAddr, payloadBytes){
 }
 
 // ADR 0007: validator-set changes go through AdminAction (0x08). The payload is
-// bincode(GovernanceAction): a little-endian u32 variant tag (AddValidator=0,
-// RemoveValidator=1) followed by the 20-byte address. `to` is the admin (self).
+// borsh(GovernanceAction): a one-byte variant tag (AddValidator=0, RemoveValidator=1)
+// followed by the 20-byte address (ADR 0081 D7c). `to` is the admin (self).
 function govValidatorPayload(variant,addr){
   const a=bech32Decode20(addr);
-  const b=new Uint8Array(24);
-  b[0]=variant&0xff;b[1]=(variant>>8)&0xff;b[2]=(variant>>16)&0xff;b[3]=(variant>>24)&0xff;
-  b.set(a,4);
+  const b=new Uint8Array(21);
+  b[0]=variant&0xff;
+  b.set(a,1);
   return b;
 }
 

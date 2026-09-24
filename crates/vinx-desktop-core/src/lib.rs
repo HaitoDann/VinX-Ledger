@@ -7,7 +7,7 @@
 
 use serde::{Deserialize, Serialize};
 use std::path::Path;
-use vinx_core::amount::{Amount, DECIMAL_FACTOR};
+use vinx_core::amount::{Amount, DECIMALS, DECIMAL_FACTOR};
 use vinx_core::protocol::ProtocolVersion;
 use vinx_core::{GovernanceAction, Transaction, TransactionType};
 use vinx_crypto::{Address, KeyPair};
@@ -75,8 +75,8 @@ impl Keystore {
 
 // ─── Amount parsing / formatting ──────────────────────────────────────────────
 
-/// Parses a human VINX string ("100", "99.50", "0.01") into atoms (10^-18 VINX).
-/// Truncates beyond 18 decimals.
+/// Parses a human VINX string ("100", "99.50", "0.01") into atoms (10^-DECIMALS VINX).
+/// Truncates beyond DECIMALS decimals.
 pub fn parse_amount(s: &str) -> Result<Amount, CoreError> {
     let s = s.trim();
     if s.is_empty() {
@@ -89,8 +89,8 @@ pub fn parse_amount(s: &str) -> Result<Amount, CoreError> {
     let frac_atoms: u128 = if frac_str.is_empty() {
         0
     } else {
-        let truncated = &frac_str[..frac_str.len().min(18)];
-        let padded = format!("{:0<18}", truncated);
+        let truncated = &frac_str[..frac_str.len().min(DECIMALS as usize)];
+        let padded = format!("{:0<width$}", truncated, width = DECIMALS as usize);
         padded
             .parse()
             .map_err(|_| CoreError::InvalidAmount(s.to_string()))?
@@ -122,10 +122,8 @@ fn build_signed(
     chain_id: u32,
     payload: Vec<u8>,
 ) -> Transaction {
-    let from = Address::from_public_key(&kp.public_key());
     let mut tx = Transaction {
         tx_type,
-        from,
         to,
         amount,
         fee,
@@ -133,7 +131,7 @@ fn build_signed(
         chain_id,
         expires_at_height: None,
         payload,
-        pub_key: Some(kp.public_key()),
+        pub_key: kp.public_key(),
         signature: None,
         sponsor: None,
         sponsor_pub_key: None,
@@ -205,7 +203,7 @@ pub fn build_unstake(
 }
 
 /// ADR 0007: validator-set changes go through the single governance path
-/// (AdminAction carrying a bincode(GovernanceAction)), not a dedicated tx type.
+/// (AdminAction carrying a borsh(GovernanceAction)), not a dedicated tx type.
 /// `to` is the admin itself, matching `Transaction::new_admin_action`.
 fn build_admin_action(
     kp: &KeyPair,
@@ -214,7 +212,7 @@ fn build_admin_action(
     chain_id: u32,
 ) -> Transaction {
     let from = Address::from_public_key(&kp.public_key());
-    let payload = bincode::serialize(action).expect("GovernanceAction serialization is infallible");
+    let payload = borsh::to_vec(action).expect("GovernanceAction serialization is infallible");
     build_signed(
         kp,
         TransactionType::AdminAction,
@@ -322,7 +320,7 @@ mod tests {
         assert_eq!(tx.chain_id, 7);
         assert_eq!(tx.tx_type, TransactionType::Transfer);
         // Signature verifies over the canonical signing bytes (incl. chain_id).
-        let pk = tx.pub_key.as_ref().unwrap();
+        let pk = &tx.pub_key;
         let sig = tx.signature.as_ref().unwrap();
         assert!(pk.verify(&tx.signing_bytes(), sig).is_ok());
     }
@@ -335,7 +333,7 @@ mod tests {
         // ADR 0007: routed through the unified governance path.
         assert_eq!(add.tx_type, TransactionType::AdminAction);
         assert_eq!(add.fee, Amount::ZERO);
-        let decoded: GovernanceAction = bincode::deserialize(&add.payload).unwrap();
+        let decoded: GovernanceAction = borsh::from_slice(&add.payload).unwrap();
         assert_eq!(
             decoded,
             GovernanceAction::AddValidator(parse_address(&v.address).unwrap())

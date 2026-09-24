@@ -1,36 +1,41 @@
+use crate::consensus::CommitCert;
 use crate::transaction::Transaction;
-use crate::validator_set::ValidatorSet;
 use borsh::{BorshDeserialize, BorshSerialize};
 use serde::{Deserialize, Serialize};
-use vinx_crypto::{
-    bls_verify_aggregate, hash256, Address, BlsError, BlsPubKey, BlsSignature, Hash32, PublicKey,
-    VinxSignature,
-};
+use vinx_crypto::{hash256, Address, Hash32};
 
 pub const GENESIS_PREV_HASH: Hash32 = [0u8; 32];
 
-#[derive(Clone, Debug, Serialize, Deserialize, BorshSerialize, BorshDeserialize)]
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, BorshSerialize, BorshDeserialize)]
 pub struct BlockHeader {
     pub height: u64,
+    /// Consensus round in which this block was **built** by its proposer (ADR 0082). A
+    /// round above 0 means the proposers of the earlier rounds did not get a block
+    /// through — the fact from which missed proposals are charged, deterministically.
+    /// The block may be re-proposed and committed at a later round (its certificate's).
+    pub round: u32,
     pub prev_hash: Hash32,
     /// Unix timestamp in seconds.
     pub timestamp: u64,
+    /// The proposer of this block.
     pub validator: Address,
     pub tx_count: u32,
     /// Merkle root of the account state after this block.
     pub state_root: Hash32,
     /// Dynamic fee floor at block production time, in atoms.
-    #[serde(default)]
     pub base_fee: u64,
-    /// SHA-256 Merkle root of transaction receipts in this block.
-    #[serde(default)]
+    /// Root of the ordered transaction hashes of this block.
     pub receipts_root: Hash32,
+    /// Hash of `Block::last_commit` (all-zero when absent), so the proposer cannot swap
+    /// the certificate of the previous block after proposing.
+    pub last_commit_hash: Hash32,
 }
 
 impl BlockHeader {
     pub fn hash(&self) -> Hash32 {
-        let mut bytes = Vec::with_capacity(176);
+        let mut bytes = Vec::with_capacity(212);
         bytes.extend_from_slice(&self.height.to_be_bytes());
+        bytes.extend_from_slice(&self.round.to_be_bytes());
         bytes.extend_from_slice(&self.prev_hash);
         bytes.extend_from_slice(&self.timestamp.to_be_bytes());
         bytes.extend_from_slice(self.validator.as_bytes());
@@ -38,116 +43,28 @@ impl BlockHeader {
         bytes.extend_from_slice(&self.state_root);
         bytes.extend_from_slice(&self.base_fee.to_be_bytes());
         bytes.extend_from_slice(&self.receipts_root);
+        bytes.extend_from_slice(&self.last_commit_hash);
         hash256(&bytes)
     }
 }
 
-/// One validator's co-signature on a block header hash.
-#[derive(Clone, Debug, Serialize, Deserialize, BorshSerialize, BorshDeserialize)]
-pub struct BlockSignature {
-    /// Address of the signing validator.
-    pub validator: Address,
-    /// Ed25519 public key — carried alongside the signature so that verification
-    /// does not require a separate public-key registry lookup.
-    pub pub_key: PublicKey,
-    /// Signature over `BlockHeader::hash()`.
-    pub signature: VinxSignature,
-}
-
-/// Evidence of validator equivocation: two *different* block headers at the **same
-/// height**, each carrying a valid BLS12-381 signature (G2, 96 bytes) from the same
-/// validator's registered BLS key (ADR 0046).
+/// A block of the chain (ADR 0082).
 ///
-/// The full headers are included so any verifier can recompute `header_a.hash()` /
-/// `header_b.hash()`, confirm the heights match and the hashes differ, then verify both
-/// BLS signatures against the target's registered key in `validator_pool`. Only the
-/// target could have produced both — forging evidence would require forging a BLS sig.
-///
-/// At block production time `bls_aggregate = individual_proposer_sig` (single-element
-/// aggregate), so the initial `bls_aggregate` bytes from each competing block serve
-/// directly as `bls_sig_a` / `bls_sig_b`.
-#[derive(Clone, Debug, Serialize, Deserialize)]
-pub struct SlashEvidence {
-    pub header_a: BlockHeader,
-    pub header_b: BlockHeader,
-    /// Proposer's individual BLS G2 signature (96 bytes) over `header_a.hash()`.
-    pub bls_sig_a: Vec<u8>,
-    /// Proposer's individual BLS G2 signature (96 bytes) over `header_b.hash()`.
-    pub bls_sig_b: Vec<u8>,
-}
-
-#[derive(Clone, Debug, Serialize, Deserialize, BorshSerialize, BorshDeserialize)]
+/// A block is only ever stored once **committed**: its own [`CommitCert`] travels next to
+/// it (chain rows, sync), and the certificate of the *previous* block is embedded here as
+/// `last_commit`. State transitions read `last_commit` to reward the validators that
+/// precommitted the previous block — so rewards derive from data every node holds, not
+/// from which signatures a given node happened to receive.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, BorshSerialize, BorshDeserialize)]
 pub struct Block {
     pub header: BlockHeader,
     pub transactions: Vec<Transaction>,
-    /// BLS12-381 aggregate co-signature (G2, 96 bytes). ADR 0029 Phase 1.
-    #[serde(default)]
-    pub bls_aggregate: Option<Vec<u8>>,
-    /// BLS G1 public keys (48 bytes each) of the validators whose signatures were
-    /// aggregated into `bls_aggregate`, in canonical (validator-index) order.
-    #[serde(default)]
-    pub bls_cosigner_pks: Vec<Vec<u8>>,
-    /// ADR 0029 Phase 1 — bitmap of validators who contributed to `bls_aggregate`.
-    /// Bit `i` = 1 means the validator at index `i` in the ValidatorSet signed.
-    #[serde(default)]
-    pub bls_bitmap: Vec<u8>,
-    /// ADR 0029 Phase 2a — the proposer's ECVRF proof (80 bytes) over
-    /// `WorldState::committee_alpha(height) = epoch_beacon ‖ height_le64`, evaluated
-    /// against the proposer's registered VRF key. Present on VRF-selected leader blocks;
-    /// `None` on round-robin / backup blocks (backward-compatible).
-    ///
-    /// The proof lives **outside** `BlockHeader` (so the signed header hash and its golden
-    /// vector are unchanged) and is self-authenticating: it verifies only against the
-    /// proposer's on-chain VRF key at the block's own height, so it cannot be forged for
-    /// another proposer nor ground (one deterministic output per key+height).
-    #[serde(default)]
-    pub vrf_proof: Option<Vec<u8>>,
-}
-
-/// ADR 0029 Phase 2a — expected number of VRF-selected leader candidates per height.
-///
-/// The self-selection threshold is calibrated so that, on average, this many active
-/// validators draw a VRF output below it. More than one candidate is resolved by
-/// fork-choice (lowest output wins); zero candidates (a slot nobody won) is covered by
-/// the existing backup-after-timeout path (ADR 0027) — so liveness never depends on a
-/// leader being drawn.
-pub const VRF_LEADER_EXPECTATION: u64 = 2;
-
-/// The self-selection threshold for `active_count` active validators: a validator is a
-/// leader candidate at a height iff its VRF priority is `<=` this value.
-///
-/// With `active_count <= VRF_LEADER_EXPECTATION` every validator is a candidate (the
-/// threshold saturates to `u64::MAX`) and fork-choice simply keeps the lowest output —
-/// the correct degenerate behavior at tiny validator counts (at `n = 1` the lone
-/// validator is always leader).
-pub fn vrf_leader_threshold(active_count: usize) -> u64 {
-    let n = active_count as u64;
-    if n <= VRF_LEADER_EXPECTATION {
-        return u64::MAX;
-    }
-    // Expected selected ≈ VRF_LEADER_EXPECTATION: P(priority <= MAX/n * E) ≈ E/n per validator.
-    (u64::MAX / n).saturating_mul(VRF_LEADER_EXPECTATION)
-}
-
-/// True if a validator drawing `priority` is a leader candidate among `active_count`.
-pub fn vrf_is_selected(priority: u64, active_count: usize) -> bool {
-    priority <= vrf_leader_threshold(active_count)
-}
-
-/// Fork-choice priority derived from a raw VRF proof: the first 8 bytes of the VRF
-/// output as a big-endian `u64`. **Lower is higher priority** (closer to leader).
-///
-/// Returns `None` if the bytes are not a well-formed 80-byte proof. Callers use this only
-/// for ordering already-validated blocks (ingress verifies the proof against the
-/// proposer's key), so a `None` here means "treat as a non-VRF block".
-pub fn vrf_priority(proof_bytes: &[u8]) -> Option<u64> {
-    let arr: [u8; vinx_crypto::VRF_PROOF_LEN] = proof_bytes.try_into().ok()?;
-    let output = vinx_crypto::vrf_proof_to_hash(&vinx_crypto::VrfProof(arr)).ok()?;
-    Some(u64::from_be_bytes(output[..8].try_into().unwrap()))
+    /// Commit certificate of block `height - 1`. `None` only for heights 0 and 1.
+    pub last_commit: Option<CommitCert>,
 }
 
 impl Block {
-    /// Hash of the block header (used as the message validators sign).
+    /// Hash of the block header — what proposals and votes refer to.
     pub fn hash(&self) -> Hash32 {
         self.header.hash()
     }
@@ -156,161 +73,14 @@ impl Block {
         self.header.height == 0
     }
 
-    /// Sets bit `validator_idx` in `bls_bitmap` (ADR 0029 Phase 1).
-    /// Auto-extends the bitmap to fit the index.
-    pub fn set_bls_bitmap_bit(&mut self, validator_idx: usize) {
-        let byte_idx = validator_idx / 8;
-        let bit_pos = validator_idx % 8;
-        if self.bls_bitmap.len() <= byte_idx {
-            self.bls_bitmap.resize(byte_idx + 1, 0);
-        }
-        self.bls_bitmap[byte_idx] |= 1 << bit_pos;
+    /// Hash to put in `header.last_commit_hash` for `cert`.
+    pub fn last_commit_hash_of(cert: Option<&CommitCert>) -> Hash32 {
+        cert.map(CommitCert::hash).unwrap_or([0u8; 32])
     }
 
-    /// Returns true if bit `validator_idx` is set in `bls_bitmap`.
-    pub fn bls_bitmap_has(&self, validator_idx: usize) -> bool {
-        let byte_idx = validator_idx / 8;
-        let bit_pos = validator_idx % 8;
-        self.bls_bitmap
-            .get(byte_idx)
-            .is_some_and(|b| b & (1 << bit_pos) != 0)
-    }
-
-    /// Number of bits set in `bls_bitmap` (popcount).
-    pub fn bls_bitmap_popcount(&self) -> usize {
-        self.bls_bitmap
-            .iter()
-            .map(|b| b.count_ones() as usize)
-            .sum()
-    }
-
-    /// Verifies `bls_aggregate` against the on-chain BLS key registry (ADR 0029 Phase 1).
-    ///
-    /// `indexed_bls_pks[i]` must be the registered BLS G1 key (48 bytes) of the
-    /// validator at index `i` in the active ValidatorSet, or `None` when unregistered.
-    /// Uses `bls_bitmap` to determine which validators signed; each set bit must have
-    /// a corresponding registered key. Returns the signer count on success.
-    ///
-    /// # Security (VINX-02 / VX-RED-001)
-    ///
-    /// There is **no fallback** to the `bls_cosigner_pks` path. That fallback used to
-    /// trigger whenever `bls_bitmap` was empty, and `bls_signer_count()` reconstructs its
-    /// signers from `bls_cosigner_pks` — a field carried *by the block itself*. An attacker
-    /// therefore reached quorum with keys registered by nobody, simply by omitting the
-    /// bitmap: a security-critical downgrade selected by the untrusted input. Blocks
-    /// produced by `consensus::sign_block_bls` always set the bitmap, so requiring it costs
-    /// legitimate producers nothing.
-    ///
-    /// An empty bitmap that nonetheless carries an aggregate is rejected as malformed:
-    /// signatures are claimed but attributed to no validator index.
-    pub fn bls_signer_count_from_bitmap(
-        &self,
-        indexed_bls_pks: &[Option<[u8; 48]>],
-    ) -> Result<usize, BlsError> {
-        if self.bls_bitmap.is_empty() {
-            return match self.bls_aggregate {
-                Some(_) => Err(BlsError::EmptyAggregate),
-                None => Ok(0),
-            };
-        }
-        let agg_vec = match &self.bls_aggregate {
-            Some(b) => b,
-            None => return Ok(0),
-        };
-        let agg_arr: [u8; 96] = agg_vec
-            .as_slice()
-            .try_into()
-            .map_err(|_| BlsError::InvalidSignature)?;
-        let agg_sig = BlsSignature(agg_arr);
-
-        // Reconstruct signers in canonical order (ascending validator index).
-        let pks: Vec<BlsPubKey> = (0..indexed_bls_pks.len())
-            .filter(|&i| self.bls_bitmap_has(i))
-            .map(|i| {
-                indexed_bls_pks[i]
-                    .as_ref()
-                    .ok_or(BlsError::InvalidKey)
-                    .and_then(BlsPubKey::from_bytes)
-            })
-            .collect::<Result<_, _>>()?;
-
-        if pks.is_empty() {
-            return Err(BlsError::EmptyAggregate);
-        }
-        // VINX-11: the same G1 key registered under two validator slots would let one
-        // real signature be counted twice (aggregate 2·pk vs 2·sigma verifies fine).
-        // One bit of the bitmap must mean one independent decision.
-        for i in 1..pks.len() {
-            if pks[..i].iter().any(|p| p.0 == pks[i].0) {
-                return Err(BlsError::InvalidKey);
-            }
-        }
-        bls_verify_aggregate(&pks, &agg_sig, &self.header.hash())?;
-        Ok(pks.len())
-    }
-
-    /// Verifies the BLS aggregate against `bls_cosigner_pks` and returns how many keys
-    /// it contains.
-    ///
-    /// # This is NOT a security predicate (VINX-02 / VINX-05)
-    ///
-    /// `bls_cosigner_pks` is supplied **by the block itself**. This function proves only
-    /// that the aggregate matches the keys the block chose to advertise — it does *not*
-    /// prove those keys belong to any validator. An attacker generates `quorum` keys of
-    /// their own and passes this check trivially.
-    ///
-    /// Use it for display only. Every security decision — finality, fork-choice weight,
-    /// block validation — must use [`Block::bls_signer_count_from_bitmap`] with the
-    /// on-chain registry (`WorldState::indexed_bls_keys`).
-    ///
-    /// Returns `Ok(0)` when `bls_aggregate` is absent; `Err` on invalid aggregate or
-    /// on malformed byte lengths (expected 96 bytes for sig, 48 bytes per pubkey).
-    pub fn bls_signer_count_unverified(&self) -> Result<usize, BlsError> {
-        let agg_vec = match &self.bls_aggregate {
-            Some(b) => b,
-            None => return Ok(0),
-        };
-        if self.bls_cosigner_pks.is_empty() {
-            return Err(BlsError::EmptyAggregate);
-        }
-        let agg_arr: [u8; 96] = agg_vec
-            .as_slice()
-            .try_into()
-            .map_err(|_| BlsError::InvalidSignature)?;
-        let agg_sig = BlsSignature(agg_arr);
-        let pks: Vec<BlsPubKey> = self
-            .bls_cosigner_pks
-            .iter()
-            .map(|pk_vec| {
-                let arr: [u8; 48] = pk_vec
-                    .as_slice()
-                    .try_into()
-                    .map_err(|_| BlsError::InvalidKey)?;
-                BlsPubKey::from_bytes(&arr)
-            })
-            .collect::<Result<_, _>>()?;
-        bls_verify_aggregate(&pks, &agg_sig, &self.header.hash())?;
-        Ok(pks.len())
-    }
-
-    /// Returns true when this block carries co-signatures from at least `quorum`
-    /// validators **whose BLS keys are registered on-chain**.
-    ///
-    /// `indexed_bls_pks[i]` is the registered G1 key of the validator at index `i` in
-    /// `validator_set`, or `None` when unregistered — build it with
-    /// `WorldState::indexed_bls_keys`. Requiring the registry here is what stops a block
-    /// from declaring its own signers (VINX-02).
-    pub fn is_finalized(
-        &self,
-        validator_set: &ValidatorSet,
-        indexed_bls_pks: &[Option<[u8; 48]>],
-    ) -> bool {
-        if self.is_genesis() {
-            return true;
-        }
-        self.bls_signer_count_from_bitmap(indexed_bls_pks)
-            .map(|c| c >= validator_set.quorum())
-            .unwrap_or(false)
+    /// True when `header.last_commit_hash` matches the embedded certificate.
+    pub fn last_commit_matches(&self) -> bool {
+        self.header.last_commit_hash == Self::last_commit_hash_of(self.last_commit.as_ref())
     }
 }
 
@@ -323,384 +93,98 @@ mod tests {
         Address::from_public_key(&KeyPair::generate().public_key())
     }
 
-    // ─── ADR 0029 Phase 2a — VRF leader selection helpers ───────────────────────
-
-    #[test]
-    fn vrf_threshold_saturates_at_or_below_expectation() {
-        // At or below the expected candidate count, every validator is a candidate.
-        assert_eq!(vrf_leader_threshold(0), u64::MAX);
-        assert_eq!(vrf_leader_threshold(1), u64::MAX);
-        assert_eq!(
-            vrf_leader_threshold(VRF_LEADER_EXPECTATION as usize),
-            u64::MAX
-        );
-        // Beyond it the per-validator threshold shrinks as the set grows.
-        let t100 = vrf_leader_threshold(100);
-        let t1000 = vrf_leader_threshold(1000);
-        assert!(t100 < u64::MAX);
-        assert!(t1000 < t100, "more validators → smaller selection window");
-    }
-
-    #[test]
-    fn vrf_selection_degenerates_at_tiny_sets_and_bounds_large_ones() {
-        // n <= expectation: always selected (single-validator chain always has its leader).
-        assert!(vrf_is_selected(u64::MAX, 1));
-        assert!(vrf_is_selected(u64::MAX, 2));
-        // Large set: a near-zero draw wins, a near-max draw loses.
-        assert!(vrf_is_selected(0, 1000));
-        assert!(!vrf_is_selected(u64::MAX, 1000));
-    }
-
-    #[test]
-    fn vrf_priority_matches_output_and_rejects_malformed() {
-        use vinx_crypto::VrfSecretKey;
-        let sk = VrfSecretKey::generate();
-        let (proof, output) = sk.evaluate(b"alpha-height-1");
-        let priority = vrf_priority(&proof.0).expect("a valid 80-byte proof yields a priority");
-        assert_eq!(
-            priority,
-            u64::from_be_bytes(output[..8].try_into().unwrap()),
-            "priority is the first 8 bytes of the VRF output, big-endian"
-        );
-        // Wrong length is not a proof.
-        assert!(vrf_priority(&[0u8; 10]).is_none());
-        assert!(vrf_priority(&[]).is_none());
-    }
-
-    fn make_genesis_header() -> BlockHeader {
-        BlockHeader {
-            height: 0,
-            prev_hash: GENESIS_PREV_HASH,
-            timestamp: 1_748_736_000,
-            validator: dummy_addr(),
-            tx_count: 0,
-            state_root: [0u8; 32],
-            base_fee: 0,
-            receipts_root: [0u8; 32],
-        }
-    }
-
     fn make_block(height: u64, proposer: Address) -> Block {
         Block {
             header: BlockHeader {
                 height,
-                prev_hash: [0u8; 32],
-                timestamp: 0,
+                round: 0,
+                prev_hash: GENESIS_PREV_HASH,
+                timestamp: 1_700_000_000 + height,
                 validator: proposer,
                 tx_count: 0,
                 state_root: [0u8; 32],
                 base_fee: 0,
                 receipts_root: [0u8; 32],
+                last_commit_hash: [0u8; 32],
             },
             transactions: vec![],
-            bls_aggregate: None,
-            bls_cosigner_pks: vec![],
-            bls_bitmap: vec![],
-            vrf_proof: None,
+            last_commit: None,
         }
     }
 
     #[test]
     fn test_block_hash_is_deterministic() {
-        let h = make_genesis_header();
-        assert_eq!(h.hash(), h.hash());
+        let b = make_block(1, dummy_addr());
+        assert_eq!(b.hash(), b.hash());
     }
 
     #[test]
-    fn test_different_heights_different_hashes() {
-        let mut h1 = make_genesis_header();
-        let mut h2 = make_genesis_header();
-        h1.height = 0;
-        h2.height = 1;
-        assert_ne!(h1.hash(), h2.hash());
+    fn test_every_header_field_is_hashed() {
+        let base = make_block(1, dummy_addr());
+        #[allow(clippy::type_complexity)]
+        let mutations: Vec<Box<dyn Fn(&mut BlockHeader)>> = vec![
+            Box::new(|h| h.height += 1),
+            Box::new(|h| h.round += 1),
+            Box::new(|h| h.prev_hash[0] ^= 1),
+            Box::new(|h| h.timestamp += 1),
+            Box::new(|h| h.validator = Address::from_bytes([9; 20])),
+            Box::new(|h| h.tx_count += 1),
+            Box::new(|h| h.state_root[0] ^= 1),
+            Box::new(|h| h.base_fee += 1),
+            Box::new(|h| h.receipts_root[0] ^= 1),
+            Box::new(|h| h.last_commit_hash[0] ^= 1),
+        ];
+        for (i, m) in mutations.iter().enumerate() {
+            let mut b = base.clone();
+            m(&mut b.header);
+            assert_ne!(b.hash(), base.hash(), "header field #{i} must be hashed");
+        }
     }
 
     #[test]
-    fn test_genesis_block_flags() {
-        let block = Block {
-            header: make_genesis_header(),
-            transactions: vec![],
-            bls_aggregate: None,
-            bls_cosigner_pks: vec![],
-            bls_bitmap: vec![],
-            vrf_proof: None,
-        };
-        assert!(block.is_genesis());
-        assert_eq!(block.header.prev_hash, GENESIS_PREV_HASH);
+    fn test_genesis_flags() {
+        assert!(make_block(0, dummy_addr()).is_genesis());
+        assert!(!make_block(1, dummy_addr()).is_genesis());
     }
 
     #[test]
-    fn test_genesis_prev_hash_is_zero() {
-        assert_eq!(GENESIS_PREV_HASH, [0u8; 32]);
-    }
-
-    #[test]
-    fn test_genesis_always_finalized() {
-        let kp = KeyPair::generate();
-        let addr = Address::from_public_key(&kp.public_key());
-        let vs = ValidatorSet::single(addr);
-        let genesis = make_block(0, addr);
-        assert!(genesis.is_finalized(&vs, &[]));
+    fn test_last_commit_hash_binds_the_certificate() {
+        let mut b = make_block(2, dummy_addr());
+        assert!(b.last_commit_matches());
+        b.last_commit = Some(CommitCert {
+            height: 1,
+            round: 0,
+            block_hash: [1; 32],
+            bitmap: vec![1],
+            aggregate: vec![0; 96],
+        });
+        assert!(
+            !b.last_commit_matches(),
+            "a swapped certificate is detected"
+        );
+        b.header.last_commit_hash = Block::last_commit_hash_of(b.last_commit.as_ref());
+        assert!(b.last_commit_matches());
     }
 
     #[test]
     fn test_block_header_hash_golden_vector() {
-        // ADR 0020 t2: BlockHeader::hash() is the exact message validators co-sign. Its
-        // manual big-endian layout is consensus-critical across implementations — pin the
-        // hash of a fixed header so any layout change (field order, width, extra field) is
-        // a conscious, breaking act caught here.
-        //
-        // Valeur mise à jour par ADR 0069 (BLAKE3 remplace SHA-256) : ce vecteur fige à la
-        // fois le layout **et** la fonction de hachage. Les deux sont consensus-critiques.
+        // ADR 0020: the header hash is what every vote signs. Any external implementation
+        // must reproduce this exact value; changing it is a consensus-breaking change.
         let h = BlockHeader {
-            height: 5,
-            prev_hash: [0u8; 32],
-            timestamp: 7,
-            validator: Address::from_bytes([0x11; 20]),
-            tx_count: 2,
-            state_root: [0xAB; 32],
-            base_fee: 42,
-            receipts_root: [0xCD; 32],
+            height: 1,
+            round: 2,
+            prev_hash: [0x11; 32],
+            timestamp: 1_700_000_000,
+            validator: Address::from_bytes([0x22; 20]),
+            tx_count: 3,
+            state_root: [0x33; 32],
+            base_fee: 100_000,
+            receipts_root: [0x44; 32],
+            last_commit_hash: [0x55; 32],
         };
         assert_eq!(
             hex::encode(h.hash()),
-            "c112230d5d05663dcaffa0cc4a58e2973306098cb2488c7c3197dfb073df3bf4"
+            "2e247f90a21e292b61cf77122ecc07acd3c1e21881474feb802cbb9a8f6dd22d"
         );
-    }
-
-    #[test]
-    fn test_slash_evidence_encoding_is_canonical() {
-        // ADR 0020: SlashEvidence enters the SlashValidator transaction payload —
-        // consensus-critical. Pin that its bincode encoding is deterministic and
-        // canonical (decode then re-encode is byte-identical).
-        use vinx_crypto::BlsSecretKey;
-        let ed_kp = KeyPair::generate();
-        let v = Address::from_public_key(&ed_kp.public_key());
-        let bls_sk = BlsSecretKey::generate();
-        let mk = |tag: u8| {
-            let h = BlockHeader {
-                height: 5,
-                prev_hash: GENESIS_PREV_HASH,
-                timestamp: 7,
-                validator: v,
-                tx_count: 0,
-                state_root: [tag; 32],
-                base_fee: 0,
-                receipts_root: [0u8; 32],
-            };
-            let bls_sig = bls_sk.sign(&h.hash()).0.to_vec();
-            (h, bls_sig)
-        };
-        let (header_a, bls_sig_a) = mk(0xAA);
-        let (header_b, bls_sig_b) = mk(0xBB);
-        let ev = SlashEvidence {
-            header_a,
-            header_b,
-            bls_sig_a,
-            bls_sig_b,
-        };
-        let bytes = bincode::serialize(&ev).unwrap();
-        assert_eq!(bytes, bincode::serialize(&ev).unwrap());
-        let decoded: SlashEvidence = bincode::deserialize(&bytes).unwrap();
-        assert_eq!(bincode::serialize(&decoded).unwrap(), bytes);
-    }
-
-    #[test]
-    fn test_bls_single_sig_finalizes_block() {
-        use vinx_crypto::BlsSecretKey;
-        let ed_kp = KeyPair::generate();
-        let addr = Address::from_public_key(&ed_kp.public_key());
-        let vs = ValidatorSet::single(addr);
-
-        let mut block = make_block(1, addr);
-        let header_hash = block.hash();
-
-        let bls_sk = BlsSecretKey::generate();
-        let bls_sig = bls_sk.sign(&header_hash);
-        // Use the public-API aggregate for proper encoding (aggregate of 1 = the sig itself).
-        let agg = vinx_crypto::bls_aggregate(&[bls_sig]).unwrap();
-        block.bls_aggregate = Some(agg.0.to_vec());
-        block.bls_cosigner_pks = vec![bls_sk.public_key().0.to_vec()];
-        block.set_bls_bitmap_bit(0);
-        let indexed_pks = vec![Some(bls_sk.public_key().0)];
-
-        assert_eq!(block.bls_signer_count_unverified().unwrap(), 1);
-        assert_eq!(block.bls_signer_count_from_bitmap(&indexed_pks).unwrap(), 1);
-        assert!(block.is_finalized(&vs, &indexed_pks));
-    }
-
-    #[test]
-    fn test_bls_wrong_sig_not_finalized() {
-        use vinx_crypto::BlsSecretKey;
-        let ed_kp = KeyPair::generate();
-        let addr = Address::from_public_key(&ed_kp.public_key());
-        let vs = ValidatorSet::single(addr);
-
-        let mut block = make_block(1, addr);
-        let header_hash = block.hash();
-
-        let bls_sk = BlsSecretKey::generate();
-        let wrong_sk = BlsSecretKey::generate();
-        // Sign with one key but advertise a different public key.
-        let agg = vinx_crypto::bls_aggregate(&[bls_sk.sign(&header_hash)]).unwrap();
-        block.bls_aggregate = Some(agg.0.to_vec());
-        block.bls_cosigner_pks = vec![wrong_sk.public_key().0.to_vec()];
-        block.set_bls_bitmap_bit(0);
-        let indexed_pks = vec![Some(wrong_sk.public_key().0)];
-
-        assert!(block.bls_signer_count_unverified().is_err());
-        assert!(!block.is_finalized(&vs, &indexed_pks));
-    }
-
-    // ─── ADR 0029 Phase 1 — bls_bitmap ───────────────────────────────────────
-
-    #[test]
-    fn test_bls_bitmap_set_and_test() {
-        let kp = KeyPair::generate();
-        let addr = Address::from_public_key(&kp.public_key());
-        let mut block = make_block(1, addr);
-        assert!(!block.bls_bitmap_has(0));
-        assert!(!block.bls_bitmap_has(7));
-        block.set_bls_bitmap_bit(0);
-        assert!(block.bls_bitmap_has(0));
-        assert!(!block.bls_bitmap_has(1));
-        block.set_bls_bitmap_bit(7);
-        assert!(block.bls_bitmap_has(7));
-        assert_eq!(block.bls_bitmap_popcount(), 2);
-    }
-
-    #[test]
-    fn test_bls_bitmap_auto_extends() {
-        let kp = KeyPair::generate();
-        let addr = Address::from_public_key(&kp.public_key());
-        let mut block = make_block(1, addr);
-        block.set_bls_bitmap_bit(15); // needs 2 bytes
-        assert_eq!(block.bls_bitmap.len(), 2);
-        assert!(block.bls_bitmap_has(15));
-        assert!(!block.bls_bitmap_has(14));
-    }
-
-    #[test]
-    fn test_bls_signer_count_from_bitmap() {
-        use vinx_crypto::BlsSecretKey;
-        let kp = KeyPair::generate();
-        let addr = Address::from_public_key(&kp.public_key());
-        let vs = ValidatorSet::single(addr);
-        let mut block = make_block(1, addr);
-        let header_hash = block.hash();
-
-        let bls_sk = BlsSecretKey::generate();
-        let bls_sig = bls_sk.sign(&header_hash);
-        let agg = vinx_crypto::bls_aggregate(&[bls_sig]).unwrap();
-        block.bls_aggregate = Some(agg.0.to_vec());
-        // Phase 1: both bitmap and cosigner_pks are populated canonically.
-        block.set_bls_bitmap_bit(0);
-        block.bls_cosigner_pks = vec![bls_sk.public_key().0.to_vec()];
-
-        let pk_bytes = bls_sk.public_key().0;
-        let indexed_pks = vec![Some(pk_bytes)];
-        assert_eq!(block.bls_signer_count_from_bitmap(&indexed_pks).unwrap(), 1);
-        // is_finalized now goes through the registry too — quorum=1 met by a registered key.
-        assert!(block.is_finalized(&vs, &indexed_pks));
-    }
-
-    /// VINX-02 regression — an empty `bls_bitmap` must NOT fall back to the
-    /// block-supplied `bls_cosigner_pks` list. That fallback let an attacker reach
-    /// quorum with self-generated keys simply by omitting the bitmap.
-    #[test]
-    fn test_empty_bitmap_does_not_fall_back_to_cosigner_pks() {
-        use vinx_crypto::BlsSecretKey;
-        let kp = KeyPair::generate();
-        let addr = Address::from_public_key(&kp.public_key());
-        let mut block = make_block(1, addr);
-        let header_hash = block.hash();
-
-        // A perfectly valid aggregate over a key the registry never heard of.
-        let bls_sk = BlsSecretKey::generate();
-        let agg = vinx_crypto::bls_aggregate(&[bls_sk.sign(&header_hash)]).unwrap();
-        block.bls_aggregate = Some(agg.0.to_vec());
-        block.bls_cosigner_pks = vec![bls_sk.public_key().0.to_vec()];
-        // bls_bitmap stays empty — the attacker-selected downgrade.
-
-        assert!(
-            block.bls_signer_count_from_bitmap(&[]).is_err(),
-            "an aggregate attributed to no validator index must be rejected"
-        );
-        let indexed = vec![Some(bls_sk.public_key().0)];
-        assert!(
-            block.bls_signer_count_from_bitmap(&indexed).is_err(),
-            "even a registered key must not count without a bitmap bit"
-        );
-    }
-
-    /// VINX-02 — a block with no aggregate at all simply has zero verified signers.
-    #[test]
-    fn test_empty_bitmap_without_aggregate_counts_zero() {
-        let kp = KeyPair::generate();
-        let addr = Address::from_public_key(&kp.public_key());
-        let block = make_block(1, addr);
-        assert_eq!(block.bls_signer_count_from_bitmap(&[]).unwrap(), 0);
-    }
-
-    /// VINX-11 — the same G1 key at two bitmap positions must not be counted twice.
-    #[test]
-    fn test_duplicate_registered_key_across_slots_rejected() {
-        use vinx_crypto::BlsSecretKey;
-        let kp = KeyPair::generate();
-        let addr = Address::from_public_key(&kp.public_key());
-        let mut block = make_block(1, addr);
-        let header_hash = block.hash();
-
-        let bls_sk = BlsSecretKey::generate();
-        // Aggregate the *same* signature twice — anyone can do this without the key.
-        let sig = bls_sk.sign(&header_hash);
-        let agg = vinx_crypto::bls_aggregate(&[sig.clone(), sig]).unwrap();
-        block.bls_aggregate = Some(agg.0.to_vec());
-        block.set_bls_bitmap_bit(0);
-        block.set_bls_bitmap_bit(1);
-
-        let pk = bls_sk.public_key().0;
-        let indexed_pks = vec![Some(pk), Some(pk)]; // one key, two validator slots
-        assert!(
-            block.bls_signer_count_from_bitmap(&indexed_pks).is_err(),
-            "one signature must never count as two independent signers"
-        );
-    }
-
-    #[test]
-    fn test_bls_signer_count_from_bitmap_unregistered_key_rejected() {
-        use vinx_crypto::BlsSecretKey;
-        let kp = KeyPair::generate();
-        let addr = Address::from_public_key(&kp.public_key());
-        let mut block = make_block(1, addr);
-        let header_hash = block.hash();
-
-        let bls_sk = BlsSecretKey::generate();
-        let agg = vinx_crypto::bls_aggregate(&[bls_sk.sign(&header_hash)]).unwrap();
-        block.bls_aggregate = Some(agg.0.to_vec());
-        block.set_bls_bitmap_bit(0);
-
-        // Indexed registry has None at index 0 → validator not registered → error.
-        let indexed_pks: Vec<Option<[u8; 48]>> = vec![None];
-        assert!(block.bls_signer_count_from_bitmap(&indexed_pks).is_err());
-    }
-
-    #[test]
-    fn test_bls_signer_count_from_bitmap_wrong_pk_rejected() {
-        use vinx_crypto::BlsSecretKey;
-        let kp = KeyPair::generate();
-        let addr = Address::from_public_key(&kp.public_key());
-        let mut block = make_block(1, addr);
-        let header_hash = block.hash();
-
-        let bls_sk = BlsSecretKey::generate();
-        let wrong_sk = BlsSecretKey::generate();
-        let agg = vinx_crypto::bls_aggregate(&[bls_sk.sign(&header_hash)]).unwrap();
-        block.bls_aggregate = Some(agg.0.to_vec());
-        block.set_bls_bitmap_bit(0);
-
-        // Registry has the WRONG key at index 0 → verification fails.
-        let indexed_pks = vec![Some(wrong_sk.public_key().0)];
-        assert!(block.bls_signer_count_from_bitmap(&indexed_pks).is_err());
     }
 }

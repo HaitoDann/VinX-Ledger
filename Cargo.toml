@@ -39,9 +39,7 @@ tokio = { version = "1", features = ["full"] }
 axum = { version = "0.7", features = ["ws"] }
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
-bincode = "1"
 borsh = { version = "1", features = ["derive"] }
 rayon = "1"
 zstd = "0.13"
 blst = "0.3"
-curve25519-dalek = { version = "4", default-features = false, features = ["alloc", "precomputed-tables", "zeroize"] }

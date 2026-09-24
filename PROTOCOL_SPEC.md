@@ -19,7 +19,7 @@
 | Ticker | VINX |
 | Chain ID | **mainnet = 1**, **testnet = 7**, **devnet = 42** (défaut local) |
 | Adresses | Bech32, préfixe `vinx1` |
-| Unité minimale | atom = 10⁻¹⁸ VINX (18 décimales) |
+| Unité minimale | atom = 10⁻⁹ VINX (9 décimales, ADR 0081) |
 | RPC par défaut | `http://127.0.0.1:8545` |
 
 ---
@@ -33,7 +33,7 @@
 | Hachage | **BLAKE3** (ADR 0069 — remplace SHA-256 avant genesis) |
 | Arbre d'état | Merkle **BLAKE3** |
 | Dérivation d'adresse | `BLAKE3(public_key)[..20]` |
-| Encodage des adresses | Bech32 |
+| Encodage des adresses | Bech32m (ADR 0081), `BLAKE3(type_de_clé ‖ clé)[..20]` |
 | VRF (consensus cible) 🔴 | ECVRF RFC 9381 |
 
 ---
@@ -44,7 +44,7 @@
 
 | Paramètre | Valeur |
 |---|---|
-| `MAX_SUPPLY` | **100 000 000 000 VinX** (100 milliards) |
+| `MAX_SUPPLY` | **1 000 000 000 VinX** (1 milliard, ADR 0081) |
 | Prémine | **Aucun** — aucun token à la genèse |
 | Burn | **Aucun** — le slash redistribue, jamais ne détruit |
 | Immuabilité | Supply max et courbe d'émission gravées (ADR 0021/0040) |
@@ -169,31 +169,18 @@ frais = base_fee × poids(type) × multiplicateur_congestion
 
 ## 8. Consensus
 
-### 8.1 Consensus implémenté — PoA Threshold + sélection VRF du leader ✅
+### 8.1 Consensus implémenté — BFT par étapes (Tendermint) ✅ (ADR 0082)
 
-| Règle | Valeur |
-|---|---|
-| Leader (défaut) | Round-robin sur le **set actif** (jailés sautés — ADR 0027) |
-| Leader (VRF, ADR 0029 Phase 2a) 🔧 | Auto-sélection VRF : candidat si `VRF(epoch_beacon ‖ height) ≤ seuil` (espérance ≈ 2) ; le fork-choice garde la **plus petite sortie**. Repli round-robin si pas de clé VRF |
-| Preuve VRF | ECVRF RFC 9381, portée par `Block::vrf_proof` (hors en-tête), vérifiée contre la clé VRF enregistrée on-chain |
-| Quorum de finalité | `⌈2n/3⌉` sur le **set complet bondé** à cette hauteur (inchangé par la Phase 2a) |
-| Jailing | Jamais ne réduit le quorum — sûreté sous partition |
-| Finalité | Prefix-closed — `finalized_height` avance sur le plus long préfixe contigu ≥ quorum |
-| Signatures | BLS12-381 agrégé + bitmap (ADR 0029 Phase 1) — vérification O(1) |
-| Sûreté vérifiée | Banc n=3 : à 2/3 vivant la finalité avance, à 1/3 elle gèle |
-| Fork-choice | `canonical_head` pur, réorg par snapshot+rejeu (ADR 0031) ; priorité VRF puis round-robin |
-
-### 8.2 Consensus cible — comité VRF échantillonné 🔴 (ADR 0029 Phase 2b/2c)
-
-| Règle | Valeur |
-|---|---|
-| Taille du comité | **k ≈ 100** — tirage uniforme parmi les bondés (`k < N`) |
-| Co-signature | **Seuls les `k` tirés** co-signent (aujourd'hui : tout le set actif) |
-| Finalité | BFT ≥ 67 % **du comité** (aujourd'hui : du set complet) |
-| Beacon | Accumulation de sorties VRF anti-grinding (Cardano 2/3-freeze) — remplace le beacon `hash(beacon ‖ epoch ‖ ts)` actuel, influençable via `ts` |
-| Anti-DoS | Leader inconnu jusqu'au dernier moment (déjà acquis en Phase 2a) |
-
----
+- **Hauteur h, round r :** le proposeur `proposer_for_round(vs, rel, r)` (priorités Tendermint pondérées, jailed sautés) diffuse `Proposal{h, r, pol_round, block}` signée BLS sur `proposal_sign_bytes`.
+- **Votes :** `SignedVote{kind ∈ {Prevote, Precommit}, h, r, value: Option<hash>}` signés BLS sur `vote_sign_bytes` (domaine `VINX_CONSENSUS_V1`, chain_id lié).
+- **Règles :** lock/valid value, saut de round sur f+1, timeouts croissants (propose 3 s + 1 s·r, vote 1 s + 0,5 s·r).
+- **Commit :** precommits pour un même hash totalisant `⌊2W/3⌋ + 1` de puissance → `CommitCert{h, r, block_hash, bitmap, agrégat BLS}` ; exige `cert.round ≥ header.round`.
+- **Chaînage :** le bloc h+1 embarque `last_commit` (cert de h), engagé par `header.last_commit_hash` ; obligatoire dès h=2, vérifié contre `last_voting_set`.
+- **Puissance :** bond en VINX (plancher = bond minimal), plafonnée à `max(10 %, 1/n)` par water-filling ; ≤ 100 validateurs actifs.
+- **Validation d'un bloc :** chaînage, `last_commit`, timestamp strictement croissant et ≤ now + 15 s, ≤ 3000 tx, receipts root, signatures, proposeur du round, base fee, exécution, state root.
+- **Pénalités :** proposeurs des rounds < `header.round` comptés en proposition manquée (jailing) ; `VoteEquivocation` (deux votes conflictuels signés) → slashing.
+- **Temps de bloc :** `block_time_secs` de genèse (1–60 s, 12 s par défaut), engagé dans l'état.
+- **Tolérance :** < 1/3 de la puissance. n=3 exige 3/3. Sans quorum : arrêt (pas de fork). Tip = finalisé.
 
 ## 9. Pool de validateurs ✅ / 🔴 (ADR 0038)
 
@@ -203,7 +190,7 @@ frais = base_fee × poids(type) × multiplicateur_congestion
 |---|---|
 | Mode | **Permissionless** — bond suffit, aucune approbation admin |
 | Clé BLS obligatoire | **Oui** — clé BLS + PoP valide exigées au bonding (ADR 0075 §3.1, invariant de liveness ; plus de mode dégradé Ed25519-only) |
-| Bond requis par défaut | **100 000 VinX** (gouvernable dans les bornes immuables) |
+| Bond requis par défaut | **10 000 VinX** (gouvernable dans [1 000 ; 1 000 000], ADR 0081) |
 | `MIN_BOND_HARD_FLOOR` | **10 000 VinX** — immuable |
 | `MAX_BOND_HARD_CAP` | **100 000 000 VinX** — immuable |
 
@@ -362,7 +349,7 @@ vinx_tx_in_block_total
 
 | ADR | Titre résumé |
 |---|---|
-| 0051 | Primitives crypto : Ed25519, Bech32 `vinx1...`, Merkle (hachage → **BLAKE3**, ADR 0069) |
+| 0051 | Primitives crypto : Ed25519, Bech32m `vinx1...` (ADR 0081), Merkle (hachage → **BLAKE3**, ADR 0069) |
 | 0052 | Keystore wallet — Argon2id + AES-256-GCM |
 | 0053 | Anti-replay : nonce, chain_id, expiry_height |
 | 0054 | Types de transactions fondamentaux (0x01–0x0A) |
@@ -474,14 +461,16 @@ ni planifiés. VinX est un rail de paiement, pas un settlement layer.
 ## 18. Constantes récapitulatives
 
 ```
-MAX_SUPPLY                = 100_000_000_000 × 10^18 atoms  (100 Md VINX)
+MAX_SUPPLY                = 1_000_000_000 × 10^9 atoms  (1 Md VINX)
+FEE_PRODUCER_SHARE_BPS    = 5_000  (50 % des frais au producteur, 50 % aux co-signataires)
+ADMIN_TENURE_SECS         = 31_536_000  (365 jours — puis plus aucune autorité on-chain)
 BLOCK_TIME_SECS           = 12
 MAX_BLOCK_TXS             = 3_000
 MAX_MEMPOOL_SIZE          = 100_000
 MAX_UNFINALIZED_DEPTH     = 64
 
 T_HALF_EMISSION_SECS      = ~630_720_000  (~20 ans)
-R0_ATOMS_PER_SEC          = ~109_954_...  (≈ 3,47 Md VinX/an)
+R0_ATOMS_PER_SEC          = ~0,79 × 10^9  (≈ 25 M VinX/an la première année)
 
 BASE_FEE_ATOMS_DEFAULT    = 100_000_000_000_000  (= 0,0001 VinX)
 CONGESTION_MULTIPLIER_MAX = 3

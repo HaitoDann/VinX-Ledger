@@ -21,8 +21,10 @@ pub const ADDRESS_LEN: usize = 20;
 pub struct Address([u8; ADDRESS_LEN]);
 
 impl Address {
+    /// Derives the address from the public key **and its key type** (ADR 0081 D6):
+    /// `BLAKE3(key_type ‖ key)[..20]`, so keys of different types can never collide.
     pub fn from_public_key(pk: &PublicKey) -> Self {
-        let hash = hash256(pk.as_bytes());
+        let hash = hash256(&pk.to_tagged_bytes());
         let mut payload = [0u8; ADDRESS_LEN];
         payload.copy_from_slice(&hash[..ADDRESS_LEN]);
         Address(payload)
@@ -48,9 +50,9 @@ impl Address {
                 BECH32_HRP, hrp
             )));
         }
-        if variant != Variant::Bech32 {
+        if variant != Variant::Bech32m {
             return Err(CryptoError::InvalidAddress(
-                "expected Bech32 variant".to_string(),
+                "expected Bech32m variant".to_string(),
             ));
         }
         let payload = Vec::<u8>::from_base32(&data_u5)
@@ -76,7 +78,7 @@ impl Address {
     /// Encodes the address to its bech32 string form (`vinx1...`).
     /// Allocates — call only at display/transport boundaries, never in hot loops.
     pub fn to_bech32(&self) -> String {
-        bech32::encode(BECH32_HRP, self.0.to_base32(), Variant::Bech32)
+        bech32::encode(BECH32_HRP, self.0.to_base32(), Variant::Bech32m)
             .expect("bech32 encoding is infallible for valid inputs")
     }
 }
@@ -101,8 +103,8 @@ impl FromStr for Address {
 }
 
 // serde is format-aware: human-readable formats (JSON, used by the RPC API and CLI)
-// carry the bech32 string `"vinx1..."`, while binary formats (bincode on disk) carry
-// the raw 20 bytes. Borsh (P2P wire) is always the raw 20 bytes.
+// carry the bech32 string `"vinx1..."`, while binary serde formats carry the raw 20
+// bytes. Borsh — the only binary encoding of the protocol (ADR 0081) — is always raw.
 impl Serialize for Address {
     fn serialize<S: Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
         if serializer.is_human_readable() {
@@ -181,7 +183,10 @@ mod tests {
         let kp = KeyPair::generate();
         let pk = kp.public_key();
         let addr = Address::from_public_key(&pk);
-        assert_eq!(addr.as_bytes(), &hash256(pk.as_bytes())[..ADDRESS_LEN]);
+        assert_eq!(
+            addr.as_bytes(),
+            &hash256(&pk.to_tagged_bytes())[..ADDRESS_LEN]
+        );
     }
 
     #[test]
@@ -207,7 +212,7 @@ mod tests {
     // Format contract for the 20-byte representation:
     // - JSON (human-readable) carries the bech32 string, so the RPC API and the
     //   TypeScript SDK are unaffected.
-    // - bincode (on disk) and borsh (P2P wire) carry the raw 20 bytes.
+    // - borsh (disk, P2P wire, signed payloads) carries the raw 20 bytes.
 
     #[test]
     fn test_json_is_the_bech32_string() {
@@ -215,16 +220,6 @@ mod tests {
         let json = serde_json::to_string(&addr).unwrap();
         assert_eq!(json, format!("\"{}\"", addr.to_bech32()));
         let back: Address = serde_json::from_str(&json).unwrap();
-        assert_eq!(addr, back);
-    }
-
-    #[test]
-    fn test_bincode_is_raw_20_bytes() {
-        let addr = Address::from_public_key(&KeyPair::generate().public_key());
-        let bytes = bincode::serialize(&addr).unwrap();
-        assert_eq!(bytes.len(), ADDRESS_LEN);
-        assert_eq!(bytes.as_slice(), addr.as_bytes());
-        let back: Address = bincode::deserialize(&bytes).unwrap();
         assert_eq!(addr, back);
     }
 
@@ -243,7 +238,7 @@ mod tests {
         // These exact strings are decoded by the web UI's bech32Decode20 (rpc/ui.rs)
         // back to the raw payloads below; keeping this stable guarantees the browser
         // signer and the node agree on the 20-byte address bytes.
-        let a = Address::from_bech32("vinx1zyg3zyg3zyg3zyg3zyg3zyg3zyg3zyg3feqld3").unwrap();
+        let a = Address::from_bech32("vinx1zyg3zyg3zyg3zyg3zyg3zyg3zyg3zyg3u9sngn").unwrap();
         assert_eq!(a.as_bytes(), &[0x11u8; 20]);
         assert_eq!(Address::from_bytes([0x11u8; 20]).to_bech32(), a.to_bech32());
     }

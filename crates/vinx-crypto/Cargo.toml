@@ -15,8 +15,6 @@ hex = { workspace = true }
 thiserror = { workspace = true }
 borsh = { workspace = true }
 blst = { workspace = true }
-curve25519-dalek = { workspace = true }
 
 [dev-dependencies]
 serde_json = { workspace = true }
-bincode = { workspace = true }

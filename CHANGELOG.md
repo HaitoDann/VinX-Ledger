@@ -5,6 +5,32 @@ Format : `MAJEUR.MINEUR.CORRECTIF` — les versions `0.x.y` sont des versions de
 
 ---
 
+## [Non publié] — Consensus BFT par étapes (ADR 0082)
+
+> **Breaking protocole** — nouvelle genèse obligatoire. `STORAGE_VERSION 22 → 23`. **338 tests verts, clippy propre.**
+
+- **Tendermint** : proposition / prevote / precommit avec lock ; commit à > 2/3 de la puissance ; plus de fork-choice ni de réorg (tip = finalisé). ⚠ n=3 exige 3/3 ; tolérance d'une panne dès n=4.
+- Chaque bloc embarque le `CommitCert` du précédent (`last_commit`) : récompenses des co-signataires déterministes.
+- Proposeur par **rotation pondérée par le stake** (VRF supprimé), **comité échantillonné supprimé**, votes pondérés **plafonnés à 10 %**, **≤ 100 validateurs actifs** automatiques.
+- **Temps de bloc = paramètre de genèse** (12 s, borné 1–60 s), **dérive d'horloge 15 s**, jailing par rounds manqués.
+- Chemin d'exécution unique (`execution.rs`) ; base fee déterministe ; clé BLS de genèse obligatoire.
+- Bugs corrigés : compteurs de co-signature locaux (récompenses divergentes), base fee dépendant du mempool local, sync HTTP (Block vs BlockResponse), perte de tx du mempool quand une proposition échouait.
+- Tests : simulation pleine pile `tests/consensus_sim.rs` + 14 simulations du moteur. Anciens harnais (`bench_n3`, `adversarial_harness`, `audit_regression_node`) retirés car liés à l'ancien consensus ; `scripts/bench-n3.sh` à réécrire.
+
+## [Non publié] — Décisions irréversibles avant la genèse (ADR 0081)
+
+> **Breaking protocole** — nouvelle genèse obligatoire. `STORAGE_VERSION 21 → 22` : toute base antérieure est refusée (et laissée intacte). **432 tests verts, clippy `-D warnings` propre.**
+
+- **Supply 1 Md VINX** (au lieu de 100 Md), **9 décimales** (au lieu de 18), **bond validateur 10 000 VINX** (plancher 1 000, plafond 1 M).
+- **Frais partagés sans burn** : 50 % au producteur, 50 % aux co-signataires via la cagnotte d'époque (`FEE_PRODUCER_SHARE_BPS`).
+- **Adresses Bech32m** ; adresse = `BLAKE3(type_de_clé ‖ clé)[..20]`.
+- **Octet de type de clé** (`PublicKey` / `VinxSignature` typées, 0 = Ed25519) ; champ `Transaction.from` supprimé, `pub_key` obligatoire, expéditeur dérivé (`sender()`) ; les *signing bytes* engagent la clé typée.
+- **Gouvernance à la Linux** : l'autorité admin on-chain s'éteint 365 jours après le premier bloc (`ADMIN_TENURE_SECS`), sans prolongation possible.
+- **Nettoyage** : registre de modules et `AnchorState` retirés, champ dormant `foundry` supprimé, migrations de stockage v6→v21 supprimées, **bincode remplacé par borsh** partout.
+- Wallet web, console admin et SDK TypeScript alignés sur le nouveau format.
+
+---
+
 ## [0.51.0] — 2026-09-10 — Durcissement post-audit & prérequis de lancement (ADRs 0069–0080)
 
 > Transforme trois audits indépendants (Claude, ChatGPT, Gemini) en correctifs de sécurité vérifiés et reproductibles, plus les prérequis de lancement. Chaque correctif est adossé à un test PoC échouant avant / vert après. **Breaking protocole** (hachage, `signing_bytes`, formats disque & wire) — réalisé en pré-mainnet, coût de coordination minimal. `STORAGE_VERSION 19 → 20` (bases pré-BLAKE3 refusées, pas de migration). **429 tests verts, clippy `-D warnings` propre.**

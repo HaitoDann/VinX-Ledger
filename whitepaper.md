@@ -26,9 +26,9 @@ Construit en solo, sans investisseurs, **sans pre-mine**, sans promesses spécul
 - **Vitesse** : Cadence de bloc fixe à **12 s** — un bloc produit toutes les 12 secondes, même vide. Finalité déterministe **au quorum** via BLS agrégé
 - **Capacité** : jusqu'à **3 000 transactions par bloc** (gouvernable), mempool de **100 000** transactions
 - **Performance** : ~250 TPS (3 000 tx toutes les 12 s) — exécution séquentielle intentionnelle pour l'auditabilité
-- **Précision** : 18 décimales internes, 2 décimales affichées à l'utilisateur
-- **Adresses** : Format Bech32 avec préfixe `vinx1`
-- **Cryptographie** : Ed25519 (signatures de transaction), BLS12-381 (co-signatures agrégées du comité), BLAKE3 (hachage), Bech32 (adresses)
+- **Précision** : 9 décimales internes, 2 décimales affichées à l'utilisateur
+- **Adresses** : Format Bech32m avec préfixe `vinx1`, dérivées du type de clé et de la clé
+- **Cryptographie** : Ed25519 (signatures de transaction), BLS12-381 (co-signatures agrégées du comité), BLAKE3 (hachage), Bech32m (adresses)
 - **Référence de temps** : le **timestamp des blocs** (temps réel), pas la hauteur — toutes les garanties temporelles (émission, déliaison de bond, préavis d'upgrade) s'expriment en secondes
 
 ### Pourquoi une implémentation custom sans VM
@@ -60,7 +60,7 @@ C'est tout. Il n'y a pas de transaction de contrat, pas de déploiement de code,
 
 ## 3. Tokenomics — Fair launch & émission par le travail
 
-La supply totale est fixée à **100 000 000 000 VinX** (100 milliards), **immuable**. Les tokens ne sont jamais créés au-delà de ce plafond.
+La supply totale est fixée à **1 000 000 000 VinX** (1 milliard), **immuable**. Les tokens ne sont jamais créés au-delà de ce plafond.
 
 ### 3.1 Aucun pre-mine, aucune réserve pré-allouée
 
@@ -83,15 +83,15 @@ R(t) = R₀ · e^(−λt)     avec  λ = ln(2) / T_half
                                R₀ ≈ 3,47 milliards VinX / an
 ```
 
-L'intégrale sur l'infini vaut exactement 100 milliards. Il n'y a **aucun événement discret** (pas de halving-day) — la courbe décroît en permanence. L'émission est calculée sur les **timestamps réels des blocs** : un réseau au repos ne minte rien.
+L'intégrale sur l'infini vaut exactement 1 milliard. Il n'y a **aucun événement discret** (pas de halving-day) — la courbe décroît en permanence. L'émission est calculée sur les **timestamps réels des blocs** : un réseau au repos ne minte rien.
 
 | Échéance | Cumul émis | Restant |
 |----------|-----------|---------|
-| Genèse | 0 | 100 Md |
-| 20 ans | 50 Md | 50 Md |
-| 40 ans | 75 Md | 25 Md |
-| 66 ans | 90 Md | 10 Md |
-| ∞ | → 100 Md | → poussière |
+| Genèse | 0 | 1 Md |
+| 20 ans | 500 M | 500 M |
+| 40 ans | 750 M | 250 M |
+| 66 ans | 900 M | 100 M |
+| ∞ | → 1 Md | → poussière |
 
 ### 3.3 Distribution de l'émission
 
@@ -135,13 +135,13 @@ frais = FRAIS_BASE × poids(type) × multiplicateur_congestion
 - **`poids(type)`** : transfert = `1` ; bond/unbond = `0` (exempté) ; actions de gouvernance = `0`.
 - **`multiplicateur_congestion`** : `×1` jusqu'à 80 % de remplissage du mempool, montée linéaire jusqu'à `×3` à saturation.
 
-### 4.2 Frais au producteur
+### 4.2 Frais partagés : producteur et co-signataires
 
-L'intégralité des frais est créditée immédiatement au validateur qui produit le bloc. Les frais rémunèrent le travail d'inclusion — une responsabilité qui appartient uniquement au proposeur.
+Produire un bloc et le valider sont deux travaux, tous deux rémunérés (ADR 0081). La moitié des frais d'un bloc est créditée immédiatement au producteur ; l'autre moitié rejoint la cagnotte d'époque et revient aux co-signataires, au prorata de leur participation. Aucun frais n'est jamais brûlé.
 
 ```
-[Émission — par époque]      ──► proposeurs + co-signataires
-[Frais forfaitaires — immédiats] ──► validateur producteur
+[Émission — par époque]           ──► 20 % proposeur · 80 % co-signataires
+[Frais forfaitaires — par bloc]   ──► 50 % producteur  · 50 % co-signataires (à la clôture d'époque)
 ```
 
 Ni les frais ni l'émission ne quittent jamais la circulation — ils changent simplement de main.
@@ -153,7 +153,7 @@ Ni les frais ni l'émission ne quittent jamais la circulation — ils changent s
 Le staking dans VinX a une seule fonction : **poser une caution**. Ce n'est pas un mécanisme de rendement pour les détenteurs passifs.
 
 - **Pas de staking retail.** Un utilisateur lambda garde du VinX pour l'utiliser comme cash.
-- **Bond minimum : `100 000 VinX`** (gouvernable) — requis pour rejoindre le set des validateurs. Le validateur du genesis est dispensé (il accumule son bond via l'émission).
+- **Bond minimum : `10 000 VinX`** (gouvernable) — requis pour rejoindre le set des validateurs. Le validateur du genesis est dispensé (il accumule son bond via l'émission).
 - **Le bond ne rapporte aucun rendement** — c'est une garantie de sécurité. Le seul revenu d'un validateur vient de son travail (émission + frais).
 - **Déliaison différée : 3 jours réels.** Les fonds retirés restent saisissables pendant la période de déliaison — sans ce délai, un validateur pourrait tricher puis retirer sa caution avant que la preuve ne soit traitée.
 
@@ -169,17 +169,15 @@ Le staking dans VinX a une seule fonction : **poser une caution**. Ce n'est pas 
 
 ## 6. Infrastructure : Validateurs & Full Nodes
 
-### 6.1 Validateurs (PoA avec comité VRF)
+### 6.1 Validateurs (consensus BFT Tendermint, ADR 0082)
 
-Nœuds qui produisent et co-signent les blocs, responsables de la sécurité du réseau.
-
-**Mécanisme actuel (testnet) :** PoA — un comité de validateurs autorisés co-signent les blocs via **BLS12-381 agrégé**. Le leader est sélectionné par **ECVRF RFC 9381** (tirage imprévisible jusqu'au dernier moment — résistance DoS). Le bloc est finalisé lorsque **≥ 67 % du comité** l'ont co-signé. La finalité est BFT déterministe : un bloc quorum-signé ne peut jamais être réorganisé.
-
-**Admission :** n'importe qui peut rejoindre le pool en postant le bond requis. Warmup de 3 époques avant d'être éligible. L'admin fixe seulement le montant du bond via gouvernance, dans des bornes immuables.
-
-**Rémunération :** par le travail uniquement — émission d'époque + frais immédiats. Le bond sécurise, il ne rémunère pas.
-
-**Tolérance aux pannes :** le réseau reste opérationnel tant que 67 % du comité sont en ligne.
+Jusqu'à 100 validateurs actifs, sélectionnés automatiquement par leur bond, votent sur chaque
+bloc en trois étapes (proposition, prevote, precommit). Un bloc est définitif dès que plus de
+2/3 de la puissance de vote l'a precommité : il n'y a jamais de réorganisation. La puissance
+suit le stake, plafonnée à 10 % par validateur pour limiter la centralisation. Le proposeur
+tourne selon le stake. Le temps de bloc (12 s au départ) est un paramètre de genèse qui
+pourra baisser progressivement. Les frais sont partagés 50/50 entre le producteur et les
+co-signataires du certificat de commit.
 
 ### 6.2 Full Nodes Communautaires
 
@@ -205,11 +203,12 @@ Pour empêcher un producteur malhonnête de gonfler le temps, chaque bloc est va
 
 ## 8. Gouvernance & Évolution
 
-La gouvernance est assurée par une **clé admin unique** (le fondateur), rotatable à chaud via `AdminAction::RotateAdmin` sans redémarrage. Ses prérogatives on-chain : gérer le set de validateurs, ajuster les paramètres gouvernables (frais de base, bond minimum), planifier les mises à jour.
+VinX suit le modèle de gouvernance de Linux (ADR 0081). Le mainteneur décide de ce qui entre dans le code et publie les versions ; chaque validateur choisit librement la version qu'il exécute. Le mainteneur dirige le **logiciel**, pas la **chaîne**.
+
+Pendant les **365 premiers jours** seulement, une clé admin on-chain (rotatable, ou comité K-of-M) peut gérer le set de validateurs, ajuster les paramètres gouvernables (frais de base, bond minimum) et planifier les mises à jour, afin de corriger une urgence de lancement. Passé ce délai, ce pouvoir s'éteint définitivement : c'est une constante du protocole, qu'aucune transaction ne peut prolonger.
 
 Il n'y a **pas de gel de compte** : la propriété des tokens est inconditionnelle.
 
-> Une répartition du contrôle admin (signature à seuil) pourra être introduite si le réseau grandit.
 
 ### Mises à jour du protocole
 
@@ -227,16 +226,16 @@ Ces préavis visent des **jours réels** pour que tous les opérateurs aient le 
 
 Les piliers de conception de VinX, que nulle gouvernance ne peut modifier :
 
-1. **Cap de 100 milliards** de VinX — jamais augmenté.
+1. **Cap de 1 milliard** de VinX — jamais augmenté.
 2. **Quasi-absence de burn** — le slash redistribue aux validateurs honnêtes, ne détruit pas. Seule la poussière des comptes reaped est détruite (≤ 0,001 VinX par compte).
 3. **Aucun pre-mine, aucune réserve pré-allouée** — à la genèse, émis = 0. 100 % de la supply mintée par le travail.
-4. **Invariant** : `circulation + pot_époque + poussière_détruite = émis ≤ 100 Md` à chaque bloc.
+4. **Invariant** : `circulation + pot_époque + poussière_détruite = émis ≤ 1 Md` à chaque bloc.
 5. **Émission décroissante continue puis relais aux frais** — jamais un robinet discrétionnaire, jamais un événement discret.
 6. **Le bond sécurise, le travail rémunère** — le stake ne produit aucun rendement ; le slash punit et récompense collectivement les honnêtes.
 7. **Finalité BFT déterministe** — comité VRF, BLS agrégé, ≥ 67 % pour finaliser. Un bloc finalisé ne peut pas être réorganisé.
 8. **Propriété inconditionnelle** — aucun compte ne peut être gelé.
 9. **Aucune logique applicative dans le nœud** — VinX est un rail de paiement. Il n'exécute jamais de code tiers. Il n'y a pas de VM, pas de modules, pas de smart contracts. Ce périmètre est une décision de conception (ADR 0064), pas une limitation technique.
-10. **Courbe d'émission immuable après la genèse** — le total (100 Md), la demi-vie (~20 ans) et la forme exponentielle continue ne sont gouvernables par personne.
+10. **Courbe d'émission immuable après la genèse** — le total (1 Md), la demi-vie (~20 ans) et la forme exponentielle continue ne sont gouvernables par personne.
 
 ---
 

@@ -1,7 +1,6 @@
+use crate::bft::Proposal;
 use borsh::{BorshDeserialize, BorshSerialize};
-use serde::{Deserialize, Serialize};
-use vinx_core::{Block, BlockHeader, Transaction};
-use vinx_crypto::VRF_PROOF_LEN;
+use vinx_core::{Block, CommitCert, SignedVote, Transaction};
 use zstd;
 
 /// Messages plus courts que ce seuil sont envoyés bruts (overhead de compression > gain).
@@ -42,85 +41,23 @@ pub fn sync_batch_len(sizes: &[usize], budget: usize, max_count: usize) -> usize
     n
 }
 
-/// Messages exchanged over the GossipSub P2P network.
-/// Wire format: Borsh (deterministic, compact, no schema needed).
-#[derive(Clone, Debug, Serialize, Deserialize, BorshSerialize, BorshDeserialize)]
+/// Messages exchanged over the GossipSub P2P network (ADR 0082).
+/// Wire format: Borsh (deterministic, compact, no schema needed), zstd above a threshold.
+#[derive(Clone, Debug, BorshSerialize, BorshDeserialize)]
 pub enum P2pMessage {
-    /// A new block produced by the leader of that height.
-    NewBlock(Block),
     /// A new transaction submitted by a user.
     NewTransaction(Transaction),
-    /// A single BLS12-381 co-signature on a block, gossiped by validators (ADR 0029 Phase 1).
-    ///
-    /// Receivers look up the sender's BLS public key from the on-chain registry keyed by
-    /// `validator_addr`. This prevents rogue-key attacks: only the REGISTERED key can verify
-    /// the aggregate, so a malicious actor cannot inject a fake key over the wire.
-    BlockBlsCoSignature {
-        height: u64,
-        /// SHA-256 hash of the signed block header. Carried so recipients can verify the
-        /// signature before doing a chain lookup.
-        block_hash: Vec<u8>,
-        /// BLS G2 compressed signature (96 bytes).
-        bls_sig: Vec<u8>,
-        /// Ed25519 address (20 bytes) of the signing validator. Recipients use this to
-        /// look up the registered BLS G1 public key from the validator pool.
-        validator_addr: Vec<u8>,
-    },
-    /// Request blocks starting from `from_height` (sent when a node detects it's behind).
+    /// A signed block proposal for `(height, round)`.
+    Proposal(Proposal),
+    /// A signed prevote or precommit.
+    Vote(SignedVote),
+    /// A block with the certificate that committed it — how a node that missed the
+    /// proposal (or joined late) catches up on the latest height.
+    Committed { block: Block, cert: CommitCert },
+    /// Request committed blocks starting from `from_height` (a node that is behind).
     SyncRequest { from_height: u64, limit: u32 },
-    /// Response to SyncRequest with the requested block range.
-    SyncResponse { blocks: Vec<Block> },
-    /// An ECVRF proof submitted by a validator for committee selection at `height`
-    /// (ADR 0029 Phase 2b). The recipient verifies the proof against the validator's
-    /// registered `vrf_pub_key` and the canonical alpha = `epoch_beacon || height_le64`.
-    /// Accumulates towards the VRF-based committee for this height.
-    BlockVrfProof {
-        height: u64,
-        /// ECVRF proof π (80 bytes): Γ(32) || c(16) || s(32).
-        vrf_proof: Vec<u8>,
-        /// Ed25519 address (20 bytes) of the proving validator. Recipients use this to
-        /// look up the registered VRF public key from the validator pool.
-        validator_addr: Vec<u8>,
-    },
-
-    // ── ADR 0037: Compact block propagation ───────────────────────────────────
-    /// Compact block: header plus the SHA-256 hash of each transaction (ADR 0037).
-    ///
-    /// Sent by the block producer instead of (or in addition to) the full
-    /// `NewBlock` message. Receivers reconstruct the full block from their
-    /// mempool using the hashes, and request any missing transactions via
-    /// `TxRequest`.
-    CompactBlock {
-        header: BlockHeader,
-        /// SHA-256 hashes of the block's transactions, in order.
-        tx_hashes: Vec<[u8; 32]>,
-        /// Aggregate BLS signature over `header.hash()` (96 bytes), carried so the
-        /// reconstructed block can be authenticated (VINX-01). Without it the compact
-        /// path rebuilt a block with **no signature at all** and applied it.
-        #[serde(default)]
-        bls_aggregate: Option<Vec<u8>>,
-        /// Bitmap of signing validator indices, matching `bls_aggregate`.
-        #[serde(default)]
-        bls_bitmap: Vec<u8>,
-        /// ADR 0029 Phase 2a — the proposer's VRF proof, carried so the reconstructed
-        /// block keeps the same fork-choice priority on every node (dropping it here
-        /// would let two nodes disagree on the canonical head).
-        #[serde(default)]
-        vrf_proof: Option<Vec<u8>>,
-    },
-
-    /// Request a set of transactions by hash from a peer that announced them
-    /// in a `CompactBlock` (ADR 0037).
-    TxRequest {
-        /// Block height the transactions belong to — used for routing and
-        /// to detect stale requests.
-        height: u64,
-        /// SHA-256 hashes of the transactions the requester is missing.
-        hashes: Vec<[u8; 32]>,
-    },
-
-    /// Response to a `TxRequest` (ADR 0037).
-    TxResponse { height: u64, txs: Vec<Transaction> },
+    /// Committed blocks with their certificates, in ascending height order.
+    SyncResponse { rows: Vec<(Block, CommitCert)> },
 }
 
 impl P2pMessage {
@@ -161,38 +98,10 @@ impl P2pMessage {
     /// GossipSub topic name for this message type.
     pub fn topic(&self) -> &'static str {
         match self {
-            P2pMessage::NewBlock(_) => "vinx/blocks/1",
             P2pMessage::NewTransaction(_) => "vinx/txs/1",
-            P2pMessage::BlockBlsCoSignature { .. } => "vinx/bls/1",
+            P2pMessage::Proposal(_) | P2pMessage::Vote(_) => "vinx/consensus/1",
+            P2pMessage::Committed { .. } => "vinx/blocks/1",
             P2pMessage::SyncRequest { .. } | P2pMessage::SyncResponse { .. } => "vinx/sync/1",
-            P2pMessage::BlockVrfProof { .. } => "vinx/vrf/1",
-            P2pMessage::CompactBlock { .. }
-            | P2pMessage::TxRequest { .. }
-            | P2pMessage::TxResponse { .. } => "vinx/compact/1",
-        }
-    }
-
-    /// Expected byte-length of a well-formed VRF proof carried in `BlockVrfProof`.
-    pub const VRF_PROOF_WIRE_LEN: usize = VRF_PROOF_LEN;
-
-    // ── ADR 0037 helpers ──────────────────────────────────────────────────────
-
-    /// Maximum number of transaction hashes in a single `TxRequest` to bound
-    /// per-message work on the responder.
-    pub const MAX_TX_REQUEST_HASHES: usize = 512;
-
-    /// Maximum transactions in a single `TxResponse`.
-    pub const MAX_TX_RESPONSE_TXS: usize = 512;
-
-    /// Build a `CompactBlock` message from a full `Block`.
-    pub fn compact_from_block(block: &Block) -> P2pMessage {
-        let tx_hashes = block.transactions.iter().map(|tx| tx.hash()).collect();
-        P2pMessage::CompactBlock {
-            header: block.header.clone(),
-            tx_hashes,
-            bls_aggregate: block.bls_aggregate.clone(),
-            bls_bitmap: block.bls_bitmap.clone(),
-            vrf_proof: block.vrf_proof.clone(),
         }
     }
 }
@@ -215,7 +124,7 @@ fn decompress_bounded(payload: &[u8], max: usize) -> Option<Vec<u8>> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use vinx_core::{Block, BlockHeader};
+    use vinx_core::{BlockHeader, VoteKind};
     use vinx_crypto::{Address, KeyPair};
 
     fn dummy_addr() -> Address {
@@ -226,6 +135,7 @@ mod tests {
         Block {
             header: BlockHeader {
                 height: 1,
+                round: 0,
                 prev_hash: [0u8; 32],
                 timestamp: 1_000,
                 validator: dummy_addr(),
@@ -233,31 +143,82 @@ mod tests {
                 state_root: [0u8; 32],
                 base_fee: 0,
                 receipts_root: [0u8; 32],
+                last_commit_hash: [0u8; 32],
             },
-            vrf_proof: None,
             transactions: vec![],
-            bls_aggregate: None,
-            bls_cosigner_pks: vec![],
-            bls_bitmap: vec![],
+            last_commit: None,
+        }
+    }
+
+    fn dummy_cert() -> CommitCert {
+        CommitCert {
+            height: 1,
+            round: 0,
+            block_hash: [1u8; 32],
+            bitmap: vec![0b111],
+            aggregate: vec![0u8; 96],
         }
     }
 
     #[test]
-    fn test_block_message_roundtrip() {
-        let msg = P2pMessage::NewBlock(dummy_block());
-        let decoded = P2pMessage::decode(&msg.encode()).unwrap();
-        assert!(matches!(decoded, P2pMessage::NewBlock(_)));
+    fn test_consensus_messages_roundtrip() {
+        let vote = SignedVote {
+            kind: VoteKind::Precommit,
+            height: 9,
+            round: 2,
+            value: Some([3u8; 32]),
+            validator: dummy_addr(),
+            signature: vec![7u8; 96],
+        };
+        match P2pMessage::decode(&P2pMessage::Vote(vote.clone()).encode()).unwrap() {
+            P2pMessage::Vote(v) => assert_eq!(v, vote),
+            _ => panic!("expected Vote"),
+        }
+        let prop = Proposal {
+            height: 1,
+            round: 0,
+            pol_round: Some(0),
+            block: dummy_block(),
+            signature: vec![1u8; 96],
+        };
+        match P2pMessage::decode(&P2pMessage::Proposal(prop.clone()).encode()).unwrap() {
+            P2pMessage::Proposal(p) => assert_eq!(p, prop),
+            _ => panic!("expected Proposal"),
+        }
+        let msg = P2pMessage::Committed {
+            block: dummy_block(),
+            cert: dummy_cert(),
+        };
+        assert!(matches!(
+            P2pMessage::decode(&msg.encode()).unwrap(),
+            P2pMessage::Committed { .. }
+        ));
     }
 
     #[test]
-    fn test_sync_request_roundtrip() {
-        let msg = P2pMessage::SyncRequest {
+    fn test_sync_roundtrip_and_compression() {
+        let rows: Vec<(Block, CommitCert)> = (0..20)
+            .map(|i| {
+                let mut b = dummy_block();
+                b.header.height = i;
+                (b, dummy_cert())
+            })
+            .collect();
+        let msg = P2pMessage::SyncResponse { rows };
+        let encoded = msg.encode();
+        assert_eq!(encoded[0], FLAG_ZSTD, "large message should be compressed");
+        match P2pMessage::decode(&encoded).unwrap() {
+            P2pMessage::SyncResponse { rows } => assert_eq!(rows.len(), 20),
+            _ => panic!("expected SyncResponse"),
+        }
+        let req = P2pMessage::SyncRequest {
             from_height: 42,
             limit: 100,
         };
-        let decoded = P2pMessage::decode(&msg.encode()).unwrap();
+        let encoded = req.encode();
+        assert_eq!(encoded[0], FLAG_RAW, "small message should stay raw");
         assert!(matches!(
-            decoded,
+            P2pMessage::decode(&encoded).unwrap(),
             P2pMessage::SyncRequest {
                 from_height: 42,
                 limit: 100
@@ -266,190 +227,31 @@ mod tests {
     }
 
     #[test]
-    fn test_sync_response_roundtrip() {
-        let msg = P2pMessage::SyncResponse {
-            blocks: vec![dummy_block()],
-        };
-        let decoded = P2pMessage::decode(&msg.encode()).unwrap();
-        if let P2pMessage::SyncResponse { blocks } = decoded {
-            assert_eq!(blocks.len(), 1);
-        } else {
-            panic!("expected SyncResponse");
-        }
-    }
-
-    #[test]
     fn test_decode_garbage_returns_none() {
-        assert!(P2pMessage::decode(b"not valid bincode").is_none());
-    }
-
-    #[test]
-    fn test_compression_roundtrip_large_message() {
-        // SyncResponse with many blocks triggers compression
-        let blocks: Vec<Block> = (0..20)
-            .map(|i| {
-                let mut b = dummy_block();
-                b.header.height = i;
-                b
-            })
-            .collect();
-        let msg = P2pMessage::SyncResponse { blocks };
-        let encoded = msg.encode();
-        assert_eq!(encoded[0], FLAG_ZSTD, "large message should be compressed");
-        let decoded = P2pMessage::decode(&encoded).unwrap();
-        assert!(matches!(decoded, P2pMessage::SyncResponse { .. }));
-    }
-
-    #[test]
-    fn test_small_message_stays_raw() {
-        let msg = P2pMessage::SyncRequest {
-            from_height: 1,
-            limit: 10,
-        };
-        let encoded = msg.encode();
-        assert_eq!(encoded[0], FLAG_RAW, "small message should stay raw");
-        let decoded = P2pMessage::decode(&encoded).unwrap();
-        assert!(matches!(
-            decoded,
-            P2pMessage::SyncRequest {
-                from_height: 1,
-                limit: 10
-            }
-        ));
-    }
-
-    #[test]
-    fn test_bls_cosig_message_roundtrip() {
-        use vinx_crypto::BlsSecretKey;
-        let sk = BlsSecretKey::generate();
-        let msg_hash = [0xABu8; 32];
-        let bls_sig = sk.sign(&msg_hash);
-        let validator_addr = [0x11u8; 20];
-        let msg = P2pMessage::BlockBlsCoSignature {
-            height: 7,
-            block_hash: msg_hash.to_vec(),
-            bls_sig: bls_sig.0.to_vec(),
-            validator_addr: validator_addr.to_vec(),
-        };
-        let decoded = P2pMessage::decode(&msg.encode()).unwrap();
-        match decoded {
-            P2pMessage::BlockBlsCoSignature {
-                height,
-                validator_addr: addr,
-                ..
-            } => {
-                assert_eq!(height, 7);
-                assert_eq!(addr.len(), 20);
-            }
-            _ => panic!("expected BlockBlsCoSignature"),
-        }
-    }
-
-    #[test]
-    fn test_compact_block_roundtrip() {
-        let block = dummy_block();
-        let msg = P2pMessage::compact_from_block(&block);
-        let encoded = msg.encode();
-        let decoded = P2pMessage::decode(&encoded).unwrap();
-        match decoded {
-            P2pMessage::CompactBlock {
-                header, tx_hashes, ..
-            } => {
-                assert_eq!(header.height, block.header.height);
-                assert_eq!(tx_hashes.len(), block.transactions.len());
-            }
-            _ => panic!("expected CompactBlock"),
-        }
-    }
-
-    #[test]
-    fn test_tx_request_roundtrip() {
-        let hashes = vec![[0x01u8; 32], [0x02u8; 32]];
-        let msg = P2pMessage::TxRequest {
-            height: 10,
-            hashes: hashes.clone(),
-        };
-        let decoded = P2pMessage::decode(&msg.encode()).unwrap();
-        match decoded {
-            P2pMessage::TxRequest { height, hashes: h } => {
-                assert_eq!(height, 10);
-                assert_eq!(h, hashes);
-            }
-            _ => panic!("expected TxRequest"),
-        }
-    }
-
-    #[test]
-    fn test_tx_response_roundtrip() {
-        let msg = P2pMessage::TxResponse {
-            height: 5,
-            txs: vec![],
-        };
-        let decoded = P2pMessage::decode(&msg.encode()).unwrap();
-        assert!(matches!(decoded, P2pMessage::TxResponse { height: 5, .. }));
-    }
-
-    #[test]
-    fn test_compact_block_topic() {
-        assert_eq!(
-            P2pMessage::CompactBlock {
-                header: dummy_block().header,
-                tx_hashes: vec![],
-                bls_aggregate: None,
-                bls_bitmap: vec![],
-                vrf_proof: None,
-            }
-            .topic(),
-            "vinx/compact/1"
-        );
-        assert_eq!(
-            P2pMessage::TxRequest {
-                height: 1,
-                hashes: vec![],
-            }
-            .topic(),
-            "vinx/compact/1"
-        );
-        assert_eq!(
-            P2pMessage::TxResponse {
-                height: 1,
-                txs: vec![],
-            }
-            .topic(),
-            "vinx/compact/1"
-        );
-    }
-
-    #[test]
-    fn test_vrf_proof_message_roundtrip() {
-        use vinx_crypto::VrfSecretKey;
-        let sk = VrfSecretKey::generate();
-        let alpha = b"committee alpha test";
-        let proof = sk.prove(alpha);
-        let validator_addr = [0x22u8; 20];
-        let msg = P2pMessage::BlockVrfProof {
-            height: 42,
-            vrf_proof: proof.0.to_vec(),
-            validator_addr: validator_addr.to_vec(),
-        };
-        let decoded = P2pMessage::decode(&msg.encode()).unwrap();
-        match decoded {
-            P2pMessage::BlockVrfProof {
-                height,
-                vrf_proof,
-                validator_addr: addr,
-            } => {
-                assert_eq!(height, 42);
-                assert_eq!(vrf_proof.len(), P2pMessage::VRF_PROOF_WIRE_LEN);
-                assert_eq!(addr.len(), 20);
-            }
-            _ => panic!("expected BlockVrfProof"),
-        }
+        assert!(P2pMessage::decode(b"not valid borsh").is_none());
     }
 
     #[test]
     fn test_topic_names() {
-        assert_eq!(P2pMessage::NewBlock(dummy_block()).topic(), "vinx/blocks/1");
+        assert_eq!(
+            P2pMessage::NewTransaction(Transaction::new_transfer(
+                &KeyPair::generate(),
+                dummy_addr(),
+                vinx_core::Amount::from_vinx(1),
+                vinx_core::Amount::from_vinx(1),
+                0
+            ))
+            .topic(),
+            "vinx/txs/1"
+        );
+        assert_eq!(
+            P2pMessage::Committed {
+                block: dummy_block(),
+                cert: dummy_cert()
+            }
+            .topic(),
+            "vinx/blocks/1"
+        );
         assert_eq!(
             P2pMessage::SyncRequest {
                 from_height: 0,
@@ -458,44 +260,15 @@ mod tests {
             .topic(),
             "vinx/sync/1"
         );
-        assert_eq!(
-            P2pMessage::SyncResponse { blocks: vec![] }.topic(),
-            "vinx/sync/1"
-        );
-        assert_eq!(
-            P2pMessage::BlockBlsCoSignature {
-                height: 1,
-                block_hash: vec![0u8; 32],
-                bls_sig: vec![0u8; 96],
-                validator_addr: vec![0u8; 20],
-            }
-            .topic(),
-            "vinx/bls/1"
-        );
-        assert_eq!(
-            P2pMessage::BlockVrfProof {
-                height: 1,
-                vrf_proof: vec![0u8; 80],
-                validator_addr: vec![0u8; 20],
-            }
-            .topic(),
-            "vinx/vrf/1"
-        );
     }
 
     // ─── ADR 0022: anti-DoS decode & sync bounds ─────────────────────────────
 
     #[test]
     fn test_decompression_bomb_is_rejected() {
-        // A tiny zstd frame that expands far beyond MAX_DECODED_BYTES must be refused
-        // without allocating the full expansion.
-        let bomb_raw = vec![0u8; MAX_DECODED_BYTES + 1_000_000]; // highly compressible zeros
+        let bomb_raw = vec![0u8; MAX_DECODED_BYTES + 1_000_000];
         let compressed = zstd::encode_all(&bomb_raw[..], 19).unwrap();
-        assert!(
-            compressed.len() < 100_000,
-            "the bomb must be small on the wire (got {} bytes)",
-            compressed.len()
-        );
+        assert!(compressed.len() < 100_000);
         let mut framed = vec![FLAG_ZSTD];
         framed.extend_from_slice(&compressed);
         assert!(
@@ -512,24 +285,10 @@ mod tests {
     }
 
     #[test]
-    fn test_valid_message_below_ceiling_still_decodes() {
-        // Guard against a ceiling so tight it breaks honest traffic.
-        let msg = P2pMessage::SyncResponse {
-            blocks: (0..8).map(|_| dummy_block()).collect(),
-        };
-        assert!(P2pMessage::decode(&msg.encode()).is_some());
-    }
-
-    #[test]
     fn test_sync_batch_len_respects_budget_and_count() {
-        // Budget stops the batch: 3 blocks of 4 bytes fit in a 10-byte budget → 2 taken
-        // (4 + 4 = 8, adding the third would exceed 10).
         assert_eq!(sync_batch_len(&[4, 4, 4], 10, 100), 2);
-        // Count cap dominates when the budget is generous.
         assert_eq!(sync_batch_len(&[1, 1, 1, 1, 1], 1_000, 3), 3);
-        // Always take at least one, even if the first block alone blows the budget.
         assert_eq!(sync_batch_len(&[100, 1], 10, 100), 1);
-        // Empty input yields an empty batch.
         assert_eq!(sync_batch_len(&[], 10, 10), 0);
     }
 }

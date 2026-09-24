@@ -1,29 +1,25 @@
+use borsh::{BorshDeserialize, BorshSerialize};
 use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, HashMap, HashSet};
 use vinx_core::{
     amount::{
-        cumulative_emission_atoms, Amount, ACTIVE_SET_COOLDOWN_SECS, ACTIVE_SET_STEP,
-        BOND_COOLDOWN_SECS, BOND_STEP_BPS, BPS_DENOM, DEFAULT_ACTIVE_SET_SIZE,
-        DEFAULT_FEE_FLOOR_ATOMS, EPOCH_DURATION_SECS, EXISTENTIAL_DEPOSIT_ATOMS, MAX_BOND_HARD_CAP,
-        MAX_MODULES, MAX_NONCE_AHEAD, MAX_TX_PAYLOAD_BYTES, MAX_VALIDATOR_EXITS_PER_EPOCH,
-        MIN_ACTIVE_SET_SIZE, MIN_BOND_HARD_FLOOR, MIN_MODULE_BOND_ATOMS, MIN_STAKE_ATOMS,
-        MIN_VALIDATOR_BOND_ATOMS, PROPOSER_SHARE_BPS, SLASH_BOUNTY_BPS, SLASH_EQUIVOCATION_BPS,
-        UNBONDING_SECS, VALIDATOR_SCORE_WINDOW_SECS,
+        cumulative_emission_atoms, Amount, ADMIN_TENURE_SECS, BOND_COOLDOWN_SECS, BOND_STEP_BPS,
+        BPS_DENOM, DEFAULT_FEE_FLOOR_ATOMS, EPOCH_DURATION_SECS, EXISTENTIAL_DEPOSIT_ATOMS,
+        FEE_PRODUCER_SHARE_BPS, MAX_ACTIVE_SET_SIZE, MAX_BOND_HARD_CAP, MAX_NONCE_AHEAD,
+        MAX_TX_PAYLOAD_BYTES, MAX_VALIDATOR_EXITS_PER_EPOCH, MIN_ACTIVE_SET_SIZE,
+        MIN_BOND_HARD_FLOOR, MIN_STAKE_ATOMS, MIN_VALIDATOR_BOND_ATOMS, PROPOSER_SHARE_BPS,
+        SLASH_BOUNTY_BPS, SLASH_EQUIVOCATION_BPS, UNBONDING_SECS, VALIDATOR_SCORE_WINDOW_SECS,
     },
-    block::SlashEvidence,
     chain_id::CHAIN_ID_DEVNET,
+    consensus::VoteEquivocation,
     governance::GovernanceAction,
-    module::ModuleOp,
     protocol::{ProtocolVersion, ScheduledUpgrade},
     reliability::{self, ReliabilityMap},
     validator_pool::PoolStatus,
     Account, CoreError, RegisterBlsKeyPayload, Transaction, TransactionType, ValidatorExitRequest,
     ValidatorSet,
 };
-use vinx_crypto::{
-    hash256, vrf_verify, Address, BlsPubKey, BlsSignature, Hash32, IncrementalMerkleTree, VrfProof,
-    VrfPublicKey,
-};
+use vinx_crypto::{hash256, Address, BlsPubKey, BlsSignature, Hash32, IncrementalMerkleTree};
 
 /// In-memory representation of the full chain state.
 /// Domain-separation tag for the two-subtree state root (VINX-04).
@@ -31,7 +27,7 @@ const STATE_ROOT_DST: &[u8] = b"VINX:state_root:v2";
 /// Domain-separation tag for the consensus subtree (VINX-04).
 const CONSENSUS_ROOT_DST: &[u8] = b"VINX:consensus_root:v1";
 
-#[derive(Clone, Debug, Serialize, Deserialize)]
+#[derive(Clone, Debug, Serialize, Deserialize, BorshSerialize, BorshDeserialize)]
 pub struct WorldState {
     /// Accounts keyed by bech32 address. A `BTreeMap` (not `HashMap`) so iteration
     /// is already sorted by address — the Merkle leaf order — avoiding an O(n log n)
@@ -41,11 +37,6 @@ pub struct WorldState {
     /// `epoch_dist_emission_pot` and `destroyed_atoms` this always equals `emitted_atoms`.
     pub circulating_supply: Amount,
     pub block_height: u64,
-    /// Dormant — kept for bincode backward-compatibility (v9 on-disk layout).
-    /// Not used in any logic after ADR 0040. Always `Amount::ZERO` on new chains.
-    #[serde(default)]
-    #[allow(dead_code)]
-    pub(crate) foundry: Amount,
     /// Timestamp (unix seconds) of the first block — the emission epoch. Established
     /// lazily on the first block; `emission_started` guards initialization (so a
     /// genesis timestamp of 0 does not collide with an "unset" sentinel).
@@ -66,11 +57,13 @@ pub struct WorldState {
     /// Timestamp of the block currently being applied — set before draining txs so
     /// `apply_unstake` can compute a real-time unlock. Not persisted.
     #[serde(skip)]
+    #[borsh(skip)]
     current_block_ts: u64,
     /// Fees collected from the transactions of the block currently being applied.
     /// Credited in full to the block producer by `settle_block`. Not persisted
     /// (transient within a single block).
     #[serde(skip)]
+    #[borsh(skip)]
     block_fees: Amount,
     /// Static minimum fee floor; dynamic base_fee is always >= this.
     pub fee_floor: Amount,
@@ -90,33 +83,38 @@ pub struct WorldState {
     /// Chain ID for replay protection — transactions must match this value.
     #[serde(default = "default_chain_id")]
     pub chain_id: u32,
+    /// Protocol block time in seconds (ADR 0081 C6) — fixed at genesis, committed in the
+    /// consensus root, never a per-node setting.
+    #[serde(default = "default_block_time_secs")]
+    pub block_time_secs: u64,
     /// Incremental Merkle tree over sorted account leaf hashes.
     /// Not persisted — rebuilt lazily on the first `compute_state_root` call after load.
     #[serde(skip)]
+    #[borsh(skip)]
     merkle_tree: IncrementalMerkleTree,
     /// Maps address string → leaf index in `merkle_tree.leaves()`.
     #[serde(skip)]
+    #[borsh(skip)]
     leaf_index: HashMap<Address, usize>,
     /// Accounts modified since the last `compute_state_root` call.
     #[serde(skip)]
+    #[borsh(skip)]
     dirty_addrs: HashSet<Address>,
     /// True when an account was added/removed — requires a full O(n) rebuild.
     #[serde(skip)]
+    #[borsh(skip)]
     needs_rebuild: bool,
     /// Accounts modified since the last persistence flush. Distinct from
     /// `dirty_addrs` (which is consumed by `compute_state_root`): this set survives
     /// until `take_persist_dirty` drains it, so incremental persistence can write
     /// only the accounts that actually changed instead of the whole map.
     #[serde(skip)]
+    #[borsh(skip)]
     persist_dirty: HashSet<Address>,
     /// Optional K-of-M admin committee (ADR 0011). When set, governance actions require
     /// `threshold` approvals among `signers`, superseding the single `admin_address`. When
-    /// `None`, `admin_address` is the sole authority (legacy 1-of-1). `serde(default)` so
-    /// pre-0011 state (bincode meta / JSON snapshot) loads with no committee.
-    ///
-    /// Declared after the `serde(skip)` fields so it is the last *serialized* field: a
-    /// pre-0011 meta blob is a strict prefix of a current one, which the v7→v8 storage
-    /// migration exploits by appending this field's default encoding.
+    /// `None`, `admin_address` is the sole authority (1-of-1). Either way the authority
+    /// expires after `ADMIN_TENURE_SECS` (ADR 0081 D7b).
     #[serde(default)]
     pub admin_policy: Option<AdminPolicy>,
     /// Governance proposals awaiting enough committee approvals to execute (ADR 0011).
@@ -124,106 +122,66 @@ pub struct WorldState {
     /// `pending_unbonds`: derived deterministically from the same transaction history.
     #[serde(default)]
     pub pending_governance: Vec<GovernanceProposal>,
-    /// Bonded module registry (ADR 0010): `module_id → ModuleEntry`. The L1 stores only the
-    /// operator, its bond, and the latest committed anchor — never module logic. Appended
-    /// after `pending_governance` so the v8→v9 storage migration can append its default
-    /// (empty map). `serde(default)` for pre-0010 state.
-    #[serde(default)]
-    pub modules: BTreeMap<Hash32, ModuleEntry>,
     /// Slash proceeds awaiting distribution to honest validators (ADR 0040).
     /// 90 % of every slashed bond flows here; distributed at epoch close (ADR 0028).
-    /// Appended after `modules` — the v9→v10 migration appends its default encoding.
     #[serde(default)]
     pub epoch_dist_emission_pot: Amount,
     /// Cumulative atoms permanently destroyed by reaping dust (ADR 0026 + ADR 0040).
     /// The only source of destruction on VinX — amounts are ≤ 0.001 VINX per account.
-    /// Appended after `epoch_dist_emission_pot` — same append-only migration strategy.
     #[serde(default)]
     pub destroyed_atoms: u128,
     /// Fiabilité des validateurs (ADR 0027) : manquements de proposition + jailing, dérivés
     /// **déterministiquement** de la séquence de blocs (comme `pending_unbonds`).
-    /// `serde(default)` pour l'état pré-0027.
     ///
     /// Depuis VINX-04 (ADR 0072) ce champ **est engagé** par `consensus_root` : ses intrants
-    /// (`rel`, `validator_set`, hauteur, proposeur, `block_ts`, `last_block_ts`) sont tous
+    /// (`rel`, `validator_set`, hauteur, tour, proposeur — ADR 0082) sont tous
     /// déterministes et il est persisté, donc l'engager rend visible toute divergence de
     /// jailing au lieu de la laisser silencieuse.
     #[serde(default)]
     pub reliability: ReliabilityMap,
     // ── Open PoA (ADR 0038) ─────────────────────────────────────────────────────
-    // All fields below are appended after `reliability` — the v11→v12 migration
-    // appends their default encodings (empty map / empty set / default value).
-    // The bincode prefix-append property requires these fields to stay LAST and
-    // be individually serde(default)-gated so pre-v12 blobs load cleanly.
-    //
     /// Pool of all bonded validators (ADR 0038). Keyed by validator signing address.
     /// Includes active, benched, warming-up, and unbonding entries.
-    /// Appended after `reliability` — v11→v12 migration appends its default (empty).
     #[serde(default)]
     pub validator_pool: BTreeMap<Address, vinx_core::ValidatorPoolEntry>,
     /// Validator keys permanently banned after a proven equivocation (ADR 0038).
     /// `AddValidator`/bond transactions referencing a banned key are rejected.
-    /// Appended after `validator_pool`.
     #[serde(default)]
     pub banned_validator_keys: std::collections::HashSet<Address>,
-    /// Current governable active-set size N (ADR 0038). Default: DEFAULT_ACTIVE_SET_SIZE.
-    /// Governable within [MIN_ACTIVE_SET_SIZE, MAX_ACTIVE_SET_SIZE] in steps of
-    /// ACTIVE_SET_STEP with ACTIVE_SET_COOLDOWN_SECS between modifications.
-    /// Appended after `banned_validator_keys`.
-    #[serde(default = "default_active_set_size")]
-    pub active_set_size: u32,
-    /// Timestamp of the last governance modification to `active_set_size` (ADR 0038).
-    /// Used to enforce the ACTIVE_SET_COOLDOWN_SECS between modifications.
-    /// Appended after `active_set_size`.
-    #[serde(default)]
-    pub last_active_set_size_change_ts: u64,
     /// Timestamp of the last governance modification to `min_validator_bond` (ADR 0038).
     /// Used to enforce BOND_COOLDOWN_SECS between modifications.
-    /// Appended after `last_active_set_size_change_ts`.
     #[serde(default)]
     pub last_bond_change_ts: u64,
     /// Timestamp of the most recent epoch close (ADR 0028 / ADR 0038).
     /// Epoch closes trigger score decay, active-set rotation, warmup ticks, and
     /// epoch-pot distribution. Zero until the first epoch close fires.
-    /// Appended after `last_bond_change_ts` — v12→v13 migration appends `u64 = 0`.
     #[serde(default)]
     pub last_epoch_close_ts: u64,
     // ── ADR 0038 complement ─────────────────────────────────────────────────────
     /// Governable minimum bond to enter the validator pool (ADR 0038).
-    /// Default: MIN_VALIDATOR_BOND_ATOMS (100 000 VinX). Adjustable within
+    /// Default: MIN_VALIDATOR_BOND_ATOMS (10 000 VinX). Adjustable within
     /// [MIN_BOND_HARD_FLOOR, MAX_BOND_HARD_CAP] in steps of ±BOND_STEP_BPS with
-    /// BOND_COOLDOWN_SECS between modifications. Appended after `last_epoch_close_ts`
-    /// — v15→v16 migration appends its default (u128 = MIN_VALIDATOR_BOND_ATOMS).
+    /// BOND_COOLDOWN_SECS between modifications.
     #[serde(default = "default_min_validator_bond")]
     pub min_validator_bond_atoms: u128,
-    // ── ADR 0029 Phase 2 — epoch beacon ─────────────────────────────────────────
-    /// Epoch beacon for committee selection (ADR 0029 Phase 2, SHA-256 placeholder
-    /// until ECVRF RFC 9381 is integrated). Updated at every epoch close.
-    /// All-zeros until the first epoch close occurs.
-    /// Appended after `min_validator_bond_atoms` — v16→v17 migration appends 32 zeros.
-    #[serde(default)]
-    pub epoch_beacon: Hash32,
     // ── ADR 0036 — validator churn bounds ───────────────────────────────────────
     /// FIFO exit queue for validators whose bond dropped below the minimum floor
     /// (ADR 0036). Entries are promoted to `Unbonding` status at each epoch close,
     /// at most `MAX_VALIDATOR_EXITS_PER_EPOCH` per epoch. This rate-limits churn and
     /// prevents a coordinated mass-exit from draining the active set in one epoch.
     /// Bond remains slashable while the request sits in the queue.
-    /// Appended after `epoch_beacon` — v17→v18 migration appends the empty-Vec encoding.
     #[serde(default)]
     pub exit_queue: Vec<ValidatorExitRequest>,
-    /// Timestamp of the previous block, needed to decide deterministically whether a
-    /// scheduled leader's slot actually elapsed before a backup proposed (ADR 0027,
-    /// VINX-06). Zero until the first block is settled.
-    /// Appended after `exit_queue` — same append-only migration strategy as the fields
-    /// above, so a pre-v19 blob remains a strict prefix.
+    /// The validator set that voted on the last committed block, with its proposer
+    /// priorities as they were when it voted (ADR 0082). `Block::last_commit` of the next
+    /// block is a certificate by *this* set — the active set may have rotated since.
     #[serde(default)]
-    pub last_block_ts: u64,
+    pub last_voting_set: Option<ValidatorSet>,
 }
 
 /// A bond amount in its unbonding delay, waiting to return to `address`'s balance
 /// at `unlock_ts` (unix seconds). Slashable until it matures.
-#[derive(Clone, Debug, Serialize, Deserialize)]
+#[derive(Clone, Debug, Serialize, Deserialize, BorshSerialize, BorshDeserialize)]
 pub struct PendingUnbond {
     pub address: Address,
     pub amount: Amount,
@@ -232,36 +190,21 @@ pub struct PendingUnbond {
 
 /// A K-of-M admin committee (ADR 0011). `threshold` signatures among the distinct
 /// `signers` are required to enact any governance action.
-#[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
+#[derive(Clone, Debug, Serialize, Deserialize, BorshSerialize, BorshDeserialize, PartialEq)]
 pub struct AdminPolicy {
     pub signers: Vec<Address>,
     pub threshold: u16,
 }
 
 /// A governance action accumulating committee approvals until it reaches the threshold and
-/// executes (ADR 0011). Identified by `action_hash = hash256(bincode(action))` so identical
+/// executes (ADR 0011). Identified by `action_hash = hash256(borsh(action))` so identical
 /// actions proposed by different signers converge on the same tally.
-#[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
+#[derive(Clone, Debug, Serialize, Deserialize, BorshSerialize, BorshDeserialize, PartialEq)]
 pub struct GovernanceProposal {
     pub action_hash: Hash32,
     pub action: GovernanceAction,
     /// Distinct signer addresses that have approved, in first-seen order.
     pub approvals: Vec<Address>,
-}
-
-/// A registered module in the bonded anchor registry (ADR 0010). The L1 keeps only this
-/// commitment — never the module's logic or full state.
-#[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
-pub struct ModuleEntry {
-    /// Address that registered the module and alone may anchor or deregister it.
-    pub operator: Address,
-    /// Locked bond, returned to the operator on deregistration. Circulation-neutral while
-    /// locked (the operator still owns it).
-    pub bond: Amount,
-    /// Latest committed state root of the off-chain module. All-zero until first anchored.
-    pub anchor_head: Hash32,
-    /// Number of successful anchors — a monotonic activity counter.
-    pub anchored_count: u64,
 }
 
 /// Upper bound on committee size (ADR 0011) — bounds the signer set stored in state and the
@@ -301,100 +244,6 @@ fn validate_admin_policy(signers: Vec<Address>, threshold: u16) -> Result<AdminP
     Ok(AdminPolicy { signers, threshold })
 }
 
-/// The bincode bytes appended to a pre-0011 (v7) `WorldState` meta blob to bring it to v8
-/// (ADR 0011): the default `admin_policy` (`None`) followed by the default
-/// `pending_governance` (empty vec). Because bincode concatenates struct fields with no
-/// framing and these are the last two *serialized* fields, appending exactly these bytes to
-/// a v7 blob yields a valid v8 blob. Shared by the storage v7→v8 migration and its tests.
-pub fn v8_meta_suffix() -> Vec<u8> {
-    let mut out = bincode::serialize(&None::<AdminPolicy>).expect("serialize None");
-    out.extend(bincode::serialize(&Vec::<GovernanceProposal>::new()).expect("serialize empty vec"));
-    out
-}
-
-/// The bincode bytes appended to a v8 `WorldState` meta blob to bring it to v9 (ADR 0010):
-/// the default `modules` registry (empty map). Same append-only rationale as
-/// [`v8_meta_suffix`] — `modules` is the last serialized field. Shared by the storage
-/// v8→v9 migration and its tests.
-pub fn v9_meta_suffix() -> Vec<u8> {
-    bincode::serialize(&BTreeMap::<Hash32, ModuleEntry>::new()).expect("serialize empty map")
-}
-
-/// The bincode bytes appended to a v9 `WorldState` meta blob to bring it to v10
-/// (ADR 0040): the default `epoch_dist_emission_pot` (Amount::ZERO) followed by the
-/// default `destroyed_atoms` (0u128). Same append-only rationale as prior suffixes.
-pub fn v10_meta_suffix() -> Vec<u8> {
-    let mut out = bincode::serialize(&Amount::ZERO).expect("serialize Amount::ZERO");
-    out.extend(bincode::serialize(&0u128).expect("serialize 0u128"));
-    out
-}
-
-/// The bincode bytes appended to a v10 `WorldState` meta blob to bring it to v11 (ADR 0027):
-/// the default `reliability` table (empty map). Same append-only rationale as
-/// [`v9_meta_suffix`] — `reliability` is the last serialized field. Shared by the storage
-/// v10→v11 migration and its tests.
-pub fn v11_meta_suffix() -> Vec<u8> {
-    bincode::serialize(&ReliabilityMap::new()).expect("serialize empty map")
-}
-
-/// The bincode bytes appended to a v11 `WorldState` meta blob to bring it to v12 (ADR 0038
-/// Open PoA). Appends the defaults of five new fields in declaration order:
-///   1. `validator_pool`                  — empty `BTreeMap<Address, ValidatorPoolEntry>`
-///   2. `banned_validator_keys`           — empty `HashSet<Address>`
-///   3. `active_set_size`                 — `u32 = DEFAULT_ACTIVE_SET_SIZE` (21)
-///   4. `last_active_set_size_change_ts`  — `u64 = 0`
-///   5. `last_bond_change_ts`             — `u64 = 0`
-pub fn v12_meta_suffix() -> Vec<u8> {
-    use std::collections::{BTreeMap, HashSet};
-    use vinx_core::ValidatorPoolEntry;
-    let mut out = bincode::serialize(&BTreeMap::<Address, ValidatorPoolEntry>::new())
-        .expect("serialize empty pool");
-    out.extend(bincode::serialize(&HashSet::<Address>::new()).expect("serialize empty ban set"));
-    out.extend(bincode::serialize(&DEFAULT_ACTIVE_SET_SIZE).expect("serialize active_set_size"));
-    out.extend(bincode::serialize(&0u64).expect("serialize 0u64"));
-    out.extend(bincode::serialize(&0u64).expect("serialize 0u64"));
-    out
-}
-
-/// The bincode bytes appended to a v12 `WorldState` meta blob to bring it to v13 (ADR 0028
-/// epoch close). Appends the default for one new field:
-///   1. `last_epoch_close_ts` — `u64 = 0`
-pub fn v13_meta_suffix() -> Vec<u8> {
-    bincode::serialize(&0u64).expect("serialize 0u64")
-}
-
-/// The bincode bytes appended to a v15 `WorldState` meta blob to bring it to v16 (ADR 0038
-/// governable bond floor). Appends the default for one new field:
-///   1. `min_validator_bond_atoms` — `u128 = MIN_VALIDATOR_BOND_ATOMS`
-pub fn v16_meta_suffix() -> Vec<u8> {
-    bincode::serialize(&MIN_VALIDATOR_BOND_ATOMS).expect("serialize u128")
-}
-
-/// The bincode bytes appended to a v16 `WorldState` meta blob to bring it to v17 (ADR 0029
-/// Phase 2 epoch beacon). Appends the default for one new field:
-///   1. `epoch_beacon` — `Hash32 = [0u8; 32]`
-pub fn v17_meta_suffix() -> Vec<u8> {
-    bincode::serialize(&[0u8; 32]).expect("serialize Hash32")
-}
-
-/// The bincode bytes appended to a v17 `WorldState` meta blob to bring it to v18 (ADR 0036
-/// churn bounds). Appends the default for one new field:
-///   1. `exit_queue` — `Vec<ValidatorExitRequest> = []` (8 zero bytes: bincode u64 length)
-pub fn v18_meta_suffix() -> Vec<u8> {
-    bincode::serialize(&Vec::<ValidatorExitRequest>::new()).expect("serialize empty Vec")
-}
-
-/// The bincode bytes appended to a v18 `WorldState` meta blob to bring it to v19
-/// (ADR 0027 / VINX-06 slot timeout). Appends the default for one new field:
-///   1. `last_block_ts` — `u64 = 0`
-///
-/// Zero is the correct default: it makes the first block after a migration look like a
-/// fully elapsed slot, which only means the first missed-proposal charge behaves as it
-/// did before the fix. It never jails anyone on its own.
-pub fn v19_meta_suffix() -> Vec<u8> {
-    bincode::serialize(&0u64).expect("serialize u64")
-}
-
 /// BLAKE3(epoch_number_le || address) — deterministic sort key for tiebreaking
 /// validators with identical reliability scores at epoch rotation (ADR 0038; hash → BLAKE3 per ADR 0069).
 fn epoch_tiebreaker(epoch: u64, addr: &Address) -> [u8; 32] {
@@ -408,12 +257,12 @@ fn default_fee_floor() -> Amount {
     Amount::from_atoms(DEFAULT_FEE_FLOOR_ATOMS)
 }
 
-fn default_chain_id() -> u32 {
-    CHAIN_ID_DEVNET
+fn default_block_time_secs() -> u64 {
+    vinx_core::amount::DEFAULT_BLOCK_TIME_SECS
 }
 
-fn default_active_set_size() -> u32 {
-    DEFAULT_ACTIVE_SET_SIZE
+fn default_chain_id() -> u32 {
+    CHAIN_ID_DEVNET
 }
 
 fn default_min_validator_bond() -> u128 {
@@ -433,7 +282,6 @@ impl WorldState {
             accounts: BTreeMap::new(),
             circulating_supply: Amount::ZERO,
             block_height: 0,
-            foundry: Amount::ZERO,
             emission_epoch_ts: 0,
             emission_started: false,
             emitted_atoms: 0,
@@ -448,6 +296,7 @@ impl WorldState {
             // Placeholder — always overwritten by create_genesis_state before use.
             validator_set: ValidatorSet::single(Address::zero()),
             chain_id: CHAIN_ID_DEVNET,
+            block_time_secs: vinx_core::amount::DEFAULT_BLOCK_TIME_SECS,
             merkle_tree: IncrementalMerkleTree::new(),
             leaf_index: HashMap::new(),
             dirty_addrs: HashSet::new(),
@@ -455,20 +304,16 @@ impl WorldState {
             persist_dirty: HashSet::new(),
             admin_policy: None,
             pending_governance: Vec::new(),
-            modules: BTreeMap::new(),
             epoch_dist_emission_pot: Amount::ZERO,
             destroyed_atoms: 0,
             reliability: ReliabilityMap::new(),
             validator_pool: BTreeMap::new(),
             banned_validator_keys: std::collections::HashSet::new(),
-            active_set_size: DEFAULT_ACTIVE_SET_SIZE,
-            last_active_set_size_change_ts: 0,
             last_bond_change_ts: 0,
             last_epoch_close_ts: 0,
             min_validator_bond_atoms: MIN_VALIDATOR_BOND_ATOMS,
-            epoch_beacon: [0u8; 32],
             exit_queue: Vec::new(),
-            last_block_ts: 0,
+            last_voting_set: None,
         }
     }
 
@@ -581,6 +426,90 @@ impl WorldState {
         self.current_block_ts = block_ts;
     }
 
+    /// Opens block `header` (ADR 0082) — call it on a state at height `header.height - 1`,
+    /// **before** applying the block's transactions, on every path that executes a block.
+    ///
+    /// 1. The proposer must be the scheduled proposer of `header.round` (weighted proposer
+    ///    priorities, jailed validators skipped).
+    /// 2. `last_commit` must be a valid certificate for the previous block, signed by more
+    ///    than 2/3 of the power of the set that voted on it (`last_voting_set`). Its signers
+    ///    are credited as co-signers (ADR 0028) — rewards follow data every node holds.
+    /// 3. Proposers of the rounds before `header.round` are charged a missed proposal.
+    /// 4. The current set becomes `last_voting_set` and its proposer priority advances.
+    ///
+    /// Deterministic and self-contained: it reads only the state and the header, so every
+    /// node reaches the same result. Fails without mutating anything.
+    pub fn begin_block(
+        &mut self,
+        header: &vinx_core::BlockHeader,
+        last_commit: Option<&vinx_core::CommitCert>,
+    ) -> Result<(), CoreError> {
+        let height = header.height;
+        if height != self.block_height + 1 {
+            return Err(CoreError::InvalidTransaction(format!(
+                "block {height} does not follow state height {}",
+                self.block_height
+            )));
+        }
+        let expected =
+            reliability::proposer_for_round(&self.validator_set, &self.reliability, header.round);
+        if header.validator != expected {
+            return Err(CoreError::InvalidTransaction(format!(
+                "block {height} round {} proposed by {}, expected {expected}",
+                header.round, header.validator
+            )));
+        }
+        let cosigners: Vec<Address> = match (height, last_commit) {
+            (1, None) => vec![],
+            (1, Some(_)) => {
+                return Err(CoreError::InvalidTransaction(
+                    "block 1 cannot carry a last commit".to_string(),
+                ))
+            }
+            (_, None) => {
+                return Err(CoreError::InvalidTransaction(format!(
+                    "block {height} is missing the commit certificate of block {}",
+                    height - 1
+                )))
+            }
+            (_, Some(cert)) => {
+                let voters = self.last_voting_set.as_ref().ok_or_else(|| {
+                    CoreError::InvalidTransaction("no voting set recorded".to_string())
+                })?;
+                let keys = self.indexed_bls_keys(voters);
+                cert.verify(self.chain_id, height - 1, &header.prev_hash, voters, &keys)
+                    .map_err(|e| {
+                        CoreError::InvalidTransaction(format!("invalid last commit: {e}"))
+                    })?;
+                cert.signers()
+                    .into_iter()
+                    .filter_map(|i| voters.validators().get(i).copied())
+                    .collect()
+            }
+        };
+        // ── validated: mutate ──
+        if !cosigners.is_empty() {
+            self.record_block_cosigns(&cosigners);
+        }
+        if reliability::on_block_committed(
+            &mut self.reliability,
+            &self.validator_set,
+            height,
+            header.round,
+            &header.validator,
+        ) {
+            tracing::warn!(
+                height,
+                "ADR 0027 : validateur jailé (manquements de proposition consécutifs)"
+            );
+        }
+        self.last_voting_set = Some(self.validator_set.clone());
+        let rel = &self.reliability;
+        self.validator_set
+            .advance_proposer_priority(|a| reliability::is_eligible(rel, a));
+        Ok(())
+    }
+
     /// Settles block-level rewards to the producer and matures due unbonds. Call once
     /// per block, after applying all transactions and before `compute_state_root`, in
     /// every path that builds/replays a block (producer, P2P apply, sync). Returns
@@ -589,42 +518,27 @@ impl WorldState {
     /// Fees stay in circulation (they move sender → producer). Emission is newly minted
     /// (progressive minting, ADR 0040). Both are computed deterministically from the
     /// block so validators re-applying it reach the identical state.
-    pub fn settle_block(
-        &mut self,
-        producer: &Address,
-        height: u64,
-        block_ts: u64,
-    ) -> (Amount, Amount) {
-        // 1. Collected transaction fees → producer (circulation-neutral).
+    pub fn settle_block(&mut self, producer: &Address, block_ts: u64) -> (Amount, Amount) {
+        // 1. Collected transaction fees (ADR 0081 D4): FEE_PRODUCER_SHARE_BPS to the
+        //    producer now, the rest into the epoch pot for the co-signers. Nothing burned.
         let fees = std::mem::replace(&mut self.block_fees, Amount::ZERO);
         if fees > Amount::ZERO {
-            self.credit(producer, fees);
+            let producer_atoms = fees.atoms() * FEE_PRODUCER_SHARE_BPS / BPS_DENOM;
+            let cosigner_atoms = fees.atoms() - producer_atoms;
+            if producer_atoms > 0 {
+                self.credit(producer, Amount::from_atoms(producer_atoms));
+            }
+            if cosigner_atoms > 0 {
+                // The fee was debited from the sender without leaving circulation;
+                // parking it in the pot keeps `circulating + pot == emitted` exact.
+                self.move_to_epoch_pot(Amount::from_atoms(cosigner_atoms));
+            }
         }
         // 2. Mature any unbonds whose delay has elapsed (real time).
         self.mature_unbonds(block_ts);
         // 3. Work emission — mint new tokens → producer (ADR 0040).
         let emission = self.emit_work_reward(producer, block_ts);
-        // 4. Fiabilité des validateurs (ADR 0027) : attributions + jailing.
-        if height > 0 {
-            let jailed = reliability::on_block_applied(
-                &mut self.reliability,
-                &self.validator_set,
-                height,
-                producer,
-                block_ts,
-                self.last_block_ts,
-            );
-            if jailed {
-                tracing::warn!(
-                    height,
-                    "ADR 0027 : validateur jailé (manquements de proposition consécutifs)"
-                );
-            }
-        }
-        // Record this block's timestamp for the next block's slot-timeout decision.
-        // Set after the reliability update so a block never compares against itself.
-        self.last_block_ts = block_ts;
-        // 5. Epoch close (ADR 0028/0038) — triggered when EPOCH_DURATION_SECS have elapsed
+        // 4. Epoch close (ADR 0028/0038) — triggered when EPOCH_DURATION_SECS have elapsed
         //    since the last close. Deterministic on block_ts so all nodes close the same epoch.
         if EPOCH_DURATION_SECS > 0 && self.emission_started {
             let since_last = block_ts.saturating_sub(if self.last_epoch_close_ts == 0 {
@@ -755,7 +669,7 @@ impl WorldState {
         }
 
         // 3. Rank eligible validators by score, BLAKE3 tiebreaker.
-        let n = self.active_set_size as usize;
+        let n = MAX_ACTIVE_SET_SIZE as usize;
         let mut eligible: Vec<(Address, u32)> = self
             .validator_pool
             .iter()
@@ -843,126 +757,11 @@ impl WorldState {
         if !new_active.is_empty() {
             let mut new_vs_addrs: Vec<Address> = new_active.iter().copied().collect();
             new_vs_addrs.sort();
-            self.validator_set = ValidatorSet::new(new_vs_addrs);
+            self.validator_set = self.weighted_validator_set(new_vs_addrs);
         }
         // If the pool is empty (e.g. genesis before any bonds), leave validator_set as-is.
 
-        // 7. Advance the epoch beacon (ADR 0029 Phase 2): chain-of-hashes accumulator.
-        //    beacon' = hash256(beacon || epoch_number_le64 || block_ts_le64)
-        //    SHA-256 placeholder for ECVRF RFC 9381 (integrated in Phase 2b).
-        {
-            let mut buf = [0u8; 32 + 8 + 8];
-            buf[..32].copy_from_slice(&self.epoch_beacon);
-            buf[32..40].copy_from_slice(&epoch_number.to_le_bytes());
-            buf[40..48].copy_from_slice(&self.current_block_ts.to_le_bytes());
-            self.epoch_beacon = hash256(&buf);
-        }
-
         self.last_epoch_close_ts = self.current_block_ts;
-    }
-
-    /// Returns the canonical VRF input alpha for the given block height.
-    ///
-    /// `alpha = epoch_beacon || height_le64` — the same seed for all validators
-    /// at this height, so VRF outputs are comparable and unbiasable.
-    pub fn committee_alpha(&self, height: u64) -> Vec<u8> {
-        let mut alpha = Vec::with_capacity(40);
-        alpha.extend_from_slice(&self.epoch_beacon);
-        alpha.extend_from_slice(&height.to_le_bytes());
-        alpha
-    }
-
-    /// Returns up to `k` validator addresses selected deterministically for `height`
-    /// using the current epoch beacon (ADR 0029 Phase 2).
-    ///
-    /// Candidates are pool members in Active or Benched status. For validators with a
-    /// registered ECVRF key (`vrf_pub_key`), committee admission is via the VRF path:
-    /// the caller must supply their VRF proofs via `committee_from_vrf_proofs`.
-    ///
-    /// This function uses SHA-256 as a fallback for validators without VRF keys —
-    /// ranking by `hash256(beacon || height_le64 || addr_bytes)`. Mixed pools (some with
-    /// VRF keys, some without) are handled by always ranking VRF-enabled validators
-    /// ahead of fallback validators.
-    pub fn committee_for_height(&self, height: u64, k: usize) -> Vec<Address> {
-        let beacon = &self.epoch_beacon;
-        let mut candidates: Vec<(Address, [u8; 32])> = self
-            .validator_pool
-            .iter()
-            .filter(|(_, e)| matches!(e.status, PoolStatus::Active | PoolStatus::Benched))
-            .map(|(addr, entry)| {
-                if entry.vrf_pub_key.is_some() {
-                    // VRF-capable validator: we cannot compute their VRF output without
-                    // their secret key. Rank them with a sentinel so they sort before
-                    // SHA-256 fallback validators — their actual relative ordering is
-                    // determined by submitted proofs via committee_from_vrf_proofs.
-                    let mut buf = [0u8; 21];
-                    buf[..20].copy_from_slice(addr.as_bytes());
-                    buf[20] = 0xFF;
-                    let mut score = hash256(&buf);
-                    score[0] = 0x00; // ensure VRF validators sort before fallback
-                    (*addr, score)
-                } else {
-                    // SHA-256 fallback: deterministic, no proof required.
-                    let mut buf = [0u8; 32 + 8 + 20];
-                    buf[..32].copy_from_slice(beacon);
-                    buf[32..40].copy_from_slice(&height.to_le_bytes());
-                    buf[40..60].copy_from_slice(addr.as_bytes());
-                    let mut score = hash256(&buf);
-                    score[0] |= 0x80; // ensure fallback validators sort after VRF ones
-                    (*addr, score)
-                }
-            })
-            .collect();
-        candidates.sort_by_key(|(_, h)| *h);
-        candidates.into_iter().take(k).map(|(a, _)| a).collect()
-    }
-
-    /// Verifies a validator's VRF proof for committee membership at `height` and
-    /// returns the 64-byte VRF output on success (ADR 0029 Phase 2b).
-    ///
-    /// Fails if:
-    /// - the validator has no registered VRF key
-    /// - the VRF proof does not verify against the registered key and canonical alpha
-    pub fn verify_committee_vrf_proof(
-        &self,
-        addr: &Address,
-        height: u64,
-        proof: &VrfProof,
-    ) -> Result<[u8; 64], CoreError> {
-        let entry = self
-            .validator_pool
-            .get(addr)
-            .ok_or_else(|| CoreError::InvalidTransaction("validator not in pool".to_string()))?;
-        let vrf_pk_bytes = entry.vrf_pub_key.ok_or_else(|| {
-            CoreError::InvalidTransaction("validator has no registered VRF key".to_string())
-        })?;
-        let vrf_pk = VrfPublicKey(vrf_pk_bytes);
-        let alpha = self.committee_alpha(height);
-        vrf_verify(&vrf_pk, proof, &alpha)
-            .map_err(|_| CoreError::Crypto("VRF proof verification failed".to_string()))
-    }
-
-    /// Forms a committee from a set of submitted VRF proofs (ADR 0029 Phase 2b).
-    ///
-    /// Verifies each proof, ranks the verified outputs, and returns the `k` validators
-    /// with the lexicographically smallest VRF output. Unverifiable proofs are silently
-    /// dropped. The result is deterministic given the same verified set.
-    pub fn committee_from_vrf_proofs(
-        &self,
-        height: u64,
-        proofs: &[(Address, VrfProof)],
-        k: usize,
-    ) -> Vec<Address> {
-        let mut scored: Vec<(Address, [u8; 64])> = proofs
-            .iter()
-            .filter_map(|(addr, proof)| {
-                self.verify_committee_vrf_proof(addr, height, proof)
-                    .ok()
-                    .map(|output| (*addr, output))
-            })
-            .collect();
-        scored.sort_by_key(|(_, o)| *o);
-        scored.into_iter().take(k).map(|(a, _)| a).collect()
     }
 
     /// Checks the supply invariant (ADR 0040):
@@ -1145,9 +944,9 @@ impl WorldState {
     ///
     /// The resulting blob deserializes back into a `WorldState` whose `accounts`
     /// map is empty; the caller repopulates it via [`WorldState::load_account`].
-    pub fn serialize_meta(&mut self) -> Result<Vec<u8>, bincode::Error> {
+    pub fn serialize_meta(&mut self) -> Result<Vec<u8>, std::io::Error> {
         let accounts = std::mem::take(&mut self.accounts);
-        let result = bincode::serialize(&*self);
+        let result = borsh::to_vec(&*self);
         self.accounts = accounts;
         result
     }
@@ -1187,8 +986,8 @@ impl WorldState {
     /// claim for free:
     ///
     /// - `chain_id` matches (no cross-network replay filling the mempool),
-    /// - the fee meets the current `base_fee` for fee-bearing types (Transfer,
-    ///   AnchorState — stake/unstake/slash are exempt per ADR 0009),
+    /// - the fee meets the current `base_fee` for fee-bearing types (Transfer —
+    ///   stake/unstake/slash are exempt per ADR 0009),
     /// - the sender account **exists** and its balance covers the transaction's
     ///   worst-case debit (`admission_cost_atoms`) — so the fee used for mempool
     ///   priority is actually funded, not just declared,
@@ -1216,19 +1015,15 @@ impl WorldState {
             )));
         }
 
-        // Fee floor for the fee-bearing types (mirrors apply_transfer / apply_anchor_state).
-        if matches!(
-            tx.tx_type,
-            TransactionType::Transfer | TransactionType::AnchorState
-        ) && tx.fee < self.base_fee
-        {
+        // Fee floor for the fee-bearing type (mirrors apply_transfer).
+        if tx.tx_type == TransactionType::Transfer && tx.fee < self.base_fee {
             return Err(CoreError::InvalidTransaction(format!(
                 "fee {} is below the current base fee {}",
                 tx.fee, self.base_fee
             )));
         }
 
-        let Some(account) = self.accounts.get(&tx.from) else {
+        let Some(account) = self.accounts.get(&tx.sender()) else {
             return Err(CoreError::InvalidTransaction(
                 "sender account does not exist (zero balance)".to_string(),
             ));
@@ -1380,11 +1175,9 @@ impl WorldState {
     /// batch driver lives at the block-validation call sites in `vinx-node`, which then
     /// apply state sequentially via [`WorldState::apply_transaction_trusted`].
     pub fn verify_tx_signature_pure(tx: &Transaction) -> Result<(), CoreError> {
-        let pk = tx.pub_key.as_ref().ok_or(CoreError::InvalidSignature)?;
-        let derived = Address::from_public_key(pk);
-        if derived != tx.from {
-            return Err(CoreError::PubKeyMismatch);
-        }
+        // ADR 0081 D6: the sender is derived from `pub_key`, so there is no separate
+        // `from` that could disagree with it — only the signature needs checking.
+        let pk = &tx.pub_key;
         let sig = tx.signature.as_ref().ok_or(CoreError::InvalidSignature)?;
         pk.verify(&tx.signing_bytes(), sig)?;
 
@@ -1415,10 +1208,8 @@ impl WorldState {
             TransactionType::AnnounceUpgrade => self.apply_announce_upgrade(tx),
             TransactionType::SlashValidator => self.apply_slash_validator(tx),
             TransactionType::AdminAction => self.apply_admin_action(tx),
-            TransactionType::AnchorState => self.apply_anchor_state(tx),
             TransactionType::RegisterBlsKey => self.apply_register_bls_key(tx),
             TransactionType::Unjail => self.apply_unjail(tx),
-            TransactionType::RegisterVrfKey => self.apply_register_vrf_key(tx),
         }
     }
 
@@ -1427,6 +1218,9 @@ impl WorldState {
         // (e.g. the dedicated AnnounceUpgrade tx) are disabled — a lone key must not bypass
         // the threshold. Such actions must go through the committee AdminAction path.
         if self.admin_policy.is_some() {
+            return Err(CoreError::Unauthorized);
+        }
+        if self.admin_tenure_expired() {
             return Err(CoreError::Unauthorized);
         }
         // VINX-20 (complément) : échec fermé, comme `apply_admin_action`. Le premier
@@ -1438,7 +1232,7 @@ impl WorldState {
         let Some(ref admin) = self.admin_address else {
             return Err(CoreError::Unauthorized);
         };
-        if &tx.from != admin {
+        if &tx.sender() != admin {
             return Err(CoreError::Unauthorized);
         }
         Ok(())
@@ -1462,7 +1256,7 @@ impl WorldState {
                 .amount
                 .checked_add(tx.fee)
                 .ok_or(CoreError::AmountOverflow)?;
-            (total, tx.from)
+            (total, tx.sender())
         };
 
         // ── ADR 0026: existential deposit. Validate every party's resulting balance
@@ -1473,8 +1267,8 @@ impl WorldState {
         {
             let ed = EXISTENTIAL_DEPOSIT_ATOMS;
             let mut deltas: HashMap<Address, i128> = HashMap::new();
-            *deltas.entry(tx.from).or_default() -= sender_debit.atoms() as i128;
-            if fee_payer != tx.from {
+            *deltas.entry(tx.sender()).or_default() -= sender_debit.atoms() as i128;
+            if fee_payer != tx.sender() {
                 *deltas.entry(fee_payer).or_default() -= tx.fee.atoms() as i128;
             }
             *deltas.entry(tx.to).or_default() += tx.amount.atoms() as i128;
@@ -1496,7 +1290,7 @@ impl WorldState {
         {
             let sender = self
                 .accounts
-                .get_mut(&tx.from)
+                .get_mut(&tx.sender())
                 .ok_or(CoreError::InsufficientBalance)?;
             if sender.nonce != tx.nonce {
                 return Err(CoreError::InvalidNonce {
@@ -1512,7 +1306,7 @@ impl WorldState {
         }
 
         // Debit fee from sponsor (if different from sender)
-        if fee_payer != tx.from {
+        if fee_payer != tx.sender() {
             let sponsor_acc = self
                 .accounts
                 .get_mut(&fee_payer)
@@ -1537,16 +1331,16 @@ impl WorldState {
         // hands, so `circulating_supply` is unchanged (sender −fee, producer +fee).
         self.block_fees = self.block_fees.saturating_add(tx.fee);
 
-        self.mark_dirty(&tx.from);
+        self.mark_dirty(&tx.sender());
         self.mark_dirty(&tx.to);
-        if fee_payer != tx.from {
+        if fee_payer != tx.sender() {
             self.mark_dirty(&fee_payer);
         }
 
         // ADR 0026: reap any party the transfer left at exactly zero (no balance, no
         // stake, no bond unbonding), returning its 60 bytes to the free state.
-        self.reap_if_empty(&tx.from);
-        if fee_payer != tx.from {
+        self.reap_if_empty(&tx.sender());
+        if fee_payer != tx.sender() {
             self.reap_if_empty(&fee_payer);
         }
         self.reap_if_empty(&tx.to);
@@ -1574,15 +1368,15 @@ impl WorldState {
         // Validé avant toute mutation : un bond refusé ne doit pas consommer le nonce.
         let creates_pool_entry = {
             let staked_after = self
-                .account_staked(&tx.from)
+                .account_staked(&tx.sender())
                 .checked_add(tx.amount)
                 .ok_or(CoreError::AmountOverflow)?;
             staked_after.atoms() >= self.min_validator_bond_atoms
-                && !self.banned_validator_keys.contains(&tx.from)
-                && !self.validator_pool.contains_key(&tx.from)
+                && !self.banned_validator_keys.contains(&tx.sender())
+                && !self.validator_pool.contains_key(&tx.sender())
         };
         let entry_bls = if creates_pool_entry {
-            Some(self.validate_bls_registration(tx.from, &tx.payload)?)
+            Some(self.validate_bls_registration(tx.sender(), &tx.payload)?)
         } else {
             None
         };
@@ -1590,7 +1384,7 @@ impl WorldState {
         let new_staked = {
             let account = self
                 .accounts
-                .get_mut(&tx.from)
+                .get_mut(&tx.sender())
                 .ok_or(CoreError::InsufficientBalance)?;
             if account.nonce != tx.nonce {
                 return Err(CoreError::InvalidNonce {
@@ -1610,11 +1404,13 @@ impl WorldState {
             account.nonce += 1;
             account.staked
         };
-        self.mark_dirty(&tx.from);
+        self.mark_dirty(&tx.sender());
         // ADR 0038: auto-enter the validator pool once the bond floor is met.
         let bond = new_staked.atoms();
-        if bond >= self.min_validator_bond_atoms && !self.banned_validator_keys.contains(&tx.from) {
-            if let Some(entry) = self.validator_pool.get_mut(&tx.from) {
+        if bond >= self.min_validator_bond_atoms
+            && !self.banned_validator_keys.contains(&tx.sender())
+        {
+            if let Some(entry) = self.validator_pool.get_mut(&tx.sender()) {
                 entry.bond_atoms = bond;
             } else {
                 let mut entry = vinx_core::ValidatorPoolEntry::new(bond, self.current_block_ts);
@@ -1627,8 +1423,8 @@ impl WorldState {
                 })?;
                 entry.bls_pub_key = Some(pk);
                 entry.bls_pop = Some(pop);
-                self.validator_pool.insert(tx.from, entry);
-                tracing::info!(addr = %tx.from, bond, "ADR 0038: validator auto-entered pool");
+                self.validator_pool.insert(tx.sender(), entry);
+                tracing::info!(addr = %tx.sender(), bond, "ADR 0038: validator auto-entered pool");
             }
         }
         Ok(())
@@ -1636,7 +1432,7 @@ impl WorldState {
 
     fn apply_unstake(&mut self, tx: &Transaction) -> Result<(), CoreError> {
         let bond_floor = Amount::from_atoms(self.min_validator_bond_atoms);
-        let is_active_validator = self.validator_set.contains(&tx.from);
+        let is_active_validator = self.validator_set.contains(&tx.sender());
         let unlock_ts = self.current_block_ts.saturating_add(UNBONDING_SECS);
 
         // ADR 0009: cap concurrent unbonding entries per account (anti-spam on
@@ -1644,7 +1440,7 @@ impl WorldState {
         let pending_for_sender = self
             .pending_unbonds
             .iter()
-            .filter(|u| u.address == tx.from)
+            .filter(|u| u.address == tx.sender())
             .count();
         if pending_for_sender >= vinx_core::amount::MAX_PENDING_UNBONDS_PER_ACCOUNT {
             return Err(CoreError::InvalidTransaction(
@@ -1655,7 +1451,7 @@ impl WorldState {
         let remaining = {
             let account = self
                 .accounts
-                .get_mut(&tx.from)
+                .get_mut(&tx.sender())
                 .ok_or(CoreError::InsufficientBalance)?;
             if account.nonce != tx.nonce {
                 return Err(CoreError::InvalidNonce {
@@ -1682,28 +1478,28 @@ impl WorldState {
         // The withdrawn amount does NOT return to the balance now: it enters the
         // unbonding delay and stays slashable until `unlock_ts`. Circulation-neutral.
         self.pending_unbonds.push(PendingUnbond {
-            address: tx.from,
+            address: tx.sender(),
             amount: tx.amount,
             unlock_ts,
         });
-        self.mark_dirty(&tx.from);
+        self.mark_dirty(&tx.sender());
         // ADR 0038 + ADR 0036: update pool entry when bond drops below the floor.
         // Instead of immediately transitioning to Unbonding, enqueue for rate-limited
         // exit at the next epoch close (at most MAX_VALIDATOR_EXITS_PER_EPOCH per epoch).
         // Bond remains slashable while queued.
         let new_bond = remaining.atoms();
-        if let Some(entry) = self.validator_pool.get_mut(&tx.from) {
+        if let Some(entry) = self.validator_pool.get_mut(&tx.sender()) {
             entry.bond_atoms = new_bond;
             if new_bond < self.min_validator_bond_atoms {
-                let already_queued = self.exit_queue.iter().any(|r| r.address == tx.from);
+                let already_queued = self.exit_queue.iter().any(|r| r.address == tx.sender());
                 if !already_queued {
                     self.exit_queue.push(ValidatorExitRequest {
-                        address: tx.from,
+                        address: tx.sender(),
                         request_height: self.block_height,
                         unlock_ts,
                     });
                     tracing::info!(
-                        addr = %tx.from,
+                        addr = %tx.sender(),
                         new_bond,
                         "ADR 0036: bond below floor, validator enqueued for rate-limited exit"
                     );
@@ -1741,7 +1537,7 @@ impl WorldState {
 
         let sender = self
             .accounts
-            .get_mut(&tx.from)
+            .get_mut(&tx.sender())
             .ok_or(CoreError::InsufficientBalance)?;
         if sender.nonce != tx.nonce {
             return Err(CoreError::InvalidNonce {
@@ -1750,7 +1546,7 @@ impl WorldState {
             });
         }
         sender.nonce += 1;
-        self.mark_dirty(&tx.from);
+        self.mark_dirty(&tx.sender());
 
         self.pending_upgrade = Some(ScheduledUpgrade {
             version: new_version,
@@ -1820,7 +1616,7 @@ impl WorldState {
     /// `compute_state_root` used to return the accounts root alone, so the root committed
     /// to nothing but `(address, balance, nonce, staked)` per account. Everything that
     /// decides who may produce blocks and who governs the chain — the validator set and
-    /// pool (bonds, BLS keys, PoP, VRF keys, status), the admin key and policy, pending
+    /// pool (bonds, BLS keys, PoP, status), the admin key and policy, pending
     /// governance and upgrades, the epoch beacon, the supply counters — sat outside it.
     /// Two nodes could therefore disagree on the entire validator set and the admin key
     /// while publishing an identical `state_root`, and since `state_root` is the only
@@ -1837,14 +1633,14 @@ impl WorldState {
         let mut banned: Vec<&Address> = self.banned_validator_keys.iter().collect();
         banned.sort_unstable();
 
-        #[derive(Serialize)]
+        #[derive(BorshSerialize)]
         struct ConsensusCommitment<'a> {
             chain_id: u32,
+            block_time_secs: u64,
             block_height: u64,
             validator_set: &'a ValidatorSet,
             validator_pool: &'a BTreeMap<Address, vinx_core::ValidatorPoolEntry>,
             banned_validator_keys: Vec<&'a Address>,
-            active_set_size: u32,
             min_validator_bond_atoms: u128,
             admin_address: &'a Option<Address>,
             admin_policy: &'a Option<AdminPolicy>,
@@ -1854,8 +1650,6 @@ impl WorldState {
             pending_unbonds: &'a [PendingUnbond],
             exit_queue: &'a [ValidatorExitRequest],
             reliability: &'a ReliabilityMap,
-            epoch_beacon: &'a Hash32,
-            modules: &'a BTreeMap<Hash32, ModuleEntry>,
             fee_floor: u128,
             base_fee: u128,
             circulating_supply: u128,
@@ -1864,20 +1658,18 @@ impl WorldState {
             epoch_dist_emission_pot: u128,
             emission_epoch_ts: u64,
             last_epoch_close_ts: u64,
-            last_active_set_size_change_ts: u64,
             last_bond_change_ts: u64,
-            last_block_ts: u64,
+            last_voting_set: &'a Option<ValidatorSet>,
             emission_started: bool,
-            foundry: u128,
         }
 
         let commitment = ConsensusCommitment {
             chain_id: self.chain_id,
+            block_time_secs: self.block_time_secs,
             block_height: self.block_height,
             validator_set: &self.validator_set,
             validator_pool: &self.validator_pool,
             banned_validator_keys: banned,
-            active_set_size: self.active_set_size,
             min_validator_bond_atoms: self.min_validator_bond_atoms,
             admin_address: &self.admin_address,
             admin_policy: &self.admin_policy,
@@ -1887,8 +1679,6 @@ impl WorldState {
             pending_unbonds: &self.pending_unbonds,
             exit_queue: &self.exit_queue,
             reliability: &self.reliability,
-            epoch_beacon: &self.epoch_beacon,
-            modules: &self.modules,
             fee_floor: self.fee_floor.atoms(),
             base_fee: self.base_fee.atoms(),
             circulating_supply: self.circulating_supply.atoms(),
@@ -1897,20 +1687,18 @@ impl WorldState {
             epoch_dist_emission_pot: self.epoch_dist_emission_pot.atoms(),
             emission_epoch_ts: self.emission_epoch_ts,
             last_epoch_close_ts: self.last_epoch_close_ts,
-            last_active_set_size_change_ts: self.last_active_set_size_change_ts,
             last_bond_change_ts: self.last_bond_change_ts,
-            last_block_ts: self.last_block_ts,
+            last_voting_set: &self.last_voting_set,
             // `emission_started` gouverne l'émission ET la clôture d'époque : deux nœuds
             // qui en divergent émettent différemment. Il n'était engagé qu'indirectement,
             // via `emission_epoch_ts` — donc invisible quand celui-ci vaut 0.
             emission_started: self.emission_started,
             // Dormant depuis ADR 0040, mais persisté et désérialisé : l'engager coûte
             // 16 octets et supprime la question « est-il vraiment mort ? ».
-            foundry: self.foundry.atoms(),
         };
 
-        let encoded = bincode::serialize(&commitment)
-            .expect("consensus commitment serialization is infallible");
+        let encoded =
+            borsh::to_vec(&commitment).expect("consensus commitment serialization is infallible");
         let mut buf = Vec::with_capacity(CONSENSUS_ROOT_DST.len() + encoded.len());
         buf.extend_from_slice(CONSENSUS_ROOT_DST);
         buf.extend_from_slice(&encoded);
@@ -1942,35 +1730,22 @@ impl WorldState {
     }
 
     fn apply_slash_validator(&mut self, tx: &Transaction) -> Result<(), CoreError> {
-        let evidence: SlashEvidence = bincode::deserialize(&tx.payload)
+        let evidence: VoteEquivocation = borsh::from_slice(&tx.payload)
             .map_err(|_| CoreError::InvalidTransaction("malformed slash evidence".to_string()))?;
 
         let target = &tx.to;
 
-        // 1. Same height, different blocks — the definition of equivocation.
-        if evidence.header_a.height != evidence.header_b.height {
+        // 1. Two votes of the target, same kind/height/round, different values — the
+        //    definition of equivocation (ADR 0082).
+        if evidence.vote_a.validator != *target || !evidence.is_conflicting() {
             return Err(CoreError::InvalidTransaction(
-                "evidence headers are at different heights".to_string(),
-            ));
-        }
-        let hash_a = evidence.header_a.hash();
-        let hash_b = evidence.header_b.hash();
-        if hash_a == hash_b {
-            return Err(CoreError::InvalidTransaction(
-                "evidence headers are identical — not equivocation".to_string(),
+                "evidence is not a conflicting pair of votes by the target".to_string(),
             ));
         }
 
-        // 2. Both headers must name the target as proposer.
-        if evidence.header_a.validator != *target || evidence.header_b.validator != *target {
-            return Err(CoreError::InvalidTransaction(
-                "evidence headers do not name target as proposer".to_string(),
-            ));
-        }
-
-        // 3. THE crucial check: both BLS signatures must verify against the target's
-        //    registered BLS key (ADR 0046). Only the target could have produced both —
-        //    forging evidence requires forging a BLS signature over a real header.
+        // 2. THE crucial check: both signatures must verify against the target's
+        //    registered BLS key. Only the target could have produced both — forging
+        //    evidence requires forging a BLS signature.
         let bls_pk_bytes = self
             .validator_pool
             .get(target)
@@ -1984,23 +1759,15 @@ impl WorldState {
         let bls_pk = BlsPubKey::from_bytes(&bls_pk_bytes).map_err(|_| {
             CoreError::InvalidTransaction("target BLS public key is malformed".to_string())
         })?;
-        let sig_a_arr: [u8; 96] =
-            evidence.bls_sig_a.as_slice().try_into().map_err(|_| {
-                CoreError::InvalidTransaction("bls_sig_a must be 96 bytes".to_string())
-            })?;
-        let sig_b_arr: [u8; 96] =
-            evidence.bls_sig_b.as_slice().try_into().map_err(|_| {
-                CoreError::InvalidTransaction("bls_sig_b must be 96 bytes".to_string())
-            })?;
-        if vinx_crypto::bls_verify(&bls_pk, &BlsSignature(sig_a_arr), &hash_a).is_err()
-            || vinx_crypto::bls_verify(&bls_pk, &BlsSignature(sig_b_arr), &hash_b).is_err()
-        {
+        if !evidence.verify(self.chain_id, &bls_pk) {
             return Err(CoreError::InvalidTransaction(
                 "BLS equivocation proof does not verify".to_string(),
             ));
         }
 
-        if !self.validator_set.contains(target) {
+        // A validator that already left the active set stays slashable while its bond is
+        // still in the pool (warm-up, bench, unbonding).
+        if !self.validator_set.contains(target) && !self.validator_pool.contains_key(target) {
             return Err(CoreError::InvalidTransaction(
                 "target is not a validator".to_string(),
             ));
@@ -2008,7 +1775,7 @@ impl WorldState {
 
         let sender = self
             .accounts
-            .get_mut(&tx.from)
+            .get_mut(&tx.sender())
             .ok_or(CoreError::InsufficientBalance)?;
         if sender.nonce != tx.nonce {
             return Err(CoreError::InvalidNonce {
@@ -2049,15 +1816,22 @@ impl WorldState {
             if returned > 0 {
                 self.credit(target, Amount::from_atoms(returned));
             }
-            self.credit(&tx.from, Amount::from_atoms(bounty)); // reporter bounty (10%)
+            self.credit(&tx.sender(), Amount::from_atoms(bounty)); // reporter bounty (10%)
             self.move_to_epoch_pot(Amount::from_atoms(to_melt)); // 90% → honest validators
         }
 
-        self.mark_dirty(&tx.from);
+        self.mark_dirty(&tx.sender());
 
         // Remove from validator set (can't produce blocks anymore).
         if self.validator_set.len() > 1 {
-            self.validator_set.remove(target);
+            let remaining: Vec<Address> = self
+                .validator_set
+                .validators()
+                .iter()
+                .copied()
+                .filter(|a| a != target)
+                .collect();
+            self.validator_set = self.weighted_validator_set(remaining);
             tracing::warn!(validator = %target, slashed = slashable, "Validator slashed for equivocation");
         } else {
             tracing::warn!(validator = %target, "Slash accounting applied — last validator kept in set");
@@ -2078,7 +1852,7 @@ impl WorldState {
         let Some(ref signers) = signers else {
             return Err(CoreError::Unauthorized);
         };
-        if !signers.contains(&tx.from) {
+        if !signers.contains(&tx.sender()) {
             return Err(CoreError::Unauthorized);
         }
 
@@ -2088,7 +1862,7 @@ impl WorldState {
         // recorded) successfully.
         let cur_nonce = self
             .accounts
-            .get(&tx.from)
+            .get(&tx.sender())
             .ok_or(CoreError::InsufficientBalance)?
             .nonce;
         if cur_nonce != tx.nonce {
@@ -2098,7 +1872,7 @@ impl WorldState {
             });
         }
 
-        let action: GovernanceAction = bincode::deserialize(&tx.payload).map_err(|_| {
+        let action: GovernanceAction = borsh::from_slice(&tx.payload).map_err(|_| {
             CoreError::InvalidTransaction("malformed governance action payload".to_string())
         })?;
 
@@ -2109,23 +1883,55 @@ impl WorldState {
         if threshold <= 1 {
             self.execute_governance_action(action)?;
         } else {
-            self.record_governance_approval(action, tx.from, threshold)?;
+            self.record_governance_approval(action, tx.sender(), threshold)?;
         }
 
         // Success: consume the nonce.
         self.accounts
-            .get_mut(&tx.from)
+            .get_mut(&tx.sender())
             .expect("sender existence checked above")
             .nonce += 1;
-        self.mark_dirty(&tx.from);
+        self.mark_dirty(&tx.sender());
         Ok(())
+    }
+
+    /// Builds the active set for `addrs` with stake-weighted, capped voting power
+    /// (ADR 0081 C4). A validator's stake is its bond (pool entry or staked balance),
+    /// floored at the minimum bond so a grandfathered genesis validator (bond 0) still
+    /// votes like a minimally bonded one. Measured in whole VINX.
+    pub fn weighted_validator_set(&self, addrs: Vec<Address>) -> ValidatorSet {
+        let unit = vinx_core::amount::DECIMAL_FACTOR;
+        let stakes = addrs
+            .iter()
+            .map(|a| {
+                let pool = self
+                    .validator_pool
+                    .get(a)
+                    .map(|e| e.bond_atoms)
+                    .unwrap_or(0);
+                let staked = self.account_staked(a).atoms();
+                let bond = pool.max(staked).max(self.min_validator_bond_atoms);
+                (bond / unit).min(u64::MAX as u128) as u64
+            })
+            .collect();
+        ValidatorSet::with_stakes(addrs, stakes)
+    }
+
+    /// True once the on-chain admin tenure is over (ADR 0081 D7b): `ADMIN_TENURE_SECS`
+    /// after the emission epoch (first block). Derived only from committed fields and a
+    /// graved constant, so every node agrees and no transaction can extend it.
+    pub fn admin_tenure_expired(&self) -> bool {
+        self.emission_started
+            && self.current_block_ts >= self.emission_epoch_ts.saturating_add(ADMIN_TENURE_SECS)
     }
 
     /// The effective admin authority (ADR 0011): `(Some(signers), threshold)` under a
     /// committee or a single admin key; `(None, 1)` when no authority is configured — in
     /// which case callers must **refuse** the action (VINX-20), never allow it.
     fn effective_admin(&self) -> (Option<Vec<Address>>, u16) {
-        if let Some(ref p) = self.admin_policy {
+        if self.admin_tenure_expired() {
+            (None, 1)
+        } else if let Some(ref p) = self.admin_policy {
             (Some(p.signers.clone()), p.threshold)
         } else if let Some(admin) = self.admin_address {
             (Some(vec![admin]), 1)
@@ -2143,7 +1949,7 @@ impl WorldState {
         approver: Address,
         threshold: u16,
     ) -> Result<(), CoreError> {
-        let action_hash = hash256(&bincode::serialize(&action).map_err(|_| {
+        let action_hash = hash256(&borsh::to_vec(&action).map_err(|_| {
             CoreError::InvalidTransaction("cannot serialize governance action".to_string())
         })?);
         let existing = self
@@ -2207,7 +2013,9 @@ impl WorldState {
                         "candidate validator has not posted the minimum bond".to_string(),
                     ));
                 }
-                self.validator_set.add(addr);
+                let mut addrs = self.validator_set.validators().to_vec();
+                addrs.push(addr);
+                self.validator_set = self.weighted_validator_set(addrs);
                 tracing::info!(%addr, "Admin: validator added");
             }
             GovernanceAction::RemoveValidator(addr) => {
@@ -2221,7 +2029,14 @@ impl WorldState {
                         "address is not a validator".to_string(),
                     ));
                 }
-                self.validator_set.remove(&addr);
+                let remaining: Vec<Address> = self
+                    .validator_set
+                    .validators()
+                    .iter()
+                    .copied()
+                    .filter(|a| *a != addr)
+                    .collect();
+                self.validator_set = self.weighted_validator_set(remaining);
                 tracing::info!(%addr, "Admin: validator removed");
             }
             GovernanceAction::UpdateFeeFloor { atoms } => {
@@ -2257,36 +2072,6 @@ impl WorldState {
                 self.admin_policy = Some(policy);
                 self.pending_governance.clear();
                 tracing::info!(threshold, "Admin: committee policy set");
-            }
-            GovernanceAction::UpdateActiveSetSize { new_size } => {
-                // ADR 0038: governable active-set N — must move by exactly ±ACTIVE_SET_STEP,
-                // stay ≥ MIN_ACTIVE_SET_SIZE, and observe ACTIVE_SET_COOLDOWN_SECS.
-                let current = self.active_set_size;
-                let diff = (new_size as i64 - current as i64).unsigned_abs() as u32;
-                if diff == 0 || diff != ACTIVE_SET_STEP {
-                    return Err(CoreError::InvalidTransaction(format!(
-                        "active_set_size must change by exactly ±{ACTIVE_SET_STEP} (current {current}, requested {new_size})"
-                    )));
-                }
-                if new_size < MIN_ACTIVE_SET_SIZE {
-                    return Err(CoreError::InvalidTransaction(format!(
-                        "active_set_size {new_size} is below the minimum {MIN_ACTIVE_SET_SIZE}"
-                    )));
-                }
-                if self.last_active_set_size_change_ts > 0 {
-                    let elapsed = self
-                        .current_block_ts
-                        .saturating_sub(self.last_active_set_size_change_ts);
-                    if elapsed < ACTIVE_SET_COOLDOWN_SECS {
-                        return Err(CoreError::InvalidTransaction(format!(
-                            "active_set_size was changed {} s ago; cooldown is {} s",
-                            elapsed, ACTIVE_SET_COOLDOWN_SECS
-                        )));
-                    }
-                }
-                self.active_set_size = new_size;
-                self.last_active_set_size_change_ts = self.current_block_ts;
-                tracing::info!(new_size, "Admin: active_set_size updated (ADR 0038)");
             }
             GovernanceAction::UpdateMinValidatorBond { atoms } => {
                 // ADR 0038: governable bond floor — within hard bounds, move by at most
@@ -2328,137 +2113,6 @@ impl WorldState {
         Ok(())
     }
 
-    /// Applies an `AnchorState` transaction: a bonded module-registry operation (ADR 0010).
-    /// The L1 records the operator, bond, and latest anchor — never module logic.
-    ///
-    /// Every op pays the base fee (anti-spam; credited to the producer like a transfer) and
-    /// leaves the operator with a live account (`balance >= ED`) — module operators are
-    /// never dust and never reaped. Each arm validates fully before mutating, so a rejected
-    /// op consumes no nonce (the producer skips a failed tx without rollback, cf. ADR 0026).
-    fn apply_anchor_state(&mut self, tx: &Transaction) -> Result<(), CoreError> {
-        let op: ModuleOp = bincode::deserialize(&tx.payload).map_err(|_| {
-            CoreError::InvalidTransaction("malformed module operation payload".to_string())
-        })?;
-
-        // Fee floor (same anti-spam forfait as a transfer).
-        if tx.fee < self.base_fee {
-            return Err(CoreError::InvalidTransaction(format!(
-                "fee {} is below minimum {}",
-                tx.fee, self.base_fee
-            )));
-        }
-        let ed = EXISTENTIAL_DEPOSIT_ATOMS;
-
-        let operator = tx.from;
-        let (nonce, balance) = {
-            let acc = self
-                .accounts
-                .get(&operator)
-                .ok_or(CoreError::InsufficientBalance)?;
-            (acc.nonce, acc.balance.atoms())
-        };
-        if nonce != tx.nonce {
-            return Err(CoreError::InvalidNonce {
-                expected: nonce,
-                got: tx.nonce,
-            });
-        }
-
-        // Compute the operator's balance debit for this op, validating fully before any
-        // mutation. Register locks a bond on top of the fee; Anchor/Deregister pay the fee
-        // only (Deregister also refunds the bond, applied after removal below).
-        let fee = tx.fee.atoms();
-        match &op {
-            ModuleOp::Register {
-                module_id,
-                bond_atoms,
-            } => {
-                if *bond_atoms < MIN_MODULE_BOND_ATOMS {
-                    return Err(CoreError::InvalidTransaction(
-                        "module bond is below the minimum".to_string(),
-                    ));
-                }
-                if self.modules.contains_key(module_id) {
-                    return Err(CoreError::InvalidTransaction(
-                        "module id is already registered".to_string(),
-                    ));
-                }
-                if self.modules.len() >= MAX_MODULES {
-                    return Err(CoreError::InvalidTransaction(
-                        "module registry is full".to_string(),
-                    ));
-                }
-                let debit = bond_atoms
-                    .checked_add(fee)
-                    .ok_or(CoreError::AmountOverflow)?;
-                if balance < debit {
-                    return Err(CoreError::InsufficientBalance);
-                }
-                // Operators keep a live account (>= ED): they must exist to anchor later.
-                if balance - debit < ed {
-                    return Err(CoreError::BelowExistentialDeposit);
-                }
-                let acc = self.accounts.get_mut(&operator).expect("checked above");
-                acc.balance = Amount::from_atoms(balance - debit);
-                acc.nonce += 1;
-                self.modules.insert(
-                    *module_id,
-                    ModuleEntry {
-                        operator,
-                        bond: Amount::from_atoms(*bond_atoms),
-                        anchor_head: [0u8; 32],
-                        anchored_count: 0,
-                    },
-                );
-            }
-            ModuleOp::Anchor {
-                module_id,
-                anchor_head,
-            } => {
-                let entry = self
-                    .modules
-                    .get(module_id)
-                    .ok_or_else(|| CoreError::InvalidTransaction("unknown module".to_string()))?;
-                if entry.operator != operator {
-                    return Err(CoreError::Unauthorized);
-                }
-                if balance < fee || balance - fee < ed {
-                    return Err(CoreError::InsufficientBalance);
-                }
-                let new_head = *anchor_head;
-                let acc = self.accounts.get_mut(&operator).expect("checked above");
-                acc.balance = Amount::from_atoms(balance - fee);
-                acc.nonce += 1;
-                let entry = self.modules.get_mut(module_id).expect("checked above");
-                entry.anchor_head = new_head;
-                entry.anchored_count += 1;
-            }
-            ModuleOp::Deregister { module_id } => {
-                let entry = self
-                    .modules
-                    .get(module_id)
-                    .ok_or_else(|| CoreError::InvalidTransaction("unknown module".to_string()))?;
-                if entry.operator != operator {
-                    return Err(CoreError::Unauthorized);
-                }
-                if balance < fee {
-                    return Err(CoreError::InsufficientBalance);
-                }
-                let refund = entry.bond.atoms();
-                let acc = self.accounts.get_mut(&operator).expect("checked above");
-                // Net: −fee +refunded bond. Refund keeps the account well above ED.
-                acc.balance = Amount::from_atoms(balance - fee + refund);
-                acc.nonce += 1;
-                self.modules.remove(module_id);
-            }
-        }
-
-        // The fee changes hands into the block pool → credited to the producer at settle.
-        self.block_fees = self.block_fees.saturating_add(tx.fee);
-        self.mark_dirty(&operator);
-        Ok(())
-    }
-
     /// Applies a `RegisterBlsKey` transaction (ADR 0046): stores a validator's BLS12-381
     /// public key and Proof-of-Possession in the validator pool after verifying both.
     ///
@@ -2477,7 +2131,7 @@ impl WorldState {
         owner: Address,
         payload_bytes: &[u8],
     ) -> Result<(Vec<u8>, Vec<u8>), CoreError> {
-        let payload: RegisterBlsKeyPayload = bincode::deserialize(payload_bytes).map_err(|_| {
+        let payload: RegisterBlsKeyPayload = borsh::from_slice(payload_bytes).map_err(|_| {
             CoreError::InvalidTransaction("malformed RegisterBlsKey payload".to_string())
         })?;
         if payload.bls_pub_key.len() != 48 {
@@ -2517,7 +2171,7 @@ impl WorldState {
     fn apply_register_bls_key(&mut self, tx: &Transaction) -> Result<(), CoreError> {
         let account = self
             .accounts
-            .get(&tx.from)
+            .get(&tx.sender())
             .ok_or(CoreError::InsufficientBalance)?;
         if account.nonce != tx.nonce {
             return Err(CoreError::InvalidNonce {
@@ -2526,7 +2180,7 @@ impl WorldState {
             });
         }
 
-        if !self.validator_pool.contains_key(&tx.from) {
+        if !self.validator_pool.contains_key(&tx.sender()) {
             return Err(CoreError::InvalidTransaction(
                 "only bonded validators may register a BLS key".to_string(),
             ));
@@ -2535,85 +2189,28 @@ impl WorldState {
         // Contrôle unique, partagé avec le chemin de bonding (ADR 0075 §3.1) : longueurs,
         // point G1 valide, PoP liée à (clé, validateur, chain_id), unicité de la clé.
         // Validation avant mutation — un payload refusé ne consomme pas le nonce.
-        let (pk, pop) = self.validate_bls_registration(tx.from, &tx.payload)?;
+        let (pk, pop) = self.validate_bls_registration(tx.sender(), &tx.payload)?;
 
         let entry = self
             .validator_pool
-            .get_mut(&tx.from)
+            .get_mut(&tx.sender())
             .expect("existence checked above");
         entry.bls_pub_key = Some(pk);
         entry.bls_pop = Some(pop);
 
         self.accounts
-            .get_mut(&tx.from)
+            .get_mut(&tx.sender())
             .expect("existence checked above")
             .nonce += 1;
-        self.mark_dirty(&tx.from);
-        tracing::info!(validator = %tx.from, "ADR 0046: BLS key registered");
-        Ok(())
-    }
-
-    /// Applies a `RegisterVrfKey` transaction (ADR 0029 Phase 2b).
-    /// Stores the validator's ECVRF public key (32-byte compressed Edwards25519 point)
-    /// after validating that the key is a well-formed curve point.
-    fn apply_register_vrf_key(&mut self, tx: &Transaction) -> Result<(), CoreError> {
-        let account = self
-            .accounts
-            .get(&tx.from)
-            .ok_or(CoreError::InsufficientBalance)?;
-        if account.nonce != tx.nonce {
-            return Err(CoreError::InvalidNonce {
-                expected: account.nonce,
-                got: tx.nonce,
-            });
-        }
-
-        if !self.validator_pool.contains_key(&tx.from) {
-            return Err(CoreError::InvalidTransaction(
-                "only bonded validators may register a VRF key".to_string(),
-            ));
-        }
-
-        if tx.payload.len() != 32 {
-            return Err(CoreError::InvalidTransaction(
-                "RegisterVrfKey payload must be 32 bytes (compressed Edwards25519 point)"
-                    .to_string(),
-            ));
-        }
-        let mut key_bytes = [0u8; 32];
-        key_bytes.copy_from_slice(&tx.payload);
-
-        // Validate: the key must decompress to a valid Edwards25519 point.
-        if VrfPublicKey(key_bytes).0.len() != 32 {
-            return Err(CoreError::InvalidTransaction(
-                "invalid VRF public key".to_string(),
-            ));
-        }
-        // Actually validate by attempting a decompress via vrf_verify with a dummy proof
-        // would be expensive. Instead just accept the 32 bytes — they are validated on
-        // first use in verify_committee_vrf_proof. This matches how Ed25519 pubkeys are
-        // stored in accounts (bytes only, validated on signature verification).
-
-        // Mutation: store the VRF public key in the pool entry.
-        let entry = self
-            .validator_pool
-            .get_mut(&tx.from)
-            .expect("existence checked above");
-        entry.vrf_pub_key = Some(key_bytes);
-
-        self.accounts
-            .get_mut(&tx.from)
-            .expect("existence checked above")
-            .nonce += 1;
-        self.mark_dirty(&tx.from);
-        tracing::info!(validator = %tx.from, "ADR 0029: VRF key registered");
+        self.mark_dirty(&tx.sender());
+        tracing::info!(validator = %tx.sender(), "ADR 0046: BLS key registered");
         Ok(())
     }
 
     fn apply_unjail(&mut self, tx: &Transaction) -> Result<(), CoreError> {
         let account = self
             .accounts
-            .get(&tx.from)
+            .get(&tx.sender())
             .ok_or(CoreError::InsufficientBalance)?;
         if account.nonce != tx.nonce {
             return Err(CoreError::InvalidNonce {
@@ -2622,17 +2219,17 @@ impl WorldState {
             });
         }
         let height = self.block_height;
-        if !reliability::try_unjail(&mut self.reliability, &tx.from, height) {
+        if !reliability::try_unjail(&mut self.reliability, &tx.sender(), height) {
             return Err(CoreError::InvalidTransaction(
                 "unjail failed: validator is not jailed or cooldown has not elapsed".to_string(),
             ));
         }
         self.accounts
-            .get_mut(&tx.from)
+            .get_mut(&tx.sender())
             .expect("existence checked above")
             .nonce += 1;
-        self.mark_dirty(&tx.from);
-        tracing::info!(validator = %tx.from, height, "ADR 0027: validator unjailed");
+        self.mark_dirty(&tx.sender());
+        tracing::info!(validator = %tx.sender(), height, "ADR 0027: validator unjailed");
         Ok(())
     }
 
@@ -2680,8 +2277,6 @@ mod tests {
 
     // ─── Fair launch: emission, fees, bond, unbonding, slashing ──────────────
     use vinx_core::amount::{cumulative_emission_atoms, EMISSION_T_HALF_SECS};
-    use vinx_core::block::GENESIS_PREV_HASH;
-    use vinx_core::{BlockHeader, SlashEvidence};
 
     #[test]
     fn test_supply_invariant_detects_corruption() {
@@ -2700,7 +2295,7 @@ mod tests {
     fn test_first_block_sets_emission_epoch_and_emits_nothing() {
         let mut s = WorldState::new();
         let (_, producer) = kp_addr();
-        let (fees, emission) = s.settle_block(&producer, 1, 1_000);
+        let (fees, emission) = s.settle_block(&producer, 1_000);
         assert_eq!(fees, Amount::ZERO);
         assert_eq!(emission, Amount::ZERO);
         assert_eq!(s.emission_epoch_ts, 1_000);
@@ -2711,9 +2306,9 @@ mod tests {
     fn test_emission_rewards_producer_and_conserves_supply() {
         let mut s = WorldState::new();
         let (_, producer) = kp_addr();
-        s.settle_block(&producer, 1, 0); // establish epoch at t=0
-                                         // One full half-life later: ~50% of the supply has been minted.
-        let (_, emission) = s.settle_block(&producer, 2, EMISSION_T_HALF_SECS);
+        s.settle_block(&producer, 0); // establish epoch at t=0
+                                      // One full half-life later: ~50% of the supply has been minted.
+        let (_, emission) = s.settle_block(&producer, EMISSION_T_HALF_SECS);
         let expected = cumulative_emission_atoms(EMISSION_T_HALF_SECS);
         assert_eq!(emission.atoms(), expected);
         // ADR 0028: producer gets 20%, 80% goes to epoch pot.
@@ -2729,8 +2324,8 @@ mod tests {
         // A producer with zero stake still earns the full block emission.
         let mut s = WorldState::new();
         let (_, producer) = kp_addr();
-        s.settle_block(&producer, 1, 0);
-        let (_, emission) = s.settle_block(&producer, 2, EMISSION_T_HALF_SECS / 20); // ~1 year
+        s.settle_block(&producer, 0);
+        let (_, emission) = s.settle_block(&producer, EMISSION_T_HALF_SECS / 20); // ~1 year
         assert!(emission > Amount::ZERO);
         // ADR 0028: producer receives PROPOSER_SHARE_BPS (20%) of the emission.
         let expected_balance =
@@ -2739,7 +2334,7 @@ mod tests {
     }
 
     #[test]
-    fn test_fee_goes_to_producer_not_epoch_pot() {
+    fn test_fee_split_between_producer_and_epoch_pot() {
         let mut s = WorldState::new();
         let (sender_kp, sender) = kp_addr();
         let (_, receiver) = kp_addr();
@@ -2750,13 +2345,61 @@ mod tests {
         let tx = Transaction::new_transfer(&sender_kp, receiver, amount, fee, 0);
         let pot_before = s.epoch_dist_emission_pot;
         s.apply_transaction(&tx).unwrap();
-        // Fee is collected, not routed to the epoch pot.
+        // Fee is collected at apply time; the pot moves only when the block settles.
         assert_eq!(s.epoch_dist_emission_pot, pot_before);
-        // Settling credits the producer with the fee (epoch established, no emission).
-        s.settle_block(&producer, 1, 100);
-        assert_eq!(s.accounts[&producer].balance, fee);
-        // The fee just changed hands: circulation is unchanged.
-        assert_eq!(s.circulating_supply, Amount::from_vinx(1_000));
+        // Settling (epoch established, no emission) splits the fee (ADR 0081 D4).
+        s.settle_block(&producer, 100);
+        let producer_part = Amount::from_atoms(fee.atoms() * FEE_PRODUCER_SHARE_BPS / BPS_DENOM);
+        let cosigner_part = fee.checked_sub(producer_part).unwrap();
+        assert!(producer_part > Amount::ZERO && cosigner_part > Amount::ZERO);
+        assert_eq!(s.accounts[&producer].balance, producer_part);
+        assert_eq!(
+            s.epoch_dist_emission_pot,
+            pot_before.saturating_add(cosigner_part)
+        );
+        // Nothing burned: circulation + pot still equals everything emitted.
+        assert_eq!(
+            s.circulating_supply
+                .saturating_add(s.epoch_dist_emission_pot),
+            Amount::from_vinx(1_000)
+        );
+    }
+
+    #[test]
+    fn test_admin_authority_expires_after_tenure() {
+        // ADR 0081 D7b: the admin acts during its tenure, then never again.
+        use vinx_core::amount::ADMIN_TENURE_SECS;
+        use vinx_core::GovernanceAction;
+        let (mut state, admin_kp, _) = admin_state();
+        state.emission_started = true;
+        state.emission_epoch_ts = 1_000;
+        let fee_floor = |atoms, nonce| {
+            Transaction::new_admin_action(
+                &admin_kp,
+                &GovernanceAction::UpdateFeeFloor { atoms },
+                nonce,
+            )
+        };
+        state.set_block_context(1_000 + ADMIN_TENURE_SECS - 1);
+        assert!(!state.admin_tenure_expired());
+        state.apply_transaction(&fee_floor(200_000, 0)).unwrap();
+
+        state.set_block_context(1_000 + ADMIN_TENURE_SECS);
+        assert!(state.admin_tenure_expired());
+        assert_eq!(
+            state.apply_transaction(&fee_floor(300_000, 1)),
+            Err(CoreError::Unauthorized)
+        );
+        // Neither a rotation nor a committee can revive it.
+        let (_, other) = kp_addr();
+        assert_eq!(
+            state.apply_transaction(&Transaction::new_admin_action(
+                &admin_kp,
+                &GovernanceAction::RotateAdmin(other),
+                1,
+            )),
+            Err(CoreError::Unauthorized)
+        );
     }
 
     #[test]
@@ -2811,10 +2454,10 @@ mod tests {
         assert_eq!(s.pending_unbonds.len(), 1);
 
         // Just before unlock: nothing matures. Use a separate producer so addr stays clean.
-        s.settle_block(&producer, 1, 1_000 + UNBONDING_SECS - 1);
+        s.settle_block(&producer, 1_000 + UNBONDING_SECS - 1);
         assert_eq!(s.pending_unbonds.len(), 1);
         // At unlock: the bond returns to addr's balance.
-        s.settle_block(&producer, 2, 1_000 + UNBONDING_SECS);
+        s.settle_block(&producer, 1_000 + UNBONDING_SECS);
         assert!(s.pending_unbonds.is_empty());
         assert_eq!(s.accounts[&addr].balance, Amount::from_vinx(1_000));
     }
@@ -2959,7 +2602,7 @@ mod tests {
         assert_eq!(s.accounts[&addr].balance, Amount::ZERO);
         assert_eq!(s.accounts[&addr].staked, Amount::ZERO);
         // After maturation the funds return.
-        s.settle_block(&addr, 1, 1_000 + UNBONDING_SECS);
+        s.settle_block(&addr, 1_000 + UNBONDING_SECS);
         assert_eq!(s.accounts[&addr].balance, stake);
     }
 
@@ -3114,172 +2757,6 @@ mod tests {
         assert!(s.pending_governance.is_empty());
     }
 
-    // ─── ADR 0010: bonded module registry ────────────────────────────────────
-    use vinx_core::amount::MIN_MODULE_BOND_ATOMS;
-    use vinx_core::module::ModuleOp;
-
-    fn operator_state() -> (WorldState, KeyPair, Address) {
-        let mut s = WorldState::new();
-        let kp = KeyPair::generate();
-        let addr = Address::from_public_key(&kp.public_key());
-        s.credit_for_test(addr, Amount::from_vinx(5_000));
-        s.circulating_supply = Amount::from_vinx(5_000);
-        (s, kp, addr)
-    }
-
-    #[test]
-    fn test_module_register_locks_bond_and_conserves_supply() {
-        let (mut s, kp, addr) = operator_state();
-        let fee = s.base_fee;
-        let supply_before = s.circulating_supply;
-        let id = [7u8; 32];
-        let op = ModuleOp::Register {
-            module_id: id,
-            bond_atoms: MIN_MODULE_BOND_ATOMS,
-        };
-        s.apply_transaction(&Transaction::new_anchor_state(&kp, &op, fee, 0))
-            .unwrap();
-
-        let entry = s.modules.get(&id).unwrap();
-        assert_eq!(entry.operator, addr);
-        assert_eq!(entry.bond.atoms(), MIN_MODULE_BOND_ATOMS);
-        assert_eq!(entry.anchor_head, [0u8; 32]);
-        // Balance debited by bond + fee; bond is locked (not destroyed) so circulation holds.
-        let expected = Amount::from_vinx(5_000).atoms() - MIN_MODULE_BOND_ATOMS - fee.atoms();
-        assert_eq!(s.accounts[&addr].balance.atoms(), expected);
-        assert_eq!(s.circulating_supply, supply_before);
-    }
-
-    #[test]
-    fn test_module_register_rejects_low_bond_and_duplicate() {
-        let (mut s, kp, _) = operator_state();
-        let fee = s.base_fee;
-        // Below the minimum bond.
-        let low = ModuleOp::Register {
-            module_id: [1u8; 32],
-            bond_atoms: MIN_MODULE_BOND_ATOMS - 1,
-        };
-        assert!(s
-            .apply_transaction(&Transaction::new_anchor_state(&kp, &low, fee, 0))
-            .is_err());
-        assert!(s.modules.is_empty());
-        // Register, then a duplicate id is rejected.
-        let id = [2u8; 32];
-        let ok = ModuleOp::Register {
-            module_id: id,
-            bond_atoms: MIN_MODULE_BOND_ATOMS,
-        };
-        s.apply_transaction(&Transaction::new_anchor_state(&kp, &ok, fee, 0))
-            .unwrap();
-        let dup = ModuleOp::Register {
-            module_id: id,
-            bond_atoms: MIN_MODULE_BOND_ATOMS,
-        };
-        assert!(s
-            .apply_transaction(&Transaction::new_anchor_state(&kp, &dup, fee, 1))
-            .is_err());
-    }
-
-    #[test]
-    fn test_module_anchor_is_operator_only() {
-        let (mut s, kp, _) = operator_state();
-        let fee = s.base_fee;
-        let id = [3u8; 32];
-        s.apply_transaction(&Transaction::new_anchor_state(
-            &kp,
-            &ModuleOp::Register {
-                module_id: id,
-                bond_atoms: MIN_MODULE_BOND_ATOMS,
-            },
-            fee,
-            0,
-        ))
-        .unwrap();
-
-        // Operator advances the anchor.
-        let head = [9u8; 32];
-        s.apply_transaction(&Transaction::new_anchor_state(
-            &kp,
-            &ModuleOp::Anchor {
-                module_id: id,
-                anchor_head: head,
-            },
-            fee,
-            1,
-        ))
-        .unwrap();
-        assert_eq!(s.modules[&id].anchor_head, head);
-        assert_eq!(s.modules[&id].anchored_count, 1);
-
-        // A non-operator cannot anchor.
-        let outsider = KeyPair::generate();
-        s.credit_for_test(
-            Address::from_public_key(&outsider.public_key()),
-            Amount::from_vinx(1),
-        );
-        let r = s.apply_transaction(&Transaction::new_anchor_state(
-            &outsider,
-            &ModuleOp::Anchor {
-                module_id: id,
-                anchor_head: [1u8; 32],
-            },
-            fee,
-            0,
-        ));
-        assert_eq!(r, Err(CoreError::Unauthorized));
-        assert_eq!(s.modules[&id].anchor_head, head); // unchanged
-    }
-
-    #[test]
-    fn test_module_deregister_returns_bond() {
-        let (mut s, kp, addr) = operator_state();
-        let fee = s.base_fee;
-        let id = [4u8; 32];
-        s.apply_transaction(&Transaction::new_anchor_state(
-            &kp,
-            &ModuleOp::Register {
-                module_id: id,
-                bond_atoms: MIN_MODULE_BOND_ATOMS,
-            },
-            fee,
-            0,
-        ))
-        .unwrap();
-        let bal_after_register = s.accounts[&addr].balance.atoms();
-        s.apply_transaction(&Transaction::new_anchor_state(
-            &kp,
-            &ModuleOp::Deregister { module_id: id },
-            fee,
-            1,
-        ))
-        .unwrap();
-        assert!(s.modules.is_empty());
-        // Bond refunded, minus the deregister fee.
-        assert_eq!(
-            s.accounts[&addr].balance.atoms(),
-            bal_after_register + MIN_MODULE_BOND_ATOMS - fee.atoms()
-        );
-    }
-
-    #[test]
-    fn test_module_register_insufficient_balance_rejected() {
-        let mut s = WorldState::new();
-        let kp = KeyPair::generate();
-        s.credit_for_test(
-            Address::from_public_key(&kp.public_key()),
-            Amount::from_vinx(500), // below the 1000 VINX bond
-        );
-        let fee = s.base_fee;
-        let op = ModuleOp::Register {
-            module_id: [5u8; 32],
-            bond_atoms: MIN_MODULE_BOND_ATOMS,
-        };
-        assert!(s
-            .apply_transaction(&Transaction::new_anchor_state(&kp, &op, fee, 0))
-            .is_err());
-        assert!(s.modules.is_empty());
-    }
-
     #[test]
     fn test_unstake_pending_cap_enforced() {
         use vinx_core::amount::MAX_PENDING_UNBONDS_PER_ACCOUNT;
@@ -3331,26 +2808,22 @@ mod tests {
         assert!(s.apply_transaction(&bad).is_err());
     }
 
-    // Builds a BLS-signed header at `height` with a distinguishing `state_root`.
-    // Returns (header, bls_sig_bytes) — the 96-byte G2 individual BLS signature.
-    fn bls_signed_header(
+    // A prevote by `validator` at (5, 0) for `value`, signed with `bls_sk` (chain devnet).
+    fn signed_prevote(
         bls_sk: &vinx_crypto::BlsSecretKey,
         validator: Address,
-        height: u64,
-        tag: u8,
-    ) -> (BlockHeader, Vec<u8>) {
-        let header = BlockHeader {
-            height,
-            prev_hash: GENESIS_PREV_HASH,
-            timestamp: 0,
+        value: Option<[u8; 32]>,
+    ) -> vinx_core::SignedVote {
+        let mut v = vinx_core::SignedVote {
+            kind: vinx_core::VoteKind::Prevote,
+            height: 5,
+            round: 0,
+            value,
             validator,
-            tx_count: 0,
-            state_root: [tag; 32],
-            base_fee: 0,
-            receipts_root: [0u8; 32],
+            signature: vec![],
         };
-        let sig = bls_sk.sign(&header.hash());
-        (header, sig.0.to_vec())
+        v.signature = bls_sk.sign(&v.sign_bytes(CHAIN_ID_DEVNET)).0.to_vec();
+        v
     }
 
     // Registers a BLS key for `addr` in the validator_pool (bypasses PoP check for tests).
@@ -3383,16 +2856,10 @@ mod tests {
         register_bls_key_for_test(&mut s, victim, &victim_bls_sk);
         s.validator_set = ValidatorSet::new(vec![victim, reporter]);
 
-        let (header_a, _) = bls_signed_header(&victim_bls_sk, victim, 5, 0xAA);
-        let (header_b, _) = bls_signed_header(&victim_bls_sk, victim, 5, 0xBB);
-        // Forged: sign headers with the attacker's BLS key, not the victim's.
-        let forge_sig_a = attacker_bls_sk.sign(&header_a.hash()).0.to_vec();
-        let forge_sig_b = attacker_bls_sk.sign(&header_b.hash()).0.to_vec();
-        let evidence = SlashEvidence {
-            header_a,
-            header_b,
-            bls_sig_a: forge_sig_a,
-            bls_sig_b: forge_sig_b,
+        // Forged: two conflicting votes signed with the attacker's key, not the victim's.
+        let evidence = VoteEquivocation {
+            vote_a: signed_prevote(&attacker_bls_sk, victim, Some([0xAA; 32])),
+            vote_b: signed_prevote(&attacker_bls_sk, victim, Some([0xBB; 32])),
         };
         let tx = Transaction::new_slash_validator(&reporter_kp, victim, &evidence, 0);
         assert!(s.apply_transaction(&tx).is_err());
@@ -3414,14 +2881,10 @@ mod tests {
         register_bls_key_for_test(&mut s, victim, &victim_bls_sk);
         s.validator_set = ValidatorSet::new(vec![victim, reporter]);
 
-        // Two genuinely BLS-signed, different headers at the same height = equivocation.
-        let (header_a, bls_sig_a) = bls_signed_header(&victim_bls_sk, victim, 5, 0xAA);
-        let (header_b, bls_sig_b) = bls_signed_header(&victim_bls_sk, victim, 5, 0xBB);
-        let evidence = SlashEvidence {
-            header_a,
-            header_b,
-            bls_sig_a,
-            bls_sig_b,
+        // Two genuinely signed, conflicting votes at the same (height, round) = equivocation.
+        let evidence = VoteEquivocation {
+            vote_a: signed_prevote(&victim_bls_sk, victim, Some([0xAA; 32])),
+            vote_b: signed_prevote(&victim_bls_sk, victim, None),
         };
         let tx = Transaction::new_slash_validator(&reporter_kp, victim, &evidence, 0);
         s.apply_transaction(&tx).unwrap();
@@ -3599,21 +3062,9 @@ mod tests {
             }),
         ));
         mutations.push((
-            "epoch_beacon",
-            Box::new(|s: &mut WorldState| {
-                s.epoch_beacon = [0xFFu8; 32];
-            }),
-        ));
-        mutations.push((
             "chain_id",
             Box::new(|s: &mut WorldState| {
                 s.chain_id = s.chain_id.wrapping_add(1);
-            }),
-        ));
-        mutations.push((
-            "active_set_size",
-            Box::new(|s: &mut WorldState| {
-                s.active_set_size += 1;
             }),
         ));
         mutations.push((
@@ -4007,127 +3458,6 @@ mod tests {
         assert!(s.exit_queue.is_empty(), "exit queue must be drained");
     }
 
-    // ─── ADR 0038: UpdateActiveSetSize governance ─────────────────────────────
-
-    #[test]
-    fn test_update_active_set_size_happy_path() {
-        use vinx_core::amount::{ACTIVE_SET_STEP, DEFAULT_ACTIVE_SET_SIZE};
-        use vinx_core::GovernanceAction;
-        let (mut s, admin_kp, _) = admin_state();
-        s.current_block_ts = 1_000;
-        let new_size = DEFAULT_ACTIVE_SET_SIZE + ACTIVE_SET_STEP;
-
-        s.apply_transaction(&Transaction::new_admin_action(
-            &admin_kp,
-            &GovernanceAction::UpdateActiveSetSize { new_size },
-            0,
-        ))
-        .unwrap();
-
-        assert_eq!(s.active_set_size, new_size);
-        assert_eq!(s.last_active_set_size_change_ts, 1_000);
-    }
-
-    #[test]
-    fn test_update_active_set_size_wrong_step_rejected() {
-        use vinx_core::amount::DEFAULT_ACTIVE_SET_SIZE;
-        use vinx_core::GovernanceAction;
-        let (mut s, admin_kp, _) = admin_state();
-
-        // Step of 4 (not ACTIVE_SET_STEP=2) must be rejected.
-        assert!(s
-            .apply_transaction(&Transaction::new_admin_action(
-                &admin_kp,
-                &GovernanceAction::UpdateActiveSetSize {
-                    new_size: DEFAULT_ACTIVE_SET_SIZE + 4,
-                },
-                0,
-            ))
-            .is_err());
-        assert_eq!(s.active_set_size, DEFAULT_ACTIVE_SET_SIZE);
-    }
-
-    #[test]
-    fn test_update_active_set_size_below_minimum_rejected() {
-        use vinx_core::amount::{ACTIVE_SET_STEP, MIN_ACTIVE_SET_SIZE};
-        use vinx_core::GovernanceAction;
-        let (mut s, admin_kp, _) = admin_state();
-        // Force the size down to MIN_ACTIVE_SET_SIZE + ACTIVE_SET_STEP so one more
-        // decrement would cross the floor.
-        s.active_set_size = MIN_ACTIVE_SET_SIZE + ACTIVE_SET_STEP;
-
-        assert!(s
-            .apply_transaction(&Transaction::new_admin_action(
-                &admin_kp,
-                &GovernanceAction::UpdateActiveSetSize {
-                    new_size: MIN_ACTIVE_SET_SIZE, // exactly the floor — still ok
-                },
-                0,
-            ))
-            .is_ok());
-
-        // One more decrement would go below the floor.
-        s.last_active_set_size_change_ts = 0; // bypass cooldown
-        assert!(s
-            .apply_transaction(&Transaction::new_admin_action(
-                &admin_kp,
-                &GovernanceAction::UpdateActiveSetSize {
-                    new_size: MIN_ACTIVE_SET_SIZE - ACTIVE_SET_STEP,
-                },
-                1,
-            ))
-            .is_err());
-        assert_eq!(s.active_set_size, MIN_ACTIVE_SET_SIZE);
-    }
-
-    #[test]
-    fn test_update_active_set_size_cooldown_enforced() {
-        use vinx_core::amount::{
-            ACTIVE_SET_COOLDOWN_SECS, ACTIVE_SET_STEP, DEFAULT_ACTIVE_SET_SIZE,
-        };
-        use vinx_core::GovernanceAction;
-        let (mut s, admin_kp, _) = admin_state();
-        // Use a non-zero baseline so last_change_ts > 0 after the first change.
-        s.current_block_ts = 1_000;
-
-        // First change succeeds.
-        s.apply_transaction(&Transaction::new_admin_action(
-            &admin_kp,
-            &GovernanceAction::UpdateActiveSetSize {
-                new_size: DEFAULT_ACTIVE_SET_SIZE + ACTIVE_SET_STEP,
-            },
-            0,
-        ))
-        .unwrap();
-
-        // Second change within cooldown must fail.
-        s.current_block_ts = 1_000 + ACTIVE_SET_COOLDOWN_SECS - 1;
-        assert!(s
-            .apply_transaction(&Transaction::new_admin_action(
-                &admin_kp,
-                &GovernanceAction::UpdateActiveSetSize {
-                    new_size: DEFAULT_ACTIVE_SET_SIZE + ACTIVE_SET_STEP * 2,
-                },
-                1,
-            ))
-            .is_err());
-
-        // After cooldown elapses it succeeds again.
-        s.current_block_ts = 1_000 + ACTIVE_SET_COOLDOWN_SECS + 1;
-        s.apply_transaction(&Transaction::new_admin_action(
-            &admin_kp,
-            &GovernanceAction::UpdateActiveSetSize {
-                new_size: DEFAULT_ACTIVE_SET_SIZE + ACTIVE_SET_STEP * 2,
-            },
-            1,
-        ))
-        .unwrap();
-        assert_eq!(
-            s.active_set_size,
-            DEFAULT_ACTIVE_SET_SIZE + ACTIVE_SET_STEP * 2
-        );
-    }
-
     // ─── ADR 0038: UpdateMinValidatorBond governance ──────────────────────────
 
     #[test]
@@ -4251,339 +3581,6 @@ mod tests {
         assert_eq!(s.min_validator_bond_atoms, new_atoms);
     }
 
-    // ─── ADR 0029 Phase 2: epoch beacon ──────────────────────────────────────
-
-    #[test]
-    fn test_tick_epoch_close_updates_beacon() {
-        let mut s = WorldState::new();
-        let beacon_before = s.epoch_beacon;
-        s.tick_epoch_close();
-        assert_ne!(
-            s.epoch_beacon, beacon_before,
-            "beacon must change after epoch close"
-        );
-        assert_ne!(
-            s.epoch_beacon, [0u8; 32],
-            "beacon must be non-zero after epoch close"
-        );
-    }
-
-    #[test]
-    fn test_tick_epoch_close_beacon_is_deterministic() {
-        let mut s1 = WorldState::new();
-        let mut s2 = WorldState::new();
-        s1.tick_epoch_close();
-        s2.tick_epoch_close();
-        assert_eq!(
-            s1.epoch_beacon, s2.epoch_beacon,
-            "beacon must be deterministic"
-        );
-    }
-
-    #[test]
-    fn test_tick_epoch_close_beacon_chain_differs_across_epochs() {
-        let mut s = WorldState::new();
-        s.tick_epoch_close();
-        let beacon_after_1 = s.epoch_beacon;
-        s.tick_epoch_close();
-        let beacon_after_2 = s.epoch_beacon;
-        assert_ne!(
-            beacon_after_1, beacon_after_2,
-            "successive epoch beacons must differ"
-        );
-    }
-
-    // ─── ADR 0029 Phase 2: committee_for_height ───────────────────────────────
-
-    fn pool_state_with_active_validators(n: usize) -> WorldState {
-        use vinx_core::validator_pool::{PoolStatus, ValidatorPoolEntry};
-        let mut s = WorldState::new();
-        for _ in 0..n {
-            let (_, addr) = kp_addr();
-            let mut entry = ValidatorPoolEntry::new(MIN_VALIDATOR_BOND_ATOMS, 0);
-            entry.status = PoolStatus::Active;
-            s.validator_pool.insert(addr, entry);
-        }
-        s
-    }
-
-    #[test]
-    fn test_committee_for_height_respects_k_cap() {
-        let s = pool_state_with_active_validators(10);
-        let committee = s.committee_for_height(1, 5);
-        assert_eq!(committee.len(), 5);
-    }
-
-    #[test]
-    fn test_committee_for_height_at_most_pool_size() {
-        let s = pool_state_with_active_validators(3);
-        let committee = s.committee_for_height(1, 10);
-        assert_eq!(committee.len(), 3, "committee cannot exceed pool size");
-    }
-
-    #[test]
-    fn test_committee_for_height_is_deterministic() {
-        let s = pool_state_with_active_validators(10);
-        let c1 = s.committee_for_height(42, 5);
-        let c2 = s.committee_for_height(42, 5);
-        assert_eq!(c1, c2, "committee selection must be deterministic");
-    }
-
-    #[test]
-    fn test_committee_for_height_differs_across_heights() {
-        let s = pool_state_with_active_validators(10);
-        let c1 = s.committee_for_height(1, 5);
-        let c2 = s.committee_for_height(2, 5);
-        // With 10 candidates and 5 slots there's virtually no chance of identical selection.
-        assert_ne!(c1, c2, "committee should differ across heights");
-    }
-
-    // ─── ADR 0029 Phase 2b: ECVRF committee membership ────────────────────────
-
-    #[test]
-    fn test_register_vrf_key_happy_path() {
-        use vinx_crypto::VrfSecretKey;
-        let (mut s, kp, addr) = validator_pool_state();
-        let vrf_sk = VrfSecretKey::generate();
-        let vrf_pk = vrf_sk.public_key();
-
-        let tx = Transaction::new_register_vrf_key(&kp, &vrf_pk.0, 0);
-        s.apply_transaction(&tx).unwrap();
-
-        assert_eq!(s.validator_pool[&addr].vrf_pub_key, Some(vrf_pk.0));
-        assert_eq!(s.accounts[&addr].nonce, 1);
-    }
-
-    #[test]
-    fn test_register_vrf_key_non_validator_rejected() {
-        use vinx_crypto::VrfSecretKey;
-        let mut s = WorldState::new();
-        let kp = KeyPair::generate();
-        let addr = Address::from_public_key(&kp.public_key());
-        s.credit_for_test(addr, Amount::from_vinx(10));
-
-        let vrf_sk = VrfSecretKey::generate();
-        let vrf_pk = vrf_sk.public_key();
-        let tx = Transaction::new_register_vrf_key(&kp, &vrf_pk.0, 0);
-
-        assert!(s.apply_transaction(&tx).is_err());
-        assert!(!s.validator_pool.contains_key(&addr));
-    }
-
-    #[test]
-    fn test_register_vrf_key_wrong_payload_size_rejected() {
-        let (mut s, kp, _) = validator_pool_state();
-        // Build a tx with a 31-byte payload (invalid).
-        let mut tx = Transaction::new_register_vrf_key(&kp, &[0u8; 32], 0);
-        tx.payload = vec![0u8; 31];
-        // Re-sign with the correct key.
-        tx.signature = Some(kp.sign(&tx.signing_bytes()));
-        assert!(s.apply_transaction(&tx).is_err());
-    }
-
-    #[test]
-    fn test_verify_committee_vrf_proof_happy_path() {
-        use vinx_crypto::VrfSecretKey;
-        let mut s = WorldState::new();
-        let kp = KeyPair::generate();
-        let addr = Address::from_public_key(&kp.public_key());
-        s.credit_for_test(addr, Amount::from_vinx(1_000));
-        s.validator_pool.insert(
-            addr,
-            vinx_core::ValidatorPoolEntry::new(MIN_VALIDATOR_BOND_ATOMS, 0),
-        );
-
-        let vrf_sk = VrfSecretKey::generate();
-        let vrf_pk = vrf_sk.public_key();
-        // Register the VRF key.
-        s.apply_transaction(&Transaction::new_register_vrf_key(&kp, &vrf_pk.0, 0))
-            .unwrap();
-
-        // Prove and verify at height 42.
-        let alpha = s.committee_alpha(42);
-        let proof = vrf_sk.prove(&alpha);
-        let result = s.verify_committee_vrf_proof(&addr, 42, &proof);
-
-        assert!(result.is_ok(), "valid VRF proof must verify");
-        let output = result.unwrap();
-        assert_ne!(output, [0u8; 64]);
-    }
-
-    #[test]
-    fn test_verify_committee_vrf_proof_wrong_alpha_rejected() {
-        use vinx_crypto::VrfSecretKey;
-        let mut s = WorldState::new();
-        let kp = KeyPair::generate();
-        let addr = Address::from_public_key(&kp.public_key());
-        s.credit_for_test(addr, Amount::from_vinx(1_000));
-        s.validator_pool.insert(
-            addr,
-            vinx_core::ValidatorPoolEntry::new(MIN_VALIDATOR_BOND_ATOMS, 0),
-        );
-
-        let vrf_sk = VrfSecretKey::generate();
-        let vrf_pk = vrf_sk.public_key();
-        s.apply_transaction(&Transaction::new_register_vrf_key(&kp, &vrf_pk.0, 0))
-            .unwrap();
-
-        // Prove at height 1 but verify at height 2.
-        let alpha1 = s.committee_alpha(1);
-        let proof = vrf_sk.prove(&alpha1);
-        assert!(s.verify_committee_vrf_proof(&addr, 2, &proof).is_err());
-    }
-
-    #[test]
-    fn test_verify_committee_vrf_proof_no_key_rejected() {
-        use vinx_crypto::VrfSecretKey;
-        let (s, _, addr) = validator_pool_state();
-        // Pool entry exists but no VRF key registered.
-        let vrf_sk = VrfSecretKey::generate();
-        let alpha = s.committee_alpha(1);
-        let proof = vrf_sk.prove(&alpha);
-        assert!(s.verify_committee_vrf_proof(&addr, 1, &proof).is_err());
-    }
-
-    #[test]
-    fn test_committee_from_vrf_proofs_selects_top_k() {
-        use vinx_core::validator_pool::PoolStatus;
-        use vinx_crypto::VrfSecretKey;
-        let mut s = WorldState::new();
-        let height = 7u64;
-
-        // Create 5 validators, each with a VRF key registered.
-        let mut pairs: Vec<(KeyPair, Address, VrfSecretKey)> = Vec::new();
-        for _ in 0..5 {
-            let kp = KeyPair::generate();
-            let addr = Address::from_public_key(&kp.public_key());
-            s.credit_for_test(addr, Amount::from_vinx(1_000));
-            let mut entry = vinx_core::ValidatorPoolEntry::new(MIN_VALIDATOR_BOND_ATOMS, 0);
-            entry.status = PoolStatus::Active;
-            s.validator_pool.insert(addr, entry);
-            let vrf_sk = VrfSecretKey::generate();
-            let vrf_pk = vrf_sk.public_key();
-            s.apply_transaction(&Transaction::new_register_vrf_key(&kp, &vrf_pk.0, 0))
-                .unwrap();
-            pairs.push((kp, addr, vrf_sk));
-        }
-
-        // Build proofs for all 5 validators.
-        let alpha = s.committee_alpha(height);
-        let proofs: Vec<(Address, VrfProof)> = pairs
-            .iter()
-            .map(|(_, addr, vrf_sk)| (*addr, vrf_sk.prove(&alpha)))
-            .collect();
-
-        // Request top-3 committee.
-        let committee = s.committee_from_vrf_proofs(height, &proofs, 3);
-        assert_eq!(committee.len(), 3, "committee must have 3 members");
-
-        // All members must be from the pool.
-        for addr in &committee {
-            assert!(s.validator_pool.contains_key(addr));
-        }
-
-        // Result is deterministic.
-        let committee2 = s.committee_from_vrf_proofs(height, &proofs, 3);
-        assert_eq!(committee, committee2);
-    }
-
-    /// ADR 0029 Phase 2a — the VRF leader (top-1 committee) **rotates** across heights and
-    /// no validator dominates. This is the headline property that distinguishes VRF
-    /// selection from a static round-robin: because `alpha = beacon ‖ height` changes every
-    /// height, the lowest-output validator moves around, and over many heights the crown is
-    /// shared roughly uniformly.
-    #[test]
-    fn test_vrf_leader_rotates_and_is_roughly_uniform() {
-        use std::collections::HashMap;
-        use vinx_core::validator_pool::PoolStatus;
-        use vinx_crypto::VrfSecretKey;
-
-        let n = 5usize;
-        let mut s = WorldState::new();
-        let mut pairs: Vec<(Address, VrfSecretKey)> = Vec::new();
-        for _ in 0..n {
-            let kp = KeyPair::generate();
-            let addr = Address::from_public_key(&kp.public_key());
-            s.credit_for_test(addr, Amount::from_vinx(1_000));
-            let mut entry = vinx_core::ValidatorPoolEntry::new(MIN_VALIDATOR_BOND_ATOMS, 0);
-            entry.status = PoolStatus::Active;
-            s.validator_pool.insert(addr, entry);
-            let vrf_sk = VrfSecretKey::generate();
-            s.apply_transaction(&Transaction::new_register_vrf_key(
-                &kp,
-                &vrf_sk.public_key().0,
-                0,
-            ))
-            .unwrap();
-            pairs.push((addr, vrf_sk));
-        }
-
-        // We measure the SELECTION property (lowest VRF output leads), so we evaluate each
-        // validator's output locally (one ECVRF prove each) and pick the min — no need to
-        // re-verify every proof each round (verification is exercised elsewhere and is far
-        // more expensive). `committee_from_vrf_proofs` uses this exact min-output rule.
-        let rounds = 60u64;
-        let mut wins: HashMap<Address, u64> = HashMap::new();
-        for h in 1..=rounds {
-            let alpha = s.committee_alpha(h);
-            let leader = pairs
-                .iter()
-                .map(|(a, sk)| {
-                    let (_, output) = sk.evaluate(&alpha);
-                    (*a, output)
-                })
-                .min_by_key(|(_, o)| *o)
-                .map(|(a, _)| a)
-                .expect("non-empty validator set");
-            *wins.entry(leader).or_insert(0) += 1;
-        }
-
-        // Rotation: every validator wins at least once over 60 heights (P(a given validator
-        // never wins) = (4/5)^60 ≈ 1.5·10⁻⁶ — deterministic in practice).
-        assert_eq!(
-            wins.len(),
-            n,
-            "every validator should lead at least once — the crown rotates"
-        );
-        // Fairness: nobody wins more than 3× the uniform mean (12). A static schedule or a
-        // biased VRF would blow past this; uniform selection stays well under.
-        let mean = rounds / n as u64; // 12
-        for (addr, w) in &wins {
-            assert!(
-                *w <= mean * 3,
-                "validator {addr} led {w} times, far above the fair share (~{mean})"
-            );
-        }
-    }
-
-    #[test]
-    fn test_committee_excludes_unbonding_and_warmup() {
-        use vinx_core::validator_pool::{PoolStatus, ValidatorPoolEntry};
-        let mut s = WorldState::new();
-
-        let (_, active_addr) = kp_addr();
-        let mut active_entry = ValidatorPoolEntry::new(MIN_VALIDATOR_BOND_ATOMS, 0);
-        active_entry.status = PoolStatus::Active;
-        s.validator_pool.insert(active_addr, active_entry);
-
-        let (_, warmup_addr) = kp_addr();
-        let warmup_entry = ValidatorPoolEntry::new(MIN_VALIDATOR_BOND_ATOMS, 0);
-        // Warmup is the default status — leave it as-is.
-        s.validator_pool.insert(warmup_addr, warmup_entry);
-
-        let (_, unbonding_addr) = kp_addr();
-        let mut unbonding_entry = ValidatorPoolEntry::new(MIN_VALIDATOR_BOND_ATOMS, 0);
-        unbonding_entry.status = PoolStatus::Unbonding { unlock_ts: 99999 };
-        s.validator_pool.insert(unbonding_addr, unbonding_entry);
-
-        let committee = s.committee_for_height(1, 10);
-        assert_eq!(
-            committee,
-            vec![active_addr],
-            "only Active/Benched validators are eligible"
-        );
-    }
-
     // ─── ADR 0036: validator churn bounds ─────────────────────────────────────
 
     fn bonded_active_validator() -> (WorldState, vinx_crypto::KeyPair, Address) {
@@ -4677,7 +3674,6 @@ mod tests {
                 eligible_blocks_in_window: 0,
                 bls_pub_key: None,
                 bls_pop: None,
-                vrf_pub_key: None,
             };
             s.validator_pool.insert(extra, entry);
         }
@@ -4741,7 +3737,6 @@ mod tests {
                 eligible_blocks_in_window: 0,
                 bls_pub_key: None,
                 bls_pop: None,
-                vrf_pub_key: None,
             };
             s.validator_pool.insert(addr, entry);
             addrs.push(addr);
@@ -4779,7 +3774,6 @@ mod tests {
                 eligible_blocks_in_window: 0,
                 bls_pub_key: None,
                 bls_pop: None,
-                vrf_pub_key: None,
             };
             s.validator_pool.insert(extra, entry);
         }
@@ -4830,7 +3824,6 @@ mod tests {
                 eligible_blocks_in_window: 0,
                 bls_pub_key: None,
                 bls_pop: None,
-                vrf_pub_key: None,
             };
             s.validator_pool.insert(addr, entry);
             targets.push(addr);
@@ -4878,7 +3871,6 @@ mod tests {
             eligible_blocks_in_window: 0,
             bls_pub_key: None,
             bls_pop: None,
-            vrf_pub_key: None,
         };
         s.validator_pool.insert(addr, entry);
 
@@ -4928,7 +3920,6 @@ mod tests {
                 eligible_blocks_in_window: 0,
                 bls_pub_key: None,
                 bls_pop: None,
-                vrf_pub_key: None,
             };
             s.validator_pool.insert(extra, entry);
         }
@@ -4967,38 +3958,5 @@ mod tests {
             s.exit_queue.is_empty(),
             "ghost exit must be silently discarded"
         );
-    }
-
-    #[test]
-    fn test_v19_meta_suffix_round_trips_into_a_v18_blob() {
-        // The v18→v19 migration relies on the bincode prefix-append property: a v18 meta
-        // blob must be a strict prefix of a v19 one, so appending the suffix yields a
-        // deserializable v19 state with last_block_ts = 0.
-        let s = WorldState::new();
-        let full = bincode::serialize(&s).expect("serialize v19 state");
-        let suffix = v19_meta_suffix();
-        assert_eq!(suffix, 0u64.to_le_bytes().to_vec());
-        assert!(
-            full.ends_with(&suffix),
-            "last_block_ts must be the last serialized field for the append migration"
-        );
-        let v18_blob = &full[..full.len() - suffix.len()];
-        let mut migrated = v18_blob.to_vec();
-        migrated.extend_from_slice(&suffix);
-        let back: WorldState =
-            bincode::deserialize(&migrated).expect("migrated blob must deserialize");
-        assert_eq!(back.last_block_ts, 0);
-    }
-
-    #[test]
-    fn test_v18_meta_suffix_is_eight_zero_bytes() {
-        // bincode empty Vec<ValidatorExitRequest> = 0u64 LE = [0;8]
-        let suffix = v18_meta_suffix();
-        assert_eq!(
-            suffix.len(),
-            8,
-            "v18 suffix must be 8 bytes (empty Vec length prefix)"
-        );
-        assert_eq!(suffix, vec![0u8; 8]);
     }
 }

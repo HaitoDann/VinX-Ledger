@@ -6,7 +6,7 @@
 
 <p align="center"><strong>Rail de paiement L1 PoS — rapide, souverain, sans intermédiaire.</strong></p>
 
-<p align="center">Une chaîne de paiement minimaliste : finalité déterministe au quorum, consensus Algorand-style, émission fair-launch. Rien d'autre.</p>
+<p align="center">Une chaîne de paiement minimaliste : finalité déterministe au quorum, consensus BFT Tendermint, émission fair-launch. Rien d'autre.</p>
 
 ---
 
@@ -36,31 +36,29 @@ Pas d'EVM. Pas de WASM. Pas de logique applicative sur L1. La surface d'attaque 
 ┌──────────────────────────────────────────────────────────────────┐
 │  VinX L1 — rail de paiement PoS                                   │
 │  • Comptes VINX · transferts · bond/slashing · frais forfaitaires │
-│  • Consensus : PoS Algorand-style, comité VRF n≈100, BLS agrégé  │
-│  • Finalité BFT déterministe (≥ 67 % du comité, 1 bloc)           │
+│  • Consensus : BFT Tendermint, ≤ 100 validateurs, BLS agrégé      │
+│  • Finalité immédiate (> 2/3 de la puissance, 1 bloc)             │
 │  • Émission progressive fair-launch (T_half ~20 ans)              │
-│  • Hachage BLAKE3 · adresses Bech32 vinx1 · anti-replay complet   │
+│  • Hachage BLAKE3 · adresses Bech32m vinx1 · anti-replay complet   │
 └──────────────────────────────────────────────────────────────────┘
 ```
 
 ---
 
-## Consensus — PoS Algorand-style
-
-Le consensus VinX est un **PoS pur avec comité réduit à sélection VRF** :
+## Consensus — BFT par étapes (Tendermint, ADR 0082)
 
 | Propriété | Valeur |
 |-----------|--------|
-| **Sélection** | VRF ECVRF (RFC 9381) — tirage uniforme parmi les bondés |
-| **Comité** | n ≈ 100 validateurs par bloc |
-| **Signatures** | BLS12-381 agrégé — 100 signatures → 1, vérification O(1) |
-| **Finalité** | BFT déterministe (1 bloc, ≥ 67 % du comité) |
-| **Admission** | Permissionless — bond suffit, pas d'approbation admin |
-| **Leader** | Validateur avec la sortie VRF la plus faible (imprévisible) |
+| **Étapes** | Proposition → prevote → precommit, avec verrou (lock) |
+| **Finalité** | Immédiate : un bloc commité (> 2/3 de la puissance) n'est jamais réorganisé |
+| **Leader** | Rotation pondérée par le stake (priorités Tendermint), validateurs jailed sautés |
+| **Votes** | Pondérés par le stake, plafonnés à 10 % par validateur |
+| **Validateurs** | Jusqu'à 100 actifs, sélection automatique par le bond |
+| **Signatures** | BLS12-381 agrégé — certificat de commit = 1 agrégat + bitmap |
+| **Temps de bloc** | Paramètre de genèse (12 s au départ), dérive d'horloge tolérée 15 s |
 
-**Résistance DoS** : le leader est imprévisible jusqu'au dernier moment — contrairement au round-robin, un attaquant ne sait pas qui cibler.
-
-> Le comité VRF (ADR 0029) est la cible ; le socle actuel tourne en PoA Threshold multi-validateur (round-robin + quorum BFT), éprouvé au banc n=3 et au banc adversarial multi-nœuds.
+> Tolérance aux pannes : moins d'1/3 de la puissance. À n=3 les 3 validateurs sont requis ;
+> une panne est tolérée à partir de n=4. Sans quorum, la chaîne s'arrête au lieu de diverger.
 
 ---
 
@@ -95,11 +93,12 @@ Le nœud expose **http://localhost:8545** :
 
 ## Tokenomics — Fair launch
 
-- **100 milliards VINX**, supply fixe et immuable.
+- **1 milliard de VINX**, supply fixe et immuable, **9 décimales** (ADR 0081).
 - **Aucun pre-mine, aucune réserve.** Les premiers VINX n'existent qu'au moment où le premier bloc est produit.
 - **Émission par le travail** : minting progressif, décroissance exponentielle continue, demi-vie ~20 ans.
-- **Validateurs rémunérés par l'émission + les frais** : les co-signataires du comité se partagent l'émission de l'époque (ADR 0028) ; les frais de transaction vont au producteur.
-- **Invariant** : `circulation + pot_époque + détruits = émis ≤ 100 Md` — garanti à chaque bloc.
+- **Validateurs rémunérés par l'émission + les frais, sans burn** : le producteur reçoit 20 % de l'émission et 50 % des frais de son bloc ; le reste va aux co-signataires au prorata de leur participation (ADR 0028, ADR 0081).
+- **Gouvernance à la Linux** : la clé admin on-chain s'éteint 365 jours après le premier bloc ; ensuite, le mainteneur dirige le logiciel et les validateurs choisissent la version qu'ils exécutent (ADR 0081).
+- **Invariant** : `circulation + pot_époque + détruits = émis ≤ 1 Md` — garanti à chaque bloc.
 
 > Whitepaper : [whitepaper.md](./whitepaper.md)
 
@@ -134,7 +133,7 @@ apps/
 sdk/
 └── vinx-sdk/           SDK TypeScript
 docs/
-└── adr/                Décisions d'architecture (ADR 0001 → 0050)
+└── adr/                Décisions d'architecture (ADR 0001 → 0081)
 ```
 
 ---

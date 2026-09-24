@@ -107,7 +107,7 @@ describe('VinxClient.submitTx()', () => {
     const payload = { accepted: true, tx_hash: 'abc123' };
     const spy = mockFetch(payload);
     const client = new VinxClient(BASE);
-    const tx = { tx_type: 'Transfer', from: 'vinx1a', to: 'vinx1b', amount: '10', fee: '0.001', nonce: 0 };
+    const tx = { tx_type: 'Transfer', to: 'vinx1b', amount: '10', fee: '100000', nonce: 0, chain_id: 7, payload: [], pub_key: new Array(32).fill(1), signature: 'ab'.repeat(64) };
     const result = await client.submitTx(tx);
     expect(spy).toHaveBeenCalledWith(
       `${BASE}/tx/submit`,

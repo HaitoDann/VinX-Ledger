@@ -1,6 +1,6 @@
 use std::path::PathBuf;
 use vinx_core::{chain_id::CHAIN_ID_DEVNET, ValidatorSet};
-use vinx_crypto::{Address, BlsSecretKey, KeyPair, VrfSecretKey};
+use vinx_crypto::{Address, BlsSecretKey, KeyPair};
 
 #[derive(Clone)]
 pub struct NodeConfig {
@@ -10,10 +10,8 @@ pub struct NodeConfig {
     pub validator_address: Address,
     /// Authorized validator set used for leader selection and quorum checks.
     pub validator_set: ValidatorSet,
-    /// Block time in seconds: fixed floor cadence (ADR 0041). At most one block every
-    /// `block_time_secs`; no back-to-back acceleration. Congestion handled via base-fee.
-    pub block_time_secs: u64,
-    /// Maximum transactions per block.
+    /// Maximum transactions this node puts in a block it proposes (capped by the protocol's
+    /// `MAX_BLOCK_TXS`).
     pub max_block_txs: usize,
     /// Maximum transactions held in the mempool at once (across all senders).
     /// Should be several blocks' worth so bursts can queue while blocks drain.
@@ -34,11 +32,6 @@ pub struct NodeConfig {
     /// Ed25519-only path is used. When set, the node signs produced blocks with BLS
     /// and the BLS public key is registered in the validator pool entry.
     pub bls_secret_key: BlsSecretKey,
-    /// ECVRF secret key for committee-selection proofs (ADR 0029 Phase 2b).
-    /// When `Some`, the node generates and gossips `BlockVrfProof` messages after
-    /// each accepted block.  The corresponding `VrfPublicKey` must be registered in
-    /// the validator pool entry for the node's address.  `None` = VRF disabled.
-    pub vrf_secret_key: Option<VrfSecretKey>,
     /// Keypair used to sign faucet transfer transactions. `None` = faucet disabled.
     pub faucet_keypair: Option<KeyPair>,
     /// Atoms to drip per faucet request (default: 100 VinX).
@@ -49,6 +42,11 @@ pub struct NodeConfig {
     pub chain_id: u32,
     /// Bootstrap peer multiaddrs dialed on P2P startup for initial peer discovery.
     pub bootstrap_peers: Vec<String>,
+    /// Trusted checkpoints (ADR 0074): a committed block at a checkpoint height must carry
+    /// the expected hash, or it is refused.
+    pub checkpoints: crate::checkpoints::Checkpoints,
+    /// Consensus round timeouts (ADR 0082).
+    pub timeouts: crate::bft::Timeouts,
 }
 
 impl NodeConfig {
@@ -60,8 +58,6 @@ impl NodeConfig {
             validator_keypair,
             validator_address,
             validator_set,
-            // ADR 0041 — 12 s fixed: wide propagation margin, rare forks.
-            block_time_secs: 12,
             // ADR 0041 — 3 000 tx/bloc max (~250 TPS) ; raised progressively as network grows.
             max_block_txs: 3_000,
             max_mempool_size: 100_000,
@@ -72,13 +68,23 @@ impl NodeConfig {
             sync_peer_rpc: None,
             admin_token: None,
             bls_secret_key: BlsSecretKey::generate(),
-            vrf_secret_key: None,
             faucet_keypair: None,
-            faucet_amount_atoms: 100 * 1_000_000_000_000_000_000, // 100 VinX
+            faucet_amount_atoms: 100 * vinx_core::amount::DECIMAL_FACTOR, // 100 VinX
             faucet_cooldown_secs: 86_400,
             chain_id: CHAIN_ID_DEVNET,
             bootstrap_peers: vec![],
+            checkpoints: crate::checkpoints::Checkpoints::none(),
+            timeouts: crate::bft::Timeouts::default(),
         }
+    }
+
+    /// Genesis key material of this node's BLS key (for a genesis it validates).
+    pub fn genesis_bls(&self) -> vinx_state::GenesisBlsKey {
+        vinx_state::GenesisBlsKey::from_secret(
+            &self.bls_secret_key,
+            &self.validator_address,
+            self.chain_id,
+        )
     }
 
     pub fn with_validator_set(mut self, validator_set: ValidatorSet) -> Self {
@@ -93,11 +99,6 @@ impl NodeConfig {
 
     pub fn with_peers(mut self, peers: Vec<String>) -> Self {
         self.peer_addrs = peers;
-        self
-    }
-
-    pub fn with_block_time(mut self, secs: u64) -> Self {
-        self.block_time_secs = secs;
         self
     }
 
@@ -141,13 +142,6 @@ impl NodeConfig {
     /// Enables BLS block co-signatures (ADR 0046) using the given BLS secret key.
     pub fn with_bls_key(mut self, bls_secret_key: BlsSecretKey) -> Self {
         self.bls_secret_key = bls_secret_key;
-        self
-    }
-
-    /// Enables ECVRF committee-selection proofs (ADR 0029 Phase 2b).
-    /// The corresponding `VrfPublicKey` must be registered in the validator pool.
-    pub fn with_vrf_key(mut self, vrf_secret_key: VrfSecretKey) -> Self {
-        self.vrf_secret_key = Some(vrf_secret_key);
         self
     }
 }

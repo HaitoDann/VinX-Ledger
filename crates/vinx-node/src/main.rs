@@ -61,7 +61,8 @@ struct Args {
     /// Path to TOML config file (default: config.toml if it exists)
     #[arg(long)]
     config: Option<PathBuf>,
-    /// Block time in seconds (overrides config)
+    /// Block time in seconds for a **new** single-node dev genesis (ADR 0081 C6). The block
+    /// time is a protocol parameter fixed at genesis; it is ignored once the chain exists.
     #[arg(long)]
     block_time: Option<u64>,
     /// RPC listen address, e.g. 0.0.0.0:8545 (overrides config)
@@ -211,6 +212,9 @@ struct GenesisSpec {
     initial_validator: String,
     #[serde(default)]
     prefund_initial_validator_vinx: u128,
+    /// Protocol block time (ADR 0081 C6). Defaults to `DEFAULT_BLOCK_TIME_SECS` (12 s).
+    #[serde(default)]
+    block_time_secs: Option<u64>,
     /// Initial validator's BLS G1 public key, hex (48 bytes), with its
     /// Proof-of-Possession, hex (96 bytes). Required for a multi-node network: without
     /// it the BLS registry is empty at genesis and peers refuse every block.
@@ -218,6 +222,17 @@ struct GenesisSpec {
     initial_validator_bls_pub_key: Option<String>,
     #[serde(default)]
     initial_validator_bls_pop: Option<String>,
+}
+
+/// Validates a genesis block time against the protocol bounds (ADR 0081 C6).
+fn checked_block_time(secs: u64) -> u64 {
+    use vinx_core::amount::{MAX_BLOCK_TIME_SECS, MIN_BLOCK_TIME_SECS};
+    assert!(
+        (MIN_BLOCK_TIME_SECS..=MAX_BLOCK_TIME_SECS).contains(&secs),
+        "block time {secs}s outside the protocol bounds \
+         [{MIN_BLOCK_TIME_SECS}, {MAX_BLOCK_TIME_SECS}]"
+    );
+    secs
 }
 
 // ─── Main ─────────────────────────────────────────────────────────────────────
@@ -244,7 +259,11 @@ async fn main() {
     };
 
     // CLI flag > config file > hardcoded default
-    let block_time = args.block_time.or(file_cfg.block_time_secs).unwrap_or(12); // ADR 0043
+    // ADR 0081 C6: only used when this node creates a fresh genesis.
+    let block_time = args
+        .block_time
+        .or(file_cfg.block_time_secs)
+        .unwrap_or(vinx_core::amount::DEFAULT_BLOCK_TIME_SECS);
     let rpc_listen = args
         .rpc_listen
         .or(file_cfg.rpc_listen)
@@ -339,19 +358,12 @@ async fn main() {
                             .expect("spec initial_validator_bls_pop: hex")
                             .try_into()
                             .expect("spec BLS PoP must be 96 bytes");
-                        Some(vinx_state::GenesisBlsKey { pub_key: pk, pop })
-                    }
-                    (None, None) => {
-                        tracing::warn!(
-                            "⚠ Genesis spec carries no initial_validator_bls_pub_key: the BLS \
-                             registry will be empty and peers will refuse every block. Set it \
-                             for any multi-node network."
-                        );
-                        None
+                        vinx_state::GenesisBlsKey { pub_key: pk, pop }
                     }
                     _ => panic!(
-                        "genesis spec must set both initial_validator_bls_pub_key and \
-                         initial_validator_bls_pop, or neither"
+                        "genesis spec must set initial_validator_bls_pub_key and \
+                         initial_validator_bls_pop: every block is committed by BLS-signed \
+                         votes verified against the on-chain registry (ADR 0082)"
                     ),
                 };
                 let cfg = GenesisConfig {
@@ -368,7 +380,11 @@ async fn main() {
                     initial_validator = %spec.initial_validator,
                     "⚠ Genèse construite depuis une spec partagée (testnet dev)"
                 );
-                let state = create_genesis_state_with_dev_prefund(&cfg, prefund_atoms);
+                let mut state = create_genesis_state_with_dev_prefund(&cfg, prefund_atoms);
+                state.block_time_secs = checked_block_time(
+                    spec.block_time_secs
+                        .unwrap_or(vinx_core::amount::DEFAULT_BLOCK_TIME_SECS),
+                );
                 let (chain, _genesis) = Chain::new_with_genesis(init_val, spec.genesis_timestamp);
                 (state, chain, false)
             } else {
@@ -378,12 +394,11 @@ async fn main() {
                     chain_id,
                     // This node *is* the genesis validator here, so register its own key:
                     // otherwise it could never produce a block its peers accept.
-                    validator_bls: Some(vinx_state::GenesisBlsKey {
-                        pub_key: bls_sk.public_key().0,
-                        pop: bls_sk
-                            .proof_of_possession(validator_addr.as_bytes(), chain_id)
-                            .0,
-                    }),
+                    validator_bls: vinx_state::GenesisBlsKey::from_secret(
+                        &bls_sk,
+                        &validator_addr,
+                        chain_id,
+                    ),
                 };
                 // VINX_DEV_PREFUND_VINX : pré-finance le validateur de genèse (mono-nœud dev).
                 let dev_prefund_atoms = std::env::var("VINX_DEV_PREFUND_VINX")
@@ -391,7 +406,9 @@ async fn main() {
                     .and_then(|v| v.parse::<u128>().ok())
                     .map(|vinx| vinx.saturating_mul(vinx_core::amount::DECIMAL_FACTOR))
                     .unwrap_or(0);
-                let state = create_genesis_state_with_dev_prefund(&genesis_cfg, dev_prefund_atoms);
+                let mut state =
+                    create_genesis_state_with_dev_prefund(&genesis_cfg, dev_prefund_atoms);
+                state.block_time_secs = checked_block_time(block_time);
                 let (chain, _genesis) = Chain::new_with_genesis(validator_addr, timestamp);
                 (state, chain, false)
             }
@@ -406,7 +423,6 @@ async fn main() {
 
     let mut config = NodeConfig::new(validator_kp)
         .with_bls_key(bls_sk)
-        .with_block_time(block_time)
         .with_rpc_listen(&rpc_listen)
         .with_data_dir(&data_dir);
 
@@ -439,7 +455,7 @@ async fn main() {
         let (faucet_kf, faucet_kp) = KeyFile::load_or_generate(faucet_path);
         let amount = file_cfg
             .faucet_amount_atoms
-            .unwrap_or(100 * 1_000_000_000_000_000_000);
+            .unwrap_or(100 * vinx_core::amount::DECIMAL_FACTOR);
         let cooldown = file_cfg.faucet_cooldown_secs.unwrap_or(86_400);
         tracing::info!(
             address = %faucet_kf.address,
@@ -514,6 +530,7 @@ async fn main() {
         &rpc_listen,
     );
 
+    config.checkpoints = checkpoints;
     let node = vinx_node::Node::new_with_p2p(state, chain, config).await;
 
     // ── BLS key registration (bootstrap) ──────────────────────────────────────
@@ -587,8 +604,9 @@ async fn main() {
         }
     }
 
-    let block_node = std::sync::Arc::clone(&node);
-    tokio::spawn(async move { block_node.run_block_producer().await });
+    // ADR 0082 — BFT consensus: one engine per height, driven by P2P and timers.
+    let consensus_node = std::sync::Arc::clone(&node);
+    tokio::spawn(async move { consensus_node.run_consensus().await });
 
     if let Err(e) = node.run_rpc().await {
         tracing::error!(error = %e, "RPC server terminated");

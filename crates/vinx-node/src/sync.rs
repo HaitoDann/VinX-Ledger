@@ -1,43 +1,75 @@
-//! Startup chain-sync: fetches blocks from a trusted peer and replays them.
+//! Startup chain-sync over HTTP: fetches committed blocks (with their certificates) from
+//! a peer and applies them through the single block-validation path (ADR 0082).
 
 use futures::future::join_all;
-use rayon::prelude::*;
 use serde::Deserialize;
 use std::time::{SystemTime, UNIX_EPOCH};
-use vinx_core::Block;
+use vinx_core::{Block, CommitCert};
 use vinx_state::WorldState;
 
 use crate::chain::Chain;
-use crate::consensus::validate_block_with_registry;
+use crate::execution;
 use crate::rpc::types::ChainSnapshotResponse;
 
-#[derive(Deserialize)]
-struct SyncResponse {
-    count: usize,
-    blocks: Vec<Block>,
+/// One committed block as served by `GET /chain/commits`.
+#[derive(Deserialize, serde::Serialize, Clone, Debug)]
+pub struct CommittedRow {
+    pub block: Block,
+    pub commit: CommitCert,
 }
 
-/// Syncs the local chain and state from `peer_rpc_url` starting at the local
-/// tip height + 1.  Returns the number of blocks applied.
-///
-/// The peer is only trusted as a *source* of blocks, never for their validity:
-/// every block is fully validated before being applied, exactly like a block
-/// received over P2P gossip —
-/// - hash-chain linkage (`prev_hash` must match our tip),
-/// - timestamp bounds (monotonic, not beyond local clock + max drift — ADR 0005),
-/// - proposer membership and quorum co-signatures, cryptographically verified
-///   against the validator set *as of that height* (the set evolves as
-///   governance transactions are replayed),
-/// - transaction signatures (verified in parallel, ADR 0015),
-/// - post-apply `state_root` match and supply invariant (ADR 0004).
-///
-/// The state transition of each block is applied against a snapshot: any
-/// failure rolls the world state back and aborts the sync, so a bad block can
-/// never leave the node with a half-applied state.
-///
-/// The function stops on the first validation failure and returns the count
-/// applied so far. Hitting a not-yet-finalized block at the peer's tip is a
-/// normal stop condition (its co-signatures arrive later over P2P).
+#[derive(Deserialize)]
+struct CommitsResponse {
+    rows: Vec<CommittedRow>,
+}
+
+fn now_secs() -> u64 {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|d| d.as_secs())
+        .unwrap_or(0)
+}
+
+/// Validates `row` as the next block and installs it. The peer is only a *source*: the
+/// certificate is checked against the local voting set and the block is fully
+/// re-executed (`execution::execute_committed`), exactly like a block from gossip.
+fn apply_row(
+    row: CommittedRow,
+    state: &mut WorldState,
+    chain: &mut Chain,
+    checkpoints: &crate::checkpoints::Checkpoints,
+) -> Result<(), String> {
+    let height = row.block.header.height;
+    let post =
+        execution::execute_committed(state, &chain.tip(), &row.block, &row.commit, now_secs())?;
+    // ADR 0074 §2.3 — a block at a checkpoint height must carry the expected hash.
+    checkpoints
+        .accepts_block(height, row.block.hash())
+        .map_err(|e| format!("block {height} refused by checkpoints: {e}"))?;
+    *state = post;
+    chain.push(row.block, Some(row.commit));
+    Ok(())
+}
+
+async fn fetch_rows(
+    client: &reqwest::Client,
+    base_url: &str,
+    from: u64,
+    limit: usize,
+) -> Result<Vec<CommittedRow>, String> {
+    let url = format!("{base_url}/chain/commits?from={from}&limit={limit}");
+    let resp = client.get(&url).send().await.map_err(|e| e.to_string())?;
+    if !resp.status().is_success() {
+        return Err(format!("HTTP {}", resp.status()));
+    }
+    resp.json::<CommitsResponse>()
+        .await
+        .map(|r| r.rows)
+        .map_err(|e| e.to_string())
+}
+
+/// Syncs the local chain and state from `peer_rpc_url`, starting at the local tip + 1.
+/// Stops at the first invalid block. Returns the number of blocks applied.
 pub async fn sync_from_peer(
     peer_rpc_url: &str,
     state: &mut WorldState,
@@ -48,177 +80,30 @@ pub async fn sync_from_peer(
         .timeout(std::time::Duration::from_secs(30))
         .build()
         .unwrap_or_default();
-
+    let base = peer_rpc_url.trim_end_matches('/');
     let batch = 200usize;
     let mut applied = 0usize;
-
     loop {
-        let from = chain.tip_height() + 1;
-        let url = format!(
-            "{}/chain/sync?from={}&limit={}",
-            peer_rpc_url.trim_end_matches('/'),
-            from,
-            batch
-        );
-
-        let resp = match client.get(&url).send().await {
+        let rows = match fetch_rows(&client, base, chain.tip_height() + 1, batch).await {
             Ok(r) => r,
             Err(e) => {
                 tracing::warn!(error = %e, "Sync request failed");
                 break;
             }
         };
-
-        if !resp.status().is_success() {
-            tracing::warn!(status = %resp.status(), "Sync returned non-200");
-            break;
-        }
-
-        let sync: SyncResponse = match resp.json().await {
-            Ok(s) => s,
-            Err(e) => {
-                tracing::warn!(error = %e, "Failed to parse sync response");
-                break;
-            }
-        };
-
-        if sync.count == 0 {
-            break; // fully caught up
-        }
-
-        let now = SystemTime::now()
-            .duration_since(UNIX_EPOCH)
-            .map(|d| d.as_secs())
-            .unwrap_or(0);
-
-        for block in sync.blocks {
-            // Verify block links to current tip
-            let expected_prev = chain.tip_hash();
-            if block.header.prev_hash != expected_prev {
-                tracing::error!(
-                    height = block.header.height,
-                    "Sync block has wrong prev_hash — aborting sync"
-                );
+        let n = rows.len();
+        for row in rows {
+            if let Err(e) = apply_row(row, state, chain, checkpoints) {
+                tracing::error!(error = %e, "Sync block rejected — aborting");
                 return applied;
             }
-
-            // ADR 0005: timestamp bounds — same rules as the P2P path. Monotonicity
-            // protects the emission/unbonding clock; the drift cap rejects blocks
-            // "from the future" that would let a producer over-forge emission.
-            if block.header.timestamp <= chain.tip_timestamp() {
-                tracing::error!(
-                    height = block.header.height,
-                    "Sync block timestamp not monotonic — aborting"
-                );
-                return applied;
-            }
-            if block.header.timestamp > now.saturating_add(vinx_core::amount::MAX_CLOCK_DRIFT_SECS)
-            {
-                tracing::error!(
-                    height = block.header.height,
-                    "Sync block timestamp too far in the future — aborting"
-                );
-                return applied;
-            }
-
-            // Proposer membership + quorum co-signatures, cryptographically verified
-            // against the on-chain BLS key registry. Uses the bitmap path
-            // (validate_block_with_registry) so that only keys registered in the
-            // validator pool can contribute to quorum — arbitrary BLS keys are rejected.
-            let indexed_pks = state.indexed_bls_keys(&state.validator_set);
-            if let Err(e) = validate_block_with_registry(&block, &state.validator_set, &indexed_pks)
-            {
-                tracing::warn!(
-                    height = block.header.height,
-                    error = %e,
-                    "Sync block not finalized/valid — stopping here (P2P will catch up)"
-                );
-                return applied;
-            }
-
-            // ADR 0015: verify all transaction signatures in parallel (Ed25519 is the
-            // dominant cost of replaying a synced block), then apply state sequentially
-            // via the trusted path. Same security posture, off the sequential critical path.
-            if !block
-                .transactions
-                .par_iter()
-                .all(|tx| WorldState::verify_tx_signature_pure(tx).is_ok())
-            {
-                tracing::error!(
-                    height = block.header.height,
-                    "Sync block has invalid transaction signature(s) — aborting"
-                );
-                return applied;
-            }
-
-            // ADR 0002/0027 — SÛRETÉ : quorum de finalité sur le set COMPLET bondé à cette
-            // hauteur (jamais le set actif) — state.validator_set est le set pré-bloc (replay
-            // ordonné), capturé avant les changements de set par gouvernance de ce bloc.
-            let pre_quorum = state.validator_set.quorum();
-            // Apply the state transition against a snapshot so any failure below
-            // rolls back instead of leaving a half-applied world state. Protocol
-            // time = MTP including this block (ADR 0005), same as the producer.
-            let protocol_ts = chain.median_time_past_with(block.header.timestamp);
-            let snapshot = state.clone();
-            state.set_block_context(protocol_ts);
-            for tx in &block.transactions {
-                if let Err(e) = state.apply_transaction_trusted(tx) {
-                    tracing::error!(error = %e, height = block.header.height, "Sync tx failed — aborting");
-                    *state = snapshot;
-                    return applied;
-                }
-            }
-            state.block_height = block.header.height;
-            state.check_upgrade_activation();
-            let _ = state.settle_block(&block.header.validator, block.header.height, protocol_ts);
-            if !state.supply_invariant_holds() {
-                tracing::error!(
-                    height = block.header.height,
-                    "Sync block breaks supply invariant — aborting"
-                );
-                *state = snapshot;
-                return applied;
-            }
-            // The header's state_root commits to the exact post-block account state:
-            // a mismatch means the peer served us a block from a different history.
-            let root = state.compute_state_root();
-            if root != block.header.state_root {
-                tracing::error!(
-                    height = block.header.height,
-                    "Sync block state_root mismatch — aborting"
-                );
-                *state = snapshot;
-                return applied;
-            }
-
-            // ADR 0074 §2.3 — un bloc à une hauteur de checkpoint doit porter le hash
-            // attendu : c'est ce qui empêche un pair de servir une histoire fabriquée mais
-            // internement cohérente. Contrôlé avant `push`, jamais après.
-            if let Err(e) = checkpoints.accepts_block(block.header.height, block.hash()) {
-                tracing::error!(error = %e, "Sync: bloc rejeté par les checkpoints");
-                *state = snapshot;
-                return applied;
-            }
-
-            let bh = block.header.height;
-            chain.push(block);
-            chain.note_quorum(bh, pre_quorum); // ADR 0002/0027 — quorum historique
             applied += 1;
         }
-
-        // ADR 0002 — faire suivre le pointeur de finalité local : les blocs synchronisés
-        // portent déjà les co-signatures du pair ; sans cet appel, `finalized_height` reste
-        // figé après un rattrapage par sync (prefix-closed → seuls les blocs à quorum comptent).
-        let indexed_pks = state.indexed_bls_keys(&state.validator_set);
-        chain.advance_finality(&state.validator_set, &indexed_pks);
-
         tracing::info!(applied, tip = chain.tip_height(), "Sync batch applied");
-
-        if sync.count < batch {
-            break; // no more blocks
+        if n < batch {
+            break;
         }
     }
-
     applied
 }
 
@@ -227,18 +112,7 @@ const PARALLEL_BATCH_SIZE: usize = 200;
 /// Maximum concurrent HTTP fetches issued to the peer at once.
 const MAX_PARALLEL_FETCHES: usize = 8;
 
-/// Parallel catch-up sync (ADR 0038) — downloads block batches concurrently,
-/// then applies them in strict sequential order.
-///
-/// Use this **after** `snapshot_sync_from_peer` when the remaining delta is
-/// more than one batch.  It issues up to `MAX_PARALLEL_FETCHES` HTTP requests
-/// to the peer at the same time, cutting wall-clock download time by ~4–8×
-/// compared to the sequential `sync_from_peer`, while keeping state-transition
-/// application strictly in order.
-///
-/// Falls back gracefully: any HTTP error or validation failure is logged and
-/// sync stops at the last successfully applied height.
-///
+/// Parallel catch-up sync: downloads batches concurrently, applies them strictly in order.
 /// Returns the total number of blocks applied.
 pub async fn parallel_sync_from_peer(
     peer_rpc_url: &str,
@@ -250,193 +124,68 @@ pub async fn parallel_sync_from_peer(
         .timeout(std::time::Duration::from_secs(30))
         .build()
         .unwrap_or_default();
-    let base_url = peer_rpc_url.trim_end_matches('/').to_owned();
+    let base = peer_rpc_url.trim_end_matches('/').to_owned();
 
-    // 1. Ask the peer for its current tip so we can pre-plan the batches.
     let peer_height: u64 = {
-        let url = format!("{}/chain/height", base_url);
+        let url = format!("{base}/chain/height");
         match client.get(&url).send().await {
             Ok(r) if r.status().is_success() => match r.json::<serde_json::Value>().await {
                 Ok(v) => match v.get("height").and_then(|h| h.as_u64()) {
                     Some(h) => h,
-                    None => {
-                        tracing::warn!("Parallel sync: could not read peer height; falling back to sequential sync");
-                        return 0;
-                    }
+                    None => return 0,
                 },
-                Err(e) => {
-                    tracing::warn!(error = %e, "Parallel sync: height parse failed");
-                    return 0;
-                }
+                Err(_) => return 0,
             },
-            Ok(r) => {
-                tracing::warn!(status = %r.status(), "Parallel sync: height endpoint error");
-                return 0;
-            }
-            Err(e) => {
-                tracing::warn!(error = %e, "Parallel sync: height request failed");
-                return 0;
-            }
+            _ => return 0,
         }
     };
-
     let local_tip = chain.tip_height();
     if peer_height <= local_tip {
-        return 0; // already caught up
+        return 0;
     }
-
-    // 2. Build the list of (from_height, limit) ranges for every needed batch.
     let mut ranges: Vec<(u64, usize)> = Vec::new();
     let mut h = local_tip + 1;
     while h <= peer_height {
-        let remaining = (peer_height - h + 1) as usize;
-        let limit = remaining.min(PARALLEL_BATCH_SIZE);
+        let limit = ((peer_height - h + 1) as usize).min(PARALLEL_BATCH_SIZE);
         ranges.push((h, limit));
         h += limit as u64;
     }
-
     tracing::info!(
         local_tip,
         peer_height,
         batches = ranges.len(),
-        "Parallel sync: starting ({} concurrent fetches max)",
-        MAX_PARALLEL_FETCHES
+        "Parallel sync: starting"
     );
 
-    let mut total_applied = 0usize;
-    let now_secs = SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .map(|d| d.as_secs())
-        .unwrap_or(0);
-
-    // 3. Process ranges in windows of MAX_PARALLEL_FETCHES — download the window
-    //    concurrently, then apply in order, then move to the next window.
+    let mut total = 0usize;
     for window in ranges.chunks(MAX_PARALLEL_FETCHES) {
-        // Fire all fetches in this window concurrently.
-        let fetches = window.iter().map(|(from, limit)| {
-            let url = format!("{}/chain/sync?from={}&limit={}", base_url, from, limit);
-            let c = client.clone();
-            async move {
-                let resp = match c.get(&url).send().await {
-                    Ok(r) => r,
-                    Err(e) => return Err(e.to_string()),
-                };
-                if !resp.status().is_success() {
-                    return Err(format!("HTTP {}", resp.status()));
-                }
-                resp.json::<SyncResponse>().await.map_err(|e| e.to_string())
-            }
-        });
-        let results: Vec<Result<SyncResponse, String>> = join_all(fetches).await;
-
-        // Apply in strict order — stop the moment anything fails.
-        let mut window_ok = true;
-        'batch: for (i, result) in results.into_iter().enumerate() {
-            let (from, _) = window[i];
-            let sync = match result {
-                Ok(s) => s,
+        let fetches = window
+            .iter()
+            .map(|(from, limit)| fetch_rows(&client, &base, *from, *limit));
+        let results = join_all(fetches).await;
+        for result in results {
+            let rows = match result {
+                Ok(r) => r,
                 Err(e) => {
-                    tracing::warn!(from, error = %e, "Parallel sync: fetch failed — stopping");
-                    window_ok = false;
-                    break 'batch;
+                    tracing::warn!(error = %e, "Parallel sync: fetch failed — stopping");
+                    return total;
                 }
             };
-
-            for block in sync.blocks {
-                let height = block.header.height;
-
-                // Hash-chain linkage.
-                if block.header.prev_hash != chain.tip_hash() {
-                    tracing::error!(height, "Parallel sync: wrong prev_hash — aborting");
-                    return total_applied;
+            for row in rows {
+                if let Err(e) = apply_row(row, state, chain, checkpoints) {
+                    tracing::error!(error = %e, "Parallel sync: block rejected — aborting");
+                    return total;
                 }
-                // Timestamp monotonicity + drift cap.
-                if block.header.timestamp <= chain.tip_timestamp() {
-                    tracing::error!(height, "Parallel sync: timestamp not monotonic — aborting");
-                    return total_applied;
-                }
-                if block.header.timestamp
-                    > now_secs.saturating_add(vinx_core::amount::MAX_CLOCK_DRIFT_SECS)
-                {
-                    tracing::error!(
-                        height,
-                        "Parallel sync: timestamp too far in future — aborting"
-                    );
-                    return total_applied;
-                }
-                // Proposer + co-signatures (registry-bound: bitmap verified against
-                // on-chain BLS keys, same security posture as the sequential path).
-                let indexed_pks = state.indexed_bls_keys(&state.validator_set);
-                if let Err(e) =
-                    validate_block_with_registry(&block, &state.validator_set, &indexed_pks)
-                {
-                    tracing::warn!(height, error = %e, "Parallel sync: block not finalized — stopping");
-                    return total_applied;
-                }
-                // Transaction signatures (parallel Ed25519).
-                if !block
-                    .transactions
-                    .par_iter()
-                    .all(|tx| WorldState::verify_tx_signature_pure(tx).is_ok())
-                {
-                    tracing::error!(height, "Parallel sync: invalid tx signature — aborting");
-                    return total_applied;
-                }
-                // State transition with rollback on error.
-                let pre_quorum = state.validator_set.quorum();
-                let protocol_ts = chain.median_time_past_with(block.header.timestamp);
-                let snapshot = state.clone();
-                state.set_block_context(protocol_ts);
-                for tx in &block.transactions {
-                    if let Err(e) = state.apply_transaction_trusted(tx) {
-                        tracing::error!(error = %e, height, "Parallel sync: tx failed — aborting");
-                        *state = snapshot;
-                        return total_applied;
-                    }
-                }
-                state.block_height = height;
-                state.check_upgrade_activation();
-                let _ = state.settle_block(&block.header.validator, height, protocol_ts);
-                if !state.supply_invariant_holds() {
-                    tracing::error!(height, "Parallel sync: supply invariant broken — aborting");
-                    *state = snapshot;
-                    return total_applied;
-                }
-                let root = state.compute_state_root();
-                if root != block.header.state_root {
-                    tracing::error!(height, "Parallel sync: state_root mismatch — aborting");
-                    *state = snapshot;
-                    return total_applied;
-                }
-                // ADR 0074 §2.3 — même garde que la sync séquentielle : un bloc à une
-                // hauteur de checkpoint doit porter le hash attendu.
-                if let Err(e) = checkpoints.accepts_block(block.header.height, block.hash()) {
-                    tracing::error!(error = %e, "Parallel sync: bloc rejeté par les checkpoints");
-                    *state = snapshot;
-                    return total_applied;
-                }
-
-                let bh = block.header.height;
-                chain.push(block);
-                chain.note_quorum(bh, pre_quorum);
-                total_applied += 1;
+                total += 1;
             }
         }
-
-        let indexed_pks = state.indexed_bls_keys(&state.validator_set);
-        chain.advance_finality(&state.validator_set, &indexed_pks);
         tracing::info!(
-            total_applied,
+            total,
             tip = chain.tip_height(),
             "Parallel sync: window applied"
         );
-
-        if !window_ok {
-            break;
-        }
     }
-
-    total_applied
+    total
 }
 
 /// Minimum block gap before snapshot sync is preferred over block-by-block replay.
@@ -566,7 +315,7 @@ pub async fn snapshot_sync_from_peer(
         }
     };
 
-    // 3. Decode: hex → decompress with zstd → deserialize bincode → WorldState.
+    // 3. Decode: hex → decompress with zstd → deserialize borsh → WorldState.
     let compressed = match hex::decode(&snap.state_hex) {
         Ok(b) => b,
         Err(e) => {
@@ -581,10 +330,10 @@ pub async fn snapshot_sync_from_peer(
             return false;
         }
     };
-    let mut new_state: WorldState = match bincode::deserialize(&raw) {
+    let mut new_state: WorldState = match borsh::from_slice(&raw) {
         Ok(s) => s,
         Err(e) => {
-            tracing::error!(error = %e, "Snapshot sync: bincode deserialize failed");
+            tracing::error!(error = %e, "Snapshot sync: borsh deserialize failed");
             return false;
         }
     };
@@ -630,20 +379,30 @@ pub async fn snapshot_sync_from_peer(
         return false;
     }
 
-    // The snapshot block is installed as *finalized* by `Chain::new_from_snapshot`, so it
-    // must carry a real quorum of co-signatures from validators registered in the state
-    // being adopted — otherwise a peer can hand us a fabricated history and declare it
-    // irreversible. This is checked against the snapshot's own validator set, which is
-    // the best a syncing node can do without trusted checkpoints; shipping checkpoints
-    // (weak subjectivity) remains open, see audit/post-fix/FINDINGS_STATUS.md.
+    // The snapshot block is installed as committed, so its certificate must hold: signed
+    // by more than 2/3 of the power of the set that voted on it — the adopted state's
+    // `last_voting_set` — with keys registered in that state. Otherwise a peer could hand
+    // us a fabricated history. (This is the best a syncing node can do without trusted
+    // checkpoints — see ADR 0074.)
     {
-        let indexed_pks = new_state.indexed_bls_keys(&new_state.validator_set);
-        if let Err(e) =
-            validate_block_with_registry(&snap.block, &new_state.validator_set, &indexed_pks)
-        {
+        let voters = match new_state.last_voting_set.as_ref() {
+            Some(v) => v.clone(),
+            None => {
+                tracing::error!("Snapshot sync: snapshot has no voting set — rejecting");
+                return false;
+            }
+        };
+        let keys = new_state.indexed_bls_keys(&voters);
+        if let Err(e) = snap.commit.verify(
+            new_state.chain_id,
+            snap.height,
+            &snap.block.hash(),
+            &voters,
+            &keys,
+        ) {
             tracing::error!(
                 height = snap.height, error = %e,
-                "Snapshot sync: snapshot block is not quorum-signed by its own validator                  set — rejecting"
+                "Snapshot sync: snapshot block is not committed by its voting set — rejecting"
             );
             return false;
         }
@@ -667,7 +426,7 @@ pub async fn snapshot_sync_from_peer(
     }
 
     // 5. Initialize the chain from the snapshot block and replace state.
-    let new_chain = Chain::new_from_snapshot(snap.block);
+    let new_chain = Chain::new_from_snapshot(snap.block, Some(snap.commit));
     *state = new_state;
     *chain = new_chain;
 

@@ -11,6 +11,9 @@ admin_key_file     = "testnet-data/admin.json"
 
 # ─── Block cadence ────────────────────────────────────────────────────────────
 # Cadence fixe du protocole : 12 s (ADR 0043 + ADR 0045). Doit être identique sur tous les nœuds.
+# Le temps de bloc est un paramètre du protocole fixé dans le genesis (ADR 0081 C6) :
+# voir `block_time_secs` dans genesis-testnet.json. Cette valeur ne sert qu'à une genèse
+# mono-nœud de développement.
 block_time_secs = 12
 
 # ─── RPC ─────────────────────────────────────────────────────────────────────

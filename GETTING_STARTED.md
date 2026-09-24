@@ -222,7 +222,7 @@ vinx_tx_submitted_total{status="ok"} 5
 vinx_tx_in_block_total 5
 ```
 
-> `vinx_emitted_atoms` et `vinx_circulating_supply` évoluent avec l'**émission par le travail** (calculée sur le temps réel écoulé). Invariant garanti : `circulating + epoch_pot + destroyed = emitted ≤ 100 Md`.
+> `vinx_emitted_atoms` et `vinx_circulating_supply` évoluent avec l'**émission par le travail** (calculée sur le temps réel écoulé). Invariant garanti : `circulating + epoch_pot + destroyed = emitted ≤ 1 Md`.
 
 ---
 

@@ -37,18 +37,22 @@ async fn start_test_node() -> (Arc<Node>, String) {
     // NOTE: GenesisConfig is written here with the NEW two-field signature that
     // will be in place once `validator_address` is added.  The existing codebase
     // only has `admin_address`; the compiler will surface any mismatch.
+    let validator_bls_sk = vinx_crypto::BlsSecretKey::generate();
     let state = create_genesis_state(&GenesisConfig {
         chain_id: vinx_core::CHAIN_ID_DEVNET,
         admin_address: admin_addr,
         validator_address: validator_addr,
-        validator_bls: None,
+        validator_bls: vinx_state::GenesisBlsKey::from_secret(
+            &validator_bls_sk,
+            &validator_addr,
+            vinx_core::CHAIN_ID_DEVNET,
+        ),
     });
 
     let (chain, _genesis_block) = Chain::new_with_genesis(validator_addr, 0);
 
     let config = NodeConfig::new(validator_kp)
-        // Very long block time so auto-ticking never fires during tests
-        .with_block_time(9_999)
+        .with_bls_key(validator_bls_sk.clone())
         .with_rpc_listen(local_addr.to_string())
         // Admin routes are fail-closed: without a token they refuse everything,
         // so tests exercising them need one configured.
@@ -119,7 +123,7 @@ async fn test_submit_and_retrieve_tx() {
 
     {
         let mut state = node.state.write().await;
-        state.credit_for_test(sender_addr, Amount::from_vinx(10_000));
+        state.credit_emit_for_test(sender_addr, Amount::from_vinx(10_000));
     }
 
     // Build and submit a transfer
@@ -187,7 +191,7 @@ async fn test_account_balance() {
 
     {
         let mut state = node.state.write().await;
-        state.credit_for_test(addr, credited);
+        state.credit_emit_for_test(addr, credited);
     }
 
     let resp: serde_json::Value = client
@@ -269,7 +273,7 @@ async fn test_mempool_ordering() {
     // Fund sender with enough for 3 transfers
     {
         let mut state = node.state.write().await;
-        state.credit_for_test(sender_addr, Amount::from_vinx(100_000));
+        state.credit_emit_for_test(sender_addr, Amount::from_vinx(100_000));
     }
 
     let amount = Amount::from_vinx(1);
@@ -361,18 +365,24 @@ async fn test_faucet_endpoint() {
     let recipient_kp = KeyPair::generate();
     let recipient_addr = Address::from_public_key(&recipient_kp.public_key());
 
+    let validator_bls_sk = vinx_crypto::BlsSecretKey::generate();
+
     let state = create_genesis_state(&GenesisConfig {
         chain_id: vinx_core::CHAIN_ID_DEVNET,
         admin_address: admin_addr,
         validator_address: validator_addr,
-        validator_bls: None,
+        validator_bls: vinx_state::GenesisBlsKey::from_secret(
+            &validator_bls_sk,
+            &validator_addr,
+            vinx_core::CHAIN_ID_DEVNET,
+        ),
     });
     let (chain, _) = Chain::new_with_genesis(validator_addr, 0);
 
-    const FAUCET_ATOMS: u128 = 100 * 1_000_000_000_000_000_000; // 100 VinX
+    const FAUCET_ATOMS: u128 = 100 * vinx_core::amount::DECIMAL_FACTOR; // 100 VinX
 
     let config = NodeConfig::new(validator_kp)
-        .with_block_time(9_999)
+        .with_bls_key(validator_bls_sk.clone())
         .with_rpc_listen(local_addr.to_string())
         .with_faucet(faucet_kp, FAUCET_ATOMS, 86_400);
 
@@ -381,7 +391,7 @@ async fn test_faucet_endpoint() {
     // Fund the faucet account
     {
         let mut s = node.state.write().await;
-        s.credit_for_test(faucet_addr, Amount::from_vinx(10_000));
+        s.credit_emit_for_test(faucet_addr, Amount::from_vinx(10_000));
     }
 
     let rpc_node = std::sync::Arc::clone(&node);
@@ -514,15 +524,20 @@ async fn test_crash_recovery() {
 
     // ── Phase 1 : run, produce blocks, persist ────────────────────────────
     let (saved_height, saved_supply, saved_sender, saved_receiver) = {
+        let validator_bls_sk = vinx_crypto::BlsSecretKey::generate();
         let state = create_genesis_state(&GenesisConfig {
             chain_id: vinx_core::CHAIN_ID_DEVNET,
             admin_address: admin_addr,
             validator_address: validator_addr,
-            validator_bls: None,
+            validator_bls: vinx_state::GenesisBlsKey::from_secret(
+                &validator_bls_sk,
+                &validator_addr,
+                vinx_core::CHAIN_ID_DEVNET,
+            ),
         });
         let (chain, _) = Chain::new_with_genesis(validator_addr, 0);
         let config = NodeConfig::new(validator_kp.clone())
-            .with_block_time(9_999)
+            .with_bls_key(validator_bls_sk.clone())
             .with_data_dir(&data_dir);
 
         let node = Node::new(state, chain, config);
@@ -620,8 +635,8 @@ async fn test_admin_action_adds_validator() {
     {
         let mut s = node.state.write().await;
         s.admin_address = Some(admin_addr);
-        s.credit_for_test(admin_addr, Amount::from_vinx(1_000));
-        s.credit_for_test(new_val_addr, Amount::from_atoms(bond));
+        s.credit_emit_for_test(admin_addr, Amount::from_vinx(1_000));
+        s.credit_emit_for_test(new_val_addr, Amount::from_atoms(bond));
     }
 
     // The candidate posts the minimum validator bond (required for admission). Since
@@ -774,11 +789,8 @@ async fn test_validator_liveness_tracking() {
         .iter()
         .find(|v| v["address"] == validator_addr)
         .expect("our validator should be in the set");
-    // Not yet online (no block produced on this node)
-    assert_eq!(
-        me["online"], false,
-        "online should be false before first block"
-    );
+    // Online is derived from reliability (not jailed, no missed proposal).
+    assert_eq!(me["online"], true, "fresh validator is eligible");
 
     // Produce 2 blocks
     node.tick().await.expect("tick 1");
@@ -803,10 +815,7 @@ async fn test_validator_liveness_tracking() {
         me["online"], true,
         "online should be true after producing blocks"
     );
-    assert_eq!(
-        me["last_seen_height"], 2,
-        "last_seen_height should be 2 after two ticks"
-    );
+    assert_eq!(me["missed_proposals"], 0, "no missed proposal");
     assert_eq!(
         after["next_leader"], validator_addr,
         "single validator is always next leader"
@@ -908,7 +917,7 @@ async fn test_admission_rejects_wrong_chain_id() {
     let receiver = Address::from_public_key(&KeyPair::generate().public_key());
     {
         let mut state = node.state.write().await;
-        state.credit_for_test(sender_addr, Amount::from_vinx(1_000));
+        state.credit_emit_for_test(sender_addr, Amount::from_vinx(1_000));
     }
 
     let amount = Amount::from_vinx(1);
@@ -939,7 +948,7 @@ async fn test_admission_bounds_nonce_window() {
     let receiver = Address::from_public_key(&KeyPair::generate().public_key());
     {
         let mut state = node.state.write().await;
-        state.credit_for_test(sender_addr, Amount::from_vinx(1_000));
+        state.credit_emit_for_test(sender_addr, Amount::from_vinx(1_000));
     }
 
     let amount = Amount::from_vinx(1);
@@ -983,7 +992,7 @@ async fn test_admission_enforces_cumulative_funding() {
     // Fund exactly one transfer (amount + fee) — not two.
     {
         let mut state = node.state.write().await;
-        state.credit_for_test(sender_addr, amount.checked_add(fee).unwrap());
+        state.credit_emit_for_test(sender_addr, amount.checked_add(fee).unwrap());
     }
 
     let tx0 = Transaction::new_transfer(&sender_kp, receiver, amount, fee, 0);

@@ -1,13 +1,13 @@
 # VinX Ledger — État du Projet
 
 > Document de référence interne — mis à jour à chaque sprint.
-> Dernière mise à jour : **septembre 2026** — **recentrage v6.0 (ADR 0064) : rail de paiement minimaliste L1 PoS** ; les subnets / modules / Appchains ZK sont gelés hors scope. **Série de durcissement post-audit (ADRs 0069–0080)** : BLAKE3 remplace SHA-256 avant genesis (ADR 0069), authentification proposeur + registre BLS (0070), verrou de vote persistant (0071), `consensus_root` complet (0072), sérialisation signée injective (0073), checkpoints de subjectivité faible (0074), clé BLS + PoP liée à l'identité exigée au bonding (0075), banc adversarial multi-nœuds (0080). **429 tests verts, clippy propre.**
+> Dernière mise à jour : **septembre 2026** — **recentrage v6.0 (ADR 0064) : rail de paiement minimaliste L1 PoS** ; les subnets / modules / Appchains ZK sont gelés hors scope. **Série de durcissement post-audit (ADRs 0069–0080)** : BLAKE3 remplace SHA-256 avant genesis (ADR 0069), authentification proposeur + registre BLS (0070), verrou de vote persistant (0071), `consensus_root` complet (0072), sérialisation signée injective (0073), checkpoints de subjectivité faible (0074), clé BLS + PoP liée à l'identité exigée au bonding (0075), banc adversarial multi-nœuds (0080). **ADR 0081 (décisions pré-genèse)** : supply 1 Md, 9 décimales, bond 10 000 VINX, frais partagés producteur/co-signataires sans burn, Bech32m, octet de type de clé et suppression de `from`, modules retirés, admin on-chain éteint après 365 jours, borsh seul format binaire. **ADR 0082 (consensus BFT Tendermint)** : propose/prevote/precommit, tip = finalisé, rotation pondérée, votes plafonnés à 10 %, ≤ 100 validateurs, temps de bloc de genèse 12 s. **338 tests verts, clippy propre.**
 
 ---
 
 > ## 🧭 Où en est le projet (lis ceci en premier)
 >
-> **Le socle L1 est solide** (banc n=3 éprouvé + banc adversarial multi-nœuds, 441 tests verts, clippy propre). **Recentrage v6.0 acté (ADR 0064)** : VinX est un **rail de paiement minimaliste L1 PoS** — pas de settlement layer ZK, pas d'Appchains. Le consensus cible reste **PoS Algorand-style** (comité VRF n≈100, BLS agrégé) ; la **sélection VRF du leader est implémentée** (ADR 0029 Phase 2a), le comité échantillonné `k<N` et la finalité par comité restent à venir (Phase 2b/2c).
+> **Le socle L1 est solide** (banc n=3 éprouvé + banc adversarial multi-nœuds, 432 tests verts, clippy propre). **Recentrage v6.0 acté (ADR 0064)** : VinX est un **rail de paiement minimaliste L1 PoS** — pas de settlement layer ZK, pas d'Appchains. Le consensus cible reste **PoS Algorand-style** (comité VRF n≈100, BLS agrégé) ; la **sélection VRF du leader est implémentée** (ADR 0029 Phase 2a), le comité échantillonné `k<N` et la finalité par comité restent à venir (Phase 2b/2c).
 >
 > **Pivot architectural acté (v6.0, ADR 0064) :**
 > - **Recentrage sur le rail de paiement** : les subnets / modules bondés / Appchains ZK (ADRs 0001, 0010, 0024, 0034, 0048, 0049, 0050) sont **gelés hors scope**. VinX fait une chose : transférer de la valeur, avec finalité BFT et émission progressive.
@@ -56,7 +56,7 @@
 VinX Ledger est une blockchain L1 de paiement écrite intégralement en Rust, sans framework tiers. Voici la liste complète des fonctionnalités implémentées :
 
 ### Protocole de base
-- [x] Cryptographie Ed25519 + **BLAKE3** (ADR 0069, remplace SHA-256) + adresses Bech32 (`vinx1...`)
+- [x] Cryptographie Ed25519 + **BLAKE3** (ADR 0069, remplace SHA-256) + adresses **Bech32m** (`vinx1...`, ADR 0081) + octet de type de clé (ADR 0081)
 - [x] Arbre de Merkle avec preuves d'inclusion vérifiables
 - [x] 7 types de transactions (transfer, stake, unstake, announce-upgrade, slash-validator, admin-action, anchor-state) — voir §2
 - [x] État mondial (`WorldState`) avec validation complète
@@ -71,7 +71,7 @@ VinX Ledger est une blockchain L1 de paiement écrite intégralement en Rust, sa
 - [x] Producteur **à cadence fixe 12 s** (ADR 0043 + ADR 0045) : un bloc toutes les **12 s** exactement — l'ancienne accélération dos-à-dos (génératrice de forks) a été retirée, le heartbeat périodique de 10 min a été aboli. La congestion passe par le base-fee, pas par des blocs rapprochés. Garde anti-spin conservée.
 - [x] Capacités : **3 000 tx/bloc** (~250 TPS), mempool **100 000** (réglables `max_block_txs` / `max_mempool_size`)
 - [x] Frais dynamiques style EIP-1559 (×1 à ×3 selon la charge mémoire)
-- [x] **Frais au producteur** : 100 % des frais du bloc créditent le validateur producteur (plus de melt)
+- [x] **Frais partagés, sans burn** (ADR 0081) : 50 % des frais du bloc au producteur, 50 % à la cagnotte d'époque des co-signataires
 - [x] Vérification des signatures en parallèle (rayon, tous les cœurs CPU)
 - [x] Détection des slots manqués + **jailing déterministe** (proposeur effectif ≠ leader prévu → manquement attribué ; jail après `MAX_MISSED_PROPOSALS`, ADR 0027)
 
@@ -84,14 +84,14 @@ VinX Ledger est une blockchain L1 de paiement écrite intégralement en Rust, sa
 - [x] Synchronisation au démarrage depuis un pair de confiance (HTTP)
 
 ### Économie — fair launch v6 (implémenté)
-- [x] Supply totale : 100 milliards de VinX, **immuable, sans burn** (18 décimales) — courbe d'émission **gravée immuable** (ADR 0021, révisé ADR 0040)
+- [x] Supply totale : **1 milliard** de VinX, **immuable, sans burn** (**9 décimales**, ADR 0081) — courbe d'émission **gravée immuable** (ADR 0021, révisé ADR 0040)
 - [x] **Genèse sans pre-mine** : 0 en circulation, 0 émis — les tokens n'existent pas avant d'être produits par le travail (**ADR 0040 ✅**)
-- [x] **Invariant vérifié à chaque bloc** (garde dure) : `circulating_supply + epoch_dist_emission_pot + destroyed_atoms == emitted_atoms ≤ 100 Md` (ADR 0040)
+- [x] **Invariant vérifié à chaque bloc** (garde dure) : `circulating_supply + epoch_dist_emission_pot + destroyed_atoms == emitted_atoms ≤ 1 Md` (ADR 0040)
 - [x] **Émission par le travail** : minting progressif (`mint_emission()`), décroissance exponentielle continue (`T_half` ~20 ans, R₀ ≈ 3,47 Md/an), intégrée sur les **timestamps**. 100 % au producteur actuellement ; **ADR 0028 (Accepté, non implémenté)** ajoutera la distribution par époque entre proposeurs et co-signataires
 - [x] **Frais forfaitaires** (indépendants du montant), **100 % au producteur** (immédiatement, hors époque) ; multiplicateur de congestion ×1–3
 - [x] **Dépôt existentiel + reaping** (ADR 0026) : plancher 0,001 VINX, comptes vidés supprimés de l'état
 
-### Gouvernance — clé admin OU comité K-of-M (ADR 0011)
+### Gouvernance — clé admin OU comité K-of-M (ADR 0011), éteinte après 365 jours (ADR 0081)
 
 - [x] `AdminAction` (0x08) encapsule une `GovernanceAction`. **Sans policy installée** : une clé admin unique (legacy) exécute immédiatement. **Avec un comité K-of-M** (`SetAdminPolicy`) : une action requiert `threshold` approbations de signataires distincts (chaque approbation = une tx mono-signée)
 - [x] 6 `GovernanceAction` : `AddValidator`, `RemoveValidator`, `UpdateFeeFloor`, `ScheduleUpgrade`, `RotateAdmin`, `SetAdminPolicy`
@@ -150,7 +150,7 @@ sdk/
 | `KeyPair` | Paire de clés Ed25519 |
 | `PublicKey` | Clé publique 32 octets |
 | `VinxSignature` | Signature Ed25519 64 octets |
-| `Address` | Adresse Bech32 `vinx1...` |
+| `Address` | Adresse Bech32m `vinx1...` = `BLAKE3(type ‖ clé)[..20]` |
 | `merkle_root(leaves)` | Racine d'un arbre de Merkle |
 | `merkle_proof_for(leaves, index)` | Preuve d'inclusion pour la feuille n°`index` |
 | `verify_merkle_proof(leaf, proof, root)` | Vérifie une preuve sans l'arbre complet |
@@ -249,7 +249,7 @@ base_fee = fee_floor × multiplier  (cap à 3×)
 
 Le multiplicateur de congestion (×1–3) est basé sur la **demande** (remplissage du mempool), pas sur la valeur transférée. Le frais est un **forfait × poids(type)**, indépendant du montant, et va **100 % au producteur**. Le multiplicateur s'applique au `base_fee` gouvernable courant.
 
-### Gouvernance — clé admin OU comité K-of-M (ADR 0011)
+### Gouvernance — clé admin OU comité K-of-M (ADR 0011), éteinte après 365 jours (ADR 0081)
 
 On-chain, une `GovernanceAction` est soumise via `AdminAction`. **Sans comité installé**, une clé admin unique l'exécute immédiatement (legacy 1-de-1). **Avec un comité K-of-M** (`SetAdminPolicy`), l'action s'exécute une fois qu'elle a réuni `threshold` approbations de signataires distincts — chaque approbation reste une **tx mono-signée** (aucun changement du format `Transaction`). Une action rejetée ne consomme pas de nonce (validation avant mutation). Pas de gel de compte.
 
@@ -489,6 +489,7 @@ sync_peer_rpc = "http://1.2.3.4:8545"  # Sync depuis un pair au démarrage
 | 🔴 Haute | **Cérémonie de genèse multi-validateurs** + `genesis_hash` (chaque validateur fournit clé BLS + PoP) | 0075 §1, 0033 §1 |
 | 🟠 Moyenne | **Récompenses par époque** — distribuer `epoch_dist_emission_pot` + émission entre proposeurs + co-signataires (1 h, `PROPOSER_SHARE_BPS=20 %`) ; frais restent immédiats au producteur | 0028 (Accepté) |
 | 🟠 Moyenne | **Garde-fous de gouvernance** (🚧 à discuter), **bornes de churn** & **de ressources par tx** | 0032, 0036, 0035 |
+| 🔴 Haute | **Étape 3 — État léger** : Jellyfish/Sparse Merkle Tree (insertion O(log n), preuves de solde), état sur disque, **snapshots d'état signés par le quorum** (sync sans rejouer l'historique), **élagage** (fenêtre de rétention courte par défaut, ≥ période d'unbonding pour les preuves de slashing), **mode `--archive`** optionnel pour explorateurs/plateformes, **reçus de paiement** (tx + preuve d'inclusion) conservés par le wallet et le SDK | 0014, 0074, 0081 |
 | 🟢 Future | **Blocs compacts**, light client, rent d'état, clés HSM, halt d'urgence, TLS natif, post-quantique, SLO | 0037, 0014, 0013, 0012, 0017, 0019, 0016, 0018 |
 | ❄️ **Gelé (0064)** | **Appchains ZK / SP1 (0050), ForceExit (0048), Clearinghouse (0049), Celestia DA (0034), modules bondés & escrow (0010/0024/0039), tokenomics Appchains (0041/0044/0047), slashing de fraude (0023)** — abandonnés au profit du rail de paiement pur | — |
 

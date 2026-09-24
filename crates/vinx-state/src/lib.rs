@@ -4,11 +4,7 @@ pub mod world_state;
 pub use genesis::{
     create_genesis_state, create_genesis_state_with_dev_prefund, GenesisBlsKey, GenesisConfig,
 };
-pub use world_state::{
-    v10_meta_suffix, v11_meta_suffix, v12_meta_suffix, v13_meta_suffix, v16_meta_suffix,
-    v17_meta_suffix, v18_meta_suffix, v19_meta_suffix, v8_meta_suffix, v9_meta_suffix, AdminPolicy,
-    GovernanceProposal, ModuleEntry, WorldState,
-};
+pub use world_state::{AdminPolicy, GovernanceProposal, WorldState};
 
 #[cfg(test)]
 mod tests {
@@ -31,7 +27,11 @@ mod tests {
             chain_id: vinx_core::CHAIN_ID_DEVNET,
             admin_address: sender_addr,
             validator_address: validator_addr,
-            validator_bls: None,
+            validator_bls: crate::GenesisBlsKey::from_secret(
+                &vinx_crypto::BlsSecretKey::generate(),
+                &validator_addr,
+                vinx_core::CHAIN_ID_DEVNET,
+            ),
         });
         // Fair launch grants nothing at genesis — fund the sender for these unit tests.
         state.credit_for_test(sender_addr, Amount::from_vinx(1_000_000_000));
@@ -172,7 +172,7 @@ mod tests {
     }
 
     #[test]
-    fn test_transfer_fee_goes_to_producer() {
+    fn test_transfer_fee_split_producer_and_pot() {
         let (mut state, sender_kp, _) = funded_state();
         let receiver = Address::from_public_key(&KeyPair::generate().public_key());
         let producer = Address::from_public_key(&KeyPair::generate().public_key());
@@ -182,11 +182,17 @@ mod tests {
         let pot_before = state.epoch_dist_emission_pot;
         let tx = Transaction::new_transfer(&sender_kp, receiver, amount, fee, 0);
         state.apply_transaction(&tx).unwrap();
-        state.settle_block(&producer, 1, 1);
+        state.settle_block(&producer, 1);
 
-        // 100% of the fee goes to the block producer; the epoch pot is untouched.
-        assert_eq!(state.account_balance(&producer), fee);
-        assert_eq!(state.epoch_dist_emission_pot, pot_before);
+        // ADR 0081 D4: the fee is split between the producer and the co-signers' pot.
+        let producer_part = Amount::from_atoms(
+            fee.atoms() * vinx_core::amount::FEE_PRODUCER_SHARE_BPS / vinx_core::amount::BPS_DENOM,
+        );
+        assert_eq!(state.account_balance(&producer), producer_part);
+        assert_eq!(
+            state.epoch_dist_emission_pot,
+            pot_before.saturating_add(fee.checked_sub(producer_part).unwrap())
+        );
     }
 
     #[test]
@@ -206,18 +212,20 @@ mod tests {
     }
 
     #[test]
-    fn test_wrong_pubkey_rejected() {
+    fn test_swapped_pubkey_changes_sender_and_fails_signature() {
         let (mut state, sender_kp, _) = funded_state();
         let attacker_kp = KeyPair::generate();
         let receiver = Address::from_public_key(&KeyPair::generate().public_key());
         let amount = Amount::from_vinx(1);
         let mut tx = Transaction::new_transfer(&sender_kp, receiver, amount, fee_for(amount), 0);
-        tx.pub_key = Some(attacker_kp.public_key());
-
-        assert_eq!(
-            state.apply_transaction(&tx),
-            Err(vinx_core::CoreError::PubKeyMismatch)
+        // ADR 0081 D6: swapping the key re-derives the sender *and* invalidates the
+        // signature (the signing bytes commit to the key) — impersonation is impossible.
+        tx.pub_key = attacker_kp.public_key();
+        assert_ne!(
+            tx.sender(),
+            Address::from_public_key(&sender_kp.public_key())
         );
+        assert!(state.apply_transaction(&tx).is_err());
     }
 
     // ─── stake / unstake ────────────────────────────────────────────────────────
@@ -268,7 +276,7 @@ mod tests {
         assert_eq!(state.account_balance(&sender_addr), balance_after_stake); // not yet back
 
         // After the unbonding delay, settling matures it back to the balance.
-        state.settle_block(&sender_addr, 1, 1_000 + UNBONDING_SECS);
+        state.settle_block(&sender_addr, 1_000 + UNBONDING_SECS);
         assert_eq!(
             state.account_balance(&sender_addr),
             balance_after_stake.checked_add(stake_amount).unwrap()

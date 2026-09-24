@@ -2,6 +2,11 @@
 # ─────────────────────────────────────────────────────────────────────────────
 # VinX — Banc n=3 multi-process (fiable, reproductible).
 #
+# ⚠ À REVOIR depuis l'ADR 0082 (consensus BFT) : un commit exige STRICTEMENT plus de
+#   2/3 de la puissance, donc à n=3 les 3 validateurs sont requis — tuer un nœud
+#   gèle la chaîne (tip ET finalité, désormais confondus). La tolérance à 1 panne
+#   commence à n=4. Les étapes 2–3 ci-dessous décrivent l'ancien modèle.
+#
 # Amène un vrai testnet 3 validateurs à un quorum fonctionnel, puis démontre :
 #   1. rotation round-robin + finalité qui avance (co-signatures P2P réelles) ;
 #   2. tolérance à 1 panne (2/3 finalise encore) ;

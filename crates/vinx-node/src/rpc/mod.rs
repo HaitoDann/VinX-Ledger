@@ -21,6 +21,7 @@ pub fn router(node: Arc<Node>) -> Router {
         .route("/health", get(handlers::health))
         .route("/chain/height", get(handlers::get_height))
         .route("/chain/sync", get(handlers::get_chain_sync))
+        .route("/chain/commits", get(handlers::get_chain_commits))
         .route("/chain/snapshot", get(handlers::get_chain_snapshot))
         .route("/account/:address", get(handlers::get_account))
         .route("/account/:address/txs", get(handlers::get_account_txs))

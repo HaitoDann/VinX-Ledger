@@ -3,20 +3,21 @@ use std::collections::{HashMap, HashSet};
 use std::num::NonZeroUsize;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
-use std::time::{Instant, SystemTime, UNIX_EPOCH};
-use tokio::sync::{broadcast, Mutex, RwLock};
-use vinx_crypto::{Address, Hash32};
+use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
+use tokio::sync::{broadcast, mpsc, Mutex, RwLock};
+use vinx_crypto::{Address, BlsPubKey, Hash32};
 
 use crate::{
-    chain::Chain,
+    bft::{Engine, HeightParams, Host, Input, Output, TimeoutKind},
+    chain::{Chain, Tip},
     config::NodeConfig,
+    execution,
     mempool::Mempool,
-    p2p::P2pHandle,
-    producer::{produce_block, produce_block_backup},
+    p2p::{messages::P2pMessage, NetEvent, P2pHandle},
     storage::Storage,
     NodeError,
 };
-use vinx_core::{Block, Transaction, ValidatorSet};
+use vinx_core::{Block, CommitCert, SignedVote, Transaction, ValidatorSet};
 use vinx_state::WorldState;
 
 // ─── Transaction receipt ─────────────────────────────────────────────────────
@@ -52,16 +53,18 @@ pub struct NodeMetricsInner {
     pub tx_submitted_ok: AtomicU64,
     /// Transactions rejected at the RPC layer (bad sig, mempool full, etc.).
     pub tx_submitted_err: AtomicU64,
-    /// Total transactions included in produced blocks.
+    /// Total transactions included in committed blocks.
     pub tx_in_block: AtomicU64,
-    /// Blocks received via P2P gossip.
+    /// Committed blocks received via P2P gossip.
     pub p2p_blocks_recv: AtomicU64,
     /// Transactions received via P2P gossip.
     pub p2p_tx_recv: AtomicU64,
     /// Requests rejected by the rate limiter.
     pub ratelimit_hit: AtomicU64,
-    /// Unix timestamp (seconds) of the last block produced or received.
+    /// Unix timestamp (seconds) of the last block committed.
     pub last_block_secs: AtomicU64,
+    /// Consensus round of the height in progress (ADR 0082).
+    pub consensus_round: AtomicU64,
 }
 
 impl NodeMetrics {
@@ -76,13 +79,12 @@ impl NodeMetrics {
                 p2p_tx_recv: AtomicU64::new(0),
                 ratelimit_hit: AtomicU64::new(0),
                 last_block_secs: AtomicU64::new(0),
+                consensus_round: AtomicU64::new(0),
             }),
         }
     }
 }
 
-// Delegate atomic accessors through the Arc so NodeMetrics can be freely cloned
-// and shared between Node and RateLimiter without extra indirection.
 impl std::ops::Deref for NodeMetrics {
     type Target = NodeMetricsInner;
     fn deref(&self) -> &Self::Target {
@@ -90,28 +92,25 @@ impl std::ops::Deref for NodeMetrics {
     }
 }
 
-/// Events broadcast to SSE/WebSocket subscribers on each produced block.
+/// Events broadcast to SSE/WebSocket subscribers on each committed block.
 #[derive(Clone, Debug)]
 pub struct BlockEvent {
     pub height: u64,
     pub tx_count: u32,
     pub hash_hex: String,
-    /// Dynamic base fee at the time of this block, in atoms.
+    /// Base fee of this block, in atoms.
     pub base_fee_atoms: u64,
-    /// Bech32 address of the validator that produced this block.
+    /// Bech32 address of the validator that proposed this block.
     pub proposer: String,
     /// Hex-encoded account state root after this block.
     pub state_root_hex: String,
 }
 
-/// ADR 0031 — contexte de fork-choice partagé avec la tâche P2P : le **snapshot d'état
-/// finalisé** (base de rejeu bornée pour les réorgs, cf. `reorg::advance_snapshot`) et le
-/// `storage` (pour une persistance **complète** après une réorg — la chaîne a pu être tronquée,
-/// ce que le persist incrémental ne saurait refléter).
-#[derive(Clone)]
-pub struct ForkChoiceCtx {
-    pub finalized_state: Arc<RwLock<(u64, WorldState)>>,
-    pub storage: Option<Arc<Storage>>,
+fn now_secs() -> u64 {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|d| d.as_secs())
+        .unwrap_or(0)
 }
 
 pub struct Node {
@@ -122,61 +121,54 @@ pub struct Node {
     storage: Option<Arc<Storage>>,
     /// P2P handle — present when p2p_listen is configured.
     pub p2p: Option<P2pHandle>,
-    /// Live validator set — updated after each block that modifies it.
+    /// Live validator set — refreshed after each committed block.
     pub validator_set: Arc<RwLock<ValidatorSet>>,
     /// Broadcast channel for new-block SSE/WebSocket events.
     pub block_events: broadcast::Sender<BlockEvent>,
     /// Per-recipient faucet cooldown tracker + serialization lock for faucet requests.
-    /// Keyed by the raw `Address`, not a bech32 String.
     pub faucet_cooldowns: Arc<Mutex<HashMap<Address, Instant>>>,
-    /// Timestamp of the last block produced or received — used for slot-skip logic.
-    pub last_block_instant: Arc<RwLock<Instant>>,
-    /// Last block height seen from each validator `Address` (liveness tracking).
-    pub validator_liveness: Arc<RwLock<HashMap<Address, u64>>>,
     /// Pending validator join requests (in-memory, not persisted).
     pub validator_requests: Arc<Mutex<Vec<ValidatorJoinRequest>>>,
     /// Transaction receipts indexed by raw `Hash32` tx hash.
     pub receipts: Arc<RwLock<LruCache<Hash32, TxReceipt>>>,
-    /// LRU cache for bech32 address decoding — keyed by the raw input String on
-    /// purpose (it caches String → parsed Address, so the String *is* the key).
+    /// LRU cache for bech32 address decoding.
     pub address_cache: tokio::sync::Mutex<LruCache<String, vinx_crypto::Address>>,
     /// Lock-free real-time counters exposed on GET /metrics.
     pub metrics: NodeMetrics,
-    /// Validators temporarily suspended from the round-robin due to liveness eviction.
-    pub suspended_validators: Arc<RwLock<HashSet<Address>>>,
-    /// ADR 0031 — snapshot d'état finalisé `(hauteur, état)` : base de rejeu bornée pour les
-    /// réorgs de fork-choice. Maintenu par `reorg::advance_snapshot` après chaque avancée de
-    /// finalité (tick + chemins P2P). Partagé avec la tâche P2P via `ForkChoiceCtx`.
-    pub finalized_state: Arc<RwLock<(u64, WorldState)>>,
-    /// Compact-block tx cache (ADR 0037): transactions from recently produced blocks,
-    /// kept alive after mempool flush so TxRequest peers can still be served.
-    /// Keyed by block height; pruned after finality.
-    pub recent_block_txs: Arc<RwLock<HashMap<u64, Vec<Transaction>>>>,
+    /// Consensus inbox: network events (P2P layer) for the consensus task.
+    net_tx: mpsc::UnboundedSender<NetEvent>,
+    net_rx: Mutex<Option<mpsc::UnboundedReceiver<NetEvent>>>,
+}
+
+/// Shared handles a node is assembled from.
+struct Parts {
+    state: Arc<RwLock<WorldState>>,
+    chain: Arc<RwLock<Chain>>,
+    mempool: Arc<RwLock<Mempool>>,
+    validator_set: ValidatorSet,
+    metrics: NodeMetrics,
+    p2p: Option<P2pHandle>,
+    net_tx: mpsc::UnboundedSender<NetEvent>,
+    net_rx: mpsc::UnboundedReceiver<NetEvent>,
 }
 
 impl Node {
-    pub fn new(state: WorldState, chain: Chain, config: NodeConfig) -> Arc<Self> {
+    fn assemble(config: NodeConfig, parts: Parts) -> Arc<Self> {
         let storage = config
             .data_dir
             .as_ref()
             .map(|p| Arc::new(Storage::new(p.clone())));
-        let initial_vs = state.validator_set.clone();
         let (block_events, _) = broadcast::channel(64);
-        // ADR 0031 — snapshot finalisé initialisé à (tip, état courant) : ≥ finalité, donc les
-        // réorgs sous ce tip sont sûrement ignorées jusqu'à ce que la finalité le dépasse.
-        let finalized_state = Arc::new(RwLock::new((chain.tip_height(), state.clone())));
         Arc::new(Self {
-            state: Arc::new(RwLock::new(state)),
-            mempool: Arc::new(RwLock::new(Mempool::new(config.max_mempool_size))),
-            chain: Arc::new(RwLock::new(chain)),
-            validator_set: Arc::new(RwLock::new(initial_vs)),
+            state: parts.state,
+            mempool: parts.mempool,
+            chain: parts.chain,
+            validator_set: Arc::new(RwLock::new(parts.validator_set)),
             config,
             storage,
-            p2p: None,
+            p2p: parts.p2p,
             block_events,
             faucet_cooldowns: Arc::new(Mutex::new(HashMap::new())),
-            last_block_instant: Arc::new(RwLock::new(Instant::now())),
-            validator_liveness: Arc::new(RwLock::new(HashMap::new())),
             validator_requests: Arc::new(Mutex::new(Vec::new())),
             receipts: Arc::new(RwLock::new(LruCache::new(
                 NonZeroUsize::new(100_000).unwrap(),
@@ -184,47 +176,43 @@ impl Node {
             address_cache: tokio::sync::Mutex::new(LruCache::new(
                 NonZeroUsize::new(1_024).unwrap(),
             )),
-            metrics: NodeMetrics::new(),
-            suspended_validators: Arc::new(RwLock::new(HashSet::new())),
-            finalized_state,
-            recent_block_txs: Arc::new(RwLock::new(HashMap::new())),
+            metrics: parts.metrics,
+            net_tx: parts.net_tx,
+            net_rx: Mutex::new(Some(parts.net_rx)),
         })
+    }
+
+    pub fn new(state: WorldState, chain: Chain, config: NodeConfig) -> Arc<Self> {
+        let (net_tx, net_rx) = mpsc::unbounded_channel();
+        let parts = Parts {
+            validator_set: state.validator_set.clone(),
+            mempool: Arc::new(RwLock::new(Mempool::new(config.max_mempool_size))),
+            state: Arc::new(RwLock::new(state)),
+            chain: Arc::new(RwLock::new(chain)),
+            metrics: NodeMetrics::new(),
+            p2p: None,
+            net_tx,
+            net_rx,
+        };
+        Self::assemble(config, parts)
     }
 
     /// Creates a node and immediately starts the P2P layer (if configured).
     pub async fn new_with_p2p(state: WorldState, chain: Chain, config: NodeConfig) -> Arc<Self> {
-        let storage = config
-            .data_dir
-            .as_ref()
-            .map(|p| Arc::new(Storage::new(p.clone())));
-        let initial_vs = state.validator_set.clone();
-        // ADR 0031 — snapshot finalisé initialisé à (tip, état courant) avant de déplacer l'état.
-        let finalized_state = Arc::new(RwLock::new((chain.tip_height(), state.clone())));
-        let state_arc = Arc::new(RwLock::new(state));
-        let chain_arc = Arc::new(RwLock::new(chain));
-        let mempool_arc = Arc::new(RwLock::new(Mempool::new(config.max_mempool_size)));
-        let vs_arc = Arc::new(RwLock::new(initial_vs));
-        let (block_events, _) = broadcast::channel(64);
-
+        let validator_set = state.validator_set.clone();
+        let state = Arc::new(RwLock::new(state));
+        let chain = Arc::new(RwLock::new(chain));
+        let mempool = Arc::new(RwLock::new(Mempool::new(config.max_mempool_size)));
         let metrics = NodeMetrics::new();
-        let recent_block_txs_arc: Arc<RwLock<HashMap<u64, Vec<Transaction>>>> =
-            Arc::new(RwLock::new(HashMap::new()));
-
-        let fork_choice = ForkChoiceCtx {
-            finalized_state: Arc::clone(&finalized_state),
-            storage: storage.clone(),
-        };
-
+        let (net_tx, net_rx) = mpsc::unbounded_channel();
         let p2p = if config.p2p_listen.is_some() {
             match crate::p2p::start(
                 &config,
-                Arc::clone(&chain_arc),
-                Arc::clone(&mempool_arc),
-                Arc::clone(&state_arc),
-                Arc::clone(&vs_arc),
+                Arc::clone(&chain),
+                Arc::clone(&mempool),
+                Arc::clone(&state),
                 metrics.clone(),
-                fork_choice,
-                Arc::clone(&recent_block_txs_arc),
+                net_tx.clone(),
             )
             .await
             {
@@ -240,378 +228,465 @@ impl Node {
         } else {
             None
         };
-
-        Arc::new(Self {
-            state: state_arc,
-            mempool: mempool_arc,
-            chain: chain_arc,
-            validator_set: vs_arc,
-            config,
-            storage,
-            p2p,
-            block_events,
-            faucet_cooldowns: Arc::new(Mutex::new(HashMap::new())),
-            last_block_instant: Arc::new(RwLock::new(Instant::now())),
-            validator_liveness: Arc::new(RwLock::new(HashMap::new())),
-            validator_requests: Arc::new(Mutex::new(Vec::new())),
-            receipts: Arc::new(RwLock::new(LruCache::new(
-                NonZeroUsize::new(100_000).unwrap(),
-            ))),
-            address_cache: tokio::sync::Mutex::new(LruCache::new(
-                NonZeroUsize::new(1_024).unwrap(),
-            )),
+        let parts = Parts {
+            state,
+            chain,
+            mempool,
+            validator_set,
             metrics,
-            suspended_validators: Arc::new(RwLock::new(HashSet::new())),
-            finalized_state,
-            recent_block_txs: recent_block_txs_arc,
+            p2p,
+            net_tx,
+            net_rx,
+        };
+        Self::assemble(config, parts)
+    }
+
+    /// Sender into the consensus inbox — used by tests and in-process harnesses.
+    pub fn net_sender(&self) -> mpsc::UnboundedSender<NetEvent> {
+        self.net_tx.clone()
+    }
+
+    // ── height context ────────────────────────────────────────────────────────
+
+    /// Snapshot of everything consensus needs for the next height.
+    async fn height_context(&self) -> HeightCtx {
+        let base = self.state.read().await.clone();
+        let tip = self.chain.read().await.tip();
+        let candidates = {
+            let mut mp = self.mempool.write().await;
+            mp.prune_expired(tip.height + 1);
+            mp.flush_staged();
+            mp.select(self.config.max_block_txs)
+        };
+        HeightCtx {
+            base,
+            tip,
+            candidates,
+        }
+    }
+
+    fn engine_for(&self, ctx: &HeightCtx) -> Engine {
+        let vs = ctx.base.validator_set.clone();
+        let keys = ctx
+            .base
+            .indexed_bls_keys(&vs)
+            .into_iter()
+            .map(|k| k.and_then(|b| BlsPubKey::from_bytes(&b).ok()))
+            .collect();
+        let jailed: HashSet<Address> = ctx
+            .base
+            .reliability
+            .iter()
+            .filter(|(_, r)| r.is_jailed())
+            .map(|(a, _)| *a)
+            .collect();
+        let me = vs.contains(&self.config.validator_address).then(|| {
+            (
+                self.config.validator_address,
+                self.config.bls_secret_key.clone(),
+            )
+        });
+        Engine::new(HeightParams {
+            chain_id: ctx.base.chain_id,
+            height: ctx.tip.height + 1,
+            validators: vs,
+            keys,
+            jailed,
+            me,
+            timeouts: self.config.timeouts.clone(),
         })
     }
 
-    /// Manually trigger block production — used in tests and by the block loop.
-    pub async fn tick(&self) -> Result<Block, NodeError> {
-        let timestamp = SystemTime::now()
-            .duration_since(UNIX_EPOCH)
-            .map(|d| d.as_secs())
-            .unwrap_or(0);
+    fn host_for(&self, ctx: HeightCtx) -> NodeHost {
+        NodeHost {
+            base: ctx.base,
+            tip: ctx.tip,
+            candidates: ctx.candidates,
+            me: self.config.validator_address,
+            post_states: HashMap::new(),
+            invalid: Vec::new(),
+            storage: self.storage.clone(),
+        }
+    }
 
-        let mut state = self.state.write().await;
-        let mut chain = self.chain.write().await;
-        let mut mempool = self.mempool.write().await;
-        let vs = self.validator_set.read().await.clone();
+    // ── commit ────────────────────────────────────────────────────────────────
 
-        mempool.prune_expired(state.block_height);
-
-        let block = produce_block(
-            &mut state,
-            &mut chain,
-            &mut mempool,
-            &self.config,
-            &vs,
-            timestamp,
-        )?;
-
-        // VX-RED-003 — producing a block is also a vote at that height: `produce_block`
-        // co-signs it with our BLS key. Claim the same durable lock the P2P co-signing
-        // path uses, so a validator can never both produce one block and co-sign a
-        // competing one at the same height. Recorded after production because the hash
-        // is not known before; a failure here is logged rather than fatal, since the
-        // block is already built — but it means the next co-sign at this height is
-        // refused by the lock, which is the safe direction.
-        if let Some(storage) = self.storage.as_ref() {
-            match storage.claim_vote(block.header.height, block.hash()) {
-                Ok(true) => {}
-                Ok(false) => tracing::warn!(
-                    height = block.header.height,
-                    "produced a block at a height already voted — vote lock disagrees"
-                ),
-                Err(e) => tracing::warn!(
-                    height = block.header.height, error = %e,
-                    "could not record the vote lock for the produced block"
-                ),
+    /// Installs a committed block: post-state, chain row, mempool, receipts, events,
+    /// persistence, and a `Committed` announcement to peers.
+    async fn commit(
+        &self,
+        block: Block,
+        cert: CommitCert,
+        post_state: WorldState,
+    ) -> Result<(), NodeError> {
+        let height = block.header.height;
+        if let Err(e) = self.config.checkpoints.accepts_block(height, block.hash()) {
+            return Err(NodeError::Consensus(format!(
+                "block {height} refused by checkpoints: {e}"
+            )));
+        }
+        {
+            let mut state = self.state.write().await;
+            let mut chain = self.chain.write().await;
+            let mut mempool = self.mempool.write().await;
+            if chain.tip_height() + 1 != height || chain.tip_hash() != block.header.prev_hash {
+                return Err(NodeError::Consensus(format!(
+                    "committed block {height} no longer extends the tip"
+                )));
             }
-        }
-
-        // ADR 0002: advance the finalized pointer. On a single-validator chain the
-        // proposer's own signature already meets quorum, so the block is final at once;
-        // with more validators it becomes final once quorum co-signs (via P2P).
-        let indexed_pks = state.indexed_bls_keys(&state.validator_set);
-        chain.advance_finality(&state.validator_set, &indexed_pks);
-
-        // ADR 0028 — record the producer as a co-signer of their own block.
-        // Additional co-signers are recorded when quorum BLS sigs arrive via P2P.
-        {
-            state.record_block_cosigns(&[block.header.validator]);
-        }
-
-        // ADR 0031 — maintenir le snapshot d'état finalisé (base de rejeu des réorgs). Verrous
-        // déjà tenus : state, chain ; finalized_state acquis en DERNIER (ordre global cohérent).
-        {
-            let mut snap = self.finalized_state.write().await;
-            crate::reorg::advance_snapshot(&mut snap, &chain);
-        }
-
-        // Cache block transactions for compact-block TxRequest responses (ADR 0037).
-        // Must happen BEFORE update_confirmed_nonces flushes them from the mempool.
-        if !block.transactions.is_empty() {
-            self.recent_block_txs.write().await.insert(
-                block.header.height,
-                block.transactions.clone() as Vec<Transaction>,
-            );
-        }
-
-        // Flush mempool entries whose nonce is now consumed by this block.
-        {
-            let mut confirmed_nonces = HashMap::new();
+            *state = post_state;
+            chain.push(block.clone(), Some(cert.clone()));
+            let mut confirmed = HashMap::new();
             for tx in &block.transactions {
-                confirmed_nonces.insert(tx.from, tx.nonce + 1);
+                confirmed.insert(tx.sender(), tx.nonce + 1);
             }
-            if !confirmed_nonces.is_empty() {
-                mempool.update_confirmed_nonces(&confirmed_nonces);
+            if !confirmed.is_empty() {
+                mempool.update_confirmed_nonces(&confirmed);
             }
+            use vinx_core::amount::{PRUNE_INTERVAL, TX_RETENTION_SECS};
+            if height.is_multiple_of(PRUNE_INTERVAL) {
+                chain.prune_by_age(block.header.timestamp, TX_RETENTION_SECS);
+            }
+            *self.validator_set.write().await = state.validator_set.clone();
         }
-
-        let receipts = block
-            .transactions
-            .iter()
-            .map(|tx| {
+        {
+            let mut rx = self.receipts.write().await;
+            for tx in &block.transactions {
                 let hash = tx.hash();
-                (
+                rx.put(
                     hash,
                     TxReceipt {
                         tx_hash: hex::encode(hash),
-                        block_height: block.header.height,
+                        block_height: height,
                         success: true,
                         error: None,
                     },
-                )
-            })
-            .collect::<HashMap<_, _>>();
-        {
-            let mut rx = self.receipts.write().await;
-            for (k, v) in receipts {
-                rx.put(k, v);
+                );
             }
         }
-
-        // Update real-time metrics
-        let now_secs = SystemTime::now()
-            .duration_since(UNIX_EPOCH)
-            .map(|d| d.as_secs())
-            .unwrap_or(0);
         self.metrics.blocks_produced.fetch_add(1, Ordering::Relaxed);
         self.metrics
             .tx_in_block
             .fetch_add(block.header.tx_count as u64, Ordering::Relaxed);
         self.metrics
             .last_block_secs
-            .store(now_secs, Ordering::Relaxed);
-
-        self.after_block_produced(&block, &state.validator_set)
-            .await;
-        Ok(block)
-    }
-
-    /// Produces a block as a backup validator (slot skip — the scheduled leader is offline).
-    async fn tick_as_backup(&self) -> Result<Block, NodeError> {
-        let timestamp = SystemTime::now()
-            .duration_since(UNIX_EPOCH)
-            .map(|d| d.as_secs())
-            .unwrap_or(0);
-
-        let mut state = self.state.write().await;
-        let mut chain = self.chain.write().await;
-        let mut mempool = self.mempool.write().await;
-        let vs = self.validator_set.read().await.clone();
-
-        let block = produce_block_backup(
-            &mut state,
-            &mut chain,
-            &mut mempool,
-            &self.config,
-            &vs,
-            timestamp,
-        )?;
-
-        self.after_block_produced(&block, &state.validator_set)
-            .await;
-        Ok(block)
-    }
-
-    /// Common bookkeeping after any block is produced by this node.
-    async fn after_block_produced(&self, block: &Block, new_vs: &ValidatorSet) {
-        // Update validator set from state (AddValidator/RemoveValidator tx effects)
-        *self.validator_set.write().await = new_vs.clone();
-
-        // Record liveness for this node
-        self.validator_liveness
-            .write()
-            .await
-            .insert(self.config.validator_address, block.header.height);
-
-        // Reset the slot-timeout clock
-        *self.last_block_instant.write().await = Instant::now();
-
-        // Broadcast enriched event to SSE/WebSocket subscribers
-        let event = BlockEvent {
-            height: block.header.height,
+            .store(now_secs(), Ordering::Relaxed);
+        let _ = self.block_events.send(BlockEvent {
+            height,
             tx_count: block.header.tx_count,
             hash_hex: hex::encode(block.hash()),
             base_fee_atoms: block.header.base_fee,
             proposer: block.header.validator.to_string(),
             state_root_hex: hex::encode(block.header.state_root),
-        };
-        let _ = self.block_events.send(event);
-
-        // Broadcast compact block to P2P peers (ADR 0037).
-        // Peers reconstruct from their mempool; missing txs arrive via TxRequest/TxResponse.
-        if let Some(ref p2p) = self.p2p {
-            p2p.broadcast_compact_block(block);
+        });
+        self.persist().await;
+        if let Some(p2p) = &self.p2p {
+            p2p.broadcast(P2pMessage::Committed { block, cert });
         }
+        tracing::info!(height, "Block committed");
+        Ok(())
     }
 
-    /// Checks whether this node should step in as a backup producer because
-    /// the scheduled leader has not produced within the slot timeout window.
-    ///
-    /// Backup validators activate in round-robin order after the stuck leader:
-    /// - validator at distance 1 activates after `2 × block_time`
-    /// - validator at distance 2 activates after `3 × block_time`
-    /// - etc.
-    async fn try_backup_production(&self) {
-        let block_time = self.config.block_time_secs;
-        let elapsed = self.last_block_instant.read().await.elapsed().as_secs();
+    /// Validates and installs a committed block received from a peer.
+    pub async fn apply_committed(&self, block: Block, cert: CommitCert) -> Result<(), NodeError> {
+        let (state, tip) = (
+            self.state.read().await.clone(),
+            self.chain.read().await.tip(),
+        );
+        let post = execution::execute_committed(&state, &tip, &block, &cert, now_secs())
+            .map_err(NodeError::Consensus)?;
+        self.commit(block, cert, post).await
+    }
 
-        // Grace period: at least 2 full slot-times must have elapsed
-        if elapsed < 2 * block_time {
-            return;
-        }
-
-        let vs = self.validator_set.read().await.clone();
-        if vs.len() <= 1 {
-            return; // Single-validator chain — can't skip yourself
-        }
-
-        let height = self.chain.read().await.tip_height() + 1;
-
-        // ADR 0027 — la rotation (leader et file de backup) porte sur le set ACTIF :
-        // les validateurs emprisonnés (jailed) sont sautés, exactement comme dans
-        // `produce_block`. Le calcul est déterministe (dérivé de `state.reliability`).
-        let active = {
-            let state = self.state.read().await;
-            vinx_core::reliability::active_validators(&vs, &state.reliability)
-        };
-        let n = active.len();
-        if n <= 1 {
-            return; // Un seul validateur actif — pas de backup possible.
-        }
-        let leader_idx = (height as usize) % n;
-
-        let my_idx = match active
-            .iter()
-            .position(|a| a == &self.config.validator_address)
-        {
-            Some(i) => i,
-            None => return, // Pas dans le set actif (non-validateur ou emprisonné).
-        };
-
-        if my_idx == leader_idx {
-            return; // We ARE the scheduled leader — tick() will handle this
-        }
-
-        // My position in the backup queue (1 = first backup, 2 = second, …)
-        let distance = (my_idx + n - leader_idx) % n;
-
-        // If the scheduled leader is already suspended (liveness-evicted), halve the
-        // activation time so backup validators step in sooner.
-        let leader_addr = &active[leader_idx];
-        let leader_suspended = self.suspended_validators.read().await.contains(leader_addr);
-        let activation_secs = if leader_suspended {
-            ((distance as u64 + 1) * block_time).max(block_time / 2)
-        } else {
-            (distance as u64 + 1) * block_time
-        };
-
-        if elapsed >= activation_secs {
-            tracing::warn!(
-                height,
-                scheduled_leader = %vs.leader_at(height),
-                my_addr = %self.config.validator_address,
-                elapsed_secs = elapsed,
-                "Slot timeout — stepping in as backup producer (distance {})",
-                distance
-            );
-            match self.tick_as_backup().await {
-                Ok(b) => {
-                    tracing::info!(height = b.header.height, "Backup block produced");
-                    self.persist().await;
-                }
-                Err(e) => {
-                    tracing::debug!(error = %e, "Backup production attempt failed");
-                }
+    /// Runs one full height locally and commits it. Only succeeds when this node alone
+    /// holds more than 2/3 of the voting power (a single-validator chain) — used by
+    /// tests and single-node development.
+    pub async fn tick(&self) -> Result<Block, NodeError> {
+        let ctx = self.height_context().await;
+        let mut engine = self.engine_for(&ctx);
+        let mut host = self.host_for(ctx);
+        let outs = engine.start(&mut host);
+        for o in outs {
+            if let Output::Commit { block, cert } = o {
+                let post = host.take_post_state(&block.hash()).ok_or_else(|| {
+                    NodeError::Consensus("committed block without post-state".into())
+                })?;
+                host.drop_invalid(&self.mempool).await;
+                self.commit(block.clone(), cert, post).await?;
+                return Ok(block);
             }
         }
+        Err(NodeError::Consensus(
+            "this node alone does not hold a quorum of the voting power".into(),
+        ))
     }
 
-    /// Background task: produce one block every `block_time_secs`, unconditionally.
+    // ── consensus task ────────────────────────────────────────────────────────
+
+    /// The consensus loop (ADR 0082): one [`Engine`] per height, fed by network events
+    /// and timers; every commit is installed here, the only writer of the chain.
     ///
-    /// ADR 0045 — cadence fixe 12 s, blocs à la demande et heartbeat supprimés.
-    /// Empty blocks are normal during low-activity periods; the emission curve is
-    /// time-integrated (ADR 0040) so empty blocks emit the same as a silent window
-    /// of equal duration. The fixed tick also makes epoch boundaries (ADR 0028) and
-    /// warm-up counting (ADR 0038) fully predictable: every epoch = exactly
-    /// EPOCH_DURATION_SECS / block_time_secs blocks.
-    ///
-    /// Slot skip (ADR 0027): if the scheduled leader is offline, backup validators
-    /// step in after 2 × block-times via `try_backup_production`.
-    pub async fn run_block_producer(self: Arc<Self>) {
-        let block_time = std::time::Duration::from_secs(self.config.block_time_secs);
+    /// Heights start at the protocol cadence: no earlier than `block_time_secs` after the
+    /// previous block's timestamp. While waiting, late precommits for the block just
+    /// committed keep being collected, so the next block credits more co-signers.
+    pub async fn run_consensus(self: Arc<Self>) {
+        let Some(mut rx) = self.net_rx.lock().await.take() else {
+            tracing::error!("consensus task already running");
+            return;
+        };
+        let (timer_tx, mut timer_rx) = mpsc::unbounded_channel::<(u64, TimeoutKind, u32)>();
+        let mut prev: Option<Engine> = None;
+        let mut last_sync_request = Instant::now()
+            .checked_sub(Duration::from_secs(60))
+            .unwrap_or_else(Instant::now);
+        let mut rebroadcast = tokio::time::interval(Duration::from_secs(5));
 
         loop {
-            tokio::time::sleep(block_time).await;
-
-            match self.tick().await {
-                Ok(block) => {
-                    tracing::info!(
-                        height = block.header.height,
-                        txs = block.header.tx_count,
-                        base_fee = block.header.base_fee,
-                        "Block sealed"
-                    );
-                    {
-                        use vinx_core::amount::{PRUNE_INTERVAL, TX_RETENTION_SECS};
-                        const LIVENESS_EVICTION_BLOCKS: u64 = 50;
-                        let h = block.header.height;
-                        let block_ts = block.header.timestamp;
-                        if h > 0 && h % PRUNE_INTERVAL == 0 {
-                            self.chain
-                                .write()
-                                .await
-                                .prune_by_age(block_ts, TX_RETENTION_SECS);
+            // ── wait for the cadence, collecting late precommits ──
+            let start_at = {
+                let tip_ts = self.chain.read().await.tip_timestamp();
+                let bt = self.state.read().await.block_time_secs;
+                tip_ts.saturating_add(bt)
+            };
+            let mut advanced = false;
+            // Messages of the next height that arrive before our cadence starts it (a peer
+            // with a slightly faster clock) are kept and replayed, not dropped.
+            let mut early: Vec<NetEvent> = Vec::new();
+            while now_secs() < start_at && !advanced {
+                tokio::select! {
+                    ev = rx.recv() => {
+                        let Some(ev) = ev else { return };
+                        let next = self.chain.read().await.tip_height() + 1;
+                        let is_next = matches!(&ev, NetEvent::Proposal(p) if p.height == next)
+                            || matches!(&ev, NetEvent::Vote(v) if v.height == next);
+                        if is_next {
+                            if early.len() < 10_000 {
+                                early.push(ev);
+                            }
+                        } else {
+                            advanced = self.handle_between_heights(ev, &mut prev).await;
                         }
-                        if h >= LIVENESS_EVICTION_BLOCKS {
-                            let liveness = self.validator_liveness.read().await;
-                            let vs = self.validator_set.read().await;
-                            let my_addr = self.config.validator_address;
-                            let mut suspended = self.suspended_validators.write().await;
-                            for addr in vs.validators() {
-                                if *addr == my_addr {
-                                    continue;
+                    }
+                    _ = tokio::time::sleep(Duration::from_millis(250)) => {}
+                }
+            }
+            if advanced {
+                continue;
+            }
+            // Upgrade the tip's certificate with the late precommits we collected.
+            if let Some(cert) = prev.as_ref().and_then(|e| e.best_commit()) {
+                self.chain.write().await.upgrade_tip_commit(cert);
+            }
+
+            // ── run one height ──
+            let ctx = self.height_context().await;
+            let height = ctx.tip.height + 1;
+            let mut engine = self.engine_for(&ctx);
+            if let Some((round, hash)) = self
+                .storage
+                .as_ref()
+                .and_then(|st| st.last_precommit(height))
+            {
+                engine.restore_lock(round, hash);
+            }
+            let mut host = self.host_for(ctx);
+            self.metrics.consensus_round.store(0, Ordering::Relaxed);
+            let mut outs = engine.start(&mut host);
+            for ev in early {
+                match ev {
+                    NetEvent::Proposal(p) if p.height == height => {
+                        outs.extend(engine.handle(Input::Proposal(p), &mut host));
+                    }
+                    NetEvent::Vote(v) if v.height == height => {
+                        outs.extend(engine.handle(Input::Vote(v), &mut host));
+                    }
+                    _ => {}
+                }
+            }
+            let mut decided = self.route(height, outs, &timer_tx).await;
+            let mut synced = false;
+
+            while decided.is_none() && !synced {
+                tokio::select! {
+                    ev = rx.recv() => {
+                        let Some(ev) = ev else { return };
+                        match ev {
+                            NetEvent::Proposal(p) if p.height == height => {
+                                let outs = engine.handle(Input::Proposal(p), &mut host);
+                                decided = self.route(height, outs, &timer_tx).await;
+                            }
+                            NetEvent::Vote(v) if v.height == height => {
+                                let outs = engine.handle(Input::Vote(v), &mut host);
+                                decided = self.route(height, outs, &timer_tx).await;
+                            }
+                            NetEvent::Vote(v) if v.height + 1 == height => {
+                                if let Some(p) = prev.as_mut() {
+                                    p.handle(Input::Vote(v), &mut NullHost);
                                 }
-                                let offline_for =
-                                    liveness.get(addr).map_or(h, |&last| h.saturating_sub(last));
-                                if offline_for >= LIVENESS_EVICTION_BLOCKS {
-                                    if suspended.insert(*addr) {
-                                        tracing::warn!(
-                                            address = %addr,
-                                            offline_for,
-                                            "Validator suspended (liveness eviction)"
-                                        );
+                            }
+                            NetEvent::Committed { block, cert } if block.header.height == height => {
+                                let input = Input::Committed { block, cert };
+                                let outs = engine.handle(input, &mut host);
+                                decided = self.route(height, outs, &timer_tx).await;
+                            }
+                            NetEvent::SyncRows(rows) => {
+                                synced = self.apply_rows(rows).await > 0;
+                            }
+                            ev => {
+                                // A message from a height ahead of ours: we are behind.
+                                if event_height(&ev).is_some_and(|h| h > height)
+                                    && last_sync_request.elapsed() > Duration::from_secs(2)
+                                {
+                                    last_sync_request = Instant::now();
+                                    if let Some(p2p) = &self.p2p {
+                                        p2p.broadcast(P2pMessage::SyncRequest {
+                                            from_height: height,
+                                            limit: 64,
+                                        });
                                     }
-                                } else if suspended.remove(addr) {
-                                    tracing::info!(
-                                        address = %addr,
-                                        "Validator restored (back online)"
-                                    );
                                 }
                             }
                         }
                     }
-                    self.persist().await;
+                    t = timer_rx.recv() => {
+                        let Some((h, kind, round)) = t else { return };
+                        if h == height {
+                            let outs = engine.handle(Input::Timeout { kind, round }, &mut host);
+                            self.metrics
+                                .consensus_round
+                                .store(engine.round() as u64, Ordering::Relaxed);
+                            decided = self.route(height, outs, &timer_tx).await;
+                        }
+                    }
+                    _ = rebroadcast.tick() => {
+                        let outs = engine.rebroadcast();
+                        self.route(height, outs, &timer_tx).await;
+                    }
                 }
-                Err(NodeError::Consensus(_)) => {
-                    self.try_backup_production().await;
+            }
+
+            if let Some((block, cert)) = decided {
+                let post = host.take_post_state(&block.hash()).or_else(|| {
+                    execution::execute_block(&host.base, &host.tip, &block, now_secs()).ok()
+                });
+                host.drop_invalid(&self.mempool).await;
+                match post {
+                    Some(post) => {
+                        if let Err(e) = self.commit(block, cert, post).await {
+                            tracing::error!(height, error = %e, "commit failed");
+                        }
+                    }
+                    None => tracing::error!(height, "decided block does not execute"),
                 }
+            }
+            prev = Some(engine);
+        }
+    }
+
+    /// Between heights: late precommits go to the previous engine; committed blocks and
+    /// sync rows from peers may advance the chain. Returns true when the chain advanced.
+    async fn handle_between_heights(&self, ev: NetEvent, prev: &mut Option<Engine>) -> bool {
+        match ev {
+            NetEvent::Vote(v) => {
+                if let Some(p) = prev.as_mut() {
+                    if p.height() == v.height {
+                        p.handle(Input::Vote(v), &mut NullHost);
+                    }
+                }
+                false
+            }
+            NetEvent::Committed { block, cert } => {
+                let next = self.chain.read().await.tip_height() + 1;
+                block.header.height == next && self.apply_committed(block, cert).await.is_ok()
+            }
+            NetEvent::SyncRows(rows) => self.apply_rows(rows).await > 0,
+            NetEvent::Proposal(_) => false,
+        }
+    }
+
+    /// Applies consecutive committed rows from a sync response. Returns how many applied.
+    pub async fn apply_rows(&self, rows: Vec<(Block, CommitCert)>) -> usize {
+        let mut applied = 0;
+        for (block, cert) in rows {
+            let next = self.chain.read().await.tip_height() + 1;
+            if block.header.height < next {
+                continue;
+            }
+            if block.header.height > next {
+                break;
+            }
+            match self.apply_committed(block, cert).await {
+                Ok(()) => applied += 1,
                 Err(e) => {
-                    tracing::error!(error = %e, "Block production failed");
+                    tracing::warn!(error = %e, "sync row rejected");
+                    break;
                 }
+            }
+        }
+        if applied > 0 {
+            tracing::info!(applied, "Blocks applied from sync");
+        }
+        applied
+    }
+
+    /// Executes engine outputs: broadcasts, timers, evidence. Returns the decision.
+    async fn route(
+        &self,
+        height: u64,
+        outs: Vec<Output>,
+        timer_tx: &mpsc::UnboundedSender<(u64, TimeoutKind, u32)>,
+    ) -> Option<(Block, CommitCert)> {
+        let mut decided = None;
+        for o in outs {
+            match o {
+                Output::BroadcastProposal(p) => {
+                    if let Some(p2p) = &self.p2p {
+                        p2p.broadcast(P2pMessage::Proposal(p));
+                    }
+                }
+                Output::BroadcastVote(v) => {
+                    if let Some(p2p) = &self.p2p {
+                        p2p.broadcast(P2pMessage::Vote(v));
+                    }
+                }
+                Output::ScheduleTimeout { kind, round, after } => {
+                    let tx = timer_tx.clone();
+                    tokio::spawn(async move {
+                        tokio::time::sleep(after).await;
+                        let _ = tx.send((height, kind, round));
+                    });
+                }
+                Output::Commit { block, cert } => decided = Some((block, cert)),
+                Output::Evidence(ev) => self.submit_evidence(ev).await,
+            }
+        }
+        decided
+    }
+
+    /// Turns vote-equivocation evidence into a `SlashValidator` transaction (ADR 0082).
+    async fn submit_evidence(&self, ev: vinx_core::VoteEquivocation) {
+        let target = ev.vote_a.validator;
+        tracing::warn!(validator = %target, height = ev.vote_a.height, "vote equivocation detected");
+        let (chain_id, nonce) = {
+            let s = self.state.read().await;
+            let me = self.config.validator_address;
+            (s.chain_id, s.get_account(&me).map(|a| a.nonce).unwrap_or(0))
+        };
+        let mut tx =
+            Transaction::new_slash_validator(&self.config.validator_keypair, target, &ev, nonce);
+        tx.chain_id = chain_id;
+        tx.sign(&self.config.validator_keypair);
+        if self.mempool.write().await.add(tx.clone()).is_ok() {
+            if let Some(p2p) = &self.p2p {
+                p2p.broadcast_tx(&tx);
             }
         }
     }
 
-    /// Writes chain, state, and mempool to disk (no-op if no data_dir configured).
-    ///
+    // ── persistence ───────────────────────────────────────────────────────────
+
     /// Full persist: writes every account and wipes any stale rows. Used after a
-    /// snapshot import replaces the live world state (the incremental `persist` path
-    /// only writes changed rows and cannot detect accounts that disappeared).
+    /// snapshot import replaces the live world state.
     pub async fn persist_full(&self) {
         let Some(storage) = self.storage.as_ref().map(Arc::clone) else {
             return;
@@ -634,19 +709,11 @@ impl Node {
         }
     }
 
-    /// Serializes to bytes while holding short write locks (fast, pure in-memory —
-    /// draining the state/chain dirty sets requires `&mut`), releases the locks,
-    /// then offloads zstd compression + redb write to a blocking thread.
-    /// The JoinHandle is awaited so the persist completes before the caller proceeds,
-    /// but locks are never held during I/O.
+    /// Serializes under short locks, then compresses and writes on a blocking thread.
     pub async fn persist(&self) {
         let Some(storage) = self.storage.as_ref().map(Arc::clone) else {
             return;
         };
-
-        // Serialize under a short write lock — moving the accounts map out for the
-        // meta blob and draining the persist-dirty set both require &mut. Only the
-        // accounts changed since the last flush are serialized here (O(dirty)).
         let (state_write, mempool_blob) = {
             let mut state = self.state.write().await;
             let mut chain = self.chain.write().await;
@@ -655,12 +722,10 @@ impl Node {
             let sw = Storage::serialize_incremental(&mut state, &mut chain);
             let mp_blob = Storage::serialize_mempool(&txs);
             (sw, mp_blob)
-        }; // all locks dropped here
-
+        };
         match state_write {
             Err(e) => tracing::warn!(error = %e, "Failed to serialize state for persist"),
             Ok(sw) => {
-                // Compress + write in a blocking thread. Locks already released.
                 let _ = tokio::task::spawn_blocking(move || {
                     if let Err(e) = storage.write_state(sw) {
                         tracing::warn!(error = %e, "Failed to persist state to disk");
@@ -727,7 +792,113 @@ impl Node {
     }
 }
 
-// ADR 0043 — la cadence est désormais un plancher fixe `block_time` (plus d'accélération à la
-// demande). L'ancienne `dynamic_gap` (écart décroissant → blocs dos-à-dos en saturation) a été
-// retirée : elle maximisait la fenêtre de fork sous charge. La boucle de production espace
-// simplement les blocs de `block_time` (voir `run_block_producer`).
+/// Height of a network event, when it has one.
+fn event_height(ev: &NetEvent) -> Option<u64> {
+    match ev {
+        NetEvent::Proposal(p) => Some(p.height),
+        NetEvent::Vote(v) => Some(v.height),
+        NetEvent::Committed { block, .. } => Some(block.header.height),
+        NetEvent::SyncRows(_) => None,
+    }
+}
+
+/// Everything a height needs, captured once at its start (the state does not change
+/// during a height).
+struct HeightCtx {
+    base: WorldState,
+    tip: Tip,
+    candidates: Vec<Transaction>,
+}
+
+/// The node's [`Host`]: builds and validates blocks with the shared execution code, and
+/// guards every signature with the durable double-sign lock.
+struct NodeHost {
+    base: WorldState,
+    tip: Tip,
+    candidates: Vec<Transaction>,
+    me: Address,
+    /// Post-states of blocks built or validated this height, by hash — reused at commit.
+    post_states: HashMap<Hash32, WorldState>,
+    /// Candidates found invalid while building (dropped from the mempool afterwards).
+    invalid: Vec<Transaction>,
+    storage: Option<Arc<Storage>>,
+}
+
+impl NodeHost {
+    fn take_post_state(&mut self, hash: &Hash32) -> Option<WorldState> {
+        self.post_states.remove(hash)
+    }
+
+    async fn drop_invalid(&mut self, mempool: &RwLock<Mempool>) {
+        if !self.invalid.is_empty() {
+            let invalid = std::mem::take(&mut self.invalid);
+            mempool.write().await.remove_txs(&invalid);
+        }
+    }
+}
+
+impl Host for NodeHost {
+    fn build_block(&mut self, round: u32) -> Option<Block> {
+        match execution::build_block(
+            &self.base,
+            &self.tip,
+            &self.candidates,
+            self.me,
+            round,
+            now_secs(),
+        ) {
+            Ok((block, post, invalid)) => {
+                self.invalid.extend(invalid);
+                self.post_states.insert(block.hash(), post);
+                Some(block)
+            }
+            Err(e) => {
+                tracing::error!(error = %e, "could not build a proposal");
+                None
+            }
+        }
+    }
+
+    fn validate_block(&mut self, block: &Block) -> bool {
+        let hash = block.hash();
+        if self.post_states.contains_key(&hash) {
+            return true; // built (or already validated) by us this height
+        }
+        match execution::execute_block(&self.base, &self.tip, block, now_secs()) {
+            Ok(post) => {
+                self.post_states.insert(hash, post);
+                true
+            }
+            Err(e) => {
+                tracing::warn!(height = block.header.height, error = %e, "proposal rejected");
+                false
+            }
+        }
+    }
+
+    fn may_sign(&mut self, vote: &SignedVote) -> bool {
+        match &self.storage {
+            // Fail closed: without a durable lock we cannot prove we are not equivocating.
+            Some(storage) => storage.claim_sign(vote).unwrap_or_else(|e| {
+                tracing::warn!(error = %e, "vote lock unavailable — not signing");
+                false
+            }),
+            None => true,
+        }
+    }
+}
+
+/// Host for an engine that is only collecting late precommits (never builds or signs).
+struct NullHost;
+
+impl Host for NullHost {
+    fn build_block(&mut self, _round: u32) -> Option<Block> {
+        None
+    }
+    fn validate_block(&mut self, _block: &Block) -> bool {
+        false
+    }
+    fn may_sign(&mut self, _vote: &SignedVote) -> bool {
+        false
+    }
+}

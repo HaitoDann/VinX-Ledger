@@ -2,21 +2,24 @@ use borsh::{BorshDeserialize, BorshSerialize};
 use serde::{Deserialize, Serialize};
 use std::fmt;
 
-pub const DECIMALS: u32 = 18;
-pub const DECIMAL_FACTOR: u128 = 1_000_000_000_000_000_000; // 10^18
+/// 9 decimals (ADR 0081 D2): 1 VinX = 10^9 atoms. Enough precision for any payment,
+/// and every realistic amount stays exact as a JavaScript number / `u64`.
+pub const DECIMALS: u32 = 9;
+pub const DECIMAL_FACTOR: u128 = 1_000_000_000; // 10^9
 
-/// Absolute supply cap: 100 billion VinX — immutable by protocol.
+/// Absolute supply cap: 1 billion VinX (ADR 0081 D1) — immutable by protocol.
 ///
 /// VinX has no burn and no pre-mine. At genesis `emitted_atoms = 0`; tokens enter
 /// circulation only through progressive minting by block producers (work emission).
 /// The invariant `circulating + epoch_pot + destroyed == emitted_atoms ≤ MAX_SUPPLY_ATOMS`
 /// holds at every block (ADR 0040).
-pub const MAX_SUPPLY_ATOMS: u128 = 100_000_000_000 * DECIMAL_FACTOR;
+pub const MAX_SUPPLY_ATOMS: u128 = 1_000_000_000 * DECIMAL_FACTOR;
 
 /// Flat base transaction fee: 0.0001 VinX. Charged as an absolute forfait (times the
 /// tx-type weight and the congestion multiplier), **independent of the amount moved** —
 /// processing a transaction costs the same whether it carries 1 or 1,000,000 VinX.
-/// Governable via `UpdateFeeFloor`. 100% of every fee goes to the block producer.
+/// Governable via `UpdateFeeFloor`. Fees are split between the producer and the
+/// co-signers (`FEE_PRODUCER_SHARE_BPS`, ADR 0081) — never burned.
 pub const DEFAULT_FEE_FLOOR_ATOMS: u128 = DECIMAL_FACTOR / 10_000;
 
 /// Minimum amount that can be staked in a single transaction: 1 VinX.
@@ -52,38 +55,27 @@ pub const EMISSION_T_HALF_SECS: u64 = 630_720_000;
 /// converges to `MAX_SUPPLY_ATOMS` — the entire supply, ever more slowly.
 pub const ERA0_EMISSION_ATOMS: u128 = MAX_SUPPLY_ATOMS / 2;
 
-// ─── Module registry (ADR 0010) ─────────────────────────────────────────────────
-
-/// Minimum bond to register a module (1,000 VinX). Skin in the game for a module operator —
-/// far below the validator bond (a module secures itself, not the L1) but high enough that
-/// registering millions of dust modules is economically absurd (anti-bloat, cf. ADR 0026).
-pub const MIN_MODULE_BOND_ATOMS: u128 = 1_000 * DECIMAL_FACTOR;
-
-/// Hard cap on the number of registered modules — bounds the module-registry state a
-/// coordinated actor could accumulate. Generous for realistic ecosystems.
-pub const MAX_MODULES: usize = 100_000;
-
 // ─── Validator bond & slashing ─────────────────────────────────────────────────
 
-/// Minimum bond required to enter the validator pool (100,000 VinX, governable).
+/// Minimum bond required to enter the validator pool (10,000 VinX, governable — ADR 0081 D3).
 /// The genesis validator is grandfathered. The bond is a security deposit slashed
 /// on equivocation — it earns no yield. Governable within [MIN_BOND_HARD_FLOOR,
 /// MAX_BOND_HARD_CAP]. Changes limited to ±BOND_STEP_BPS per modification with
 /// BOND_COOLDOWN_SECS between modifications (ADR 0038).
-pub const MIN_VALIDATOR_BOND_ATOMS: u128 = 100_000 * DECIMAL_FACTOR;
+pub const MIN_VALIDATOR_BOND_ATOMS: u128 = 10_000 * DECIMAL_FACTOR;
 
 /// Hard floor on the validator bond (ADR 0038). Immutable — governance cannot drop
 /// the bond below this even if the governable minimum is set lower.
-pub const MIN_BOND_HARD_FLOOR: u128 = 10_000 * DECIMAL_FACTOR;
+pub const MIN_BOND_HARD_FLOOR: u128 = 1_000 * DECIMAL_FACTOR;
 
 /// Hard cap on the validator bond (ADR 0038). Immutable — prevents governance from
 /// pricing out new validators by inflating the bond requirement.
-pub const MAX_BOND_HARD_CAP: u128 = 100_000_000 * DECIMAL_FACTOR;
+pub const MAX_BOND_HARD_CAP: u128 = 1_000_000 * DECIMAL_FACTOR;
 
 /// Maximum bond change per governance action, in basis points of the current value
 /// (2 500 bps = 25%). Immutable. Limits how fast the bond can be moved in either
 /// direction — an attacker controlling governance needs ~37 steps × 7-day cooldown
-/// to go from 100 000 VinX to 1 VinX, giving the community time to react.
+/// to go from 10 000 VinX to the 1 000 VinX floor, giving the community time to react.
 pub const BOND_STEP_BPS: u128 = 2_500;
 
 /// Minimum real-time gap between two bond governance modifications (7 days). Immutable.
@@ -97,27 +89,17 @@ pub const UNBONDING_SECS: u64 = 3 * 24 * 3_600;
 
 // ─── Open PoA — active set (ADR 0038) ─────────────────────────────────────────
 
-/// Default number of validators in the active signing set (ADR 0038). Governable
-/// in steps of ACTIVE_SET_STEP with ACTIVE_SET_COOLDOWN_SECS between modifications.
-/// No hard upper cap — governance controls the ceiling. Note: above ~100 validators,
-/// Ed25519 individual co-signatures stress the gossip layer; BLS aggregation (ADR 0029)
-/// is recommended for large committees.
-pub const DEFAULT_ACTIVE_SET_SIZE: u32 = 21;
+/// Maximum number of validators in the active voting set (ADR 0081 C5). A protocol
+/// constant, not a governable value: while fewer are bonded, every eligible validator is
+/// active; beyond it, the top `MAX_ACTIVE_SET_SIZE` by score are selected at each epoch
+/// and the rest wait on the bench. BLS aggregation keeps 100 votes to one signature.
+pub const MAX_ACTIVE_SET_SIZE: u32 = 100;
 
 /// Hard floor on the active set size (ADR 0038). Immutable — below 5 the BFT
 /// safety threshold (⌈2n/3⌉ = 4) has no tolerance for faults.
 /// Activated once the validator pool reaches 5 entries; below that the set equals
 /// the pool size.
 pub const MIN_ACTIVE_SET_SIZE: u32 = 5;
-
-/// Active-set size changes are limited to this step per governance action (ADR 0038).
-/// Prevents an attacker from jumping from 21 to the floor of 5 in a single transaction.
-pub const ACTIVE_SET_STEP: u32 = 2;
-
-/// Minimum real-time gap between two active-set-size governance modifications (7 days).
-/// Immutable. Combined with ACTIVE_SET_STEP, going from 21 to the floor of 5 takes
-/// 8 steps × 7 days = 56 days of sustained governance control (ADR 0038).
-pub const ACTIVE_SET_COOLDOWN_SECS: u64 = 7 * 24 * 3_600;
 
 /// Duration of one epoch in real-time seconds (ADR 0028). With a fixed 12s block cadence
 /// (ADR 0043/0045), each epoch contains exactly EPOCH_DURATION_SECS / block_time_secs = 300
@@ -155,6 +137,12 @@ pub const SLASH_BOUNTY_BPS: u128 = 1_000;
 /// 20% goes to the producer immediately; 80% goes to the epoch distribution pot
 /// and is shared proportionally among co-signers at epoch close.
 pub const PROPOSER_SHARE_BPS: u128 = 2_000;
+
+/// Share of the block's transaction fees credited directly to the block producer
+/// (ADR 0081 D4). The remaining 50% goes to the epoch distribution pot and is shared
+/// among co-signers by participation at epoch close — the same channel as emission.
+/// No fee is ever burned: producing a block and co-signing it are both paid work.
+pub const FEE_PRODUCER_SHARE_BPS: u128 = 5_000;
 
 /// How long (in real-time seconds) to keep full block data (header + transactions +
 /// signatures). After this window, transactions and signatures are dropped — only the
@@ -199,23 +187,24 @@ pub const BATCH_WINDOW_MS: u64 = 200;
 /// governance actions and BLS registrations, all well under 1 KiB.
 pub const MAX_TX_PAYLOAD_BYTES: usize = 16 * 1024;
 
-pub const MAX_CLOCK_DRIFT_SECS: u64 = 120;
+/// Maximum tolerated clock skew between a block timestamp and local time (ADR 0081 C7).
+/// Validators are expected to run NTP; 15 s leaves room for ordinary skew without letting a
+/// producer shift protocol time (and therefore emission) by minutes.
+pub const MAX_CLOCK_DRIFT_SECS: u64 = 15;
 
-/// Grace period a scheduled leader gets before a backup proposal counts as a missed
-/// proposal against it (ADR 0027, VINX-06).
-///
-/// Jailing used to be charged whenever the actual proposer differed from the scheduled
-/// leader, with no timing condition at all — and the P2P path accepts a block from any
-/// set member, with no slot deadline. A single validator that simply proposed *first* at
-/// every height therefore charged a miss to every honest leader in turn and jailed the
-/// entire honest set after three rounds.
-///
-/// A miss is only real if the leader actually had its turn and did not take it, so the
-/// charge now requires the block to arrive at least this long after the previous one.
-/// Derived from the 12 s target cadence plus the clock-drift allowance, so an honest
-/// backup stepping in for a genuinely absent leader still charges the miss, while a
-/// pre-emptive proposal at normal cadence does not.
-pub const SLOT_TIMEOUT_SECS: u64 = 3 * 12 + MAX_CLOCK_DRIFT_SECS;
+/// Default block time for a new genesis (ADR 0081 C6). The block time is a **protocol**
+/// parameter committed in the state (`WorldState::block_time_secs`), fixed at genesis —
+/// never a per-node setting. It is lowered by a software release, step by step.
+pub const DEFAULT_BLOCK_TIME_SECS: u64 = 12;
+
+/// Maximum transactions per block (protocol constant, ADR 0082). Validators reject a
+/// larger block; the base fee of the next block rises with the fill ratio of the previous
+/// one (EIP-1559 style), which keeps fee pricing deterministic across nodes.
+pub const MAX_BLOCK_TXS: usize = 3_000;
+
+/// Bounds accepted for the genesis block time.
+pub const MIN_BLOCK_TIME_SECS: u64 = 1;
+pub const MAX_BLOCK_TIME_SECS: u64 = 60;
 
 /// Window (number of recent blocks) for the Median Time Past (ADR 0005): a single
 /// producer cannot make the network's time reference jump because it is a median.
@@ -228,7 +217,14 @@ pub const UPGRADE_NOTICE_PATCH_SECS: u64 = 7 * 24 * 3600; //  7 days
 pub const UPGRADE_NOTICE_MINOR_SECS: u64 = 30 * 24 * 3600; // 30 days
 pub const UPGRADE_NOTICE_MAJOR_SECS: u64 = 90 * 24 * 3600; // 90 days
 
-/// Internal token amount stored as an integer in the smallest unit (10^-18 VinX).
+/// On-chain admin tenure (ADR 0081 D7b): the genesis admin key / committee may act only
+/// during the first 365 days after the emission epoch (first block timestamp). After
+/// that the on-chain authority is extinct — forever. No governance action can extend
+/// it: the constant is graved, not stored. Governance then lives off-chain, like Linux:
+/// the maintainers publish releases, and validators choose which release they run.
+pub const ADMIN_TENURE_SECS: u64 = 365 * 24 * 3600;
+
+/// Internal token amount stored as an integer in the smallest unit (10^-9 VinX).
 /// All arithmetic uses checked operations to prevent overflow or underflow.
 #[derive(
     Clone,
@@ -305,8 +301,8 @@ pub fn cumulative_emission_atoms(elapsed_secs: u64) -> u128 {
             return total; // schedule exhausted (dust) — nothing more to emit, ever
         }
     }
-    // Linear share of the current (partial) era. No overflow: era_amount ≤ 5e28,
-    // rem < h ≈ 2.5e8, product ≤ 1.25e37 < u128::MAX.
+    // Linear share of the current (partial) era. No overflow: era_amount ≤ 5e17,
+    // rem < h ≈ 6.3e8, product ≤ 3.2e26 < u128::MAX.
     total.saturating_add(era_amount * rem / h)
 }
 
@@ -330,8 +326,8 @@ mod tests {
     }
 
     #[test]
-    fn test_max_supply_is_100_billion() {
-        let expected = Amount::from_vinx(100_000_000_000);
+    fn test_max_supply_is_1_billion() {
+        let expected = Amount::from_vinx(1_000_000_000);
         assert_eq!(Amount::MAX_SUPPLY, expected);
     }
 
@@ -355,7 +351,7 @@ mod tests {
 
     #[test]
     fn test_emission_halves_each_period() {
-        // T₁ → 50 Md, T₂ → +25 Md (75 Md total), T₃ → +12.5 Md (87.5 Md).
+        // T₁ → 500 M, T₂ → +250 M (750 M total), T₃ → +125 M (875 M).
         let one = cumulative_emission_atoms(EMISSION_T_HALF_SECS);
         let two = cumulative_emission_atoms(2 * EMISSION_T_HALF_SECS);
         let three = cumulative_emission_atoms(3 * EMISSION_T_HALF_SECS);
@@ -379,8 +375,8 @@ mod tests {
         );
         assert_eq!(
             MAX_SUPPLY_ATOMS,
-            100_000_000_000 * DECIMAL_FACTOR,
-            "100 Md cap — immutable"
+            1_000_000_000 * DECIMAL_FACTOR,
+            "1 Md cap — immutable (ADR 0081)"
         );
         // The schedule asymptotically emits the entire supply (minus integer dust).
         let far_future = cumulative_emission_atoms(u64::MAX / 2);

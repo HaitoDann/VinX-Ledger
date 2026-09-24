@@ -2,77 +2,42 @@ use std::io;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
-use crate::chain::Chain;
+use crate::chain::{Chain, ChainRow};
 use ahash::AHashMap;
 use redb::{Database, ReadableTable, TableDefinition};
-use vinx_core::{Account, Block, Transaction};
+use vinx_core::{Account, SignedVote, Transaction, VoteKind};
 use vinx_crypto::{Address, Hash32};
 use vinx_state::WorldState;
 use zstd;
 
-/// Schema version stored in the meta table. Increment when the on-disk layout
-/// changes; older data is migrated forward in place by `Storage::migrate_forward`
-/// (add a step there for the new bump), so nodes upgrade without a data wipe.
-/// v2: blobs are zstd-compressed (level 3) before insertion.
-/// v3: tx_index and account_tx_index are persisted (no rebuild_tx_index on boot).
-/// v4: accounts persisted per-key in a dedicated table; only changed rows are
-///     written each block (O(dirty) instead of O(total accounts) per persist).
-/// v5: addresses are stored as raw 20 bytes (Address is `[u8; 20]`); the accounts
-///     table is keyed by those bytes and bincode encodes addresses as 20 bytes.
-/// v6: "Fonderie" tokenomics — Account drops `frozen`/`frozen_since`; WorldState
-///     replaces the pools (staking/melt/distribution/treasury/coffre) with `foundry`.
-/// v7: tx indexes are keyed by raw bytes (`Hash32`, `Address`) instead of hex/bech32
-///     Strings, and hashed with ahash. The persisted index blobs change layout;
-///     they are derived data, so a fresh start simply rebuilds them from blocks.
-/// v8: WorldState meta gains ADR 0011 governance fields (`admin_policy`,
-///     `pending_governance`), appended last. A v7 meta blob is a strict prefix of a v8
-///     one, so the migration simply appends those fields' default encodings.
-/// v9: WorldState meta gains the ADR 0010 module registry (`modules`), appended last —
-///     same prefix property, migrated by appending the empty-map encoding.
-/// v10: WorldState meta gains ADR 0040 fields `epoch_dist_emission_pot` (Amount::ZERO)
-///     and `destroyed_atoms` (0u128), appended after `modules`. The dormant `foundry`
-///     field is retained in-place for bincode compatibility.
-/// v11: (1) blocks are persisted per-height in BLOCKS table; the monolithic "chain"
-///      blob is replaced by a tiny "chain_meta" entry (finalized height). (2) WorldState
-///      meta gains ADR 0027 `reliability` map appended last — same prefix property.
-/// v12: Open PoA (ADR 0038) — `validator_pool`, `banned_validator_keys`,
-///      `active_set_size`, `last_active_set_size_change_ts`, `last_bond_change_ts`
-///      appended after `reliability`. Migration appends their default encodings.
-/// v13: Epoch close (ADR 0028/0038) — `last_epoch_close_ts` appended after
-///      `last_bond_change_ts`. Migration appends `u64 = 0`.
-/// v14: BLS co-signatures (ADR 0046 Phase 2) — each Block row gains two trailing fields:
-///      `bls_aggregate: Option<[u8;96]>` (None) and `bls_cosigner_pks: Vec<[u8;48]>` ([]).
-///      `ValidatorPoolEntry` also gains `bls_pub_key` and `bls_pop` (None each), but since
-///      the pool is expected empty during this alpha migration, no entry-level patching is done.
-/// v15: BLS bitmap (ADR 0029 Phase 1) — each Block row gains `bls_bitmap: Vec<u8>` ([]).
-///      8 bytes appended per block row (bincode empty Vec<u8> = 0u64 LE).
-/// v16: ADR 0038 governable bond floor — `min_validator_bond_atoms` (u128 =
-///      MIN_VALIDATOR_BOND_ATOMS) appended to WorldState meta.
-/// v17: ADR 0029 Phase 2 epoch beacon — `epoch_beacon` (Hash32 = [0u8; 32]) appended
-///      to WorldState meta.
-/// v18: ADR 0036 validator churn bounds — `exit_queue` (Vec<ValidatorExitRequest> = [])
-///      appended to WorldState meta. Migration appends 8 zero bytes (bincode empty Vec).
-/// v21: ADR 0029 Phase 2a VRF leader selection — each Block row gains a trailing
-///      `vrf_proof: Option<Vec<u8>>` (None). bincode is positional, so this changes the
-///      block-row layout; as with the BLAKE3 wall (v20), a pre-v21 database is refused
-///      rather than migrated (no live network predates it — genesis has not shipped).
-const STORAGE_VERSION: u64 = 21;
+/// Schema version stored in the meta table. Increment when the on-disk layout changes.
+///
+/// v23 (ADR 0082): block rows carry their commit certificate; the vote lock is keyed by
+/// (height, round, kind). Pre-genesis, so older databases are refused like v22.
+/// v22 (ADR 0081): pre-genesis reset. The protocol changed incompatibly (1 Md supply,
+/// 9 decimals, Bech32m, module registry removed, fee split), so there is no migration
+/// path from any older database: a pre-v22 database belongs to another protocol and is
+/// refused, left untouched. Every earlier step (v2–v21) predates the public genesis and
+/// its migration code has been retired. From v22 on, layout changes that must preserve
+/// a live network add an explicit step to `Storage::open`.
+const STORAGE_VERSION: u64 = 23;
 
 /// zstd compression level — level 3 is the sweet spot: ~60-70% size reduction,
 /// negligible latency compared to disk I/O.
 const ZSTD_LEVEL: i32 = 3;
 
 const STATE: TableDefinition<&str, &[u8]> = TableDefinition::new("state");
-/// Per-account rows: bech32 address → bincode(Account), stored uncompressed.
+/// Per-account rows: bech32 address → borsh(Account), stored uncompressed.
 /// Accounts are tiny (~100 B); per-row zstd framing would cost more than it saves.
 const ACCOUNTS: TableDefinition<&[u8], &[u8]> = TableDefinition::new("accounts");
-/// Per-block rows: height → zstd(bincode((block_hash, Block))). Written
+/// Per-block rows: height → zstd(borsh(ChainRow)) — hash, block and commit. Written
 /// incrementally — only heights dirtied since the last flush (v10).
 const BLOCKS: TableDefinition<u64, &[u8]> = TableDefinition::new("blocks");
 const META: TableDefinition<&str, u64> = TableDefinition::new("meta");
-/// Height → the single block hash this validator has co-signed at that height
-/// (VX-RED-003 / VX-RED-007). Durable and committed *before* a signature is released.
-const VOTES: TableDefinition<u64, [u8; 32]> = TableDefinition::new("votes");
+/// Double-sign guard (ADR 0082, VX-RED-003): `height(8 BE) ‖ round(4 BE) ‖ kind(1)` →
+/// the value signed (`0` for nil, `1 ‖ hash`). Durable and committed *before* a signature
+/// is released.
+const VOTES: TableDefinition<&[u8], &[u8]> = TableDefinition::new("votes");
 
 pub struct Storage {
     db: Arc<Database>,
@@ -84,7 +49,7 @@ pub struct Storage {
 pub struct StateWrite {
     /// Serialized `WorldState` meta — every field except the accounts map.
     pub meta: Vec<u8>,
-    /// Changed account rows: (20-byte address, bincode(Account)). Empty on a no-op flush.
+    /// Changed account rows: (20-byte address, borsh(Account)). Empty on a no-op flush.
     pub account_rows: Vec<([u8; 20], Vec<u8>)>,
     /// Addresses of accounts reaped this flush (ADR 0026): their rows must be **deleted**
     /// from the accounts table, not merely absent from `account_rows`, or they would
@@ -95,7 +60,7 @@ pub struct StateWrite {
     pub replace_accounts: bool,
     /// Tiny chain metadata blob (finalized height) — rewritten every flush.
     pub chain_meta: Vec<u8>,
-    /// Changed block rows: (height, bincode((hash, Block))). Only the heights
+    /// Changed block rows: (height, borsh((hash, Block))). Only the heights
     /// dirtied since the last flush — O(new blocks), not O(chain length).
     pub block_rows: Vec<(u64, Vec<u8>)>,
     /// When true, the blocks table is wiped before writing `block_rows`
@@ -108,10 +73,8 @@ pub struct StateWrite {
 
 impl Storage {
     /// Opens (or creates) the storage at `dir`, returning an error instead of
-    /// panicking so callers can fail gracefully. Older on-disk schemas are
-    /// **migrated forward in place** (see [`Storage::migrate_forward`]); a newer
-    /// on-disk schema, or one with no known migration path, is a clean, actionable
-    /// error rather than a wipe.
+    /// panicking so callers can fail gracefully. An older or newer on-disk schema is a
+    /// clean, actionable error — never a silent wipe.
     pub fn open(dir: impl Into<PathBuf>) -> io::Result<Self> {
         let dir: PathBuf = dir.into();
         std::fs::create_dir_all(&dir)
@@ -146,234 +109,21 @@ impl Storage {
                          Use a matching or newer VinX build; downgrade is not supported."
                     )));
                 }
-                // Older — migrate forward step by step, then stamp the new version.
+                // Older — pre-genesis protocol (ADR 0081): refuse, leave the data intact.
                 Some(v) => {
-                    Self::migrate_forward(&tx, v)?;
-                    let mut meta = tx.open_table(META).map_err(Self::io_err)?;
-                    meta.insert("schema_version", STORAGE_VERSION)
-                        .map_err(Self::io_err)?;
-                    tracing::info!(
-                        from = v,
-                        to = STORAGE_VERSION,
-                        "Storage schema migrated in place — no wipe"
-                    );
+                    return Err(Self::io_err(format!(
+                        "cette base (schéma v{v}) a été écrite par une version antérieure au \
+                         genesis ADR 0081 (supply, décimales, adresses Bech32m, format d'état) : \
+                         elle appartient à un autre protocole et n'est pas migrable. Repartez \
+                         d'un dossier de données vide (nouvelle genèse) ou resynchronisez \
+                         depuis un pair à jour."
+                    )));
                 }
             }
             tx.commit().map_err(Self::io_err)?;
         }
 
         Ok(Self { db: Arc::new(db) })
-    }
-
-    /// Applies forward migrations from on-disk `from` up to [`STORAGE_VERSION`],
-    /// operating on an open write transaction. Each step transforms the data so
-    /// this binary can read it. Returns a clear error if a step is unknown, so the
-    /// operator can fall back to the snapshot export/import path instead of losing data.
-    ///
-    /// VinX's on-disk layout separates the *source of truth* (per-account rows,
-    /// world-state meta, chain blocks) from *derived data* (the tx indexes, which
-    /// are rebuildable from the chain). A version bump that changed only derived
-    /// data therefore migrates by dropping the stale index blobs — `load()` then
-    /// rebuilds them from the chain. Bumps that change the on-disk layout of
-    /// accounts / meta / blocks need an explicit transform step added to the match.
-    fn migrate_forward(tx: &redb::WriteTransaction, from: u64) -> io::Result<()> {
-        let mut v = from;
-        while v < STORAGE_VERSION {
-            match v {
-                // v6 → v7: tx indexes switched to raw-byte keys (Hash32 / Address).
-                // Derived data — drop the stale blobs; load() rebuilds from the chain.
-                6 => {
-                    let mut state = tx.open_table(STATE).map_err(Self::io_err)?;
-                    state.remove("tx_index").map_err(Self::io_err)?;
-                    state.remove("account_tx_index").map_err(Self::io_err)?;
-                }
-                // v7 → v8 (ADR 0011): the WorldState meta gained two trailing serialized
-                // fields. A v7 blob is a strict prefix of a v8 one, so append their default
-                // encodings in place — no wipe, accounts and chain untouched.
-                7 => Self::append_meta_suffix(tx, &vinx_state::v8_meta_suffix())?,
-                // v8 → v9 (ADR 0010): the module registry was appended last — same prefix
-                // property, migrated by appending the empty-map encoding.
-                8 => Self::append_meta_suffix(tx, &vinx_state::v9_meta_suffix())?,
-                // v9 → v10 (ADR 0040): epoch_dist_emission_pot and destroyed_atoms appended.
-                9 => Self::append_meta_suffix(tx, &vinx_state::v10_meta_suffix())?,
-                // v10 → v11: (1) split monolithic chain blob into per-height BLOCKS rows,
-                // (2) append reliability map (ADR 0027) to WorldState meta.
-                10 => {
-                    Self::migrate_v9_chain_blob(tx)?;
-                    Self::append_meta_suffix(tx, &vinx_state::v11_meta_suffix())?;
-                }
-                // v11 → v12 (ADR 0038 Open PoA): append validator_pool (empty BTreeMap),
-                // banned_validator_keys (empty HashSet), active_set_size (u32 = 21),
-                // last_active_set_size_change_ts (u64 = 0), last_bond_change_ts (u64 = 0).
-                11 => Self::append_meta_suffix(tx, &vinx_state::v12_meta_suffix())?,
-                // v12 → v13 (ADR 0028 epoch close): append last_epoch_close_ts (u64 = 0).
-                12 => Self::append_meta_suffix(tx, &vinx_state::v13_meta_suffix())?,
-                // v13 → v14 (ADR 0046 Phase 2 BLS): append BLS fields to every block row.
-                13 => Self::migrate_v13_block_bls_fields(tx)?,
-                // v14 → v15 (ADR 0029 Phase 1 bitmap): append bls_bitmap (empty Vec<u8>) to every block row.
-                14 => Self::migrate_v14_block_bitmap_field(tx)?,
-                // v15 → v16 (ADR 0038 governable bond floor): append min_validator_bond_atoms.
-                15 => Self::append_meta_suffix(tx, &vinx_state::v16_meta_suffix())?,
-                // v16 → v17 (ADR 0029 Phase 2 epoch beacon): append epoch_beacon ([0u8;32]).
-                16 => Self::append_meta_suffix(tx, &vinx_state::v17_meta_suffix())?,
-                // v17 → v18 (ADR 0036 churn bounds): append exit_queue (empty Vec = 8 zero bytes).
-                17 => Self::append_meta_suffix(tx, &vinx_state::v18_meta_suffix())?,
-                // v18 → v19 (ADR 0027 / VINX-06 slot timeout): append last_block_ts (u64 = 0).
-                18 => Self::append_meta_suffix(tx, &vinx_state::v19_meta_suffix())?,
-                // v19 → v20 (ADR 0069) : BLAKE3 remplace SHA-256. Il n'existe **pas** de
-                // migration possible. Le format sur disque est inchangé, mais tous les
-                // hachages stockés — hash de blocs, chaînage `prev_hash`, `state_root`,
-                // index de transactions — ont été calculés avec l'ancienne fonction. Les
-                // recalculer donnerait d'autres valeurs : la chaîne persistée appartient
-                // littéralement à un autre protocole. Migrer silencieusement corromprait
-                // l'état ; on refuse avec une consigne explicite.
-                19 => {
-                    return Err(Self::io_err(
-                        "cette base a été écrite avant le passage à BLAKE3 (ADR 0069). \
-                         Tous les hachages du protocole ont changé, donc la chaîne persistée \
-                         n'est pas migrable : elle appartient à un autre protocole. \
-                         Repartez d'un dossier de données vide (nouvelle genèse), ou \
-                         resynchronisez depuis un pair déjà sur BLAKE3."
-                            .to_string(),
-                    ));
-                }
-                unknown => {
-                    return Err(Self::io_err(format!(
-                        "no automatic migration from schema v{unknown} to v{STORAGE_VERSION}. \
-                         To migrate: run the previous VinX build, GET /snapshot to export the \
-                         state, then POST /snapshot into a fresh data directory on this build."
-                    )));
-                }
-            }
-            v += 1;
-        }
-        Ok(())
-    }
-
-    /// v9 → v10: explodes the monolithic compressed chain blob into per-height rows
-    /// in the BLOCKS table and a "chain_meta" entry, then removes the blob. A no-op
-    /// if no chain has been written yet.
-    fn migrate_v9_chain_blob(tx: &redb::WriteTransaction) -> io::Result<()> {
-        let mut state = tx.open_table(STATE).map_err(Self::io_err)?;
-        let compressed = state
-            .get("chain")
-            .map_err(Self::io_err)?
-            .map(|g| g.value().to_vec());
-        let Some(compressed) = compressed else {
-            return Ok(());
-        };
-        let chain_bytes = Self::decompress(&compressed)?;
-        let chain: Chain = bincode::deserialize(&chain_bytes)
-            .map_err(|e| Self::io_err(format!("v10 migration: decode chain blob: {e}")))?;
-
-        let mut blocks_tbl = tx.open_table(BLOCKS).map_err(Self::io_err)?;
-        let mut height = 0u64;
-        while let Some(row) = chain.block_row(height) {
-            let bytes = bincode::serialize(row)
-                .map_err(|e| Self::io_err(format!("v10 migration: encode block {height}: {e}")))?;
-            let compressed_row = Self::compress(&bytes)?;
-            blocks_tbl
-                .insert(height, compressed_row.as_slice())
-                .map_err(Self::io_err)?;
-            height += 1;
-        }
-
-        let meta = bincode::serialize(&chain.finalized_height())
-            .map_err(|e| Self::io_err(format!("v10 migration: encode chain_meta: {e}")))?;
-        let meta_c = Self::compress(&meta)?;
-        state
-            .insert("chain_meta", meta_c.as_slice())
-            .map_err(Self::io_err)?;
-        state.remove("chain").map_err(Self::io_err)?;
-        tracing::info!(
-            blocks = height,
-            "Chain blob migrated to per-height rows (v10)"
-        );
-        Ok(())
-    }
-
-    /// Appends `suffix` to the persisted (compressed) WorldState meta blob in place — the
-    /// append-only bincode migration used by every meta-field addition (ADR 0010/0011).
-    /// A no-op if no meta has been written yet.
-    fn append_meta_suffix(tx: &redb::WriteTransaction, suffix: &[u8]) -> io::Result<()> {
-        let mut state = tx.open_table(STATE).map_err(Self::io_err)?;
-        let compressed = state
-            .get("world_state_meta")
-            .map_err(Self::io_err)?
-            .map(|g| g.value().to_vec());
-        if let Some(compressed) = compressed {
-            let mut meta = Self::decompress(&compressed)?;
-            meta.extend_from_slice(suffix);
-            let recompressed = Self::compress(&meta)?;
-            state
-                .insert("world_state_meta", recompressed.as_slice())
-                .map_err(Self::io_err)?;
-        }
-        Ok(())
-    }
-
-    /// v13 → v14 (ADR 0046 Phase 2 BLS): appends two new trailing fields to each Block's
-    /// bincode data in the BLOCKS table. Each Block gains:
-    ///   `bls_aggregate: Option<[u8; 96]>` = None   → 1 byte  (bincode discriminant 0)
-    ///   `bls_cosigner_pks: Vec<[u8; 48]>` = []     → 8 bytes (bincode u64 length = 0)
-    /// Total suffix per block: 9 bytes. Decompress → append → recompress in place.
-    fn migrate_v13_block_bls_fields(tx: &redb::WriteTransaction) -> io::Result<()> {
-        // bincode v1: None<Option<T>> = 0u8 (1 byte); empty Vec<T> = 0u64 LE (8 bytes).
-        const SUFFIX: [u8; 9] = [0u8; 9];
-        let rows: Vec<(u64, Vec<u8>)> = {
-            let tbl = tx.open_table(BLOCKS).map_err(Self::io_err)?;
-            tbl.iter()
-                .map_err(Self::io_err)?
-                .map(|r| {
-                    r.map(|(k, v)| (k.value(), v.value().to_vec()))
-                        .map_err(Self::io_err)
-                })
-                .collect::<io::Result<_>>()?
-        };
-        let count = rows.len() as u64;
-        let mut tbl = tx.open_table(BLOCKS).map_err(Self::io_err)?;
-        for (height, compressed) in rows {
-            let mut data = Self::decompress(&compressed)?;
-            data.extend_from_slice(&SUFFIX);
-            let recompressed = Self::compress(&data)?;
-            tbl.insert(height, recompressed.as_slice())
-                .map_err(Self::io_err)?;
-        }
-        tracing::info!(
-            blocks = count,
-            "v14 migration: BLS fields appended to block rows"
-        );
-        Ok(())
-    }
-
-    /// v14 → v15 (ADR 0029 Phase 1 bitmap): appends `bls_bitmap: Vec<u8>` (empty) to each
-    /// Block's bincode data. bincode encodes an empty `Vec<u8>` as `0u64` LE (8 bytes).
-    fn migrate_v14_block_bitmap_field(tx: &redb::WriteTransaction) -> io::Result<()> {
-        const SUFFIX: [u8; 8] = [0u8; 8]; // bincode empty Vec<u8> = 0u64 LE
-        let rows: Vec<(u64, Vec<u8>)> = {
-            let tbl = tx.open_table(BLOCKS).map_err(Self::io_err)?;
-            tbl.iter()
-                .map_err(Self::io_err)?
-                .map(|r| {
-                    r.map(|(k, v)| (k.value(), v.value().to_vec()))
-                        .map_err(Self::io_err)
-                })
-                .collect::<io::Result<_>>()?
-        };
-        let count = rows.len() as u64;
-        let mut tbl = tx.open_table(BLOCKS).map_err(Self::io_err)?;
-        for (height, compressed) in rows {
-            let mut data = Self::decompress(&compressed)?;
-            data.extend_from_slice(&SUFFIX);
-            let recompressed = Self::compress(&data)?;
-            tbl.insert(height, recompressed.as_slice())
-                .map_err(Self::io_err)?;
-        }
-        tracing::info!(
-            blocks = count,
-            "v15 migration: bls_bitmap field appended to block rows"
-        );
-        Ok(())
     }
 
     /// Convenience wrapper that panics on failure — kept for internal callers and
@@ -400,20 +150,25 @@ impl Storage {
     fn serialize_chain(
         chain: &mut Chain,
     ) -> io::Result<(Vec<u8>, Vec<(u64, Vec<u8>)>, Vec<u8>, Vec<u8>)> {
-        let chain_meta = bincode::serialize(&chain.finalized_height())
+        let chain_meta = borsh::to_vec(&chain.height_base)
             .map_err(|e| Self::io_err(format!("serialize chain_meta: {e}")))?;
         let mut block_rows = Vec::new();
         for height in chain.take_dirty_heights() {
-            if let Some(row) = chain.block_row(height) {
-                let bytes = bincode::serialize(row)
+            if let Some(row) = chain.row(height) {
+                let bytes = borsh::to_vec(row)
                     .map_err(|e| Self::io_err(format!("serialize block {height}: {e}")))?;
                 block_rows.push((height, bytes));
             }
         }
         let (tx_index, account_tx_index) = chain.export_tx_indexes();
-        let tx_index_bytes = bincode::serialize(tx_index)
+        // AHashMap has no borsh impl: persist as a sorted entry list (deterministic bytes).
+        let mut tx_entries: Vec<(&Hash32, &(u64, u32))> = tx_index.iter().collect();
+        tx_entries.sort_unstable_by_key(|(k, _)| *k);
+        let mut acc_entries: Vec<(&Address, &Vec<Hash32>)> = account_tx_index.iter().collect();
+        acc_entries.sort_unstable_by_key(|(k, _)| *k);
+        let tx_index_bytes = borsh::to_vec(&tx_entries)
             .map_err(|e| Self::io_err(format!("serialize tx_index: {e}")))?;
-        let account_tx_index_bytes = bincode::serialize(account_tx_index)
+        let account_tx_index_bytes = borsh::to_vec(&acc_entries)
             .map_err(|e| Self::io_err(format!("serialize account_tx_index: {e}")))?;
         Ok((
             chain_meta,
@@ -439,7 +194,7 @@ impl Storage {
         let mut account_deletes = Vec::new();
         for addr in dirty {
             if let Some(acc) = state.account_by_addr(&addr) {
-                let bytes = bincode::serialize(acc)
+                let bytes = borsh::to_vec(acc)
                     .map_err(|e| Self::io_err(format!("serialize account: {e}")))?;
                 account_rows.push((*addr.as_bytes(), bytes));
             } else {
@@ -555,7 +310,7 @@ impl Storage {
             .map_err(|e| tracing::warn!("Cannot decompress state meta: {e}"))
             .ok()?;
         // Deserializes into a WorldState whose accounts map is empty — repopulated below.
-        let mut state: WorldState = bincode::deserialize(&meta_bytes)
+        let mut state: WorldState = borsh::from_slice(&meta_bytes)
             .map_err(|e| tracing::warn!("Cannot deserialize state meta: {e}"))
             .ok()?;
 
@@ -564,7 +319,7 @@ impl Storage {
             let mut count = 0usize;
             if let Ok(iter) = atbl.iter() {
                 for entry in iter.flatten() {
-                    match bincode::deserialize::<Account>(entry.1.value()) {
+                    match borsh::from_slice::<Account>(entry.1.value()) {
                         Ok(acc) => {
                             state.load_account(acc);
                             count += 1;
@@ -576,16 +331,16 @@ impl Storage {
             tracing::debug!(accounts = count, "Loaded accounts from per-key store");
         }
 
-        // Chain: finalized-height watermark + per-height block rows (v10).
+        // Chain: base height + per-height rows (block and commit certificate).
         let chain_meta_bytes = Self::decompress(tbl.get("chain_meta").ok()??.value())
             .map_err(|e| tracing::warn!("Cannot decompress chain_meta: {e}"))
             .ok()?;
-        let finalized_height: u64 = bincode::deserialize(&chain_meta_bytes)
+        let stored_base: u64 = borsh::from_slice(&chain_meta_bytes)
             .map_err(|e| tracing::warn!("Cannot deserialize chain_meta: {e}"))
             .ok()?;
 
         let btbl = tx.open_table(BLOCKS).ok()?;
-        let mut blocks: Vec<(Hash32, Block)> = Vec::new();
+        let mut blocks: Vec<ChainRow> = Vec::new();
         let mut height_base: Option<u64> = None;
         let iter = btbl.iter().ok()?;
         for entry in iter.flatten() {
@@ -604,7 +359,7 @@ impl Storage {
             let bytes = Self::decompress(row)
                 .map_err(|e| tracing::warn!("Cannot decompress block {height}: {e}"))
                 .ok()?;
-            let parsed: (Hash32, Block) = bincode::deserialize(&bytes)
+            let parsed: ChainRow = borsh::from_slice(&bytes)
                 .map_err(|e| tracing::warn!("Cannot deserialize block {height}: {e}"))
                 .ok()?;
             blocks.push(parsed);
@@ -613,8 +368,16 @@ impl Storage {
             tracing::warn!("chain_meta present but no block rows — refusing to load");
             return None;
         }
-        let mut chain = Chain::from_parts(blocks, finalized_height);
-        chain.height_base = height_base.unwrap_or(0);
+        let base = height_base.unwrap_or(0);
+        if base != stored_base {
+            tracing::warn!(
+                base,
+                stored_base,
+                "Chain base height mismatch — refusing to load"
+            );
+            return None;
+        }
+        let mut chain = Chain::from_rows(blocks, base);
 
         // Restore persisted indexes — O(1) vs O(blocks×txs) rebuild
         let indexes_restored = (|| -> Option<()> {
@@ -622,9 +385,15 @@ impl Storage {
             let account_tx_index_bytes =
                 Self::decompress(tbl.get("account_tx_index").ok()??.value()).ok()?;
             let tx_index: AHashMap<Hash32, (u64, u32)> =
-                bincode::deserialize(&tx_index_bytes).ok()?;
+                borsh::from_slice::<Vec<(Hash32, (u64, u32))>>(&tx_index_bytes)
+                    .ok()?
+                    .into_iter()
+                    .collect();
             let account_tx_index: AHashMap<Address, Vec<Hash32>> =
-                bincode::deserialize(&account_tx_index_bytes).ok()?;
+                borsh::from_slice::<Vec<(Address, Vec<Hash32>)>>(&account_tx_index_bytes)
+                    .ok()?
+                    .into_iter()
+                    .collect();
             chain.import_tx_indexes(tx_index, account_tx_index);
             Some(())
         })();
@@ -639,59 +408,84 @@ impl Storage {
 
     /// Serializes pending mempool transactions to raw bytes.
     pub fn serialize_mempool(txs: &[&Transaction]) -> io::Result<Vec<u8>> {
-        bincode::serialize(txs).map_err(|e| Self::io_err(format!("serialize mempool: {e}")))
+        borsh::to_vec(txs).map_err(|e| Self::io_err(format!("serialize mempool: {e}")))
     }
 
-    /// Compresses and writes a pre-serialized mempool blob to redb.
-    /// Designed to run inside `tokio::task::spawn_blocking`.
-    /// Claims the right to co-sign `block_hash` at `height` — the vote lock that makes
-    /// "one validator, one vote per height" an enforced invariant rather than an
-    /// observation (VX-RED-003 / VX-RED-007).
+    fn vote_key(height: u64, round: u32, kind: VoteKind) -> [u8; 13] {
+        let mut k = [0u8; 13];
+        k[..8].copy_from_slice(&height.to_be_bytes());
+        k[8..12].copy_from_slice(&round.to_be_bytes());
+        k[12] = match kind {
+            VoteKind::Prevote => 1,
+            VoteKind::Precommit => 2,
+        };
+        k
+    }
+
+    fn vote_value(value: &Option<Hash32>) -> Vec<u8> {
+        match value {
+            Some(h) => {
+                let mut v = vec![1u8];
+                v.extend_from_slice(h);
+                v
+            }
+            None => vec![0u8],
+        }
+    }
+
+    /// Claims the right to sign `vote` — the double-sign guard (ADR 0082, VX-RED-003).
     ///
-    /// Returns `Ok(true)` when the caller may sign: either no vote is recorded at this
-    /// height, or the recorded vote is for this exact hash (so re-signing is idempotent —
-    /// a re-gossiped block must not be treated as equivocation). Returns `Ok(false)` when
-    /// a *different* hash is already locked at that height; the caller must not sign.
-    ///
-    /// The write is committed before this returns, so the lock survives a crash between
-    /// claiming and signing. Committing durably before the signature is released is the
-    /// whole point: a lock recorded after the fact cannot prevent anything.
-    pub fn claim_vote(&self, height: u64, block_hash: [u8; 32]) -> io::Result<bool> {
-        let write = self
-            .db
-            .begin_write()
-            .map_err(|e| io::Error::other(e.to_string()))?;
+    /// Returns `Ok(true)` when no vote of this `(height, round, kind)` was signed before,
+    /// or the recorded one has the same value (re-signing is idempotent). Returns
+    /// `Ok(false)` when a *different* value is recorded: signing would be equivocation.
+    /// The record is committed before this returns, so it survives a crash between the
+    /// claim and the signature — a lock written after the fact prevents nothing.
+    pub fn claim_sign(&self, vote: &SignedVote) -> io::Result<bool> {
+        let key = Self::vote_key(vote.height, vote.round, vote.kind);
+        let value = Self::vote_value(&vote.value);
+        let write = self.db.begin_write().map_err(Self::io_err)?;
         let allowed = {
-            let mut t = write
-                .open_table(VOTES)
-                .map_err(|e| io::Error::other(e.to_string()))?;
+            let mut t = write.open_table(VOTES).map_err(Self::io_err)?;
             let existing = t
-                .get(height)
-                .map_err(|e| io::Error::other(e.to_string()))?
-                .map(|v| v.value());
+                .get(key.as_slice())
+                .map_err(Self::io_err)?
+                .map(|v| v.value().to_vec());
             match existing {
-                Some(h) if h != block_hash => false,
-                Some(_) => true, // same block — idempotent
+                Some(prev) => prev == value,
                 None => {
-                    t.insert(height, block_hash)
-                        .map_err(|e| io::Error::other(e.to_string()))?;
+                    t.insert(key.as_slice(), value.as_slice())
+                        .map_err(Self::io_err)?;
                     true
                 }
             }
         };
-        write
-            .commit()
-            .map_err(|e| io::Error::other(e.to_string()))?;
+        write.commit().map_err(Self::io_err)?;
         Ok(allowed)
     }
 
-    /// The block hash this validator co-signed at `height`, if any.
-    pub fn recorded_vote(&self, height: u64) -> Option<[u8; 32]> {
+    /// The highest-round non-nil precommit we signed at `height` — our Tendermint lock,
+    /// restored after a restart so the node keeps honouring it.
+    pub fn last_precommit(&self, height: u64) -> Option<(u32, Hash32)> {
         let read = self.db.begin_read().ok()?;
         let t = read.open_table(VOTES).ok()?;
-        t.get(height).ok()?.map(|v| v.value())
+        let from = Self::vote_key(height, 0, VoteKind::Prevote);
+        let to = Self::vote_key(height, u32::MAX, VoteKind::Precommit);
+        let mut best: Option<(u32, Hash32)> = None;
+        for entry in t.range(from.as_slice()..=to.as_slice()).ok()?.flatten() {
+            let (k, v) = (entry.0.value(), entry.1.value());
+            if k.len() == 13 && k[12] == 2 && v.len() == 33 && v[0] == 1 {
+                let round = u32::from_be_bytes(k[8..12].try_into().ok()?);
+                let hash: Hash32 = v[1..].try_into().ok()?;
+                if best.is_none_or(|(r, _)| round > r) {
+                    best = Some((round, hash));
+                }
+            }
+        }
+        best
     }
 
+    /// Compresses and writes a pre-serialized mempool blob to redb.
+    /// Designed to run inside `tokio::task::spawn_blocking`.
     pub fn save_mempool_blob(&self, blob: Vec<u8>) -> io::Result<()> {
         let compressed = Self::compress(&blob)?;
         let tx = self.db.begin_write().map_err(Self::io_err)?;
@@ -713,7 +507,7 @@ impl Storage {
         let bytes = Self::decompress(&compressed)
             .map_err(|e| tracing::warn!("Cannot decompress mempool: {e}"))
             .ok()?;
-        bincode::deserialize(&bytes)
+        borsh::from_slice(&bytes)
             .map_err(|e| tracing::warn!("Cannot deserialize mempool: {e}"))
             .ok()
     }
@@ -800,15 +594,10 @@ mod tests {
         v
     }
 
-    /// ADR 0069 — toute base antérieure à BLAKE3 est refusée, **et laissée intacte**.
-    ///
-    /// La migration est transactionnelle : elle bute sur le mur v19→v20 et annule
-    /// l'ensemble. C'est le comportement voulu — une base à moitié migrée serait pire que
-    /// pas de migration du tout, et l'opérateur peut encore exporter ses données avec
-    /// l'ancien binaire.
+    /// ADR 0081 — toute base antérieure au schéma courant est refusée **et laissée intacte**.
     #[test]
-    fn test_pre_blake3_database_is_refused_and_left_intact() {
-        for from in [6u64, 9, 14, 19] {
+    fn test_older_database_is_refused_and_left_intact() {
+        for from in [3u64, 6, 19, 21] {
             let tmp = Tmp::new();
             stamp(&tmp.0, from, true);
             let err = Storage::open(&tmp.0)
@@ -816,27 +605,15 @@ mod tests {
                 .unwrap_or_else(|| panic!("une base v{from} doit être refusée"));
             let msg = err.to_string();
             assert!(
-                msg.contains("BLAKE3"),
-                "consigne attendue pour v{from} : {msg}"
-            );
-            assert!(
-                msg.contains("dossier de données vide") || msg.contains("resynchronisez"),
+                msg.contains("dossier de données vide") && msg.contains("ADR 0081"),
                 "le message doit dire quoi faire : {msg}"
             );
             assert_eq!(
                 read_version(&tmp.0),
                 Some(from),
-                "la base v{from} doit rester intacte (migration atomique)"
+                "la base v{from} doit rester intacte"
             );
         }
-    }
-
-    #[test]
-    fn test_unknown_old_version_errors_with_guidance() {
-        let tmp = Tmp::new();
-        stamp(&tmp.0, 3, false); // no migration path from v3 → snapshot fallback
-        let err = Storage::open(&tmp.0).err().unwrap();
-        assert!(err.to_string().contains("no automatic migration"));
     }
 
     #[test]
@@ -878,7 +655,11 @@ mod tests {
             chain_id: vinx_core::CHAIN_ID_DEVNET,
             admin_address: admin,
             validator_address: validator,
-            validator_bls: None,
+            validator_bls: vinx_state::GenesisBlsKey::from_secret(
+                &vinx_crypto::BlsSecretKey::generate(),
+                &validator,
+                vinx_core::CHAIN_ID_DEVNET,
+            ),
         });
         let (mut chain, _) = Chain::new_with_genesis(validator, 0);
 
@@ -921,11 +702,12 @@ mod tests {
         );
     }
 
-    fn make_test_block(height: u64, prev_hash: Hash32, validator: Address) -> Block {
+    fn make_test_block(height: u64, prev_hash: Hash32, validator: Address) -> vinx_core::Block {
         use vinx_core::BlockHeader;
-        Block {
+        vinx_core::Block {
             header: BlockHeader {
                 height,
+                round: 0,
                 prev_hash,
                 timestamp: height,
                 validator,
@@ -933,12 +715,20 @@ mod tests {
                 state_root: [0u8; 32],
                 base_fee: 0,
                 receipts_root: [0u8; 32],
+                last_commit_hash: [0u8; 32],
             },
             transactions: vec![],
-            bls_aggregate: None,
-            bls_cosigner_pks: vec![],
-            bls_bitmap: vec![],
-            vrf_proof: None,
+            last_commit: None,
+        }
+    }
+
+    fn cert_for(block: &vinx_core::Block) -> vinx_core::CommitCert {
+        vinx_core::CommitCert {
+            height: block.header.height,
+            round: 0,
+            block_hash: block.hash(),
+            bitmap: vec![1],
+            aggregate: vec![0u8; 96],
         }
     }
 
@@ -956,7 +746,11 @@ mod tests {
             chain_id: vinx_core::CHAIN_ID_DEVNET,
             admin_address: admin,
             validator_address: validator,
-            validator_bls: None,
+            validator_bls: vinx_state::GenesisBlsKey::from_secret(
+                &vinx_crypto::BlsSecretKey::generate(),
+                &validator,
+                vinx_core::CHAIN_ID_DEVNET,
+            ),
         });
         let (mut chain, _) = Chain::new_with_genesis(validator, 0);
 
@@ -965,8 +759,11 @@ mod tests {
             storage.save(&mut state, &mut chain).unwrap();
 
             // Two new blocks → exactly two dirty rows in the next flush.
-            chain.push(make_test_block(1, chain.tip_hash(), validator));
-            chain.push(make_test_block(2, chain.tip_hash(), validator));
+            for h in 1..=2 {
+                let b = make_test_block(h, chain.tip_hash(), validator);
+                let c = cert_for(&b);
+                chain.push(b, Some(c));
+            }
             let w = Storage::serialize_incremental(&mut state, &mut chain).unwrap();
             let mut heights: Vec<u64> = w.block_rows.iter().map(|(h, _)| *h).collect();
             heights.sort_unstable();
@@ -984,8 +781,60 @@ mod tests {
         assert_eq!(loaded.tip_height(), 2);
         assert_eq!(loaded.tip_hash(), chain.tip_hash());
         assert_eq!(loaded.finalized_height(), chain.finalized_height());
+        assert_eq!(
+            loaded.get_commit(2),
+            chain.get_commit(2),
+            "commit survives reload"
+        );
     }
 
-    // v9 → v10: a monolithic v9 "chain" blob is exploded into per-height rows on
-    // open, the blob removed, and the chain loads identically afterwards.
+    // ADR 0082 — the double-sign guard: one value per (height, round, kind), durable,
+    // idempotent for the same value, and the lock is recoverable after a restart.
+    #[test]
+    fn test_sign_guard_and_lock_recovery() {
+        use vinx_core::{SignedVote, VoteKind};
+        let tmp = Tmp::new();
+        let vote = |kind, round, value: Option<Hash32>| SignedVote {
+            kind,
+            height: 7,
+            round,
+            value,
+            validator: Address::from_bytes([1; 20]),
+            signature: vec![],
+        };
+        {
+            let storage = Storage::open(&tmp.0).unwrap();
+            assert!(storage
+                .claim_sign(&vote(VoteKind::Prevote, 0, Some([1; 32])))
+                .unwrap());
+            assert!(
+                storage
+                    .claim_sign(&vote(VoteKind::Prevote, 0, Some([1; 32])))
+                    .unwrap(),
+                "same value again is idempotent"
+            );
+            assert!(
+                !storage
+                    .claim_sign(&vote(VoteKind::Prevote, 0, None))
+                    .unwrap(),
+                "another value at the same (height, round, kind) is refused"
+            );
+            assert!(storage
+                .claim_sign(&vote(VoteKind::Precommit, 0, Some([1; 32])))
+                .unwrap());
+            assert!(storage
+                .claim_sign(&vote(VoteKind::Precommit, 2, Some([2; 32])))
+                .unwrap());
+            assert!(storage
+                .claim_sign(&vote(VoteKind::Precommit, 3, None))
+                .unwrap());
+        }
+        // After a restart the refusal still holds and the lock is recovered.
+        let storage = Storage::open(&tmp.0).unwrap();
+        assert!(!storage
+            .claim_sign(&vote(VoteKind::Prevote, 0, None))
+            .unwrap());
+        assert_eq!(storage.last_precommit(7), Some((2, [2; 32])));
+        assert_eq!(storage.last_precommit(8), None);
+    }
 }

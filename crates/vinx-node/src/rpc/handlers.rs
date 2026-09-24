@@ -178,9 +178,9 @@ async fn admit_to_mempool(node: &Arc<Node>, tx: Transaction) -> Result<(), Strin
     state.admission_check(&tx).map_err(|e| e.to_string())?;
 
     let mut mempool = node.mempool.write().await;
-    let queued = mempool.queued_cost_atoms(&tx.from);
+    let queued = mempool.queued_cost_atoms(&tx.sender());
     let needed = queued.saturating_add(tx.admission_cost_atoms());
-    if state.account_balance(&tx.from).atoms() < needed {
+    if state.account_balance(&tx.sender()).atoms() < needed {
         return Err(format!(
             "sender balance does not cover already-queued transactions plus this one \
              (queued cost {queued} atoms)"
@@ -195,10 +195,11 @@ pub async fn get_block(
     Path(height): Path<u64>,
 ) -> ApiResult<BlockResponse> {
     let chain = node.chain.read().await;
-    let vs = node.validator_set.read().await.clone();
-    let indexed_pks = node.state.read().await.indexed_bls_keys(&vs);
-    match chain.get_block(height) {
-        Some(block) => Ok(Json(BlockResponse::from_block(block, &vs, &indexed_pks))),
+    match chain.row(height) {
+        Some(row) => Ok(Json(BlockResponse::from_block(
+            &row.block,
+            row.commit.as_ref(),
+        ))),
         None => Err(ApiError::NotFound(format!("Block {} not found", height))),
     }
 }
@@ -209,16 +210,10 @@ pub async fn get_mempool(State(node): State<Arc<Node>>) -> ApiResult<MempoolResp
 }
 
 pub async fn get_validators(State(node): State<Arc<Node>>) -> ApiResult<ValidatorSetResponse> {
-    let vs = node.validator_set.read().await;
-    let next_height = node.chain.read().await.tip_height() + 1;
-    let liveness = node.validator_liveness.read().await;
-    let suspended = node.suspended_validators.read().await;
+    let state = node.state.read().await;
     Ok(Json(ValidatorSetResponse::from_validator_set(
-        &vs,
-        next_height,
-        &liveness,
-        10,
-        &suspended,
+        &state.validator_set,
+        &state.reliability,
     )))
 }
 
@@ -371,12 +366,10 @@ pub async fn get_chain_sync(
     }
 
     let end = (start + limit as u64).min(tip + 1);
-    let vs = node.validator_set.read().await.clone();
-    let indexed_pks = node.state.read().await.indexed_bls_keys(&vs);
     let mut blocks = Vec::new();
     for h in start..end {
-        if let Some(block) = chain.get_block(h) {
-            blocks.push(BlockResponse::from_block(block, &vs, &indexed_pks));
+        if let Some(row) = chain.row(h) {
+            blocks.push(BlockResponse::from_block(&row.block, row.commit.as_ref()));
         }
     }
     let count = blocks.len();
@@ -385,6 +378,30 @@ pub async fn get_chain_sync(
         count,
         blocks,
     }))
+}
+
+/// Committed blocks with their certificates — `GET /chain/commits?from=&limit=` — the
+/// source for node-to-node HTTP sync (ADR 0082). The requester re-verifies everything.
+pub async fn get_chain_commits(
+    State(node): State<Arc<Node>>,
+    Query(params): Query<SyncParams>,
+) -> Json<serde_json::Value> {
+    let limit = params.limit.min(500) as u64;
+    let chain = node.chain.read().await;
+    let end = params
+        .from
+        .saturating_add(limit)
+        .min(chain.tip_height().saturating_add(1));
+    let rows: Vec<crate::sync::CommittedRow> = (params.from..end)
+        .map_while(|h| {
+            let row = chain.row(h)?;
+            Some(crate::sync::CommittedRow {
+                block: row.block.clone(),
+                commit: row.commit.clone()?,
+            })
+        })
+        .collect();
+    Json(serde_json::json!({ "rows": rows }))
 }
 
 /// Server-Sent Events stream: sends a JSON event on every new block.
@@ -502,25 +519,27 @@ pub async fn get_snapshot(
 
 /// Public bootstrap snapshot — GET /chain/snapshot (ADR snapshot-sync).
 /// No auth required: any new node can call this to bootstrap from a trusted peer.
-/// Returns the full WorldState (bincode+zstd+hex) and the tip block so the caller
+/// Returns the full WorldState (borsh+zstd+hex) and the tip block so the caller
 /// can initialize `Chain::new_from_snapshot` without replaying history from genesis.
 pub async fn get_chain_snapshot(State(node): State<Arc<Node>>) -> impl IntoResponse {
     let mut state_guard = node.state.write().await;
     let chain_guard = node.chain.read().await;
     let height = chain_guard.tip_height();
-    let Some((_, block)) = chain_guard.block_row(height) else {
+    let Some((block, commit)) = chain_guard
+        .row(height)
+        .and_then(|r| Some((r.block.clone(), r.commit.clone()?)))
+    else {
         return (
             StatusCode::INTERNAL_SERVER_ERROR,
             Json(ErrorResponse {
-                error: "tip block not found".into(),
+                error: "tip block or its commit certificate not found".into(),
             }),
         )
             .into_response();
     };
-    let block = block.clone();
     let state_root = hex::encode(state_guard.compute_state_root());
-    // Encode: bincode → zstd → hex
-    let Ok(raw) = bincode::serialize(&*state_guard) else {
+    // Encode: borsh → zstd → hex
+    let Ok(raw) = borsh::to_vec(&*state_guard) else {
         return (
             StatusCode::INTERNAL_SERVER_ERROR,
             Json(ErrorResponse {
@@ -545,6 +564,7 @@ pub async fn get_chain_snapshot(State(node): State<Arc<Node>>) -> impl IntoRespo
         height,
         state_root,
         block,
+        commit,
         state_hex: hex::encode(&compressed),
     };
     (StatusCode::OK, Json(snap)).into_response()
@@ -654,7 +674,7 @@ pub async fn post_compact(
     let keep_last = params.keep_last.unwrap_or(1000);
     let mut chain = node.chain.write().await;
     let tip = chain.tip_height();
-    chain.compact_old_txs(keep_last);
+    chain.prune(keep_last);
     Ok(Json(CompactResponse {
         compacted: true,
         kept_last: keep_last,
@@ -757,7 +777,6 @@ pub async fn post_snapshot(
             let height = body.height;
             *node.state.write().await = new_state;
             *node.validator_set.write().await = new_vs;
-            node.suspended_validators.write().await.clear();
             // Full persist: the imported state may hold fewer accounts than the one
             // it replaces, so wipe stale rows and write the whole set to disk now.
             node.persist_full().await;
@@ -841,9 +860,9 @@ pub async fn submit_tx_batch(
     for (tx, (hash, sig_result)) in txs.into_iter().zip(verifications) {
         let admit = sig_result.and_then(|()| {
             state.admission_check(&tx).map_err(|e| e.to_string())?;
-            let queued = mempool.queued_cost_atoms(&tx.from);
+            let queued = mempool.queued_cost_atoms(&tx.sender());
             let needed = queued.saturating_add(tx.admission_cost_atoms());
-            if state.account_balance(&tx.from).atoms() < needed {
+            if state.account_balance(&tx.sender()).atoms() < needed {
                 return Err(format!(
                     "sender balance does not cover already-queued transactions plus this one \
                      (queued cost {queued} atoms)"

@@ -20,5 +20,6 @@
 
   "admin_address":         "vinx1REPLACE_WITH_YOUR_ADMIN_ADDRESS",
   "initial_validator":     "vinx1REPLACE_WITH_YOUR_VALIDATOR_ADDRESS",
-  "prefund_initial_validator_vinx": 10000
+  "prefund_initial_validator_vinx": 10000,
+  "block_time_secs": 12
 }
