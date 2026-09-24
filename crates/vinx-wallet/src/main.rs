@@ -2,6 +2,7 @@ mod amount;
 mod client;
 mod error;
 mod keystore;
+mod receipt;
 
 use amount::parse_amount;
 use client::RpcClient;
@@ -144,6 +145,22 @@ enum Commands {
         #[arg(long, default_value = "http://127.0.0.1:8545")]
         node: String,
     },
+    /// Fetch, verify and save the payment receipt of a transaction (ADR 0083). Keep it:
+    /// it proves the payment even after nodes prune the block.
+    Receipt {
+        /// Hex-encoded transaction hash
+        hash: String,
+        /// Directory where the receipt is saved as <hash>.json
+        #[arg(long, default_value = "receipts")]
+        out: PathBuf,
+        #[arg(long, default_value = "http://127.0.0.1:8545")]
+        node: String,
+    },
+    /// Verify a saved payment receipt offline
+    VerifyReceipt {
+        /// Receipt file (<hash>.json)
+        file: PathBuf,
+    },
     /// Show transaction history for an address
     History {
         /// Bech32 address (vinx1...)
@@ -221,6 +238,8 @@ async fn run(cmd: Commands) -> Result<(), WalletError> {
         Commands::Block { height, node } => cmd_block(height, &node).await,
         Commands::Status { node } => cmd_status(&node).await,
         Commands::Tx { hash, node } => cmd_tx(&hash, &node).await,
+        Commands::Receipt { hash, out, node } => cmd_receipt(&hash, &out, &node).await,
+        Commands::VerifyReceipt { file } => cmd_verify_receipt(&file),
         Commands::AnnounceUpgrade {
             version,
             activation_ts,
@@ -414,6 +433,32 @@ async fn cmd_tx(hash: &str, node: &str) -> Result<(), WalletError> {
     println!("Amount    : {}", tx.amount);
     println!("Fee       : {}", tx.fee);
     println!("Nonce     : {}", tx.nonce);
+    Ok(())
+}
+
+async fn cmd_receipt(hash: &str, out: &Path, node: &str) -> Result<(), WalletError> {
+    let client = RpcClient::new(node);
+    let receipt: serde_json::Value = client.get_json(&format!("/tx/{hash}/proof")).await?;
+    let height = receipt::verify(&receipt, hash).map_err(WalletError::Receipt)?;
+    std::fs::create_dir_all(out)?;
+    let path = out.join(format!("{}.json", hash.to_lowercase()));
+    let json = serde_json::to_string_pretty(&receipt).expect("json");
+    std::fs::write(&path, json)?;
+    println!("✓ Payment included in block {height} — receipt verified");
+    println!("  Saved to {}", path.display());
+    Ok(())
+}
+
+fn cmd_verify_receipt(file: &Path) -> Result<(), WalletError> {
+    let raw = std::fs::read_to_string(file)?;
+    let receipt: serde_json::Value = serde_json::from_str(&raw)?;
+    let hash = receipt["tx_hash"].as_str().unwrap_or_default().to_string();
+    let height = receipt::verify(&receipt, &hash).map_err(WalletError::Receipt)?;
+    println!("✓ Valid receipt: transaction {hash} is in block {height}");
+    println!(
+        "  Block hash: {}",
+        receipt["block_hash"].as_str().unwrap_or_default()
+    );
     Ok(())
 }
 

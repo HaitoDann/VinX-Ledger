@@ -47,6 +47,9 @@ pub struct NodeConfig {
     pub checkpoints: crate::checkpoints::Checkpoints,
     /// Consensus round timeouts (ADR 0082).
     pub timeouts: crate::bft::Timeouts,
+    /// Archive node (ADR 0083, L5): keeps every block forever instead of pruning those
+    /// older than `BLOCK_RETENTION_SECS`. For explorers and history services.
+    pub archive: bool,
 }
 
 impl NodeConfig {
@@ -75,6 +78,7 @@ impl NodeConfig {
             bootstrap_peers: vec![],
             checkpoints: crate::checkpoints::Checkpoints::none(),
             timeouts: crate::bft::Timeouts::default(),
+            archive: false,
         }
     }
 

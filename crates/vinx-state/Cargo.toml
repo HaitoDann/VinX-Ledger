@@ -6,6 +6,7 @@ authors.workspace = true
 
 [dev-dependencies]
 proptest = "1"
+hex = { workspace = true }
 
 [dependencies]
 vinx-crypto = { path = "../vinx-crypto" }
@@ -15,3 +16,4 @@ serde_json = { workspace = true }
 thiserror = { workspace = true }
 tracing = { workspace = true }
 borsh = { workspace = true }
+imbl = "7"

@@ -295,6 +295,9 @@ pub struct ChainSnapshotResponse {
     pub block: vinx_core::Block,
     /// Its commit certificate (ADR 0082), verified against the snapshot's voting set.
     pub commit: vinx_core::CommitCert,
+    /// The blocks just before `block`, oldest first (protocol-clock window, ADR 0005).
+    #[serde(default)]
+    pub ancestors: Vec<vinx_core::Block>,
     /// WorldState serialized as borsh, compressed with zstd, hex-encoded.
     pub state_hex: String,
 }
@@ -326,19 +329,80 @@ pub struct ErrorResponse {
     pub error: String,
 }
 
+/// Proof of an account against the `state_root` of block `height` (ADR 0083).
+///
+/// Light-client check: `state_root` is in the header of block `height`, committed by the
+/// quorum certificate embedded in block `height + 1`. Recompute
+/// `H("VINX_STATE_ROOT"… ‖ accounts_root ‖ consensus_root)` and fold the sparse Merkle
+/// proof from the leaf up to `accounts_root`.
 #[derive(Serialize)]
 pub struct MerkleProofResponse {
     pub address: String,
-    pub leaf_hash: String,
+    pub height: u64,
     pub state_root: String,
-    pub proof: Vec<MerkleProofStepResponse>,
+    pub accounts_root: String,
+    pub consensus_root: String,
+    /// Tree key of the account (`account_key(address)`).
+    pub key: String,
+    /// Leaf value (`hash_account`), or null when the account does not exist.
+    pub leaf_value: Option<String>,
+    /// Leaf reached by the key's path: `[key, value]`, or null for an empty subtree.
+    pub proof_leaf: Option<[String; 2]>,
+    /// Sibling hashes, root first.
+    pub siblings: Vec<String>,
     pub valid: bool,
 }
 
-#[derive(Serialize)]
-pub struct MerkleProofStepResponse {
-    pub sibling: String,
-    pub sibling_is_right: bool,
+/// Header fields in hex/JSON form, enough to recompute the block hash client-side
+/// (`BlockHeader::hash`).
+#[derive(Serialize, Deserialize, Clone, Debug, PartialEq)]
+pub struct HeaderJson {
+    pub height: u64,
+    pub round: u32,
+    pub prev_hash: String,
+    pub timestamp: u64,
+    pub validator: String,
+    pub tx_count: u32,
+    pub state_root: String,
+    pub base_fee: u64,
+    pub receipts_root: String,
+    pub last_commit_hash: String,
+}
+
+impl From<&vinx_core::BlockHeader> for HeaderJson {
+    fn from(h: &vinx_core::BlockHeader) -> Self {
+        Self {
+            height: h.height,
+            round: h.round,
+            prev_hash: hex::encode(h.prev_hash),
+            timestamp: h.timestamp,
+            validator: h.validator.to_string(),
+            tx_count: h.tx_count,
+            state_root: hex::encode(h.state_root),
+            base_fee: h.base_fee,
+            receipts_root: hex::encode(h.receipts_root),
+            last_commit_hash: hex::encode(h.last_commit_hash),
+        }
+    }
+}
+
+/// Payment receipt (ADR 0083, L6): proof that a transaction is in a committed block,
+/// meant to be **kept by the wallet** — it stays valid after nodes prune the block.
+///
+/// Check: `verify_tx_proof(tx_hash, index, header.tx_count, siblings,
+/// header.receipts_root)`, then `hash(header) == block_hash`, then that `commit`
+/// (more than 2/3 of the voting power) signs `block_hash` at `header.height`.
+#[derive(Serialize, Deserialize, Clone, Debug)]
+pub struct PaymentReceiptResponse {
+    pub tx_hash: String,
+    pub index: u32,
+    /// Sibling hashes, bottom-up.
+    pub siblings: Vec<String>,
+    pub header: HeaderJson,
+    pub block_hash: String,
+    /// Commit certificate of the block (quorum BLS aggregate + signer bitmap).
+    pub commit: Option<vinx_core::CommitCert>,
+    pub tx: vinx_core::Transaction,
 }
 
 // ─── Batch transaction submission ────────────────────────────────────────────

@@ -16,7 +16,7 @@ pub struct ChainRow {
 /// What block execution needs to know about the chain: its tip and the recent
 /// timestamps of the Median-Time-Past window (ADR 0005). Cheap to clone, so consensus can
 /// validate proposals without holding the chain lock.
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, PartialEq)]
 pub struct Tip {
     pub height: u64,
     pub hash: Hash32,
@@ -55,6 +55,8 @@ pub struct Chain {
     account_tx_index: AHashMap<Address, Vec<Hash32>>,
     /// Heights whose stored row changed since the last persistence flush.
     dirty_heights: AHashSet<u64>,
+    /// Set by `prune_before`: stored rows below this height must be deleted.
+    pruned_below: Option<u64>,
 }
 
 impl Chain {
@@ -86,6 +88,7 @@ impl Chain {
             tx_index: AHashMap::new(),
             account_tx_index: AHashMap::new(),
             dirty_heights: AHashSet::from_iter([0]),
+            pruned_below: None,
         };
         (chain, genesis)
     }
@@ -99,25 +102,70 @@ impl Chain {
             tx_index: AHashMap::new(),
             account_tx_index: AHashMap::new(),
             dirty_heights: AHashSet::new(),
+            pruned_below: None,
         }
     }
 
-    /// Bootstraps a chain from a state snapshot. The provided block (with its commit
-    /// certificate, when known) is the only stored block; its height becomes `height_base`.
-    pub fn new_from_snapshot(block: Block, commit: Option<CommitCert>) -> Self {
+    /// Bootstraps a chain from a state snapshot: the snapshot block (with its commit
+    /// certificate) preceded by its `ancestors`, oldest first. The ancestors carry the
+    /// timestamps the protocol clock (median time past, ADR 0005) needs for the next
+    /// blocks — without them a snapshot-synced node computes a different clock than its
+    /// peers and rejects valid blocks. The caller verifies their hash linkage
+    /// (`ancestors_link`).
+    pub fn new_from_snapshot(
+        ancestors: Vec<Block>,
+        block: Block,
+        commit: Option<CommitCert>,
+    ) -> Self {
         let height = block.header.height;
-        let row = ChainRow {
+        let base = height - ancestors.len() as u64;
+        let mut rows: Vec<ChainRow> = ancestors
+            .into_iter()
+            .map(|b| ChainRow {
+                hash: b.hash(),
+                block: b,
+                commit: None,
+            })
+            .collect();
+        rows.push(ChainRow {
             hash: block.hash(),
             block,
             commit,
-        };
-        Self {
-            rows: vec![row],
-            height_base: height,
+        });
+        let mut chain = Self {
+            rows,
+            height_base: base,
             tx_index: AHashMap::new(),
             account_tx_index: AHashMap::new(),
-            dirty_heights: AHashSet::from_iter([height]),
+            dirty_heights: AHashSet::new(),
+            pruned_below: None,
+        };
+        chain.mark_all_dirty();
+        chain.rebuild_tx_index();
+        chain
+    }
+
+    /// True when `ancestors` (oldest first) are consecutive and hash-linked up to `block`.
+    pub fn ancestors_link(ancestors: &[Block], block: &Block) -> bool {
+        let mut next = block;
+        for a in ancestors.iter().rev() {
+            if a.header.height + 1 != next.header.height || a.hash() != next.header.prev_hash {
+                return false;
+            }
+            next = a;
         }
+        true
+    }
+
+    /// The last `MEDIAN_TIME_BLOCKS - 1` blocks before the tip, oldest first (snapshot
+    /// serving).
+    pub fn tip_ancestors(&self) -> Vec<Block> {
+        let n = self.rows.len().saturating_sub(1);
+        let start = n.saturating_sub(vinx_core::amount::MEDIAN_TIME_BLOCKS - 1);
+        self.rows[start..n]
+            .iter()
+            .map(|r| r.block.clone())
+            .collect()
     }
 
     /// Drains and returns the set of heights whose row must be rewritten.
@@ -352,32 +400,49 @@ impl Chain {
         self.rows.is_empty()
     }
 
-    /// Time-based pruning: drops transaction data from blocks older than `retain_secs`
-    /// before `now_ts`. Headers and commit certificates are kept forever.
-    pub fn prune_by_age(&mut self, now_ts: u64, retain_secs: u64) {
+    /// Retention pruning (ADR 0083, L3): deletes whole blocks older than `retain_secs`
+    /// before `now_ts` — header, transactions and certificate — and advances the chain
+    /// base. The tip is always kept. Returns the number of blocks removed; the storage
+    /// layer deletes their rows on the next write (`take_pruned_below`).
+    pub fn prune_before(&mut self, now_ts: u64, retain_secs: u64) -> u64 {
         let cutoff = now_ts.saturating_sub(retain_secs);
-        let mut pruned_blocks = 0usize;
-        let mut tx_pruned = 0usize;
-        for (i, row) in self.rows.iter_mut().enumerate() {
-            if row.block.header.timestamp >= cutoff {
-                break; // blocks are monotonically ordered by time
-            }
-            if !row.block.transactions.is_empty() {
-                tx_pruned += row.block.transactions.len();
-                row.block.transactions.clear();
-                self.dirty_heights.insert(self.height_base + i as u64);
-                pruned_blocks += 1;
-            }
-        }
-        if pruned_blocks > 0 {
-            self.rebuild_tx_index();
-            tracing::info!(
-                pruned_blocks,
-                tx_pruned,
-                cutoff_ts = cutoff,
-                "Chain: time-based tx pruning complete"
+        let keep_from = self
+            .rows
+            .iter()
+            .position(|r| r.block.header.timestamp >= cutoff)
+            .unwrap_or(self.rows.len())
+            // Never drop the blocks the protocol clock needs (MTP window, tip included).
+            .min(
+                self.rows
+                    .len()
+                    .saturating_sub(vinx_core::amount::MEDIAN_TIME_BLOCKS),
             );
+        if keep_from == 0 {
+            return 0;
         }
+        self.rows.drain(..keep_from);
+        let removed = keep_from as u64;
+        self.height_base += removed;
+        self.dirty_heights.retain(|h| *h >= self.height_base);
+        self.pruned_below = Some(self.height_base);
+        self.rebuild_tx_index();
+        tracing::info!(
+            removed,
+            base = self.height_base,
+            "Chain: blocks outside the retention window deleted"
+        );
+        removed
+    }
+
+    /// Height below which stored rows must be deleted, set by `prune_before` and
+    /// drained by persistence.
+    pub fn take_pruned_below(&mut self) -> Option<u64> {
+        self.pruned_below.take()
+    }
+
+    /// Lowest height still held (older blocks were pruned or precede a snapshot).
+    pub fn base_height(&self) -> u64 {
+        self.height_base
     }
 
     /// Drops transaction data from blocks older than `keep_last` blocks. Headers and
@@ -429,6 +494,53 @@ mod tests {
             transactions: txs,
             last_commit: None,
         }
+    }
+
+    #[test]
+    fn test_prune_before_drops_old_blocks_but_keeps_the_clock_window() {
+        let (mut chain, _) = Chain::new_with_genesis(validator(), 0);
+        for h in 1..=50u64 {
+            let b = block_on(&chain, h * 10, vec![]);
+            chain.push(b, None);
+        }
+        let tip = chain.tip();
+        // Everything before ts 300 goes: heights 0..=29.
+        assert_eq!(chain.prune_before(500, 200), 30);
+        assert_eq!(chain.base_height(), 30);
+        assert_eq!(chain.take_pruned_below(), Some(30));
+        assert!(chain.get_block(29).is_none());
+        assert_eq!(chain.get_block(30).unwrap().header.timestamp, 300);
+        assert_eq!(chain.tip_height(), 50);
+        assert_eq!(chain.tip(), tip, "the protocol clock is unchanged");
+
+        // An aggressive window still keeps the MTP window (tip included).
+        chain.prune_before(10_000, 0);
+        assert_eq!(chain.len(), vinx_core::amount::MEDIAN_TIME_BLOCKS);
+        assert_eq!(chain.tip(), tip);
+    }
+
+    #[test]
+    fn test_snapshot_chain_has_the_same_clock_as_the_full_chain() {
+        let (mut chain, _) = Chain::new_with_genesis(validator(), 0);
+        for h in 1..=30u64 {
+            let b = block_on(&chain, h * 7 + (h % 3), vec![]);
+            chain.push(b, None);
+        }
+        let tip_block = chain.get_block(30).unwrap().clone();
+        let ancestors = chain.tip_ancestors();
+        assert_eq!(ancestors.len(), vinx_core::amount::MEDIAN_TIME_BLOCKS - 1);
+        assert!(Chain::ancestors_link(&ancestors, &tip_block));
+        let snap = Chain::new_from_snapshot(ancestors.clone(), tip_block.clone(), None);
+        assert_eq!(snap.tip(), chain.tip());
+        assert_eq!(
+            snap.median_time_past_with(1_000),
+            chain.median_time_past_with(1_000)
+        );
+
+        // A forged ancestor breaks the hash chain.
+        let mut forged = ancestors;
+        forged[3].header.timestamp += 1;
+        assert!(!Chain::ancestors_link(&forged, &tip_block));
     }
 
     #[test]

@@ -12,21 +12,16 @@ use vinx_core::{
     amount::{MAX_BLOCK_TXS, MAX_CLOCK_DRIFT_SECS},
     Block, BlockHeader, CommitCert, Transaction,
 };
-use vinx_crypto::{hash256, Address, Hash32};
+use vinx_crypto::{Address, Hash32};
 use vinx_state::WorldState;
 
 use crate::{chain::Tip, mempool::is_future_nonce};
 
-/// Root of the ordered transaction hashes of a block. Empty blocks get the zero hash.
+/// Merkle root of the ordered transaction hashes of a block (ADR 0083): each payment
+/// is provable with a short proof (`vinx_crypto::tx_proof`). Empty blocks: zero hash.
 pub fn compute_receipts_root(txs: &[Transaction]) -> Hash32 {
-    if txs.is_empty() {
-        return [0u8; 32];
-    }
-    let mut bytes = Vec::with_capacity(txs.len() * 32);
-    for tx in txs {
-        bytes.extend_from_slice(&tx.hash());
-    }
-    hash256(&bytes)
+    let hashes: Vec<Hash32> = txs.iter().map(|tx| tx.hash()).collect();
+    vinx_crypto::tx_root(&hashes)
 }
 
 /// Verifies every transaction signature of `txs` in parallel (ADR 0015).

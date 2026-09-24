@@ -31,6 +31,7 @@ pub fn router(node: Arc<Node>) -> Router {
         .route("/tx/estimate", get(handlers::get_fee_estimate))
         .route("/tx/:hash", get(handlers::get_tx_by_hash))
         .route("/tx/:hash/receipt", get(handlers::get_tx_receipt))
+        .route("/tx/:hash/proof", get(handlers::get_tx_proof))
         .route("/block/:height", get(handlers::get_block))
         .route("/mempool/size", get(handlers::get_mempool))
         .route("/validators", get(handlers::get_validators))

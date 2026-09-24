@@ -110,7 +110,7 @@ Un bloc est refusé si son timestamp dépasse `now + 15 s`.
     - mauvais proposeur ;
     - `last_commit` retiré ;
     - timestamp dans le futur.
-- **Non testé à ce jour :**
-  - un vrai réseau multi-processus libp2p ;
-  - le script `scripts/bench-n3.sh`, qui repose encore sur l'ancien modèle et est à
-    réécrire pour n=4.
+- **Vrai réseau** (`scripts/bench-n4.sh`) : 4 processus `vinx-node` en libp2p sur une genèse
+  multi-validateurs (`--genesis-entry` + champ `validators` de la spec). Résultats :
+  progression et accord à 4, poursuite à 3/4, arrêt à 2/4 sans fork, reprise et
+  resynchronisation après relance. ✅

@@ -425,8 +425,21 @@ pub async fn snapshot_sync_from_peer(
         );
     }
 
+    // The ancestors only feed the protocol clock, but they must be the real ones: they
+    // are authenticated by their hash chain up to the committed snapshot block.
+    let expected = vinx_core::amount::MEDIAN_TIME_BLOCKS as u64 - 1;
+    if snap.ancestors.len() as u64 != expected.min(snap.height)
+        || !Chain::ancestors_link(&snap.ancestors, &snap.block)
+    {
+        tracing::error!(
+            height = snap.height,
+            "Snapshot sync: missing or unlinked ancestor blocks — rejecting"
+        );
+        return false;
+    }
+
     // 5. Initialize the chain from the snapshot block and replace state.
-    let new_chain = Chain::new_from_snapshot(snap.block, Some(snap.commit));
+    let new_chain = Chain::new_from_snapshot(snap.ancestors, snap.block, Some(snap.commit));
     *state = new_state;
     *chain = new_chain;
 

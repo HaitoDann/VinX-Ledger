@@ -187,6 +187,7 @@ d'exploitation, correctifs, prompts de contre-audit — vit dans
 | [0080](./0080-criteres-lancement-testnet-mainnet.md) | **Critères de lancement : testnet → mainnet** | 📐 Accepté | 🔴 Porte de sortie |
 | [0081](./0081-decisions-irreversibles-pre-genesis.md) | **Décisions irréversibles avant la genèse** (supply, décimales, frais, Bech32m, type de clé, gouvernance, borsh) | ✅ Implémenté | 🔴 Haute |
 | [0082](./0082-consensus-bft-tendermint.md) | **Consensus BFT par étapes (Tendermint)** — rotation pondérée, votes plafonnés à 10 %, ≤ 100 validateurs, temps de bloc de genèse | ✅ Implémenté | 🔴 Haute |
+| [0083](./0083-etat-leger.md) | **État léger** — arbre de Merkle creux, élagage 30 j, snapshots, `--archive`, reçus de paiement | ✅ Implémenté | 🔴 Haute |
 
 > **Le banc adversarial multi-nœuds est désormais en place** (ADR 0080 §2.2) : 6 scénarios
 > avec un `Storage` réel (redb) par nœud, validés par mutation testing (non-équivocation, rejet
@@ -333,6 +334,7 @@ d'exploitation, correctifs, prompts de contre-audit — vit dans
 | [0080](./0080-criteres-lancement-testnet-mainnet.md) | Critères de lancement testnet → mainnet | 📐 Accepté | 1.5 |
 | [0081](./0081-decisions-irreversibles-pre-genesis.md) | Décisions irréversibles avant la genèse | ✅ Implémenté | 1.5 |
 | [0082](./0082-consensus-bft-tendermint.md) | Consensus BFT par étapes (Tendermint) | ✅ Implémenté | 1.5 |
+| [0083](./0083-etat-leger.md) | État léger (SMT, élagage, snapshots, reçus) | ✅ Implémenté | 1.5 |
 
 > ⚠️ = change les règles de consensus. Appliqué **sans hauteur d'activation**, ce qui n'est
 > acceptable qu'en pré-lancement (`0.1.0-alpha.1`, aucun réseau public). Après le lancement,
@@ -350,7 +352,7 @@ d'exploitation, correctifs, prompts de contre-audit — vit dans
 ## Comment contribuer
 
 1. Copier le gabarit de l'ADR 0001 (Contexte / Options / Décision / Conséquences).
-2. Numéroter en séquence (prochain disponible : **0083**).
+2. Numéroter en séquence (prochain disponible : **0084**).
 3. Écrire les **critères de validation vérifiables** avant de passer Accepté.
 4. Suivre le cycle : `Proposé → Accepté → En cours → Implémenté → Vérifié`.
 5. Mettre à jour ce README et `PROTOCOL_SPEC.md` quand l'ADR passe Implémenté.

@@ -33,6 +33,8 @@ struct NodeConfigFile {
     faucet_amount_atoms: Option<u128>,
     /// Cooldown between faucet requests per address in seconds (default: 86 400 = 24 h).
     faucet_cooldown_secs: Option<u64>,
+    /// Archive node (same as `--archive`).
+    archive: Option<bool>,
 }
 
 impl NodeConfigFile {
@@ -86,6 +88,15 @@ struct Args {
     /// Hardcoded bootstrap peers (repeatable, in addition to --peers)
     #[arg(long, num_args = 0..)]
     bootstrap_peers: Vec<String>,
+    /// Prints this node's genesis validator entry (address, BLS key, PoP for `--chain-id`)
+    /// as JSON, generating the keys if needed, then exits. Collect one per validator into
+    /// the shared spec's `validators` list (multi-validator genesis, ADR 0082).
+    #[arg(long)]
+    genesis_entry: bool,
+    /// Archive node: keep every block instead of pruning those older than 30 days
+    /// (ADR 0083). For explorers and history services.
+    #[arg(long)]
+    archive: bool,
 }
 
 // ─── Key file helpers ─────────────────────────────────────────────────────────
@@ -222,6 +233,32 @@ struct GenesisSpec {
     initial_validator_bls_pub_key: Option<String>,
     #[serde(default)]
     initial_validator_bls_pop: Option<String>,
+    /// Further genesis validators, as printed by `vinx-node --genesis-entry`.
+    #[serde(default)]
+    validators: Vec<SpecValidator>,
+}
+
+/// One genesis validator entry (`vinx-node --genesis-entry`).
+#[derive(serde::Deserialize, serde::Serialize)]
+struct SpecValidator {
+    address: String,
+    bls_pub_key: String,
+    bls_pop: String,
+}
+
+impl SpecValidator {
+    fn parse(&self) -> (Address, vinx_state::GenesisBlsKey) {
+        let addr: Address = self.address.parse().expect("spec validator address");
+        let pub_key: [u8; 48] = hex::decode(&self.bls_pub_key)
+            .expect("spec validator bls_pub_key: hex")
+            .try_into()
+            .expect("spec validator BLS public key must be 48 bytes");
+        let pop: [u8; 96] = hex::decode(&self.bls_pop)
+            .expect("spec validator bls_pop: hex")
+            .try_into()
+            .expect("spec validator BLS PoP must be 96 bytes");
+        (addr, vinx_state::GenesisBlsKey { pub_key, pop })
+    }
 }
 
 /// Validates a genesis block time against the protocol bounds (ADR 0081 C6).
@@ -311,6 +348,17 @@ async fn main() {
     let admin_addr: Address = admin_kf.address.parse().expect("admin address");
     let validator_addr: Address = validator_kf.address.parse().expect("validator address");
 
+    if args.genesis_entry {
+        let key = vinx_state::GenesisBlsKey::from_secret(&bls_sk, &validator_addr, chain_id);
+        let entry = SpecValidator {
+            address: validator_addr.to_string(),
+            bls_pub_key: hex::encode(key.pub_key),
+            bls_pop: hex::encode(key.pop),
+        };
+        println!("{}", serde_json::to_string(&entry).unwrap());
+        return;
+    }
+
     let timestamp = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .unwrap()
@@ -381,6 +429,8 @@ async fn main() {
                     "⚠ Genèse construite depuis une spec partagée (testnet dev)"
                 );
                 let mut state = create_genesis_state_with_dev_prefund(&cfg, prefund_atoms);
+                let extra: Vec<_> = spec.validators.iter().map(SpecValidator::parse).collect();
+                vinx_state::add_genesis_validators(&mut state, &extra);
                 state.block_time_secs = checked_block_time(
                     spec.block_time_secs
                         .unwrap_or(vinx_core::amount::DEFAULT_BLOCK_TIME_SECS),
@@ -421,11 +471,16 @@ async fn main() {
     let restored_mempool = storage.load_mempool();
     drop(storage);
 
+    let archive = args.archive || file_cfg.archive.unwrap_or(false);
     let mut config = NodeConfig::new(validator_kp)
         .with_bls_key(bls_sk)
         .with_rpc_listen(&rpc_listen)
         .with_data_dir(&data_dir);
 
+    config.archive = archive;
+    if archive {
+        tracing::info!("Archive node: blocks are never pruned");
+    }
     if let Some(ref p2p) = p2p_listen {
         config = config.with_p2p(p2p);
     }

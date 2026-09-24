@@ -121,6 +121,34 @@ pub fn create_genesis_state_with_dev_prefund(
     state
 }
 
+/// Adds validators to a genesis state (multi-validator launch, ADR 0082). Each key's
+/// Proof-of-Possession is verified against its address and the chain id; voting powers
+/// are recomputed over the whole genesis set. Panics on an invalid PoP or a duplicate,
+/// since an unverifiable genesis must never be written.
+pub fn add_genesis_validators(state: &mut WorldState, extra: &[(Address, GenesisBlsKey)]) {
+    if extra.is_empty() {
+        return;
+    }
+    let mut addrs: Vec<Address> = state.validator_set.validators().to_vec();
+    for (addr, bls) in extra {
+        assert!(!addrs.contains(addr), "duplicate genesis validator {addr}");
+        let pop_ok = BlsPubKey::from_bytes(&bls.pub_key)
+            .and_then(|pk| pk.verify_pop(&BlsSignature(bls.pop), addr.as_bytes(), state.chain_id))
+            .is_ok();
+        assert!(
+            pop_ok,
+            "genesis validator {addr}: invalid BLS Proof-of-Possession"
+        );
+        let mut entry = ValidatorPoolEntry::new(0, 0);
+        entry.status = PoolStatus::Active;
+        entry.bls_pub_key = Some(bls.pub_key.to_vec());
+        entry.bls_pop = Some(bls.pop.to_vec());
+        state.validator_pool.insert(*addr, entry);
+        addrs.push(*addr);
+    }
+    state.validator_set = state.weighted_validator_set(addrs);
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
