@@ -709,7 +709,7 @@ impl WorldState {
         if !new_active.is_empty() {
             let mut new_vs_addrs: Vec<Address> = new_active.iter().copied().collect();
             new_vs_addrs.sort();
-            self.validator_set = ValidatorSet::new(new_vs_addrs);
+            self.validator_set = self.weighted_validator_set(new_vs_addrs);
         }
         // If the pool is empty (e.g. genesis before any bonds), leave validator_set as-is.
 
@@ -1915,7 +1915,14 @@ impl WorldState {
 
         // Remove from validator set (can't produce blocks anymore).
         if self.validator_set.len() > 1 {
-            self.validator_set.remove(target);
+            let remaining: Vec<Address> = self
+                .validator_set
+                .validators()
+                .iter()
+                .copied()
+                .filter(|a| a != target)
+                .collect();
+            self.validator_set = self.weighted_validator_set(remaining);
             tracing::warn!(validator = %target, slashed = slashable, "Validator slashed for equivocation");
         } else {
             tracing::warn!(validator = %target, "Slash accounting applied — last validator kept in set");
@@ -1977,6 +1984,28 @@ impl WorldState {
             .nonce += 1;
         self.mark_dirty(&tx.sender());
         Ok(())
+    }
+
+    /// Builds the active set for `addrs` with stake-weighted, capped voting power
+    /// (ADR 0081 C4). A validator's stake is its bond (pool entry or staked balance),
+    /// floored at the minimum bond so a grandfathered genesis validator (bond 0) still
+    /// votes like a minimally bonded one. Measured in whole VINX.
+    pub fn weighted_validator_set(&self, addrs: Vec<Address>) -> ValidatorSet {
+        let unit = vinx_core::amount::DECIMAL_FACTOR;
+        let stakes = addrs
+            .iter()
+            .map(|a| {
+                let pool = self
+                    .validator_pool
+                    .get(a)
+                    .map(|e| e.bond_atoms)
+                    .unwrap_or(0);
+                let staked = self.account_staked(a).atoms();
+                let bond = pool.max(staked).max(self.min_validator_bond_atoms);
+                (bond / unit).min(u64::MAX as u128) as u64
+            })
+            .collect();
+        ValidatorSet::with_stakes(addrs, stakes)
     }
 
     /// True once the on-chain admin tenure is over (ADR 0081 D7b): `ADMIN_TENURE_SECS`
@@ -2075,7 +2104,9 @@ impl WorldState {
                         "candidate validator has not posted the minimum bond".to_string(),
                     ));
                 }
-                self.validator_set.add(addr);
+                let mut addrs = self.validator_set.validators().to_vec();
+                addrs.push(addr);
+                self.validator_set = self.weighted_validator_set(addrs);
                 tracing::info!(%addr, "Admin: validator added");
             }
             GovernanceAction::RemoveValidator(addr) => {
@@ -2089,7 +2120,14 @@ impl WorldState {
                         "address is not a validator".to_string(),
                     ));
                 }
-                self.validator_set.remove(&addr);
+                let remaining: Vec<Address> = self
+                    .validator_set
+                    .validators()
+                    .iter()
+                    .copied()
+                    .filter(|a| *a != addr)
+                    .collect();
+                self.validator_set = self.weighted_validator_set(remaining);
                 tracing::info!(%addr, "Admin: validator removed");
             }
             GovernanceAction::UpdateFeeFloor { atoms } => {
