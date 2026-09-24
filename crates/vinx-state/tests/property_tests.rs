@@ -185,10 +185,10 @@ proptest! {
         prop_assert_eq!(nonce_after, nonce_before + 1);
     }
 
-    /// The full fee goes to the block producer — not the epoch pot. After settling,
-    /// the producer holds exactly the fee and the epoch pot is untouched.
+    /// The fee is split (ADR 0081 D4): the producer's share is credited directly, the
+    /// rest lands in the co-signers' epoch pot. Nothing is lost or burned.
     #[test]
-    fn fee_goes_to_producer(
+    fn fee_split_producer_and_pot(
         amount_vinx  in 1u64..=1_000u64,
         initial_vinx in 2_000u64..=20_000u64,
     ) {
@@ -210,15 +210,16 @@ proptest! {
         state.apply_transaction(&tx).unwrap();
         state.settle_block(&producer, 1, 1);
 
+        let producer_part = fee.atoms() * vinx_core::amount::FEE_PRODUCER_SHARE_BPS / vinx_core::amount::BPS_DENOM;
         prop_assert_eq!(
             state.account_balance(&producer).atoms(),
-            fee.atoms(),
-            "fee not credited in full to the producer"
+            producer_part,
+            "producer share of the fee"
         );
         prop_assert_eq!(
-            state.epoch_dist_emission_pot,
-            pot_before,
-            "epoch pot changed — the fee must not flow to the pot"
+            state.epoch_dist_emission_pot.atoms(),
+            pot_before.atoms() + (fee.atoms() - producer_part),
+            "co-signer share of the fee must land in the epoch pot"
         );
     }
 

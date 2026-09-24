@@ -172,7 +172,7 @@ mod tests {
     }
 
     #[test]
-    fn test_transfer_fee_goes_to_producer() {
+    fn test_transfer_fee_split_producer_and_pot() {
         let (mut state, sender_kp, _) = funded_state();
         let receiver = Address::from_public_key(&KeyPair::generate().public_key());
         let producer = Address::from_public_key(&KeyPair::generate().public_key());
@@ -184,9 +184,15 @@ mod tests {
         state.apply_transaction(&tx).unwrap();
         state.settle_block(&producer, 1, 1);
 
-        // 100% of the fee goes to the block producer; the epoch pot is untouched.
-        assert_eq!(state.account_balance(&producer), fee);
-        assert_eq!(state.epoch_dist_emission_pot, pot_before);
+        // ADR 0081 D4: the fee is split between the producer and the co-signers' pot.
+        let producer_part = Amount::from_atoms(
+            fee.atoms() * vinx_core::amount::FEE_PRODUCER_SHARE_BPS / vinx_core::amount::BPS_DENOM,
+        );
+        assert_eq!(state.account_balance(&producer), producer_part);
+        assert_eq!(
+            state.epoch_dist_emission_pot,
+            pot_before.saturating_add(fee.checked_sub(producer_part).unwrap())
+        );
     }
 
     #[test]

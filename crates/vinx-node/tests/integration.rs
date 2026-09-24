@@ -119,7 +119,7 @@ async fn test_submit_and_retrieve_tx() {
 
     {
         let mut state = node.state.write().await;
-        state.credit_for_test(sender_addr, Amount::from_vinx(10_000));
+        state.credit_emit_for_test(sender_addr, Amount::from_vinx(10_000));
     }
 
     // Build and submit a transfer
@@ -187,7 +187,7 @@ async fn test_account_balance() {
 
     {
         let mut state = node.state.write().await;
-        state.credit_for_test(addr, credited);
+        state.credit_emit_for_test(addr, credited);
     }
 
     let resp: serde_json::Value = client
@@ -269,7 +269,7 @@ async fn test_mempool_ordering() {
     // Fund sender with enough for 3 transfers
     {
         let mut state = node.state.write().await;
-        state.credit_for_test(sender_addr, Amount::from_vinx(100_000));
+        state.credit_emit_for_test(sender_addr, Amount::from_vinx(100_000));
     }
 
     let amount = Amount::from_vinx(1);
@@ -381,7 +381,7 @@ async fn test_faucet_endpoint() {
     // Fund the faucet account
     {
         let mut s = node.state.write().await;
-        s.credit_for_test(faucet_addr, Amount::from_vinx(10_000));
+        s.credit_emit_for_test(faucet_addr, Amount::from_vinx(10_000));
     }
 
     let rpc_node = std::sync::Arc::clone(&node);
@@ -620,8 +620,8 @@ async fn test_admin_action_adds_validator() {
     {
         let mut s = node.state.write().await;
         s.admin_address = Some(admin_addr);
-        s.credit_for_test(admin_addr, Amount::from_vinx(1_000));
-        s.credit_for_test(new_val_addr, Amount::from_atoms(bond));
+        s.credit_emit_for_test(admin_addr, Amount::from_vinx(1_000));
+        s.credit_emit_for_test(new_val_addr, Amount::from_atoms(bond));
     }
 
     // The candidate posts the minimum validator bond (required for admission). Since
@@ -908,7 +908,7 @@ async fn test_admission_rejects_wrong_chain_id() {
     let receiver = Address::from_public_key(&KeyPair::generate().public_key());
     {
         let mut state = node.state.write().await;
-        state.credit_for_test(sender_addr, Amount::from_vinx(1_000));
+        state.credit_emit_for_test(sender_addr, Amount::from_vinx(1_000));
     }
 
     let amount = Amount::from_vinx(1);
@@ -939,7 +939,7 @@ async fn test_admission_bounds_nonce_window() {
     let receiver = Address::from_public_key(&KeyPair::generate().public_key());
     {
         let mut state = node.state.write().await;
-        state.credit_for_test(sender_addr, Amount::from_vinx(1_000));
+        state.credit_emit_for_test(sender_addr, Amount::from_vinx(1_000));
     }
 
     let amount = Amount::from_vinx(1);
@@ -983,7 +983,7 @@ async fn test_admission_enforces_cumulative_funding() {
     // Fund exactly one transfer (amount + fee) — not two.
     {
         let mut state = node.state.write().await;
-        state.credit_for_test(sender_addr, amount.checked_add(fee).unwrap());
+        state.credit_emit_for_test(sender_addr, amount.checked_add(fee).unwrap());
     }
 
     let tx0 = Transaction::new_transfer(&sender_kp, receiver, amount, fee, 0);

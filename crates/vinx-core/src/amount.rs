@@ -18,7 +18,8 @@ pub const MAX_SUPPLY_ATOMS: u128 = 1_000_000_000 * DECIMAL_FACTOR;
 /// Flat base transaction fee: 0.0001 VinX. Charged as an absolute forfait (times the
 /// tx-type weight and the congestion multiplier), **independent of the amount moved** —
 /// processing a transaction costs the same whether it carries 1 or 1,000,000 VinX.
-/// Governable via `UpdateFeeFloor`. 100% of every fee goes to the block producer.
+/// Governable via `UpdateFeeFloor`. Fees are split between the producer and the
+/// co-signers (`FEE_PRODUCER_SHARE_BPS`, ADR 0081) — never burned.
 pub const DEFAULT_FEE_FLOOR_ATOMS: u128 = DECIMAL_FACTOR / 10_000;
 
 /// Minimum amount that can be staked in a single transaction: 1 VinX.
@@ -157,6 +158,12 @@ pub const SLASH_BOUNTY_BPS: u128 = 1_000;
 /// 20% goes to the producer immediately; 80% goes to the epoch distribution pot
 /// and is shared proportionally among co-signers at epoch close.
 pub const PROPOSER_SHARE_BPS: u128 = 2_000;
+
+/// Share of the block's transaction fees credited directly to the block producer
+/// (ADR 0081 D4). The remaining 50% goes to the epoch distribution pot and is shared
+/// among co-signers by participation at epoch close — the same channel as emission.
+/// No fee is ever burned: producing a block and co-signing it are both paid work.
+pub const FEE_PRODUCER_SHARE_BPS: u128 = 5_000;
 
 /// How long (in real-time seconds) to keep full block data (header + transactions +
 /// signatures). After this window, transactions and signatures are dropped — only the

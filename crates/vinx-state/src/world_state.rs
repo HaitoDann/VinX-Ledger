@@ -4,11 +4,12 @@ use vinx_core::{
     amount::{
         cumulative_emission_atoms, Amount, ACTIVE_SET_COOLDOWN_SECS, ACTIVE_SET_STEP,
         BOND_COOLDOWN_SECS, BOND_STEP_BPS, BPS_DENOM, DEFAULT_ACTIVE_SET_SIZE,
-        DEFAULT_FEE_FLOOR_ATOMS, EPOCH_DURATION_SECS, EXISTENTIAL_DEPOSIT_ATOMS, MAX_BOND_HARD_CAP,
-        MAX_MODULES, MAX_NONCE_AHEAD, MAX_TX_PAYLOAD_BYTES, MAX_VALIDATOR_EXITS_PER_EPOCH,
-        MIN_ACTIVE_SET_SIZE, MIN_BOND_HARD_FLOOR, MIN_MODULE_BOND_ATOMS, MIN_STAKE_ATOMS,
-        MIN_VALIDATOR_BOND_ATOMS, PROPOSER_SHARE_BPS, SLASH_BOUNTY_BPS, SLASH_EQUIVOCATION_BPS,
-        UNBONDING_SECS, VALIDATOR_SCORE_WINDOW_SECS,
+        DEFAULT_FEE_FLOOR_ATOMS, EPOCH_DURATION_SECS, EXISTENTIAL_DEPOSIT_ATOMS,
+        FEE_PRODUCER_SHARE_BPS, MAX_BOND_HARD_CAP, MAX_MODULES, MAX_NONCE_AHEAD,
+        MAX_TX_PAYLOAD_BYTES, MAX_VALIDATOR_EXITS_PER_EPOCH, MIN_ACTIVE_SET_SIZE,
+        MIN_BOND_HARD_FLOOR, MIN_MODULE_BOND_ATOMS, MIN_STAKE_ATOMS, MIN_VALIDATOR_BOND_ATOMS,
+        PROPOSER_SHARE_BPS, SLASH_BOUNTY_BPS, SLASH_EQUIVOCATION_BPS, UNBONDING_SECS,
+        VALIDATOR_SCORE_WINDOW_SECS,
     },
     block::SlashEvidence,
     chain_id::CHAIN_ID_DEVNET,
@@ -595,10 +596,20 @@ impl WorldState {
         height: u64,
         block_ts: u64,
     ) -> (Amount, Amount) {
-        // 1. Collected transaction fees → producer (circulation-neutral).
+        // 1. Collected transaction fees (ADR 0081 D4): FEE_PRODUCER_SHARE_BPS to the
+        //    producer now, the rest into the epoch pot for the co-signers. Nothing burned.
         let fees = std::mem::replace(&mut self.block_fees, Amount::ZERO);
         if fees > Amount::ZERO {
-            self.credit(producer, fees);
+            let producer_atoms = fees.atoms() * FEE_PRODUCER_SHARE_BPS / BPS_DENOM;
+            let cosigner_atoms = fees.atoms() - producer_atoms;
+            if producer_atoms > 0 {
+                self.credit(producer, Amount::from_atoms(producer_atoms));
+            }
+            if cosigner_atoms > 0 {
+                // The fee was debited from the sender without leaving circulation;
+                // parking it in the pot keeps `circulating + pot == emitted` exact.
+                self.move_to_epoch_pot(Amount::from_atoms(cosigner_atoms));
+            }
         }
         // 2. Mature any unbonds whose delay has elapsed (real time).
         self.mature_unbonds(block_ts);
@@ -2739,7 +2750,7 @@ mod tests {
     }
 
     #[test]
-    fn test_fee_goes_to_producer_not_epoch_pot() {
+    fn test_fee_split_between_producer_and_epoch_pot() {
         let mut s = WorldState::new();
         let (sender_kp, sender) = kp_addr();
         let (_, receiver) = kp_addr();
@@ -2750,13 +2761,24 @@ mod tests {
         let tx = Transaction::new_transfer(&sender_kp, receiver, amount, fee, 0);
         let pot_before = s.epoch_dist_emission_pot;
         s.apply_transaction(&tx).unwrap();
-        // Fee is collected, not routed to the epoch pot.
+        // Fee is collected at apply time; the pot moves only when the block settles.
         assert_eq!(s.epoch_dist_emission_pot, pot_before);
-        // Settling credits the producer with the fee (epoch established, no emission).
+        // Settling (epoch established, no emission) splits the fee (ADR 0081 D4).
         s.settle_block(&producer, 1, 100);
-        assert_eq!(s.accounts[&producer].balance, fee);
-        // The fee just changed hands: circulation is unchanged.
-        assert_eq!(s.circulating_supply, Amount::from_vinx(1_000));
+        let producer_part = Amount::from_atoms(fee.atoms() * FEE_PRODUCER_SHARE_BPS / BPS_DENOM);
+        let cosigner_part = fee.checked_sub(producer_part).unwrap();
+        assert!(producer_part > Amount::ZERO && cosigner_part > Amount::ZERO);
+        assert_eq!(s.accounts[&producer].balance, producer_part);
+        assert_eq!(
+            s.epoch_dist_emission_pot,
+            pot_before.saturating_add(cosigner_part)
+        );
+        // Nothing burned: circulation + pot still equals everything emitted.
+        assert_eq!(
+            s.circulating_supply
+                .saturating_add(s.epoch_dist_emission_pot),
+            Amount::from_vinx(1_000)
+        );
     }
 
     #[test]

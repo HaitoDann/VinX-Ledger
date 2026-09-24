@@ -600,7 +600,7 @@ mod tests {
     }
 
     #[test]
-    fn test_fee_goes_to_producer_on_block() {
+    fn test_fee_split_on_block() {
         let (mut state, mut chain, mut mempool, config) = setup();
 
         let sender_kp = KeyPair::generate();
@@ -626,16 +626,22 @@ mod tests {
         )
         .unwrap();
 
-        // 100% of the fee goes to the block producer. The epoch pot is untouched by fees;
-        // the first block only establishes the emission epoch (minting nothing yet).
+        // ADR 0081 D4: fee split producer / co-signers' pot. The first block only
+        // establishes the emission epoch (minting nothing yet).
+        let producer_part = Amount::from_atoms(
+            fee.atoms() * vinx_core::amount::FEE_PRODUCER_SHARE_BPS / vinx_core::amount::BPS_DENOM,
+        );
         assert_eq!(
             state
                 .account_balance(&producer)
                 .checked_sub(producer_before)
                 .unwrap(),
-            fee
+            producer_part
         );
-        assert_eq!(state.epoch_dist_emission_pot, epoch_pot_before);
+        assert_eq!(
+            state.epoch_dist_emission_pot,
+            epoch_pot_before.saturating_add(fee.checked_sub(producer_part).unwrap())
+        );
     }
 
     #[test]
