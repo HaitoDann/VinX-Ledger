@@ -6,6 +6,7 @@ authors.workspace = true
 
 [dev-dependencies]
 proptest = "1"
+hex = { workspace = true }
 
 [dependencies]
 vinx-crypto = { path = "../vinx-crypto" }

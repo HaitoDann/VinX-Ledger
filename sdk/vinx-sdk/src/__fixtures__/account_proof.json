@@ -1,0 +1,55 @@
+{
+  "cases": [
+    {
+      "account": {
+        "address": "vinx1qvpsxqcrqvpsxqcrqvpsxqcrqvpsxqcrllptkh",
+        "balance": "",
+        "balance_atoms": "1000002",
+        "nonce": 0,
+        "staked": "",
+        "staked_atoms": "0"
+      },
+      "proof": {
+        "accounts_root": "c15a954be5e30a5e2946c5cecf5af49af04d06f0bf5c00a8f2f624068821b9cd",
+        "address": "vinx1qvpsxqcrqvpsxqcrqvpsxqcrqvpsxqcrllptkh",
+        "consensus_root": "57f2c373be9321d086e7ff80f86cb6bf43d9558f72dae51d846b8179564ab7ed",
+        "height": 0,
+        "key": "5269b8e4e35d89957dc0c0735246592902d41d07a9c5afba8e15d1571f4127e2",
+        "leaf_value": "c3399e2a01b31045c3f50a6ec63b79448866b99e0e456b3f2f67493ac66155af",
+        "proof_leaf": [
+          "5269b8e4e35d89957dc0c0735246592902d41d07a9c5afba8e15d1571f4127e2",
+          "c3399e2a01b31045c3f50a6ec63b79448866b99e0e456b3f2f67493ac66155af"
+        ],
+        "siblings": [
+          "e8c835d3e60885e5bcdb0ad5c93c5b8dc38c3fbf75f68c55d4d922153d2a779c",
+          "9c02a477301413a8dec233075738330db6c41bdcb20b4b0a9b709718cf0bc0e5",
+          "0000000000000000000000000000000000000000000000000000000000000000",
+          "6f3060b284b63bcc3404e483357e0967b2f1929b77f2e5592fd95731aaef39b9"
+        ],
+        "state_root": "031455760efa659f0276eb2868f4d8c98a5712cb8afe5a3dae7224c74502da83",
+        "valid": true
+      }
+    },
+    {
+      "account": null,
+      "proof": {
+        "accounts_root": "c15a954be5e30a5e2946c5cecf5af49af04d06f0bf5c00a8f2f624068821b9cd",
+        "address": "vinx1pyysjzgfpyysjzgfpyysjzgfpyysjzgfqrn759",
+        "consensus_root": "57f2c373be9321d086e7ff80f86cb6bf43d9558f72dae51d846b8179564ab7ed",
+        "height": 0,
+        "key": "8cef51318e0d81f173f794fe0a1b60463a10f056000b0738efafad3042ff89c1",
+        "leaf_value": null,
+        "proof_leaf": [
+          "ada403266930d9f055507d1b7d6e20d0088b186ff60fca60e46c26091ac925e7",
+          "102da70c2f79b3b54a2b07ce5e8e1dac80c8c61f08964984b07c4d5408b938a9"
+        ],
+        "siblings": [
+          "e553a7b7052f3dc8f576d14eeebb21f94c0326808806c7dce0a83a6fa7f8fe47"
+        ],
+        "state_root": "031455760efa659f0276eb2868f4d8c98a5712cb8afe5a3dae7224c74502da83",
+        "valid": true
+      }
+    }
+  ],
+  "state_root": "031455760efa659f0276eb2868f4d8c98a5712cb8afe5a3dae7224c74502da83"
+}

@@ -906,52 +906,28 @@ pub async fn get_account_proof(
     State(node): State<Arc<Node>>,
     Path(raw_address): Path<String>,
 ) -> ApiResult<MerkleProofResponse> {
-    use vinx_crypto::{hash256, merkle_proof_for, merkle_root, verify_merkle_proof};
-
     let address = node.parse_address(&raw_address).await?;
-
-    let state = node.state.read().await;
-
-    // Build sorted leaf list (same order as compute_state_root)
-    let entries = state.accounts_sorted();
-
-    let index = entries
-        .iter()
-        .position(|a| a.address == address)
-        .ok_or_else(|| ApiError::NotFound(format!("Account {} not found", raw_address)))?;
-
-    let leaves: Vec<vinx_crypto::Hash32> = entries
-        .iter()
-        .map(|a| {
-            // Must match vinx_state::hash_account exactly (light-client leaf hash).
-            let addr = a.address.as_bytes();
-            let mut buf = Vec::with_capacity(addr.len() + 32);
-            buf.extend_from_slice(addr);
-            buf.extend_from_slice(&a.balance.atoms().to_be_bytes());
-            buf.extend_from_slice(&a.nonce.to_be_bytes());
-            buf.extend_from_slice(&a.staked.atoms().to_be_bytes());
-            hash256(&buf)
-        })
-        .collect();
-
-    let state_root = merkle_root(&leaves);
-    let leaf_hash = leaves[index];
-    let proof = merkle_proof_for(&leaves, index)
-        .ok_or_else(|| ApiError::Internal("proof generation failed".to_string()))?;
-
-    let valid = verify_merkle_proof(&leaf_hash, &proof, &state_root);
-
+    // Write lock: the proof flushes the account tree (a no-op right after a commit).
+    let mut state = node.state.write().await;
+    let (height, state_root) = {
+        let chain = node.chain.read().await;
+        let tip = chain
+            .get_block(chain.tip_height())
+            .ok_or_else(|| ApiError::Internal("tip block unavailable".to_string()))?;
+        (tip.header.height, tip.header.state_root)
+    };
+    let p = state.account_proof(&address);
+    let valid = p.verify(&state_root, &address, state.get_account(&address));
     Ok(Json(MerkleProofResponse {
         address: raw_address,
-        leaf_hash: hex::encode(leaf_hash),
+        height,
         state_root: hex::encode(state_root),
-        proof: proof
-            .iter()
-            .map(|s| MerkleProofStepResponse {
-                sibling: hex::encode(s.sibling),
-                sibling_is_right: s.sibling_is_right,
-            })
-            .collect(),
+        accounts_root: hex::encode(p.accounts_root),
+        consensus_root: hex::encode(p.consensus_root),
+        key: hex::encode(p.key),
+        leaf_value: p.leaf_value.map(hex::encode),
+        proof_leaf: p.proof.leaf.map(|(k, v)| [hex::encode(k), hex::encode(v)]),
+        siblings: p.proof.siblings.iter().map(hex::encode).collect(),
         valid,
     }))
 }

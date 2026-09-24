@@ -1,3 +1,5 @@
+import { blake3 } from "@noble/hashes/blake3";
+import { bech32m } from "@scure/base";
 /**
  * VinX Ledger TypeScript SDK
  * Typed client for the VinX node RPC API.
@@ -106,17 +108,25 @@ export interface ChainSyncResponse {
   blocks: BlockResponse[];
 }
 
-export interface MerkleProofStep {
-  sibling: string;        // hex-encoded SHA-256 hash of the sibling node
-  sibling_is_right: boolean; // true = sibling is the right child, current is left
-}
-
+/**
+ * Proof of an account against the `state_root` of block `height` (ADR 0083).
+ * Verify it client-side with {@link verifyAccountProof}.
+ */
 export interface MerkleProofResponse {
   address: string;
-  leaf_hash: string;   // hex SHA-256 of the account leaf
-  state_root: string;  // hex SHA-256 of the Merkle state root
-  proof: MerkleProofStep[];
-  valid: boolean;      // server-side verification result (use verifyMerkleProof for client-side)
+  height: number;
+  state_root: string;
+  accounts_root: string;
+  consensus_root: string;
+  key: string;
+  /** hash of the account leaf, or null when the account does not exist */
+  leaf_value: string | null;
+  /** leaf reached by the key's path: [key, value], or null (empty subtree) */
+  proof_leaf: [string, string] | null;
+  /** sibling hashes, root first */
+  siblings: string[];
+  /** server-side verification result — do not trust it, use verifyAccountProof */
+  valid: boolean;
 }
 
 export interface FaucetResponse {
@@ -263,7 +273,7 @@ export class VinxClient {
 
   /**
    * Fetch the Merkle inclusion proof for an account in the current state root.
-   * Use `verifyMerkleProof` to verify the proof client-side.
+   * Use `verifyAccountProof` to verify the proof client-side.
    */
   accountProof(address: string): Promise<MerkleProofResponse> {
     return this.get(`/account/${address}/proof`);
@@ -280,60 +290,114 @@ export class VinxClient {
 
 // ─── Light client — Merkle proof verification ─────────────────────────────────
 
-function hexToBytes(hex: string): Uint8Array {
-  const bytes = new Uint8Array(hex.length / 2);
-  for (let i = 0; i < hex.length; i += 2) {
-    bytes[i / 2] = parseInt(hex.slice(i, i + 2), 16);
+const enc = new TextEncoder();
+
+function concat(...parts: Uint8Array[]): Uint8Array {
+  const out = new Uint8Array(parts.reduce((n, p) => n + p.length, 0));
+  let o = 0;
+  for (const p of parts) {
+    out.set(p, o);
+    o += p.length;
   }
-  return bytes;
+  return out;
 }
 
-function bytesToHex(bytes: Uint8Array): string {
-  return Array.from(bytes)
-    .map((b) => b.toString(16).padStart(2, "0"))
-    .join("");
+function beBytes(value: bigint, len: number): Uint8Array {
+  const out = new Uint8Array(len);
+  for (let i = len - 1; i >= 0; i--) {
+    out[i] = Number(value & 0xffn);
+    value >>= 8n;
+  }
+  return out;
 }
 
-async function sha256Concat(leftHex: string, rightHex: string): Promise<string> {
-  const left = hexToBytes(leftHex);
-  const right = hexToBytes(rightHex);
-  const combined = new Uint8Array(left.length + right.length);
-  combined.set(left);
-  combined.set(right, left.length);
-  const hashBuffer = await globalThis.crypto.subtle.digest("SHA-256", combined);
-  return bytesToHex(new Uint8Array(hashBuffer));
+function hexToBytes(hex: string): Uint8Array {
+  if (!/^[0-9a-fA-F]*$/.test(hex) || hex.length % 2) throw new Error("invalid hex");
+  return Uint8Array.from(hex.match(/../g) ?? [], (h) => parseInt(h, 16));
+}
+
+const eq = (a: Uint8Array, b: Uint8Array) =>
+  a.length === b.length && a.every((x, i) => x === b[i]);
+
+const bit = (key: Uint8Array, d: number) => ((key[d >> 3] >> (7 - (d & 7))) & 1) === 1;
+
+/** Raw 20-byte payload of a `vinx1…` Bech32m address. */
+export function addressBytes(address: string): Uint8Array {
+  const { prefix, words } = bech32m.decode(address as `${string}1${string}`);
+  if (prefix !== "vinx") throw new Error("not a vinx address");
+  return bech32m.fromWords(words);
+}
+
+/** Tree key of an account (`account_key` in vinx-state). */
+export function accountKey(address: string): Uint8Array {
+  return blake3(concat(enc.encode("VINX_ACCOUNT_KEY"), addressBytes(address)));
+}
+
+/** Leaf value of an account (`hash_account` in vinx-state). */
+export function hashAccount(account: AccountResponse): Uint8Array {
+  return blake3(
+    concat(
+      addressBytes(account.address),
+      beBytes(BigInt(account.balance_atoms), 16),
+      beBytes(BigInt(account.nonce), 8),
+      beBytes(BigInt(account.staked_atoms), 16)
+    )
+  );
 }
 
 /**
- * Verify a Merkle inclusion proof client-side without trusting the server.
+ * Verifies an account proof without trusting the server (ADR 0083).
  *
- * Reconstructs the Merkle root from the leaf hash and proof steps, then
- * compares it against the expected `stateRoot`. Returns `true` if the proof
- * is valid (leaf is included in the tree that produces `stateRoot`).
- *
- * All hash values must be lowercase hex strings (64 chars / 32 bytes).
- *
- * @example
- * const proof = await client.accountProof("vinx1abc...");
- * const valid = await verifyMerkleProof(proof.leaf_hash, proof.proof, proof.state_root);
+ * `trustedStateRoot` must come from a block header you trust (it is committed by the
+ * quorum certificate of the next block). `account` is the account state to prove, or
+ * `null` to prove the address has no account.
  */
-export async function verifyMerkleProof(
-  leafHash: string,
-  proof: MerkleProofStep[],
-  stateRoot: string
-): Promise<boolean> {
-  let current = leafHash.toLowerCase();
-  for (const step of proof) {
-    const sibling = step.sibling.toLowerCase();
-    if (step.sibling_is_right) {
-      // current node is the left child
-      current = await sha256Concat(current, sibling);
+export function verifyAccountProof(
+  proof: MerkleProofResponse,
+  trustedStateRoot: string,
+  account: AccountResponse | null
+): boolean {
+  try {
+    if (account && account.address !== proof.address) return false;
+    const key = accountKey(proof.address);
+    const expected = account ? hashAccount(account) : null;
+    const siblings = proof.siblings.map(hexToBytes);
+    if (siblings.length > 256) return false;
+    const leafHash = (k: Uint8Array, v: Uint8Array) =>
+      blake3(concat(enc.encode("VINX_SMT_LEAF"), k, v));
+    let current: Uint8Array;
+    if (proof.proof_leaf) {
+      const k = hexToBytes(proof.proof_leaf[0]);
+      const v = hexToBytes(proof.proof_leaf[1]);
+      if (expected) {
+        if (!eq(k, key) || !eq(v, expected)) return false;
+      } else {
+        if (eq(k, key)) return false;
+        for (let d = 0; d < siblings.length; d++) if (bit(k, d) !== bit(key, d)) return false;
+      }
+      current = leafHash(k, v);
     } else {
-      // sibling is the left child, current is right
-      current = await sha256Concat(sibling, current);
+      if (expected) return false;
+      current = new Uint8Array(32);
     }
+    const node = enc.encode("VINX_SMT_NODE");
+    for (let d = siblings.length - 1; d >= 0; d--) {
+      current = bit(key, d)
+        ? blake3(concat(node, siblings[d], current))
+        : blake3(concat(node, current, siblings[d]));
+    }
+    if (!eq(current, hexToBytes(proof.accounts_root))) return false;
+    const stateRoot = blake3(
+      concat(
+        enc.encode("VINX:state_root:v2"),
+        hexToBytes(proof.accounts_root),
+        hexToBytes(proof.consensus_root)
+      )
+    );
+    return eq(stateRoot, hexToBytes(trustedStateRoot));
+  } catch {
+    return false;
   }
-  return current === stateRoot.toLowerCase();
 }
 
 export default VinxClient;

@@ -4161,6 +4161,7 @@ name = "vinx-state"
 version = "0.1.0-alpha.1"
 dependencies = [
  "borsh",
+ "hex",
  "proptest",
  "serde",
  "serde_json",

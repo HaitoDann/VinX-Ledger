@@ -19,7 +19,7 @@ use vinx_core::{
     Account, CoreError, RegisterBlsKeyPayload, Transaction, TransactionType, ValidatorExitRequest,
     ValidatorSet,
 };
-use vinx_crypto::{hash256, Address, BlsPubKey, BlsSignature, Hash32, IncrementalMerkleTree};
+use vinx_crypto::{hash256, Address, BlsPubKey, BlsSignature, Hash32, SmtProof, SparseMerkleTree};
 
 /// In-memory representation of the full chain state.
 /// Domain-separation tag for the two-subtree state root (VINX-04).
@@ -87,23 +87,20 @@ pub struct WorldState {
     /// consensus root, never a per-node setting.
     #[serde(default = "default_block_time_secs")]
     pub block_time_secs: u64,
-    /// Incremental Merkle tree over sorted account leaf hashes.
-    /// Not persisted — rebuilt lazily on the first `compute_state_root` call after load.
+    /// Sparse Merkle tree of the accounts, keyed by `account_key(address)` (ADR 0083).
+    /// Not persisted — built once on the first `compute_state_root` after load, then
+    /// updated in O(log n) per changed account. Cloning it is O(1) (shared nodes).
     #[serde(skip)]
     #[borsh(skip)]
-    merkle_tree: IncrementalMerkleTree,
-    /// Maps address string → leaf index in `merkle_tree.leaves()`.
+    account_tree: SparseMerkleTree,
+    /// True once `account_tree` reflects `accounts` (up to `dirty_addrs`).
     #[serde(skip)]
     #[borsh(skip)]
-    leaf_index: HashMap<Address, usize>,
-    /// Accounts modified since the last `compute_state_root` call.
+    tree_synced: bool,
+    /// Accounts modified (or removed) since the last `compute_state_root` call.
     #[serde(skip)]
     #[borsh(skip)]
     dirty_addrs: HashSet<Address>,
-    /// True when an account was added/removed — requires a full O(n) rebuild.
-    #[serde(skip)]
-    #[borsh(skip)]
-    needs_rebuild: bool,
     /// Accounts modified since the last persistence flush. Distinct from
     /// `dirty_addrs` (which is consumed by `compute_state_root`): this set survives
     /// until `take_persist_dirty` drains it, so incremental persistence can write
@@ -297,10 +294,9 @@ impl WorldState {
             validator_set: ValidatorSet::single(Address::zero()),
             chain_id: CHAIN_ID_DEVNET,
             block_time_secs: vinx_core::amount::DEFAULT_BLOCK_TIME_SECS,
-            merkle_tree: IncrementalMerkleTree::new(),
-            leaf_index: HashMap::new(),
+            account_tree: SparseMerkleTree::new(),
+            tree_synced: false,
             dirty_addrs: HashSet::new(),
-            needs_rebuild: false,
             persist_dirty: HashSet::new(),
             admin_policy: None,
             pending_governance: Vec::new(),
@@ -317,58 +313,46 @@ impl WorldState {
         }
     }
 
-    /// Marks an account address as dirty.
-    /// If the address is not yet in the leaf index (new account), triggers a full rebuild.
+    /// Marks an account address as dirty (changed or removed).
     #[inline]
     fn mark_dirty(&mut self, addr: &Address) {
-        if !self.leaf_index.contains_key(addr) {
-            self.needs_rebuild = true;
-        }
         self.dirty_addrs.insert(*addr);
         self.persist_dirty.insert(*addr);
     }
 
-    /// O(n) full rebuild of the incremental tree — sorts all accounts, hashes each leaf,
-    /// rebuilds the `leaf_index` map and all internal tree levels.
-    fn full_rebuild(&mut self) {
-        // `accounts` is a BTreeMap, so `values()` already yields address-sorted order.
-        let entries: Vec<&Account> = self.accounts.values().collect();
-        self.leaf_index.clear();
-        let leaves: Vec<Hash32> = entries
-            .iter()
-            .enumerate()
-            .map(|(i, a)| {
-                self.leaf_index.insert(a.address, i);
-                hash_account(a)
-            })
-            .collect();
-        self.merkle_tree.rebuild(&leaves);
-        self.dirty_addrs.clear();
-        self.needs_rebuild = false;
+    /// Brings the account tree up to date: a full O(n log n) build after load, then only
+    /// the changed accounts, O(log n) each.
+    fn flush_dirty(&mut self) {
+        if !self.tree_synced {
+            let mut tree = SparseMerkleTree::new();
+            for a in self.accounts.values() {
+                tree.insert(account_key(&a.address), hash_account(a));
+            }
+            self.account_tree = tree;
+            self.tree_synced = true;
+            self.dirty_addrs.clear();
+            return;
+        }
+        for addr in std::mem::take(&mut self.dirty_addrs) {
+            match self.accounts.get(&addr) {
+                Some(a) => self
+                    .account_tree
+                    .insert(account_key(&addr), hash_account(a)),
+                None => self.account_tree.remove(&account_key(&addr)),
+            }
+        }
     }
 
-    /// Applies pending dirty-leaf updates to the tree, rebuilding fully if needed.
-    fn flush_dirty(&mut self) {
-        // Lazy full build on first call after deserialization or genesis.
-        if self.leaf_index.is_empty() && !self.accounts.is_empty() {
-            self.full_rebuild();
-            return;
-        }
-        if self.dirty_addrs.is_empty() && !self.needs_rebuild {
-            return;
-        }
-        if self.needs_rebuild {
-            self.full_rebuild();
-        } else {
-            // O(|dirty| × log n) — only update changed leaf paths.
-            let dirty: Vec<Address> = std::mem::take(&mut self.dirty_addrs).into_iter().collect();
-            for addr in dirty {
-                if let (Some(&idx), Some(account)) =
-                    (self.leaf_index.get(&addr), self.accounts.get(&addr))
-                {
-                    self.merkle_tree.update_leaf(idx, hash_account(account));
-                }
-            }
+    /// Proof of an account's state (or absence) against the accounts root, together with
+    /// the consensus root, so a client can recompute the block's `state_root` (ADR 0083).
+    pub fn account_proof(&mut self, addr: &Address) -> AccountProof {
+        self.flush_dirty();
+        AccountProof {
+            key: account_key(addr),
+            leaf_value: self.accounts.get(addr).map(hash_account),
+            proof: self.account_tree.prove(&account_key(addr)),
+            accounts_root: self.account_tree.root(),
+            consensus_root: self.compute_consensus_root(),
         }
     }
 
@@ -890,11 +874,8 @@ impl WorldState {
                 .saturating_add(reapable_balance.atoms());
         }
         self.accounts.remove(addr);
-        self.leaf_index.remove(addr);
-        // The leaf set shrank: the incremental tree needs a full rebuild, and the row
-        // must be erased from persistence (mark_dirty only handles upserts).
-        self.needs_rebuild = true;
-        self.persist_dirty.insert(*addr);
+        // Removed from the tree at the next flush, and erased from persistence.
+        self.mark_dirty(addr);
     }
 
     /// Debug/test invariant for the existential deposit (ADR 0026 §Modèle): every account
@@ -1601,13 +1582,9 @@ impl WorldState {
     /// O(txs_per_block × log n), orders of magnitude faster than O(n) for large account sets.
     pub fn compute_state_root(&mut self) -> Hash32 {
         self.flush_dirty();
-        let accounts_root = self.merkle_tree.root();
+        let accounts_root = self.account_tree.root();
         let consensus_root = self.compute_consensus_root();
-        let mut buf = Vec::with_capacity(32 + 32 + STATE_ROOT_DST.len());
-        buf.extend_from_slice(STATE_ROOT_DST);
-        buf.extend_from_slice(&accounts_root);
-        buf.extend_from_slice(&consensus_root);
-        hash256(&buf)
+        state_root_of(&accounts_root, &consensus_root)
     }
 
     /// Merkle-equivalent commitment to the **consensus** portion of the state
@@ -2244,7 +2221,58 @@ impl WorldState {
     }
 }
 
-fn hash_account(account: &Account) -> Hash32 {
+/// Key of an account in the state tree (ADR 0083).
+pub fn account_key(addr: &Address) -> Hash32 {
+    let mut buf = Vec::with_capacity(ACCOUNT_KEY_DST.len() + 32);
+    buf.extend_from_slice(ACCOUNT_KEY_DST);
+    buf.extend_from_slice(addr.as_bytes());
+    hash256(&buf)
+}
+
+const ACCOUNT_KEY_DST: &[u8] = b"VINX_ACCOUNT_KEY";
+
+/// Proof of one account against a `state_root` (ADR 0083). Verify with
+/// [`AccountProof::verify`]; the `state_root` itself is trusted through the block
+/// header, which a quorum certificate commits.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct AccountProof {
+    pub key: Hash32,
+    /// `hash_account` of the account, or `None` when it does not exist.
+    pub leaf_value: Option<Hash32>,
+    pub proof: SmtProof,
+    pub accounts_root: Hash32,
+    pub consensus_root: Hash32,
+}
+
+impl AccountProof {
+    /// Checks the proof against a trusted `state_root` and, when `account` is given, that
+    /// it is exactly the proven account (`None` proves absence).
+    pub fn verify(&self, state_root: &Hash32, addr: &Address, account: Option<&Account>) -> bool {
+        if self.key != account_key(addr) {
+            return false;
+        }
+        let expected = account.map(hash_account);
+        if expected != self.leaf_value {
+            return false;
+        }
+        state_root_of(&self.accounts_root, &self.consensus_root) == *state_root
+            && self
+                .proof
+                .verify(&self.accounts_root, &self.key, self.leaf_value.as_ref())
+    }
+}
+
+/// `state_root = H(DST ‖ accounts_root ‖ consensus_root)`.
+pub fn state_root_of(accounts_root: &Hash32, consensus_root: &Hash32) -> Hash32 {
+    let mut buf = Vec::with_capacity(32 + 32 + STATE_ROOT_DST.len());
+    buf.extend_from_slice(STATE_ROOT_DST);
+    buf.extend_from_slice(accounts_root);
+    buf.extend_from_slice(consensus_root);
+    hash256(&buf)
+}
+
+/// Leaf value of an account in the state tree.
+pub fn hash_account(account: &Account) -> Hash32 {
     let addr = account.address.as_bytes();
     let mut buf = Vec::with_capacity(addr.len() + 16 + 8 + 16);
     buf.extend_from_slice(addr);
@@ -2257,6 +2285,39 @@ fn hash_account(account: &Account) -> Hash32 {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn account_tree_incremental_matches_rebuild_and_proves() {
+        let addrs: Vec<Address> = (0..50)
+            .map(|_| Address::from_public_key(&vinx_crypto::KeyPair::generate().public_key()))
+            .collect();
+        let mut s = WorldState::new();
+        for (i, a) in addrs.iter().enumerate() {
+            s.credit_for_test(*a, Amount::from_atoms(1_000 + i as u128));
+            if i % 7 == 0 {
+                s.compute_state_root(); // interleave incremental flushes
+            }
+        }
+        s.accounts.remove(&addrs[3]);
+        s.mark_dirty(&addrs[3]);
+        let root = s.compute_state_root();
+
+        // Same accounts, tree built from scratch (as after a reload).
+        let mut fresh = s.clone();
+        fresh.tree_synced = false;
+        assert_eq!(fresh.compute_state_root(), root);
+
+        let p = s.account_proof(&addrs[5]);
+        assert!(p.verify(&root, &addrs[5], s.get_account(&addrs[5])));
+        let p = s.account_proof(&addrs[3]);
+        assert!(
+            p.verify(&root, &addrs[3], None),
+            "removed account proven absent"
+        );
+        let wrong = Account::new_with_balance(addrs[5], Amount::from_atoms(1));
+        let p = s.account_proof(&addrs[5]);
+        assert!(!p.verify(&root, &addrs[5], Some(&wrong)));
+    }
     use vinx_core::{protocol::ProtocolVersion, Transaction};
     use vinx_crypto::{Address, KeyPair};
 

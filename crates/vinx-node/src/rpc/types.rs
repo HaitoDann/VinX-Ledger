@@ -326,19 +326,28 @@ pub struct ErrorResponse {
     pub error: String,
 }
 
+/// Proof of an account against the `state_root` of block `height` (ADR 0083).
+///
+/// Light-client check: `state_root` is in the header of block `height`, committed by the
+/// quorum certificate embedded in block `height + 1`. Recompute
+/// `H("VINX_STATE_ROOT"… ‖ accounts_root ‖ consensus_root)` and fold the sparse Merkle
+/// proof from the leaf up to `accounts_root`.
 #[derive(Serialize)]
 pub struct MerkleProofResponse {
     pub address: String,
-    pub leaf_hash: String,
+    pub height: u64,
     pub state_root: String,
-    pub proof: Vec<MerkleProofStepResponse>,
+    pub accounts_root: String,
+    pub consensus_root: String,
+    /// Tree key of the account (`account_key(address)`).
+    pub key: String,
+    /// Leaf value (`hash_account`), or null when the account does not exist.
+    pub leaf_value: Option<String>,
+    /// Leaf reached by the key's path: `[key, value]`, or null for an empty subtree.
+    pub proof_leaf: Option<[String; 2]>,
+    /// Sibling hashes, root first.
+    pub siblings: Vec<String>,
     pub valid: bool,
-}
-
-#[derive(Serialize)]
-pub struct MerkleProofStepResponse {
-    pub sibling: String,
-    pub sibling_is_right: bool,
 }
 
 // ─── Batch transaction submission ────────────────────────────────────────────
