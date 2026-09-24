@@ -14,6 +14,8 @@ pub enum WalletError {
     NodeError(String),
     #[error("I/O error: {0}")]
     Io(String),
+    #[error("Invalid receipt: {0}")]
+    Receipt(String),
 }
 
 impl From<std::io::Error> for WalletError {

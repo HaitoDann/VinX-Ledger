@@ -353,6 +353,58 @@ pub struct MerkleProofResponse {
     pub valid: bool,
 }
 
+/// Header fields in hex/JSON form, enough to recompute the block hash client-side
+/// (`BlockHeader::hash`).
+#[derive(Serialize, Deserialize, Clone, Debug, PartialEq)]
+pub struct HeaderJson {
+    pub height: u64,
+    pub round: u32,
+    pub prev_hash: String,
+    pub timestamp: u64,
+    pub validator: String,
+    pub tx_count: u32,
+    pub state_root: String,
+    pub base_fee: u64,
+    pub receipts_root: String,
+    pub last_commit_hash: String,
+}
+
+impl From<&vinx_core::BlockHeader> for HeaderJson {
+    fn from(h: &vinx_core::BlockHeader) -> Self {
+        Self {
+            height: h.height,
+            round: h.round,
+            prev_hash: hex::encode(h.prev_hash),
+            timestamp: h.timestamp,
+            validator: h.validator.to_string(),
+            tx_count: h.tx_count,
+            state_root: hex::encode(h.state_root),
+            base_fee: h.base_fee,
+            receipts_root: hex::encode(h.receipts_root),
+            last_commit_hash: hex::encode(h.last_commit_hash),
+        }
+    }
+}
+
+/// Payment receipt (ADR 0083, L6): proof that a transaction is in a committed block,
+/// meant to be **kept by the wallet** — it stays valid after nodes prune the block.
+///
+/// Check: `verify_tx_proof(tx_hash, index, header.tx_count, siblings,
+/// header.receipts_root)`, then `hash(header) == block_hash`, then that `commit`
+/// (more than 2/3 of the voting power) signs `block_hash` at `header.height`.
+#[derive(Serialize, Deserialize, Clone, Debug)]
+pub struct PaymentReceiptResponse {
+    pub tx_hash: String,
+    pub index: u32,
+    /// Sibling hashes, bottom-up.
+    pub siblings: Vec<String>,
+    pub header: HeaderJson,
+    pub block_hash: String,
+    /// Commit certificate of the block (quorum BLS aggregate + signer bitmap).
+    pub commit: Option<vinx_core::CommitCert>,
+    pub tx: vinx_core::Transaction,
+}
+
 // ─── Batch transaction submission ────────────────────────────────────────────
 
 #[derive(Serialize)]

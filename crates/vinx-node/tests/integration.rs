@@ -176,6 +176,87 @@ async fn test_submit_and_retrieve_tx() {
     );
 }
 
+/// ADR 0083 L6: a payment receipt proves the transaction is in a committed block —
+/// inclusion proof to `receipts_root`, header hash, and quorum certificate.
+#[tokio::test]
+async fn test_payment_receipt_proves_inclusion() {
+    let (node, base_url) = start_test_node().await;
+    let client = reqwest::Client::new();
+    let sender_kp = KeyPair::generate();
+    let sender_addr = Address::from_public_key(&sender_kp.public_key());
+    {
+        let mut state = node.state.write().await;
+        state.credit_emit_for_test(sender_addr, Amount::from_vinx(10_000));
+    }
+    let mut hashes = vec![];
+    for nonce in 0..5 {
+        let amount = Amount::from_vinx(10 + nonce);
+        let fee = amount.calculate_fee(Amount::from_atoms(DEFAULT_FEE_FLOOR_ATOMS));
+        let to = Address::from_public_key(&KeyPair::generate().public_key());
+        let tx = Transaction::new_transfer(&sender_kp, to, amount, fee, nonce);
+        hashes.push(tx.hash());
+        let r = client
+            .post(format!("{base_url}/tx/submit"))
+            .json(&tx)
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(r.status(), 200);
+    }
+    node.tick().await.expect("tick");
+
+    for h in &hashes {
+        let r: serde_json::Value = client
+            .get(format!("{base_url}/tx/{}/proof", hex::encode(h)))
+            .send()
+            .await
+            .unwrap()
+            .json()
+            .await
+            .unwrap();
+        let hexh = |v: &serde_json::Value| -> [u8; 32] {
+            hex::decode(v.as_str().unwrap())
+                .unwrap()
+                .try_into()
+                .unwrap()
+        };
+        let siblings: Vec<[u8; 32]> = r["siblings"].as_array().unwrap().iter().map(hexh).collect();
+        let header = &r["header"];
+        let count = header["tx_count"].as_u64().unwrap() as usize;
+        assert_eq!(count, 5);
+        assert!(vinx_crypto::verify_tx_proof(
+            h,
+            r["index"].as_u64().unwrap() as usize,
+            count,
+            &siblings,
+            &hexh(&header["receipts_root"]),
+        ));
+        // The header recomputes to the block hash the certificate signs.
+        let block = node.chain.read().await.get_block(1).unwrap().clone();
+        assert_eq!(hex::encode(block.hash()), r["block_hash"].as_str().unwrap());
+        assert_eq!(hexh(&header["receipts_root"]), block.header.receipts_root);
+        let cert: vinx_core::CommitCert = serde_json::from_value(r["commit"].clone()).unwrap();
+        let state = node.state.read().await;
+        let keys = state.indexed_bls_keys(&state.validator_set);
+        cert.verify(
+            state.chain_id,
+            1,
+            &block.hash(),
+            &state.validator_set,
+            &keys,
+        )
+        .expect("receipt carries the quorum certificate");
+
+        if std::env::var("VINX_WRITE_FIXTURE").is_ok() && h == &hashes[2] {
+            let path = concat!(
+                env!("CARGO_MANIFEST_DIR"),
+                "/../../sdk/vinx-sdk/src/__fixtures__/payment_receipt.json"
+            );
+            std::fs::write(path, serde_json::to_string_pretty(&r).unwrap() + "\n").unwrap();
+        }
+    }
+}
+
 // ─── Test 3 — account balance ─────────────────────────────────────────────────
 
 /// Credit an account via `credit_for_test`, then GET /account/:addr and verify

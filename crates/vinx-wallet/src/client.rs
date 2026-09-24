@@ -138,6 +138,11 @@ impl RpcClient {
         self.get(&format!("/block/{}", height)).await
     }
 
+    /// Raw JSON of any GET endpoint.
+    pub async fn get_json(&self, path: &str) -> Result<serde_json::Value, WalletError> {
+        self.get(path).await
+    }
+
     pub async fn get_tx(&self, hash: &str) -> Result<TxWithBlockInfo, WalletError> {
         self.get(&format!("/tx/{}", hash)).await
     }

@@ -954,6 +954,36 @@ pub async fn get_tx_receipt(
     }))
 }
 
+/// `GET /tx/:hash/proof` — payment receipt with its inclusion proof (ADR 0083, L6).
+pub async fn get_tx_proof(
+    Path(hash_hex): Path<String>,
+    State(node): State<Arc<Node>>,
+) -> ApiResult<PaymentReceiptResponse> {
+    let not_found = || ApiError::NotFound(format!("transaction {hash_hex} not found"));
+    let hash: [u8; 32] = hex::decode(&hash_hex)
+        .ok()
+        .and_then(|b| b.try_into().ok())
+        .ok_or_else(not_found)?;
+    let chain = node.chain.read().await;
+    let (height, block, tx) = chain.get_tx_by_hash(&hash).ok_or_else(not_found)?;
+    let hashes: Vec<vinx_crypto::Hash32> = block.transactions.iter().map(|t| t.hash()).collect();
+    let index = hashes
+        .iter()
+        .position(|h| *h == hash)
+        .ok_or_else(not_found)?;
+    let siblings = vinx_crypto::tx_proof(&hashes, index)
+        .ok_or_else(|| ApiError::Internal("proof generation failed".into()))?;
+    Ok(Json(PaymentReceiptResponse {
+        tx_hash: hash_hex.to_lowercase(),
+        index: index as u32,
+        siblings: siblings.iter().map(hex::encode).collect(),
+        header: HeaderJson::from(&block.header),
+        block_hash: hex::encode(block.hash()),
+        commit: chain.get_commit(height).cloned(),
+        tx: tx.clone(),
+    }))
+}
+
 pub async fn get_fee_estimate(State(node): State<Arc<Node>>) -> ApiResult<FeeEstimateResponse> {
     let state = node.state.read().await;
     let mempool = node.mempool.read().await;

@@ -5,6 +5,17 @@ Format : `MAJEUR.MINEUR.CORRECTIF` — les versions `0.x.y` sont des versions de
 
 ---
 
+## [Non publié] — État léger (ADR 0083)
+
+> **Breaking protocole** (racine d'état, `receipts_root`) — nouvelle genèse obligatoire.
+
+- **Arbre de Merkle creux** pour les comptes : O(log n) par mise à jour, preuves d'inclusion/non-inclusion ; `/account/:addr/proof` prouve enfin contre le `state_root` du bloc ; SDK `verifyAccountProof` en BLAKE3 (l'ancien vérificateur SHA-256 était périmé).
+- **Copies d'état O(1)** (map persistante) : bloc avec 100 nouveaux comptes 92 ms → 16 ms à 200 000 comptes.
+- **Élagage** : blocs entiers supprimés au-delà de 30 jours (mémoire + disque) ; **`--archive`** pour tout garder.
+- **Snapshots** : transportent les 10 blocs précédents — corrige un nœud démarré par snapshot qui rejetait des blocs valides (horloge MTP divergente).
+- **Reçus de paiement** : `receipts_root` devient un arbre de Merkle (anti-CVE-2012-2459) ; `GET /tx/:hash/proof` ; `vinx-wallet receipt` / `verify-receipt` ; SDK `verifyPaymentReceipt`.
+- Banc n=4 : ajout d'un paiement réel avec reçu vérifié depuis un autre nœud ✅.
+
 ## [Non publié] — Consensus BFT par étapes (ADR 0082)
 
 > **Breaking protocole** — nouvelle genèse obligatoire. `STORAGE_VERSION 22 → 23`. **338 tests verts, clippy propre.**

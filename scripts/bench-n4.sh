@@ -14,13 +14,16 @@
 set -euo pipefail
 
 NODE="${NODE:-./target/release/vinx-node}"
+WALLET="${WALLET:-./target/release/vinx-wallet}"
 BASE="${BENCH_DIR:-/tmp/vinx-bench-n4}"
 BLOCK_TIME="${BLOCK_TIME:-2}"
 CHAIN_ID=42
 GENESIS_TS=$(( $(date +%s) - 60 ))
 FAIL=0
 
-[[ -x "$NODE" ]] || { echo "ERREUR: $NODE introuvable (cargo build --release -p vinx-node)"; exit 1; }
+for b in "$NODE" "$WALLET"; do
+    [[ -x "$b" ]] || { echo "ERREUR: $b introuvable (cargo build --release -p vinx-node -p vinx-wallet)"; exit 1; }
+done
 
 rm -rf "$BASE"; mkdir -p "$BASE"/node{1,2,3,4}
 declare -A PID
@@ -84,6 +87,7 @@ json.dump({
     "initial_validator_bls_pub_key": e[0]["bls_pub_key"],
     "initial_validator_bls_pop": e[0]["bls_pop"],
     "block_time_secs": int(bt), "validators": e[1:],
+    "prefund_initial_validator_vinx": 1000,
 }, open(out, "w"), indent=2)
 PY
 echo "  spec : $BASE/genesis.json"
@@ -92,6 +96,24 @@ echo "=== Phase 1 : 4 nœuds — progression ==="
 for i in 1 2 3 4; do start "$i"; done
 if wait_height 5 120 1 2 3 4; then ok "les 4 nœuds atteignent la hauteur 5"; else ko "pas de progression à 4"; fi
 agree 5 1 2 3 4 || true
+
+echo "=== Phase 1b : paiement réel + reçu vérifié depuis un autre nœud ==="
+DEST=$(python3 -c "import json;print(json.load(open('$BASE/node2/validator.json'))['address'])")
+OUT=$("$WALLET" transfer --to "$DEST" --amount 5 --wallet "$BASE/node1/validator.json" \
+    --node http://127.0.0.1:8545 2>&1 || true)
+TXH=$(echo "$OUT" | grep -oE '[0-9a-f]{64}' | head -1)
+if [[ -z "$TXH" ]]; then ko "transfert refusé : $OUT"; else
+    GOT=""
+    for _ in $(seq 1 30); do
+        if "$WALLET" receipt "$TXH" --out "$BASE/receipts" --node http://127.0.0.1:8547 >/dev/null 2>&1; then GOT=1; break; fi
+        sleep 1
+    done
+    if [[ -n "$GOT" ]] && "$WALLET" verify-receipt "$BASE/receipts/$TXH.json" >/dev/null; then
+        ok "paiement inclus, reçu obtenu de node3 et vérifié hors-ligne"
+    else ko "pas de reçu pour $TXH"; fi
+    BAL=$(rpc 8546 "account/$DEST" | jfield "['balance_atoms']")
+    [[ "$BAL" == "5000000000" ]] && ok "solde du destinataire = 5 VINX (vu par node2)" || ko "solde inattendu : $BAL"
+fi
 
 echo "=== Phase 2 : node4 tué — tolérance à 1 panne ==="
 stop 4

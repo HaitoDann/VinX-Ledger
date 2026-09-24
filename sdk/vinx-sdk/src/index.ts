@@ -129,6 +129,36 @@ export interface MerkleProofResponse {
   valid: boolean;
 }
 
+/** Block header fields needed to recompute the block hash. */
+export interface HeaderJson {
+  height: number;
+  round: number;
+  prev_hash: string;
+  timestamp: number;
+  validator: string;
+  tx_count: number;
+  state_root: string;
+  base_fee: number;
+  receipts_root: string;
+  last_commit_hash: string;
+}
+
+/**
+ * Payment receipt (ADR 0083): proof that a transaction is in a committed block.
+ * Keep it — it stays verifiable after nodes prune the block (30-day window).
+ */
+export interface PaymentReceipt {
+  tx_hash: string;
+  index: number;
+  /** sibling hashes, bottom-up */
+  siblings: string[];
+  header: HeaderJson;
+  block_hash: string;
+  /** quorum certificate of the block (BLS aggregate + signer bitmap) */
+  commit: unknown;
+  tx: unknown;
+}
+
 export interface FaucetResponse {
   accepted: boolean;
   tx_hash: string;
@@ -283,6 +313,11 @@ export class VinxClient {
    * Request testnet tokens from the faucet.
    * The node must have a faucet keypair configured.
    */
+  /** Payment receipt with its inclusion proof — verify with verifyPaymentReceipt. */
+  paymentReceipt(txHash: string): Promise<PaymentReceipt> {
+    return this.get(`/tx/${txHash}/proof`);
+  }
+
   faucetRequest(address: string): Promise<FaucetResponse> {
     return this.post("/faucet/request", { address });
   }
@@ -395,6 +430,59 @@ export function verifyAccountProof(
       )
     );
     return eq(stateRoot, hexToBytes(trustedStateRoot));
+  } catch {
+    return false;
+  }
+}
+
+/** Block hash of a header (`BlockHeader::hash` in vinx-core). */
+export function headerHash(h: HeaderJson): string {
+  const bytes = concat(
+    beBytes(BigInt(h.height), 8),
+    beBytes(BigInt(h.round), 4),
+    hexToBytes(h.prev_hash),
+    beBytes(BigInt(h.timestamp), 8),
+    addressBytes(h.validator),
+    beBytes(BigInt(h.tx_count), 4),
+    hexToBytes(h.state_root),
+    beBytes(BigInt(h.base_fee), 8),
+    hexToBytes(h.receipts_root),
+    hexToBytes(h.last_commit_hash)
+  );
+  return Array.from(blake3(bytes), (b) => b.toString(16).padStart(2, "0")).join("");
+}
+
+/**
+ * Verifies a payment receipt for `txHash`: the transaction is entry `index` of the
+ * block's transaction tree, and the header hashes to `block_hash`.
+ *
+ * This proves inclusion in *that block*. That the block is committed rests on
+ * `receipt.commit` (a BLS quorum certificate) or on `block_hash` matching a block
+ * returned by a node you trust; the SDK does not verify BLS signatures.
+ */
+export function verifyPaymentReceipt(receipt: PaymentReceipt, txHash: string): boolean {
+  try {
+    const tx = hexToBytes(txHash.toLowerCase());
+    if (receipt.tx_hash.toLowerCase() !== txHash.toLowerCase()) return false;
+    const count = receipt.header.tx_count;
+    let idx = receipt.index;
+    if (!Number.isInteger(idx) || idx < 0 || idx >= count) return false;
+    const sibs = receipt.siblings.map(hexToBytes);
+    let cur = blake3(concat(enc.encode("VINX_TX_LEAF"), tx));
+    let len = count;
+    let used = 0;
+    const node = enc.encode("VINX_TX_NODE");
+    while (len > 1) {
+      if ((idx ^ 1) < len) {
+        const sib = sibs[used++];
+        if (!sib) return false;
+        cur = idx % 2 === 0 ? blake3(concat(node, cur, sib)) : blake3(concat(node, sib, cur));
+      }
+      idx = Math.floor(idx / 2);
+      len = Math.ceil(len / 2);
+    }
+    if (used !== sibs.length || !eq(cur, hexToBytes(receipt.header.receipts_root))) return false;
+    return headerHash(receipt.header) === receipt.block_hash.toLowerCase();
   } catch {
     return false;
   }

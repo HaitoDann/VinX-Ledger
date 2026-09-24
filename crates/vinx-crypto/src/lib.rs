@@ -4,6 +4,7 @@ pub mod hash;
 pub mod keys;
 pub mod merkle;
 pub mod smt;
+pub mod tx_tree;
 
 pub use address::Address;
 pub use bls::{
@@ -17,6 +18,7 @@ pub use merkle::{
 };
 
 pub use smt::{SmtProof, SparseMerkleTree, SMT_EMPTY};
+pub use tx_tree::{tx_proof, tx_root, verify_tx_proof};
 
 use thiserror::Error;
 
