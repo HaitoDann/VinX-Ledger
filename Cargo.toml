@@ -43,4 +43,3 @@ borsh = { version = "1", features = ["derive"] }
 rayon = "1"
 zstd = "0.13"
 blst = "0.3"
-curve25519-dalek = { version = "4", default-features = false, features = ["alloc", "precomputed-tables", "zeroize"] }

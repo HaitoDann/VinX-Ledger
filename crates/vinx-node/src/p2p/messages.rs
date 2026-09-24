@@ -1,7 +1,6 @@
 use borsh::{BorshDeserialize, BorshSerialize};
 use serde::{Deserialize, Serialize};
 use vinx_core::{Block, BlockHeader, Transaction};
-use vinx_crypto::VRF_PROOF_LEN;
 use zstd;
 
 /// Messages plus courts que ce seuil sont envoyés bruts (overhead de compression > gain).
@@ -70,19 +69,6 @@ pub enum P2pMessage {
     SyncRequest { from_height: u64, limit: u32 },
     /// Response to SyncRequest with the requested block range.
     SyncResponse { blocks: Vec<Block> },
-    /// An ECVRF proof submitted by a validator for committee selection at `height`
-    /// (ADR 0029 Phase 2b). The recipient verifies the proof against the validator's
-    /// registered `vrf_pub_key` and the canonical alpha = `epoch_beacon || height_le64`.
-    /// Accumulates towards the VRF-based committee for this height.
-    BlockVrfProof {
-        height: u64,
-        /// ECVRF proof π (80 bytes): Γ(32) || c(16) || s(32).
-        vrf_proof: Vec<u8>,
-        /// Ed25519 address (20 bytes) of the proving validator. Recipients use this to
-        /// look up the registered VRF public key from the validator pool.
-        validator_addr: Vec<u8>,
-    },
-
     // ── ADR 0037: Compact block propagation ───────────────────────────────────
     /// Compact block: header plus the SHA-256 hash of each transaction (ADR 0037).
     ///
@@ -102,11 +88,6 @@ pub enum P2pMessage {
         /// Bitmap of signing validator indices, matching `bls_aggregate`.
         #[serde(default)]
         bls_bitmap: Vec<u8>,
-        /// ADR 0029 Phase 2a — the proposer's VRF proof, carried so the reconstructed
-        /// block keeps the same fork-choice priority on every node (dropping it here
-        /// would let two nodes disagree on the canonical head).
-        #[serde(default)]
-        vrf_proof: Option<Vec<u8>>,
     },
 
     /// Request a set of transactions by hash from a peer that announced them
@@ -165,15 +146,11 @@ impl P2pMessage {
             P2pMessage::NewTransaction(_) => "vinx/txs/1",
             P2pMessage::BlockBlsCoSignature { .. } => "vinx/bls/1",
             P2pMessage::SyncRequest { .. } | P2pMessage::SyncResponse { .. } => "vinx/sync/1",
-            P2pMessage::BlockVrfProof { .. } => "vinx/vrf/1",
             P2pMessage::CompactBlock { .. }
             | P2pMessage::TxRequest { .. }
             | P2pMessage::TxResponse { .. } => "vinx/compact/1",
         }
     }
-
-    /// Expected byte-length of a well-formed VRF proof carried in `BlockVrfProof`.
-    pub const VRF_PROOF_WIRE_LEN: usize = VRF_PROOF_LEN;
 
     // ── ADR 0037 helpers ──────────────────────────────────────────────────────
 
@@ -192,7 +169,6 @@ impl P2pMessage {
             tx_hashes,
             bls_aggregate: block.bls_aggregate.clone(),
             bls_bitmap: block.bls_bitmap.clone(),
-            vrf_proof: block.vrf_proof.clone(),
         }
     }
 }
@@ -234,7 +210,6 @@ mod tests {
                 base_fee: 0,
                 receipts_root: [0u8; 32],
             },
-            vrf_proof: None,
             transactions: vec![],
             bls_aggregate: None,
             bls_cosigner_pks: vec![],
@@ -397,7 +372,6 @@ mod tests {
                 tx_hashes: vec![],
                 bls_aggregate: None,
                 bls_bitmap: vec![],
-                vrf_proof: None,
             }
             .topic(),
             "vinx/compact/1"
@@ -418,33 +392,6 @@ mod tests {
             .topic(),
             "vinx/compact/1"
         );
-    }
-
-    #[test]
-    fn test_vrf_proof_message_roundtrip() {
-        use vinx_crypto::VrfSecretKey;
-        let sk = VrfSecretKey::generate();
-        let alpha = b"committee alpha test";
-        let proof = sk.prove(alpha);
-        let validator_addr = [0x22u8; 20];
-        let msg = P2pMessage::BlockVrfProof {
-            height: 42,
-            vrf_proof: proof.0.to_vec(),
-            validator_addr: validator_addr.to_vec(),
-        };
-        let decoded = P2pMessage::decode(&msg.encode()).unwrap();
-        match decoded {
-            P2pMessage::BlockVrfProof {
-                height,
-                vrf_proof,
-                validator_addr: addr,
-            } => {
-                assert_eq!(height, 42);
-                assert_eq!(vrf_proof.len(), P2pMessage::VRF_PROOF_WIRE_LEN);
-                assert_eq!(addr.len(), 20);
-            }
-            _ => panic!("expected BlockVrfProof"),
-        }
     }
 
     #[test]
@@ -471,15 +418,6 @@ mod tests {
             }
             .topic(),
             "vinx/bls/1"
-        );
-        assert_eq!(
-            P2pMessage::BlockVrfProof {
-                height: 1,
-                vrf_proof: vec![0u8; 80],
-                validator_addr: vec![0u8; 20],
-            }
-            .topic(),
-            "vinx/vrf/1"
         );
     }
 

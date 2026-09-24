@@ -4103,7 +4103,6 @@ dependencies = [
  "blake3",
  "blst",
  "borsh",
- "curve25519-dalek",
  "ed25519-dalek",
  "hex",
  "rand 0.8.6",

@@ -19,10 +19,7 @@ use vinx_core::{
     Account, CoreError, RegisterBlsKeyPayload, Transaction, TransactionType, ValidatorExitRequest,
     ValidatorSet,
 };
-use vinx_crypto::{
-    hash256, vrf_verify, Address, BlsPubKey, BlsSignature, Hash32, IncrementalMerkleTree, VrfProof,
-    VrfPublicKey,
-};
+use vinx_crypto::{hash256, Address, BlsPubKey, BlsSignature, Hash32, IncrementalMerkleTree};
 
 /// In-memory representation of the full chain state.
 /// Domain-separation tag for the two-subtree state root (VINX-04).
@@ -167,12 +164,6 @@ pub struct WorldState {
     /// BOND_COOLDOWN_SECS between modifications.
     #[serde(default = "default_min_validator_bond")]
     pub min_validator_bond_atoms: u128,
-    // ── ADR 0029 Phase 2 — epoch beacon ─────────────────────────────────────────
-    /// Epoch beacon for committee selection (ADR 0029 Phase 2, SHA-256 placeholder
-    /// until ECVRF RFC 9381 is integrated). Updated at every epoch close.
-    /// All-zeros until the first epoch close occurs.
-    #[serde(default)]
-    pub epoch_beacon: Hash32,
     // ── ADR 0036 — validator churn bounds ───────────────────────────────────────
     /// FIFO exit queue for validators whose bond dropped below the minimum floor
     /// (ADR 0036). Entries are promoted to `Unbonding` status at each epoch close,
@@ -321,7 +312,6 @@ impl WorldState {
             last_bond_change_ts: 0,
             last_epoch_close_ts: 0,
             min_validator_bond_atoms: MIN_VALIDATOR_BOND_ATOMS,
-            epoch_beacon: [0u8; 32],
             exit_queue: Vec::new(),
             last_block_ts: 0,
         }
@@ -713,122 +703,7 @@ impl WorldState {
         }
         // If the pool is empty (e.g. genesis before any bonds), leave validator_set as-is.
 
-        // 7. Advance the epoch beacon (ADR 0029 Phase 2): chain-of-hashes accumulator.
-        //    beacon' = hash256(beacon || epoch_number_le64 || block_ts_le64)
-        //    SHA-256 placeholder for ECVRF RFC 9381 (integrated in Phase 2b).
-        {
-            let mut buf = [0u8; 32 + 8 + 8];
-            buf[..32].copy_from_slice(&self.epoch_beacon);
-            buf[32..40].copy_from_slice(&epoch_number.to_le_bytes());
-            buf[40..48].copy_from_slice(&self.current_block_ts.to_le_bytes());
-            self.epoch_beacon = hash256(&buf);
-        }
-
         self.last_epoch_close_ts = self.current_block_ts;
-    }
-
-    /// Returns the canonical VRF input alpha for the given block height.
-    ///
-    /// `alpha = epoch_beacon || height_le64` — the same seed for all validators
-    /// at this height, so VRF outputs are comparable and unbiasable.
-    pub fn committee_alpha(&self, height: u64) -> Vec<u8> {
-        let mut alpha = Vec::with_capacity(40);
-        alpha.extend_from_slice(&self.epoch_beacon);
-        alpha.extend_from_slice(&height.to_le_bytes());
-        alpha
-    }
-
-    /// Returns up to `k` validator addresses selected deterministically for `height`
-    /// using the current epoch beacon (ADR 0029 Phase 2).
-    ///
-    /// Candidates are pool members in Active or Benched status. For validators with a
-    /// registered ECVRF key (`vrf_pub_key`), committee admission is via the VRF path:
-    /// the caller must supply their VRF proofs via `committee_from_vrf_proofs`.
-    ///
-    /// This function uses SHA-256 as a fallback for validators without VRF keys —
-    /// ranking by `hash256(beacon || height_le64 || addr_bytes)`. Mixed pools (some with
-    /// VRF keys, some without) are handled by always ranking VRF-enabled validators
-    /// ahead of fallback validators.
-    pub fn committee_for_height(&self, height: u64, k: usize) -> Vec<Address> {
-        let beacon = &self.epoch_beacon;
-        let mut candidates: Vec<(Address, [u8; 32])> = self
-            .validator_pool
-            .iter()
-            .filter(|(_, e)| matches!(e.status, PoolStatus::Active | PoolStatus::Benched))
-            .map(|(addr, entry)| {
-                if entry.vrf_pub_key.is_some() {
-                    // VRF-capable validator: we cannot compute their VRF output without
-                    // their secret key. Rank them with a sentinel so they sort before
-                    // SHA-256 fallback validators — their actual relative ordering is
-                    // determined by submitted proofs via committee_from_vrf_proofs.
-                    let mut buf = [0u8; 21];
-                    buf[..20].copy_from_slice(addr.as_bytes());
-                    buf[20] = 0xFF;
-                    let mut score = hash256(&buf);
-                    score[0] = 0x00; // ensure VRF validators sort before fallback
-                    (*addr, score)
-                } else {
-                    // SHA-256 fallback: deterministic, no proof required.
-                    let mut buf = [0u8; 32 + 8 + 20];
-                    buf[..32].copy_from_slice(beacon);
-                    buf[32..40].copy_from_slice(&height.to_le_bytes());
-                    buf[40..60].copy_from_slice(addr.as_bytes());
-                    let mut score = hash256(&buf);
-                    score[0] |= 0x80; // ensure fallback validators sort after VRF ones
-                    (*addr, score)
-                }
-            })
-            .collect();
-        candidates.sort_by_key(|(_, h)| *h);
-        candidates.into_iter().take(k).map(|(a, _)| a).collect()
-    }
-
-    /// Verifies a validator's VRF proof for committee membership at `height` and
-    /// returns the 64-byte VRF output on success (ADR 0029 Phase 2b).
-    ///
-    /// Fails if:
-    /// - the validator has no registered VRF key
-    /// - the VRF proof does not verify against the registered key and canonical alpha
-    pub fn verify_committee_vrf_proof(
-        &self,
-        addr: &Address,
-        height: u64,
-        proof: &VrfProof,
-    ) -> Result<[u8; 64], CoreError> {
-        let entry = self
-            .validator_pool
-            .get(addr)
-            .ok_or_else(|| CoreError::InvalidTransaction("validator not in pool".to_string()))?;
-        let vrf_pk_bytes = entry.vrf_pub_key.ok_or_else(|| {
-            CoreError::InvalidTransaction("validator has no registered VRF key".to_string())
-        })?;
-        let vrf_pk = VrfPublicKey(vrf_pk_bytes);
-        let alpha = self.committee_alpha(height);
-        vrf_verify(&vrf_pk, proof, &alpha)
-            .map_err(|_| CoreError::Crypto("VRF proof verification failed".to_string()))
-    }
-
-    /// Forms a committee from a set of submitted VRF proofs (ADR 0029 Phase 2b).
-    ///
-    /// Verifies each proof, ranks the verified outputs, and returns the `k` validators
-    /// with the lexicographically smallest VRF output. Unverifiable proofs are silently
-    /// dropped. The result is deterministic given the same verified set.
-    pub fn committee_from_vrf_proofs(
-        &self,
-        height: u64,
-        proofs: &[(Address, VrfProof)],
-        k: usize,
-    ) -> Vec<Address> {
-        let mut scored: Vec<(Address, [u8; 64])> = proofs
-            .iter()
-            .filter_map(|(addr, proof)| {
-                self.verify_committee_vrf_proof(addr, height, proof)
-                    .ok()
-                    .map(|output| (*addr, output))
-            })
-            .collect();
-        scored.sort_by_key(|(_, o)| *o);
-        scored.into_iter().take(k).map(|(a, _)| a).collect()
     }
 
     /// Checks the supply invariant (ADR 0040):
@@ -1277,7 +1152,6 @@ impl WorldState {
             TransactionType::AdminAction => self.apply_admin_action(tx),
             TransactionType::RegisterBlsKey => self.apply_register_bls_key(tx),
             TransactionType::Unjail => self.apply_unjail(tx),
-            TransactionType::RegisterVrfKey => self.apply_register_vrf_key(tx),
         }
     }
 
@@ -1684,7 +1558,7 @@ impl WorldState {
     /// `compute_state_root` used to return the accounts root alone, so the root committed
     /// to nothing but `(address, balance, nonce, staked)` per account. Everything that
     /// decides who may produce blocks and who governs the chain — the validator set and
-    /// pool (bonds, BLS keys, PoP, VRF keys, status), the admin key and policy, pending
+    /// pool (bonds, BLS keys, PoP, status), the admin key and policy, pending
     /// governance and upgrades, the epoch beacon, the supply counters — sat outside it.
     /// Two nodes could therefore disagree on the entire validator set and the admin key
     /// while publishing an identical `state_root`, and since `state_root` is the only
@@ -1718,7 +1592,6 @@ impl WorldState {
             pending_unbonds: &'a [PendingUnbond],
             exit_queue: &'a [ValidatorExitRequest],
             reliability: &'a ReliabilityMap,
-            epoch_beacon: &'a Hash32,
             fee_floor: u128,
             base_fee: u128,
             circulating_supply: u128,
@@ -1748,7 +1621,6 @@ impl WorldState {
             pending_unbonds: &self.pending_unbonds,
             exit_queue: &self.exit_queue,
             reliability: &self.reliability,
-            epoch_beacon: &self.epoch_beacon,
             fee_floor: self.fee_floor.atoms(),
             base_fee: self.base_fee.atoms(),
             circulating_supply: self.circulating_supply.atoms(),
@@ -2295,63 +2167,6 @@ impl WorldState {
             .nonce += 1;
         self.mark_dirty(&tx.sender());
         tracing::info!(validator = %tx.sender(), "ADR 0046: BLS key registered");
-        Ok(())
-    }
-
-    /// Applies a `RegisterVrfKey` transaction (ADR 0029 Phase 2b).
-    /// Stores the validator's ECVRF public key (32-byte compressed Edwards25519 point)
-    /// after validating that the key is a well-formed curve point.
-    fn apply_register_vrf_key(&mut self, tx: &Transaction) -> Result<(), CoreError> {
-        let account = self
-            .accounts
-            .get(&tx.sender())
-            .ok_or(CoreError::InsufficientBalance)?;
-        if account.nonce != tx.nonce {
-            return Err(CoreError::InvalidNonce {
-                expected: account.nonce,
-                got: tx.nonce,
-            });
-        }
-
-        if !self.validator_pool.contains_key(&tx.sender()) {
-            return Err(CoreError::InvalidTransaction(
-                "only bonded validators may register a VRF key".to_string(),
-            ));
-        }
-
-        if tx.payload.len() != 32 {
-            return Err(CoreError::InvalidTransaction(
-                "RegisterVrfKey payload must be 32 bytes (compressed Edwards25519 point)"
-                    .to_string(),
-            ));
-        }
-        let mut key_bytes = [0u8; 32];
-        key_bytes.copy_from_slice(&tx.payload);
-
-        // Validate: the key must decompress to a valid Edwards25519 point.
-        if VrfPublicKey(key_bytes).0.len() != 32 {
-            return Err(CoreError::InvalidTransaction(
-                "invalid VRF public key".to_string(),
-            ));
-        }
-        // Actually validate by attempting a decompress via vrf_verify with a dummy proof
-        // would be expensive. Instead just accept the 32 bytes — they are validated on
-        // first use in verify_committee_vrf_proof. This matches how Ed25519 pubkeys are
-        // stored in accounts (bytes only, validated on signature verification).
-
-        // Mutation: store the VRF public key in the pool entry.
-        let entry = self
-            .validator_pool
-            .get_mut(&tx.sender())
-            .expect("existence checked above");
-        entry.vrf_pub_key = Some(key_bytes);
-
-        self.accounts
-            .get_mut(&tx.sender())
-            .expect("existence checked above")
-            .nonce += 1;
-        self.mark_dirty(&tx.sender());
-        tracing::info!(validator = %tx.sender(), "ADR 0029: VRF key registered");
         Ok(())
     }
 
@@ -3226,12 +3041,6 @@ mod tests {
             }),
         ));
         mutations.push((
-            "epoch_beacon",
-            Box::new(|s: &mut WorldState| {
-                s.epoch_beacon = [0xFFu8; 32];
-            }),
-        ));
-        mutations.push((
             "chain_id",
             Box::new(|s: &mut WorldState| {
                 s.chain_id = s.chain_id.wrapping_add(1);
@@ -3751,339 +3560,6 @@ mod tests {
         assert_eq!(s.min_validator_bond_atoms, new_atoms);
     }
 
-    // ─── ADR 0029 Phase 2: epoch beacon ──────────────────────────────────────
-
-    #[test]
-    fn test_tick_epoch_close_updates_beacon() {
-        let mut s = WorldState::new();
-        let beacon_before = s.epoch_beacon;
-        s.tick_epoch_close();
-        assert_ne!(
-            s.epoch_beacon, beacon_before,
-            "beacon must change after epoch close"
-        );
-        assert_ne!(
-            s.epoch_beacon, [0u8; 32],
-            "beacon must be non-zero after epoch close"
-        );
-    }
-
-    #[test]
-    fn test_tick_epoch_close_beacon_is_deterministic() {
-        let mut s1 = WorldState::new();
-        let mut s2 = WorldState::new();
-        s1.tick_epoch_close();
-        s2.tick_epoch_close();
-        assert_eq!(
-            s1.epoch_beacon, s2.epoch_beacon,
-            "beacon must be deterministic"
-        );
-    }
-
-    #[test]
-    fn test_tick_epoch_close_beacon_chain_differs_across_epochs() {
-        let mut s = WorldState::new();
-        s.tick_epoch_close();
-        let beacon_after_1 = s.epoch_beacon;
-        s.tick_epoch_close();
-        let beacon_after_2 = s.epoch_beacon;
-        assert_ne!(
-            beacon_after_1, beacon_after_2,
-            "successive epoch beacons must differ"
-        );
-    }
-
-    // ─── ADR 0029 Phase 2: committee_for_height ───────────────────────────────
-
-    fn pool_state_with_active_validators(n: usize) -> WorldState {
-        use vinx_core::validator_pool::{PoolStatus, ValidatorPoolEntry};
-        let mut s = WorldState::new();
-        for _ in 0..n {
-            let (_, addr) = kp_addr();
-            let mut entry = ValidatorPoolEntry::new(MIN_VALIDATOR_BOND_ATOMS, 0);
-            entry.status = PoolStatus::Active;
-            s.validator_pool.insert(addr, entry);
-        }
-        s
-    }
-
-    #[test]
-    fn test_committee_for_height_respects_k_cap() {
-        let s = pool_state_with_active_validators(10);
-        let committee = s.committee_for_height(1, 5);
-        assert_eq!(committee.len(), 5);
-    }
-
-    #[test]
-    fn test_committee_for_height_at_most_pool_size() {
-        let s = pool_state_with_active_validators(3);
-        let committee = s.committee_for_height(1, 10);
-        assert_eq!(committee.len(), 3, "committee cannot exceed pool size");
-    }
-
-    #[test]
-    fn test_committee_for_height_is_deterministic() {
-        let s = pool_state_with_active_validators(10);
-        let c1 = s.committee_for_height(42, 5);
-        let c2 = s.committee_for_height(42, 5);
-        assert_eq!(c1, c2, "committee selection must be deterministic");
-    }
-
-    #[test]
-    fn test_committee_for_height_differs_across_heights() {
-        let s = pool_state_with_active_validators(10);
-        let c1 = s.committee_for_height(1, 5);
-        let c2 = s.committee_for_height(2, 5);
-        // With 10 candidates and 5 slots there's virtually no chance of identical selection.
-        assert_ne!(c1, c2, "committee should differ across heights");
-    }
-
-    // ─── ADR 0029 Phase 2b: ECVRF committee membership ────────────────────────
-
-    #[test]
-    fn test_register_vrf_key_happy_path() {
-        use vinx_crypto::VrfSecretKey;
-        let (mut s, kp, addr) = validator_pool_state();
-        let vrf_sk = VrfSecretKey::generate();
-        let vrf_pk = vrf_sk.public_key();
-
-        let tx = Transaction::new_register_vrf_key(&kp, &vrf_pk.0, 0);
-        s.apply_transaction(&tx).unwrap();
-
-        assert_eq!(s.validator_pool[&addr].vrf_pub_key, Some(vrf_pk.0));
-        assert_eq!(s.accounts[&addr].nonce, 1);
-    }
-
-    #[test]
-    fn test_register_vrf_key_non_validator_rejected() {
-        use vinx_crypto::VrfSecretKey;
-        let mut s = WorldState::new();
-        let kp = KeyPair::generate();
-        let addr = Address::from_public_key(&kp.public_key());
-        s.credit_for_test(addr, Amount::from_vinx(10));
-
-        let vrf_sk = VrfSecretKey::generate();
-        let vrf_pk = vrf_sk.public_key();
-        let tx = Transaction::new_register_vrf_key(&kp, &vrf_pk.0, 0);
-
-        assert!(s.apply_transaction(&tx).is_err());
-        assert!(!s.validator_pool.contains_key(&addr));
-    }
-
-    #[test]
-    fn test_register_vrf_key_wrong_payload_size_rejected() {
-        let (mut s, kp, _) = validator_pool_state();
-        // Build a tx with a 31-byte payload (invalid).
-        let mut tx = Transaction::new_register_vrf_key(&kp, &[0u8; 32], 0);
-        tx.payload = vec![0u8; 31];
-        // Re-sign with the correct key.
-        tx.signature = Some(kp.sign(&tx.signing_bytes()));
-        assert!(s.apply_transaction(&tx).is_err());
-    }
-
-    #[test]
-    fn test_verify_committee_vrf_proof_happy_path() {
-        use vinx_crypto::VrfSecretKey;
-        let mut s = WorldState::new();
-        let kp = KeyPair::generate();
-        let addr = Address::from_public_key(&kp.public_key());
-        s.credit_for_test(addr, Amount::from_vinx(1_000));
-        s.validator_pool.insert(
-            addr,
-            vinx_core::ValidatorPoolEntry::new(MIN_VALIDATOR_BOND_ATOMS, 0),
-        );
-
-        let vrf_sk = VrfSecretKey::generate();
-        let vrf_pk = vrf_sk.public_key();
-        // Register the VRF key.
-        s.apply_transaction(&Transaction::new_register_vrf_key(&kp, &vrf_pk.0, 0))
-            .unwrap();
-
-        // Prove and verify at height 42.
-        let alpha = s.committee_alpha(42);
-        let proof = vrf_sk.prove(&alpha);
-        let result = s.verify_committee_vrf_proof(&addr, 42, &proof);
-
-        assert!(result.is_ok(), "valid VRF proof must verify");
-        let output = result.unwrap();
-        assert_ne!(output, [0u8; 64]);
-    }
-
-    #[test]
-    fn test_verify_committee_vrf_proof_wrong_alpha_rejected() {
-        use vinx_crypto::VrfSecretKey;
-        let mut s = WorldState::new();
-        let kp = KeyPair::generate();
-        let addr = Address::from_public_key(&kp.public_key());
-        s.credit_for_test(addr, Amount::from_vinx(1_000));
-        s.validator_pool.insert(
-            addr,
-            vinx_core::ValidatorPoolEntry::new(MIN_VALIDATOR_BOND_ATOMS, 0),
-        );
-
-        let vrf_sk = VrfSecretKey::generate();
-        let vrf_pk = vrf_sk.public_key();
-        s.apply_transaction(&Transaction::new_register_vrf_key(&kp, &vrf_pk.0, 0))
-            .unwrap();
-
-        // Prove at height 1 but verify at height 2.
-        let alpha1 = s.committee_alpha(1);
-        let proof = vrf_sk.prove(&alpha1);
-        assert!(s.verify_committee_vrf_proof(&addr, 2, &proof).is_err());
-    }
-
-    #[test]
-    fn test_verify_committee_vrf_proof_no_key_rejected() {
-        use vinx_crypto::VrfSecretKey;
-        let (s, _, addr) = validator_pool_state();
-        // Pool entry exists but no VRF key registered.
-        let vrf_sk = VrfSecretKey::generate();
-        let alpha = s.committee_alpha(1);
-        let proof = vrf_sk.prove(&alpha);
-        assert!(s.verify_committee_vrf_proof(&addr, 1, &proof).is_err());
-    }
-
-    #[test]
-    fn test_committee_from_vrf_proofs_selects_top_k() {
-        use vinx_core::validator_pool::PoolStatus;
-        use vinx_crypto::VrfSecretKey;
-        let mut s = WorldState::new();
-        let height = 7u64;
-
-        // Create 5 validators, each with a VRF key registered.
-        let mut pairs: Vec<(KeyPair, Address, VrfSecretKey)> = Vec::new();
-        for _ in 0..5 {
-            let kp = KeyPair::generate();
-            let addr = Address::from_public_key(&kp.public_key());
-            s.credit_for_test(addr, Amount::from_vinx(1_000));
-            let mut entry = vinx_core::ValidatorPoolEntry::new(MIN_VALIDATOR_BOND_ATOMS, 0);
-            entry.status = PoolStatus::Active;
-            s.validator_pool.insert(addr, entry);
-            let vrf_sk = VrfSecretKey::generate();
-            let vrf_pk = vrf_sk.public_key();
-            s.apply_transaction(&Transaction::new_register_vrf_key(&kp, &vrf_pk.0, 0))
-                .unwrap();
-            pairs.push((kp, addr, vrf_sk));
-        }
-
-        // Build proofs for all 5 validators.
-        let alpha = s.committee_alpha(height);
-        let proofs: Vec<(Address, VrfProof)> = pairs
-            .iter()
-            .map(|(_, addr, vrf_sk)| (*addr, vrf_sk.prove(&alpha)))
-            .collect();
-
-        // Request top-3 committee.
-        let committee = s.committee_from_vrf_proofs(height, &proofs, 3);
-        assert_eq!(committee.len(), 3, "committee must have 3 members");
-
-        // All members must be from the pool.
-        for addr in &committee {
-            assert!(s.validator_pool.contains_key(addr));
-        }
-
-        // Result is deterministic.
-        let committee2 = s.committee_from_vrf_proofs(height, &proofs, 3);
-        assert_eq!(committee, committee2);
-    }
-
-    /// ADR 0029 Phase 2a — the VRF leader (top-1 committee) **rotates** across heights and
-    /// no validator dominates. This is the headline property that distinguishes VRF
-    /// selection from a static round-robin: because `alpha = beacon ‖ height` changes every
-    /// height, the lowest-output validator moves around, and over many heights the crown is
-    /// shared roughly uniformly.
-    #[test]
-    fn test_vrf_leader_rotates_and_is_roughly_uniform() {
-        use std::collections::HashMap;
-        use vinx_core::validator_pool::PoolStatus;
-        use vinx_crypto::VrfSecretKey;
-
-        let n = 5usize;
-        let mut s = WorldState::new();
-        let mut pairs: Vec<(Address, VrfSecretKey)> = Vec::new();
-        for _ in 0..n {
-            let kp = KeyPair::generate();
-            let addr = Address::from_public_key(&kp.public_key());
-            s.credit_for_test(addr, Amount::from_vinx(1_000));
-            let mut entry = vinx_core::ValidatorPoolEntry::new(MIN_VALIDATOR_BOND_ATOMS, 0);
-            entry.status = PoolStatus::Active;
-            s.validator_pool.insert(addr, entry);
-            let vrf_sk = VrfSecretKey::generate();
-            s.apply_transaction(&Transaction::new_register_vrf_key(
-                &kp,
-                &vrf_sk.public_key().0,
-                0,
-            ))
-            .unwrap();
-            pairs.push((addr, vrf_sk));
-        }
-
-        // We measure the SELECTION property (lowest VRF output leads), so we evaluate each
-        // validator's output locally (one ECVRF prove each) and pick the min — no need to
-        // re-verify every proof each round (verification is exercised elsewhere and is far
-        // more expensive). `committee_from_vrf_proofs` uses this exact min-output rule.
-        let rounds = 60u64;
-        let mut wins: HashMap<Address, u64> = HashMap::new();
-        for h in 1..=rounds {
-            let alpha = s.committee_alpha(h);
-            let leader = pairs
-                .iter()
-                .map(|(a, sk)| {
-                    let (_, output) = sk.evaluate(&alpha);
-                    (*a, output)
-                })
-                .min_by_key(|(_, o)| *o)
-                .map(|(a, _)| a)
-                .expect("non-empty validator set");
-            *wins.entry(leader).or_insert(0) += 1;
-        }
-
-        // Rotation: every validator wins at least once over 60 heights (P(a given validator
-        // never wins) = (4/5)^60 ≈ 1.5·10⁻⁶ — deterministic in practice).
-        assert_eq!(
-            wins.len(),
-            n,
-            "every validator should lead at least once — the crown rotates"
-        );
-        // Fairness: nobody wins more than 3× the uniform mean (12). A static schedule or a
-        // biased VRF would blow past this; uniform selection stays well under.
-        let mean = rounds / n as u64; // 12
-        for (addr, w) in &wins {
-            assert!(
-                *w <= mean * 3,
-                "validator {addr} led {w} times, far above the fair share (~{mean})"
-            );
-        }
-    }
-
-    #[test]
-    fn test_committee_excludes_unbonding_and_warmup() {
-        use vinx_core::validator_pool::{PoolStatus, ValidatorPoolEntry};
-        let mut s = WorldState::new();
-
-        let (_, active_addr) = kp_addr();
-        let mut active_entry = ValidatorPoolEntry::new(MIN_VALIDATOR_BOND_ATOMS, 0);
-        active_entry.status = PoolStatus::Active;
-        s.validator_pool.insert(active_addr, active_entry);
-
-        let (_, warmup_addr) = kp_addr();
-        let warmup_entry = ValidatorPoolEntry::new(MIN_VALIDATOR_BOND_ATOMS, 0);
-        // Warmup is the default status — leave it as-is.
-        s.validator_pool.insert(warmup_addr, warmup_entry);
-
-        let (_, unbonding_addr) = kp_addr();
-        let mut unbonding_entry = ValidatorPoolEntry::new(MIN_VALIDATOR_BOND_ATOMS, 0);
-        unbonding_entry.status = PoolStatus::Unbonding { unlock_ts: 99999 };
-        s.validator_pool.insert(unbonding_addr, unbonding_entry);
-
-        let committee = s.committee_for_height(1, 10);
-        assert_eq!(
-            committee,
-            vec![active_addr],
-            "only Active/Benched validators are eligible"
-        );
-    }
-
     // ─── ADR 0036: validator churn bounds ─────────────────────────────────────
 
     fn bonded_active_validator() -> (WorldState, vinx_crypto::KeyPair, Address) {
@@ -4177,7 +3653,6 @@ mod tests {
                 eligible_blocks_in_window: 0,
                 bls_pub_key: None,
                 bls_pop: None,
-                vrf_pub_key: None,
             };
             s.validator_pool.insert(extra, entry);
         }
@@ -4241,7 +3716,6 @@ mod tests {
                 eligible_blocks_in_window: 0,
                 bls_pub_key: None,
                 bls_pop: None,
-                vrf_pub_key: None,
             };
             s.validator_pool.insert(addr, entry);
             addrs.push(addr);
@@ -4279,7 +3753,6 @@ mod tests {
                 eligible_blocks_in_window: 0,
                 bls_pub_key: None,
                 bls_pop: None,
-                vrf_pub_key: None,
             };
             s.validator_pool.insert(extra, entry);
         }
@@ -4330,7 +3803,6 @@ mod tests {
                 eligible_blocks_in_window: 0,
                 bls_pub_key: None,
                 bls_pop: None,
-                vrf_pub_key: None,
             };
             s.validator_pool.insert(addr, entry);
             targets.push(addr);
@@ -4378,7 +3850,6 @@ mod tests {
             eligible_blocks_in_window: 0,
             bls_pub_key: None,
             bls_pop: None,
-            vrf_pub_key: None,
         };
         s.validator_pool.insert(addr, entry);
 
@@ -4428,7 +3899,6 @@ mod tests {
                 eligible_blocks_in_window: 0,
                 bls_pub_key: None,
                 bls_pop: None,
-                vrf_pub_key: None,
             };
             s.validator_pool.insert(extra, entry);
         }

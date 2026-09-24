@@ -1,6 +1,6 @@
 use std::path::PathBuf;
 use vinx_core::{chain_id::CHAIN_ID_DEVNET, ValidatorSet};
-use vinx_crypto::{Address, BlsSecretKey, KeyPair, VrfSecretKey};
+use vinx_crypto::{Address, BlsSecretKey, KeyPair};
 
 #[derive(Clone)]
 pub struct NodeConfig {
@@ -31,11 +31,6 @@ pub struct NodeConfig {
     /// Ed25519-only path is used. When set, the node signs produced blocks with BLS
     /// and the BLS public key is registered in the validator pool entry.
     pub bls_secret_key: BlsSecretKey,
-    /// ECVRF secret key for committee-selection proofs (ADR 0029 Phase 2b).
-    /// When `Some`, the node generates and gossips `BlockVrfProof` messages after
-    /// each accepted block.  The corresponding `VrfPublicKey` must be registered in
-    /// the validator pool entry for the node's address.  `None` = VRF disabled.
-    pub vrf_secret_key: Option<VrfSecretKey>,
     /// Keypair used to sign faucet transfer transactions. `None` = faucet disabled.
     pub faucet_keypair: Option<KeyPair>,
     /// Atoms to drip per faucet request (default: 100 VinX).
@@ -67,7 +62,6 @@ impl NodeConfig {
             sync_peer_rpc: None,
             admin_token: None,
             bls_secret_key: BlsSecretKey::generate(),
-            vrf_secret_key: None,
             faucet_keypair: None,
             faucet_amount_atoms: 100 * vinx_core::amount::DECIMAL_FACTOR, // 100 VinX
             faucet_cooldown_secs: 86_400,
@@ -131,13 +125,6 @@ impl NodeConfig {
     /// Enables BLS block co-signatures (ADR 0046) using the given BLS secret key.
     pub fn with_bls_key(mut self, bls_secret_key: BlsSecretKey) -> Self {
         self.bls_secret_key = bls_secret_key;
-        self
-    }
-
-    /// Enables ECVRF committee-selection proofs (ADR 0029 Phase 2b).
-    /// The corresponding `VrfPublicKey` must be registered in the validator pool.
-    pub fn with_vrf_key(mut self, vrf_secret_key: VrfSecretKey) -> Self {
-        self.vrf_secret_key = Some(vrf_secret_key);
         self
     }
 }

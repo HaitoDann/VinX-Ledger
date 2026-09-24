@@ -679,7 +679,6 @@ mod tests {
             bls_aggregate: None,
             bls_cosigner_pks: vec![],
             bls_bitmap: vec![],
-            vrf_proof: None,
         }
     }
 
