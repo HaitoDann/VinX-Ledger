@@ -144,12 +144,13 @@ pub const PROPOSER_SHARE_BPS: u128 = 2_000;
 /// No fee is ever burned: producing a block and co-signing it are both paid work.
 pub const FEE_PRODUCER_SHARE_BPS: u128 = 5_000;
 
-/// How long (in real-time seconds) to keep full block data (header + transactions +
-/// signatures). After this window, transactions and signatures are dropped — only the
-/// header (height, hashes, validator, state_root) is kept for chain integrity.
-/// 90 days ≈ 648 000 blocks at 12 s cadence. Keeps the node light while allowing
-/// 3-month transaction history lookups.
-pub const TX_RETENTION_SECS: u64 = 90 * 24 * 3_600;
+/// Block retention window of a regular (non-archive) node (ADR 0083, L3): blocks older
+/// than this — header, transactions and certificate — are deleted from memory and disk.
+/// The state itself is complete and proven by its root; history beyond the window lives
+/// on `--archive` nodes and in wallets' payment receipts. 30 days is longer than the
+/// unbonding period, so equivocation evidence remains checkable. A node further behind
+/// than the window joins through a quorum-committed snapshot.
+pub const BLOCK_RETENTION_SECS: u64 = 30 * 24 * 3_600;
 
 /// Pruning runs every N blocks to amortize the O(n) tx-index rebuild cost.
 pub const PRUNE_INTERVAL: u64 = 1_000;

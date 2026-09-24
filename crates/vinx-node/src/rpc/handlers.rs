@@ -537,6 +537,7 @@ pub async fn get_chain_snapshot(State(node): State<Arc<Node>>) -> impl IntoRespo
         )
             .into_response();
     };
+    let ancestors = chain_guard.tip_ancestors();
     let state_root = hex::encode(state_guard.compute_state_root());
     // Encode: borsh → zstd → hex
     let Ok(raw) = borsh::to_vec(&*state_guard) else {
@@ -565,6 +566,7 @@ pub async fn get_chain_snapshot(State(node): State<Arc<Node>>) -> impl IntoRespo
         state_root,
         block,
         commit,
+        ancestors,
         state_hex: hex::encode(&compressed),
     };
     (StatusCode::OK, Json(snap)).into_response()

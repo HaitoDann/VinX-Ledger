@@ -343,9 +343,9 @@ impl Node {
             if !confirmed.is_empty() {
                 mempool.update_confirmed_nonces(&confirmed);
             }
-            use vinx_core::amount::{PRUNE_INTERVAL, TX_RETENTION_SECS};
-            if height.is_multiple_of(PRUNE_INTERVAL) {
-                chain.prune_by_age(block.header.timestamp, TX_RETENTION_SECS);
+            use vinx_core::amount::{BLOCK_RETENTION_SECS, PRUNE_INTERVAL};
+            if !self.config.archive && height.is_multiple_of(PRUNE_INTERVAL) {
+                chain.prune_before(block.header.timestamp, BLOCK_RETENTION_SECS);
             }
             *self.validator_set.write().await = state.validator_set.clone();
         }

@@ -33,6 +33,8 @@ struct NodeConfigFile {
     faucet_amount_atoms: Option<u128>,
     /// Cooldown between faucet requests per address in seconds (default: 86 400 = 24 h).
     faucet_cooldown_secs: Option<u64>,
+    /// Archive node (same as `--archive`).
+    archive: Option<bool>,
 }
 
 impl NodeConfigFile {
@@ -91,6 +93,10 @@ struct Args {
     /// the shared spec's `validators` list (multi-validator genesis, ADR 0082).
     #[arg(long)]
     genesis_entry: bool,
+    /// Archive node: keep every block instead of pruning those older than 30 days
+    /// (ADR 0083). For explorers and history services.
+    #[arg(long)]
+    archive: bool,
 }
 
 // ─── Key file helpers ─────────────────────────────────────────────────────────
@@ -465,11 +471,16 @@ async fn main() {
     let restored_mempool = storage.load_mempool();
     drop(storage);
 
+    let archive = args.archive || file_cfg.archive.unwrap_or(false);
     let mut config = NodeConfig::new(validator_kp)
         .with_bls_key(bls_sk)
         .with_rpc_listen(&rpc_listen)
         .with_data_dir(&data_dir);
 
+    config.archive = archive;
+    if archive {
+        tracing::info!("Archive node: blocks are never pruned");
+    }
     if let Some(ref p2p) = p2p_listen {
         config = config.with_p2p(p2p);
     }

@@ -58,6 +58,8 @@ pub struct StateWrite {
     /// When true, the accounts table is wiped before writing `account_rows`
     /// (used by full snapshot import to drop rows no longer present).
     pub replace_accounts: bool,
+    /// Block rows below this height are deleted (retention pruning, ADR 0083).
+    pub delete_blocks_below: Option<u64>,
     /// Tiny chain metadata blob (finalized height) — rewritten every flush.
     pub chain_meta: Vec<u8>,
     /// Changed block rows: (height, borsh((hash, Block))). Only the heights
@@ -202,8 +204,10 @@ impl Storage {
                 account_deletes.push(*addr.as_bytes());
             }
         }
+        let delete_blocks_below = chain.take_pruned_below();
         let (chain_meta, block_rows, tx_index, account_tx_index) = Self::serialize_chain(chain)?;
         Ok(StateWrite {
+            delete_blocks_below,
             meta,
             account_rows,
             account_deletes,
@@ -271,6 +275,17 @@ impl Storage {
         }
         {
             let mut btbl = tx.open_table(BLOCKS).map_err(Self::io_err)?;
+            if let (Some(below), false) = (w.delete_blocks_below, w.replace_blocks) {
+                let stale: Vec<u64> = btbl
+                    .range(..below)
+                    .map_err(Self::io_err)?
+                    .flatten()
+                    .map(|(k, _)| k.value())
+                    .collect();
+                for h in stale {
+                    btbl.remove(h).map_err(Self::io_err)?;
+                }
+            }
             for (height, bytes) in &block_rows_c {
                 btbl.insert(*height, bytes.as_slice())
                     .map_err(Self::io_err)?;
@@ -730,6 +745,52 @@ mod tests {
             bitmap: vec![1],
             aggregate: vec![0u8; 96],
         }
+    }
+
+    /// ADR 0083 L3: pruned blocks are deleted from disk and the chain reloads from the
+    /// new base.
+    #[test]
+    fn test_pruned_blocks_are_deleted_and_chain_reloads() {
+        use vinx_crypto::KeyPair;
+        use vinx_state::{create_genesis_state, GenesisConfig};
+
+        let tmp = Tmp::new();
+        let validator = Address::from_public_key(&KeyPair::generate().public_key());
+        let mut state = create_genesis_state(&GenesisConfig {
+            chain_id: vinx_core::CHAIN_ID_DEVNET,
+            admin_address: validator,
+            validator_address: validator,
+            validator_bls: vinx_state::GenesisBlsKey::from_secret(
+                &vinx_crypto::BlsSecretKey::generate(),
+                &validator,
+                vinx_core::CHAIN_ID_DEVNET,
+            ),
+        });
+        let (mut chain, _) = Chain::new_with_genesis(validator, 0);
+        {
+            let storage = Storage::open(&tmp.0).unwrap();
+            storage.save(&mut state, &mut chain).unwrap();
+            for h in 1..=40 {
+                let b = make_test_block(h, chain.tip_hash(), validator);
+                let c = cert_for(&b);
+                chain.push(b, Some(c));
+            }
+            storage
+                .write_state(Storage::serialize_incremental(&mut state, &mut chain).unwrap())
+                .unwrap();
+            // Timestamps equal heights: keep heights >= 25.
+            assert_eq!(chain.prune_before(40, 15), 25);
+            storage
+                .write_state(Storage::serialize_incremental(&mut state, &mut chain).unwrap())
+                .unwrap();
+        }
+        let storage = Storage::open(&tmp.0).unwrap();
+        let (_, loaded) = storage.load().expect("pruned chain reloads");
+        assert_eq!(loaded.base_height(), 25);
+        assert_eq!(loaded.tip_height(), 40);
+        assert_eq!(loaded.tip_hash(), chain.tip_hash());
+        assert!(loaded.get_block(24).is_none());
+        assert_eq!(loaded.tip(), chain.tip());
     }
 
     // v10: a flush after N new blocks serializes exactly those N rows — never the

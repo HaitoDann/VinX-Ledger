@@ -295,6 +295,9 @@ pub struct ChainSnapshotResponse {
     pub block: vinx_core::Block,
     /// Its commit certificate (ADR 0082), verified against the snapshot's voting set.
     pub commit: vinx_core::CommitCert,
+    /// The blocks just before `block`, oldest first (protocol-clock window, ADR 0005).
+    #[serde(default)]
+    pub ancestors: Vec<vinx_core::Block>,
     /// WorldState serialized as borsh, compressed with zstd, hex-encoded.
     pub state_hex: String,
 }
