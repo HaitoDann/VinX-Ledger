@@ -74,7 +74,7 @@ impl NodeConfig {
             bls_secret_key: BlsSecretKey::generate(),
             vrf_secret_key: None,
             faucet_keypair: None,
-            faucet_amount_atoms: 100 * 1_000_000_000_000_000_000, // 100 VinX
+            faucet_amount_atoms: 100 * vinx_core::amount::DECIMAL_FACTOR, // 100 VinX
             faucet_cooldown_secs: 86_400,
             chain_id: CHAIN_ID_DEVNET,
             bootstrap_peers: vec![],

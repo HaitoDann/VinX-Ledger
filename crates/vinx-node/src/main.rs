@@ -439,7 +439,7 @@ async fn main() {
         let (faucet_kf, faucet_kp) = KeyFile::load_or_generate(faucet_path);
         let amount = file_cfg
             .faucet_amount_atoms
-            .unwrap_or(100 * 1_000_000_000_000_000_000);
+            .unwrap_or(100 * vinx_core::amount::DECIMAL_FACTOR);
         let cooldown = file_cfg.faucet_cooldown_secs.unwrap_or(86_400);
         tracing::info!(
             address = %faucet_kf.address,

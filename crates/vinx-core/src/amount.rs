@@ -2,16 +2,18 @@ use borsh::{BorshDeserialize, BorshSerialize};
 use serde::{Deserialize, Serialize};
 use std::fmt;
 
-pub const DECIMALS: u32 = 18;
-pub const DECIMAL_FACTOR: u128 = 1_000_000_000_000_000_000; // 10^18
+/// 9 decimals (ADR 0081 D2): 1 VinX = 10^9 atoms. Enough precision for any payment,
+/// and every realistic amount stays exact as a JavaScript number / `u64`.
+pub const DECIMALS: u32 = 9;
+pub const DECIMAL_FACTOR: u128 = 1_000_000_000; // 10^9
 
-/// Absolute supply cap: 100 billion VinX — immutable by protocol.
+/// Absolute supply cap: 1 billion VinX (ADR 0081 D1) — immutable by protocol.
 ///
 /// VinX has no burn and no pre-mine. At genesis `emitted_atoms = 0`; tokens enter
 /// circulation only through progressive minting by block producers (work emission).
 /// The invariant `circulating + epoch_pot + destroyed == emitted_atoms ≤ MAX_SUPPLY_ATOMS`
 /// holds at every block (ADR 0040).
-pub const MAX_SUPPLY_ATOMS: u128 = 100_000_000_000 * DECIMAL_FACTOR;
+pub const MAX_SUPPLY_ATOMS: u128 = 1_000_000_000 * DECIMAL_FACTOR;
 
 /// Flat base transaction fee: 0.0001 VinX. Charged as an absolute forfait (times the
 /// tx-type weight and the congestion multiplier), **independent of the amount moved** —
@@ -65,25 +67,25 @@ pub const MAX_MODULES: usize = 100_000;
 
 // ─── Validator bond & slashing ─────────────────────────────────────────────────
 
-/// Minimum bond required to enter the validator pool (100,000 VinX, governable).
+/// Minimum bond required to enter the validator pool (10,000 VinX, governable — ADR 0081 D3).
 /// The genesis validator is grandfathered. The bond is a security deposit slashed
 /// on equivocation — it earns no yield. Governable within [MIN_BOND_HARD_FLOOR,
 /// MAX_BOND_HARD_CAP]. Changes limited to ±BOND_STEP_BPS per modification with
 /// BOND_COOLDOWN_SECS between modifications (ADR 0038).
-pub const MIN_VALIDATOR_BOND_ATOMS: u128 = 100_000 * DECIMAL_FACTOR;
+pub const MIN_VALIDATOR_BOND_ATOMS: u128 = 10_000 * DECIMAL_FACTOR;
 
 /// Hard floor on the validator bond (ADR 0038). Immutable — governance cannot drop
 /// the bond below this even if the governable minimum is set lower.
-pub const MIN_BOND_HARD_FLOOR: u128 = 10_000 * DECIMAL_FACTOR;
+pub const MIN_BOND_HARD_FLOOR: u128 = 1_000 * DECIMAL_FACTOR;
 
 /// Hard cap on the validator bond (ADR 0038). Immutable — prevents governance from
 /// pricing out new validators by inflating the bond requirement.
-pub const MAX_BOND_HARD_CAP: u128 = 100_000_000 * DECIMAL_FACTOR;
+pub const MAX_BOND_HARD_CAP: u128 = 1_000_000 * DECIMAL_FACTOR;
 
 /// Maximum bond change per governance action, in basis points of the current value
 /// (2 500 bps = 25%). Immutable. Limits how fast the bond can be moved in either
 /// direction — an attacker controlling governance needs ~37 steps × 7-day cooldown
-/// to go from 100 000 VinX to 1 VinX, giving the community time to react.
+/// to go from 10 000 VinX to the 1 000 VinX floor, giving the community time to react.
 pub const BOND_STEP_BPS: u128 = 2_500;
 
 /// Minimum real-time gap between two bond governance modifications (7 days). Immutable.
@@ -228,7 +230,7 @@ pub const UPGRADE_NOTICE_PATCH_SECS: u64 = 7 * 24 * 3600; //  7 days
 pub const UPGRADE_NOTICE_MINOR_SECS: u64 = 30 * 24 * 3600; // 30 days
 pub const UPGRADE_NOTICE_MAJOR_SECS: u64 = 90 * 24 * 3600; // 90 days
 
-/// Internal token amount stored as an integer in the smallest unit (10^-18 VinX).
+/// Internal token amount stored as an integer in the smallest unit (10^-9 VinX).
 /// All arithmetic uses checked operations to prevent overflow or underflow.
 #[derive(
     Clone,
@@ -305,8 +307,8 @@ pub fn cumulative_emission_atoms(elapsed_secs: u64) -> u128 {
             return total; // schedule exhausted (dust) — nothing more to emit, ever
         }
     }
-    // Linear share of the current (partial) era. No overflow: era_amount ≤ 5e28,
-    // rem < h ≈ 2.5e8, product ≤ 1.25e37 < u128::MAX.
+    // Linear share of the current (partial) era. No overflow: era_amount ≤ 5e17,
+    // rem < h ≈ 6.3e8, product ≤ 3.2e26 < u128::MAX.
     total.saturating_add(era_amount * rem / h)
 }
 
@@ -330,8 +332,8 @@ mod tests {
     }
 
     #[test]
-    fn test_max_supply_is_100_billion() {
-        let expected = Amount::from_vinx(100_000_000_000);
+    fn test_max_supply_is_1_billion() {
+        let expected = Amount::from_vinx(1_000_000_000);
         assert_eq!(Amount::MAX_SUPPLY, expected);
     }
 
@@ -355,7 +357,7 @@ mod tests {
 
     #[test]
     fn test_emission_halves_each_period() {
-        // T₁ → 50 Md, T₂ → +25 Md (75 Md total), T₃ → +12.5 Md (87.5 Md).
+        // T₁ → 500 M, T₂ → +250 M (750 M total), T₃ → +125 M (875 M).
         let one = cumulative_emission_atoms(EMISSION_T_HALF_SECS);
         let two = cumulative_emission_atoms(2 * EMISSION_T_HALF_SECS);
         let three = cumulative_emission_atoms(3 * EMISSION_T_HALF_SECS);
@@ -379,8 +381,8 @@ mod tests {
         );
         assert_eq!(
             MAX_SUPPLY_ATOMS,
-            100_000_000_000 * DECIMAL_FACTOR,
-            "100 Md cap — immutable"
+            1_000_000_000 * DECIMAL_FACTOR,
+            "1 Md cap — immutable (ADR 0081)"
         );
         // The schedule asymptotically emits the entire supply (minus integer dust).
         let far_future = cumulative_emission_atoms(u64::MAX / 2);

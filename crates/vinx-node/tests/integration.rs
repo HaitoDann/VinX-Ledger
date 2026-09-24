@@ -369,7 +369,7 @@ async fn test_faucet_endpoint() {
     });
     let (chain, _) = Chain::new_with_genesis(validator_addr, 0);
 
-    const FAUCET_ATOMS: u128 = 100 * 1_000_000_000_000_000_000; // 100 VinX
+    const FAUCET_ATOMS: u128 = 100 * vinx_core::amount::DECIMAL_FACTOR; // 100 VinX
 
     let config = NodeConfig::new(validator_kp)
         .with_block_time(9_999)

@@ -7,7 +7,7 @@
 
 use serde::{Deserialize, Serialize};
 use std::path::Path;
-use vinx_core::amount::{Amount, DECIMAL_FACTOR};
+use vinx_core::amount::{Amount, DECIMALS, DECIMAL_FACTOR};
 use vinx_core::protocol::ProtocolVersion;
 use vinx_core::{GovernanceAction, Transaction, TransactionType};
 use vinx_crypto::{Address, KeyPair};
@@ -75,8 +75,8 @@ impl Keystore {
 
 // ─── Amount parsing / formatting ──────────────────────────────────────────────
 
-/// Parses a human VINX string ("100", "99.50", "0.01") into atoms (10^-18 VINX).
-/// Truncates beyond 18 decimals.
+/// Parses a human VINX string ("100", "99.50", "0.01") into atoms (10^-DECIMALS VINX).
+/// Truncates beyond DECIMALS decimals.
 pub fn parse_amount(s: &str) -> Result<Amount, CoreError> {
     let s = s.trim();
     if s.is_empty() {
@@ -89,8 +89,8 @@ pub fn parse_amount(s: &str) -> Result<Amount, CoreError> {
     let frac_atoms: u128 = if frac_str.is_empty() {
         0
     } else {
-        let truncated = &frac_str[..frac_str.len().min(18)];
-        let padded = format!("{:0<18}", truncated);
+        let truncated = &frac_str[..frac_str.len().min(DECIMALS as usize)];
+        let padded = format!("{:0<width$}", truncated, width = DECIMALS as usize);
         padded
             .parse()
             .map_err(|_| CoreError::InvalidAmount(s.to_string()))?

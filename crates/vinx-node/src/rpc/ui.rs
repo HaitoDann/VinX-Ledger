@@ -311,8 +311,8 @@ const HTML: &str = r####"<!DOCTYPE html>
 <script>
 // ─── Constants ────────────────────────────────────────────────────────────────
 const BASE = window.location.origin;
-const DECIMAL = 1_000_000_000_000_000_000n;
-const FEE_FLOOR = DECIMAL / 100n;
+const DECIMAL = 1_000_000_000n; // 9 decimals (ADR 0081)
+const FEE_FLOOR = DECIMAL / 10_000n; // 0.0001 VINX — DEFAULT_FEE_FLOOR_ATOMS
 
 // ─── State ────────────────────────────────────────────────────────────────────
 let netHeight = 0;
@@ -330,7 +330,7 @@ const bytesToHex = b => Array.from(b, x => x.toString(16).padStart(2,'0')).join(
 function parseVinx(s) {
   s = s.trim().replace(',', '.');
   const [w, f = ''] = s.split('.');
-  const frac = (f + '0'.repeat(18)).slice(0, 18);
+  const frac = (f + '0'.repeat(9)).slice(0, 9);
   return BigInt(w || 0) * DECIMAL + BigInt(frac);
 }
 
@@ -452,7 +452,7 @@ async function refreshEconStats() {
   try {
     const s = await (await fetch(BASE + '/network/stats')).json();
     document.getElementById('e-fee').textContent       = Number(BigInt(s.base_fee_atoms)).toLocaleString();
-    document.getElementById('e-supply').textContent    = fmtAtoms(s.circulating_supply.split(' ')[0] + '000000000000000000').replace('.00 VINX','');
+    document.getElementById('e-supply').textContent    = fmtAtoms(parseVinx(s.circulating_supply.split(' ')[0])).replace('.00 VINX','');
     document.getElementById('e-remaining').textContent = s.remaining_supply;
   } catch {}
 }
@@ -1047,7 +1047,7 @@ const ADMIN_HTML: &str = r####"<!DOCTYPE html>
 </main>
 <script>
 const BASE = window.location.origin;
-const DECIMAL = 1_000_000_000_000_000_000n;
+const DECIMAL = 1_000_000_000n; // 9 decimals (ADR 0081)
 let wallet = null, isAdmin = false, adminAddress = null, opToken = '';
 
 // ─── Byte / hex helpers ───────────────────────────────────────────────────────
