@@ -7,12 +7,14 @@
 use std::collections::{BTreeMap, HashSet};
 
 use vinx_core::consensus::{CommitCert, SignedVote, VoteKind};
-use vinx_core::{Block, PoolStatus, ValidatorPoolEntry};
+use vinx_core::Block;
 use vinx_crypto::{Address, BlsPubKey, BlsSecretKey, Hash32, KeyPair};
 use vinx_node::bft::{Engine, HeightParams, Host, Input, Output, Timeouts};
 use vinx_node::chain::{Chain, Tip};
 use vinx_node::execution;
-use vinx_state::{create_genesis_state, GenesisBlsKey, GenesisConfig, WorldState};
+use vinx_state::{
+    add_genesis_validators, create_genesis_state, GenesisBlsKey, GenesisConfig, WorldState,
+};
 
 const CHAIN: u32 = vinx_core::CHAIN_ID_DEVNET;
 
@@ -38,15 +40,11 @@ fn genesis(n: usize) -> (WorldState, Vec<Val>) {
         validator_address: vals[0].addr,
         validator_bls: GenesisBlsKey::from_secret(&vals[0].sk, &vals[0].addr, CHAIN),
     });
-    for v in &vals[1..] {
-        let key = GenesisBlsKey::from_secret(&v.sk, &v.addr, CHAIN);
-        let mut entry = ValidatorPoolEntry::new(0, 0);
-        entry.status = PoolStatus::Active;
-        entry.bls_pub_key = Some(key.pub_key.to_vec());
-        entry.bls_pop = Some(key.pop.to_vec());
-        state.validator_pool.insert(v.addr, entry);
-    }
-    state.validator_set = state.weighted_validator_set(vals.iter().map(|v| v.addr).collect());
+    let extra: Vec<_> = vals[1..]
+        .iter()
+        .map(|v| (v.addr, GenesisBlsKey::from_secret(&v.sk, &v.addr, CHAIN)))
+        .collect();
+    add_genesis_validators(&mut state, &extra);
     (state, vals)
 }
 

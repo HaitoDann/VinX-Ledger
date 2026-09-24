@@ -15,7 +15,8 @@ Format : `MAJEUR.MINEUR.CORRECTIF` — les versions `0.x.y` sont des versions de
 - **Temps de bloc = paramètre de genèse** (12 s, borné 1–60 s), **dérive d'horloge 15 s**, jailing par rounds manqués.
 - Chemin d'exécution unique (`execution.rs`) ; base fee déterministe ; clé BLS de genèse obligatoire.
 - Bugs corrigés : compteurs de co-signature locaux (récompenses divergentes), base fee dépendant du mempool local, sync HTTP (Block vs BlockResponse), perte de tx du mempool quand une proposition échouait.
-- Tests : simulation pleine pile `tests/consensus_sim.rs` + 14 simulations du moteur. Anciens harnais (`bench_n3`, `adversarial_harness`, `audit_regression_node`) retirés car liés à l'ancien consensus ; `scripts/bench-n3.sh` à réécrire.
+- Tests : simulation pleine pile `tests/consensus_sim.rs` + 14 simulations du moteur. Anciens harnais (`bench_n3`, `adversarial_harness`, `audit_regression_node`) retirés car liés à l'ancien consensus ; `scripts/bench-n3.sh` remplacé par **`scripts/bench-n4.sh`** (4 vrais processus libp2p : progression, 3/4 continue, 2/4 s'arrête sans fork, reprise) — ✅ réussi.
+- **Genèse multi-validateurs** : `vinx-node --genesis-entry` imprime l'entrée d'un validateur (adresse, clé BLS, PoP) ; le champ `validators` de la spec partagée les inscrit tous à la genèse (`add_genesis_validators`, PoP vérifiée).
 
 ## [Non publié] — Décisions irréversibles avant la genèse (ADR 0081)
 

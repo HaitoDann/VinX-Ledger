@@ -2,7 +2,8 @@ pub mod genesis;
 pub mod world_state;
 
 pub use genesis::{
-    create_genesis_state, create_genesis_state_with_dev_prefund, GenesisBlsKey, GenesisConfig,
+    add_genesis_validators, create_genesis_state, create_genesis_state_with_dev_prefund,
+    GenesisBlsKey, GenesisConfig,
 };
 pub use world_state::{AdminPolicy, GovernanceProposal, WorldState};
 
