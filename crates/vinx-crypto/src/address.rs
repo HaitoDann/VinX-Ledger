@@ -48,9 +48,9 @@ impl Address {
                 BECH32_HRP, hrp
             )));
         }
-        if variant != Variant::Bech32 {
+        if variant != Variant::Bech32m {
             return Err(CryptoError::InvalidAddress(
-                "expected Bech32 variant".to_string(),
+                "expected Bech32m variant".to_string(),
             ));
         }
         let payload = Vec::<u8>::from_base32(&data_u5)
@@ -76,7 +76,7 @@ impl Address {
     /// Encodes the address to its bech32 string form (`vinx1...`).
     /// Allocates — call only at display/transport boundaries, never in hot loops.
     pub fn to_bech32(&self) -> String {
-        bech32::encode(BECH32_HRP, self.0.to_base32(), Variant::Bech32)
+        bech32::encode(BECH32_HRP, self.0.to_base32(), Variant::Bech32m)
             .expect("bech32 encoding is infallible for valid inputs")
     }
 }
@@ -243,7 +243,7 @@ mod tests {
         // These exact strings are decoded by the web UI's bech32Decode20 (rpc/ui.rs)
         // back to the raw payloads below; keeping this stable guarantees the browser
         // signer and the node agree on the 20-byte address bytes.
-        let a = Address::from_bech32("vinx1zyg3zyg3zyg3zyg3zyg3zyg3zyg3zyg3feqld3").unwrap();
+        let a = Address::from_bech32("vinx1zyg3zyg3zyg3zyg3zyg3zyg3zyg3zyg3u9sngn").unwrap();
         assert_eq!(a.as_bytes(), &[0x11u8; 20]);
         assert_eq!(Address::from_bytes([0x11u8; 20]).to_bech32(), a.to_bech32());
     }
