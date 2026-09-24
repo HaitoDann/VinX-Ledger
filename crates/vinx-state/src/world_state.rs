@@ -3,7 +3,7 @@ use std::collections::{BTreeMap, HashMap, HashSet};
 use vinx_core::{
     amount::{
         cumulative_emission_atoms, Amount, ACTIVE_SET_COOLDOWN_SECS, ACTIVE_SET_STEP,
-        BOND_COOLDOWN_SECS, BOND_STEP_BPS, BPS_DENOM, DEFAULT_ACTIVE_SET_SIZE,
+        ADMIN_TENURE_SECS, BOND_COOLDOWN_SECS, BOND_STEP_BPS, BPS_DENOM, DEFAULT_ACTIVE_SET_SIZE,
         DEFAULT_FEE_FLOOR_ATOMS, EPOCH_DURATION_SECS, EXISTENTIAL_DEPOSIT_ATOMS,
         FEE_PRODUCER_SHARE_BPS, MAX_BOND_HARD_CAP, MAX_NONCE_AHEAD, MAX_TX_PAYLOAD_BYTES,
         MAX_VALIDATOR_EXITS_PER_EPOCH, MIN_ACTIVE_SET_SIZE, MIN_BOND_HARD_FLOOR, MIN_STAKE_ATOMS,
@@ -1310,6 +1310,9 @@ impl WorldState {
         if self.admin_policy.is_some() {
             return Err(CoreError::Unauthorized);
         }
+        if self.admin_tenure_expired() {
+            return Err(CoreError::Unauthorized);
+        }
         // VINX-20 (complément) : échec fermé, comme `apply_admin_action`. Le premier
         // correctif n'avait traité que `apply_admin_action` et avait laissé ce chemin —
         // qui garde `AnnounceUpgrade` — sur l'ancien motif permissif : sans admin
@@ -1998,11 +2001,21 @@ impl WorldState {
         Ok(())
     }
 
+    /// True once the on-chain admin tenure is over (ADR 0081 D7b): `ADMIN_TENURE_SECS`
+    /// after the emission epoch (first block). Derived only from committed fields and a
+    /// graved constant, so every node agrees and no transaction can extend it.
+    pub fn admin_tenure_expired(&self) -> bool {
+        self.emission_started
+            && self.current_block_ts >= self.emission_epoch_ts.saturating_add(ADMIN_TENURE_SECS)
+    }
+
     /// The effective admin authority (ADR 0011): `(Some(signers), threshold)` under a
     /// committee or a single admin key; `(None, 1)` when no authority is configured — in
     /// which case callers must **refuse** the action (VINX-20), never allow it.
     fn effective_admin(&self) -> (Option<Vec<Address>>, u16) {
-        if let Some(ref p) = self.admin_policy {
+        if self.admin_tenure_expired() {
+            (None, 1)
+        } else if let Some(ref p) = self.admin_policy {
             (Some(p.signers.clone()), p.threshold)
         } else if let Some(admin) = self.admin_address {
             (Some(vec![admin]), 1)
@@ -2513,6 +2526,43 @@ mod tests {
             s.circulating_supply
                 .saturating_add(s.epoch_dist_emission_pot),
             Amount::from_vinx(1_000)
+        );
+    }
+
+    #[test]
+    fn test_admin_authority_expires_after_tenure() {
+        // ADR 0081 D7b: the admin acts during its tenure, then never again.
+        use vinx_core::amount::ADMIN_TENURE_SECS;
+        use vinx_core::GovernanceAction;
+        let (mut state, admin_kp, _) = admin_state();
+        state.emission_started = true;
+        state.emission_epoch_ts = 1_000;
+        let fee_floor = |atoms, nonce| {
+            Transaction::new_admin_action(
+                &admin_kp,
+                &GovernanceAction::UpdateFeeFloor { atoms },
+                nonce,
+            )
+        };
+        state.set_block_context(1_000 + ADMIN_TENURE_SECS - 1);
+        assert!(!state.admin_tenure_expired());
+        state.apply_transaction(&fee_floor(200_000, 0)).unwrap();
+
+        state.set_block_context(1_000 + ADMIN_TENURE_SECS);
+        assert!(state.admin_tenure_expired());
+        assert_eq!(
+            state.apply_transaction(&fee_floor(300_000, 1)),
+            Err(CoreError::Unauthorized)
+        );
+        // Neither a rotation nor a committee can revive it.
+        let (_, other) = kp_addr();
+        assert_eq!(
+            state.apply_transaction(&Transaction::new_admin_action(
+                &admin_kp,
+                &GovernanceAction::RotateAdmin(other),
+                1,
+            )),
+            Err(CoreError::Unauthorized)
         );
     }
 

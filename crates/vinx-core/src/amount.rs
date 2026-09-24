@@ -226,6 +226,13 @@ pub const UPGRADE_NOTICE_PATCH_SECS: u64 = 7 * 24 * 3600; //  7 days
 pub const UPGRADE_NOTICE_MINOR_SECS: u64 = 30 * 24 * 3600; // 30 days
 pub const UPGRADE_NOTICE_MAJOR_SECS: u64 = 90 * 24 * 3600; // 90 days
 
+/// On-chain admin tenure (ADR 0081 D7b): the genesis admin key / committee may act only
+/// during the first 365 days after the emission epoch (first block timestamp). After
+/// that the on-chain authority is extinct — forever. No governance action can extend
+/// it: the constant is graved, not stored. Governance then lives off-chain, like Linux:
+/// the maintainers publish releases, and validators choose which release they run.
+pub const ADMIN_TENURE_SECS: u64 = 365 * 24 * 3600;
+
 /// Internal token amount stored as an integer in the smallest unit (10^-9 VinX).
 /// All arithmetic uses checked operations to prevent overflow or underflow.
 #[derive(
