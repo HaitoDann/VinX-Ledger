@@ -86,7 +86,7 @@ cargo run -p vinx-wallet -- status
 > **Le staking n'est pas un placement à rendement.** En PoS permissionless, la sécurité vient du bond économique des validateurs, pas de leur identité. Le stake sert donc uniquement de **caution** (bond) : la peau dans le jeu qu'un validateur perd s'il triche. Un détenteur lambda ne stake pas — il garde son VINX pour **l'utiliser comme cash**. Il n'y a **aucune récompense de staking** : les validateurs sont rémunérés par leur **travail** (émission + frais), pas par leur bond.
 
 **En pratique :**
-- **Bond minimum : 100 000 VINX** (gouvernable) pour être éligible au set des validateurs. Le validateur défini à la genèse est dispensé (bootstrap).
+- **Bond minimum : 10 000 VINX** (gouvernable) pour être éligible au set des validateurs. Le validateur défini à la genèse est dispensé (bootstrap).
 - **Aucun rendement** sur le bond.
 - **Déliaison différée : 3 jours de temps réel.** Le retrait n'est pas instantané — les fonds restent saisissables pendant la fenêtre où une preuve d'équivocation peut émerger.
 - **Slashing** : équivocation prouvée → 100 % du bond (10 % de prime au rapporteur, le reste versé dans le pot d'époque (redistribué aux validateurs honnêtes, ADR 0028) ; downtime → suspension du round-robin, sans slash économique.
@@ -113,7 +113,7 @@ Les fonds reviennent sur le solde **après la période de déliaison** (3 jours 
 
 ## 4. Admin — mise à jour du protocole
 
-> **Console d'admin web** : la page **http://localhost:8545/admin** offre un tableau de bord (hauteur, mempool, émission, version), la gestion des validateurs (ajout/retrait, approbation des demandes), la planification d'upgrades et la maintenance — le tout signé localement avec la clé admin. La page reste en lecture seule tant que la clé de l'admin on-chain n'est pas chargée. Les commandes CLI ci-dessous restent équivalentes pour un usage scripté.
+> **Console d'admin web** : la page **http://localhost:8545/admin** offre un tableau de bord (hauteur, mempool, émission, version), la gestion des validateurs (ajout/retrait, approbation des demandes), la planification d'upgrades et la maintenance — le tout signé localement avec la clé admin. La clé admin on-chain n'agit que pendant les 365 premiers jours de la chaîne (ADR 0081). La page reste en lecture seule tant que la clé de l'admin on-chain n'est pas chargée. Les commandes CLI ci-dessous restent équivalentes pour un usage scripté.
 
 Les mises à jour de protocole nécessitent un préavis minimum. La **cible** est un délai en temps réel ; l'implémentation actuelle l'applique encore en hauteur de bloc (migration vers les timestamps planifiée, cf. `ETAT_DU_PROJET.md` §8) :
 

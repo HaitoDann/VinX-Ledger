@@ -19,7 +19,7 @@
 | Ticker | VINX |
 | Chain ID | **mainnet = 1**, **testnet = 7**, **devnet = 42** (défaut local) |
 | Adresses | Bech32, préfixe `vinx1` |
-| Unité minimale | atom = 10⁻¹⁸ VINX (18 décimales) |
+| Unité minimale | atom = 10⁻⁹ VINX (9 décimales, ADR 0081) |
 | RPC par défaut | `http://127.0.0.1:8545` |
 
 ---
@@ -33,7 +33,7 @@
 | Hachage | **BLAKE3** (ADR 0069 — remplace SHA-256 avant genesis) |
 | Arbre d'état | Merkle **BLAKE3** |
 | Dérivation d'adresse | `BLAKE3(public_key)[..20]` |
-| Encodage des adresses | Bech32 |
+| Encodage des adresses | Bech32m (ADR 0081), `BLAKE3(type_de_clé ‖ clé)[..20]` |
 | VRF (consensus cible) 🔴 | ECVRF RFC 9381 |
 
 ---
@@ -44,7 +44,7 @@
 
 | Paramètre | Valeur |
 |---|---|
-| `MAX_SUPPLY` | **100 000 000 000 VinX** (100 milliards) |
+| `MAX_SUPPLY` | **1 000 000 000 VinX** (1 milliard, ADR 0081) |
 | Prémine | **Aucun** — aucun token à la genèse |
 | Burn | **Aucun** — le slash redistribue, jamais ne détruit |
 | Immuabilité | Supply max et courbe d'émission gravées (ADR 0021/0040) |
@@ -203,7 +203,7 @@ frais = base_fee × poids(type) × multiplicateur_congestion
 |---|---|
 | Mode | **Permissionless** — bond suffit, aucune approbation admin |
 | Clé BLS obligatoire | **Oui** — clé BLS + PoP valide exigées au bonding (ADR 0075 §3.1, invariant de liveness ; plus de mode dégradé Ed25519-only) |
-| Bond requis par défaut | **100 000 VinX** (gouvernable dans les bornes immuables) |
+| Bond requis par défaut | **10 000 VinX** (gouvernable dans [1 000 ; 1 000 000], ADR 0081) |
 | `MIN_BOND_HARD_FLOOR` | **10 000 VinX** — immuable |
 | `MAX_BOND_HARD_CAP` | **100 000 000 VinX** — immuable |
 
@@ -362,7 +362,7 @@ vinx_tx_in_block_total
 
 | ADR | Titre résumé |
 |---|---|
-| 0051 | Primitives crypto : Ed25519, Bech32 `vinx1...`, Merkle (hachage → **BLAKE3**, ADR 0069) |
+| 0051 | Primitives crypto : Ed25519, Bech32m `vinx1...` (ADR 0081), Merkle (hachage → **BLAKE3**, ADR 0069) |
 | 0052 | Keystore wallet — Argon2id + AES-256-GCM |
 | 0053 | Anti-replay : nonce, chain_id, expiry_height |
 | 0054 | Types de transactions fondamentaux (0x01–0x0A) |
@@ -474,14 +474,16 @@ ni planifiés. VinX est un rail de paiement, pas un settlement layer.
 ## 18. Constantes récapitulatives
 
 ```
-MAX_SUPPLY                = 100_000_000_000 × 10^18 atoms  (100 Md VINX)
+MAX_SUPPLY                = 1_000_000_000 × 10^9 atoms  (1 Md VINX)
+FEE_PRODUCER_SHARE_BPS    = 5_000  (50 % des frais au producteur, 50 % aux co-signataires)
+ADMIN_TENURE_SECS         = 31_536_000  (365 jours — puis plus aucune autorité on-chain)
 BLOCK_TIME_SECS           = 12
 MAX_BLOCK_TXS             = 3_000
 MAX_MEMPOOL_SIZE          = 100_000
 MAX_UNFINALIZED_DEPTH     = 64
 
 T_HALF_EMISSION_SECS      = ~630_720_000  (~20 ans)
-R0_ATOMS_PER_SEC          = ~109_954_...  (≈ 3,47 Md VinX/an)
+R0_ATOMS_PER_SEC          = ~0,79 × 10^9  (≈ 25 M VinX/an la première année)
 
 BASE_FEE_ATOMS_DEFAULT    = 100_000_000_000_000  (= 0,0001 VinX)
 CONGESTION_MULTIPLIER_MAX = 3

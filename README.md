@@ -39,7 +39,7 @@ Pas d'EVM. Pas de WASM. Pas de logique applicative sur L1. La surface d'attaque 
 │  • Consensus : PoS Algorand-style, comité VRF n≈100, BLS agrégé  │
 │  • Finalité BFT déterministe (≥ 67 % du comité, 1 bloc)           │
 │  • Émission progressive fair-launch (T_half ~20 ans)              │
-│  • Hachage BLAKE3 · adresses Bech32 vinx1 · anti-replay complet   │
+│  • Hachage BLAKE3 · adresses Bech32m vinx1 · anti-replay complet   │
 └──────────────────────────────────────────────────────────────────┘
 ```
 
@@ -95,11 +95,12 @@ Le nœud expose **http://localhost:8545** :
 
 ## Tokenomics — Fair launch
 
-- **100 milliards VINX**, supply fixe et immuable.
+- **1 milliard de VINX**, supply fixe et immuable, **9 décimales** (ADR 0081).
 - **Aucun pre-mine, aucune réserve.** Les premiers VINX n'existent qu'au moment où le premier bloc est produit.
 - **Émission par le travail** : minting progressif, décroissance exponentielle continue, demi-vie ~20 ans.
-- **Validateurs rémunérés par l'émission + les frais** : les co-signataires du comité se partagent l'émission de l'époque (ADR 0028) ; les frais de transaction vont au producteur.
-- **Invariant** : `circulation + pot_époque + détruits = émis ≤ 100 Md` — garanti à chaque bloc.
+- **Validateurs rémunérés par l'émission + les frais, sans burn** : le producteur reçoit 20 % de l'émission et 50 % des frais de son bloc ; le reste va aux co-signataires au prorata de leur participation (ADR 0028, ADR 0081).
+- **Gouvernance à la Linux** : la clé admin on-chain s'éteint 365 jours après le premier bloc ; ensuite, le mainteneur dirige le logiciel et les validateurs choisissent la version qu'ils exécutent (ADR 0081).
+- **Invariant** : `circulation + pot_époque + détruits = émis ≤ 1 Md` — garanti à chaque bloc.
 
 > Whitepaper : [whitepaper.md](./whitepaper.md)
 
@@ -134,7 +135,7 @@ apps/
 sdk/
 └── vinx-sdk/           SDK TypeScript
 docs/
-└── adr/                Décisions d'architecture (ADR 0001 → 0050)
+└── adr/                Décisions d'architecture (ADR 0001 → 0081)
 ```
 
 ---

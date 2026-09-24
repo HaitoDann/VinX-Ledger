@@ -185,6 +185,7 @@ d'exploitation, correctifs, prompts de contre-audit — vit dans
 | [0078](./0078-divulgation-vulnerabilites-reponse-incident.md) | Divulgation des vulnérabilités & réponse à incident | 📐 Accepté | 🔴 Haute |
 | [0079](./0079-release-versioning-upgrade-reseau.md) | Release, versioning & upgrade réseau | 📐 Accepté | 🟠 Moyenne |
 | [0080](./0080-criteres-lancement-testnet-mainnet.md) | **Critères de lancement : testnet → mainnet** | 📐 Accepté | 🔴 Porte de sortie |
+| [0081](./0081-decisions-irreversibles-pre-genesis.md) | **Décisions irréversibles avant la genèse** (supply, décimales, frais, Bech32m, type de clé, gouvernance, borsh) | ✅ Implémenté | 🔴 Haute |
 
 > **Le banc adversarial multi-nœuds est désormais en place** (ADR 0080 §2.2) : 6 scénarios
 > avec un `Storage` réel (redb) par nœud, validés par mutation testing (non-équivocation, rejet
@@ -329,6 +330,7 @@ d'exploitation, correctifs, prompts de contre-audit — vit dans
 | [0078](./0078-divulgation-vulnerabilites-reponse-incident.md) | Divulgation & réponse à incident | 📐 Accepté | 1.5 |
 | [0079](./0079-release-versioning-upgrade-reseau.md) | Release, versioning & upgrade réseau | 📐 Accepté | 1.5 |
 | [0080](./0080-criteres-lancement-testnet-mainnet.md) | Critères de lancement testnet → mainnet | 📐 Accepté | 1.5 |
+| [0081](./0081-decisions-irreversibles-pre-genesis.md) | Décisions irréversibles avant la genèse | ✅ Implémenté | 1.5 |
 
 > ⚠️ = change les règles de consensus. Appliqué **sans hauteur d'activation**, ce qui n'est
 > acceptable qu'en pré-lancement (`0.1.0-alpha.1`, aucun réseau public). Après le lancement,
