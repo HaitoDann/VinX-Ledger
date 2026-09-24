@@ -5,6 +5,20 @@ Format : `MAJEUR.MINEUR.CORRECTIF` — les versions `0.x.y` sont des versions de
 
 ---
 
+## [Non publié] — Décisions irréversibles avant la genèse (ADR 0081)
+
+> **Breaking protocole** — nouvelle genèse obligatoire. `STORAGE_VERSION 21 → 22` : toute base antérieure est refusée (et laissée intacte). **432 tests verts, clippy `-D warnings` propre.**
+
+- **Supply 1 Md VINX** (au lieu de 100 Md), **9 décimales** (au lieu de 18), **bond validateur 10 000 VINX** (plancher 1 000, plafond 1 M).
+- **Frais partagés sans burn** : 50 % au producteur, 50 % aux co-signataires via la cagnotte d'époque (`FEE_PRODUCER_SHARE_BPS`).
+- **Adresses Bech32m** ; adresse = `BLAKE3(type_de_clé ‖ clé)[..20]`.
+- **Octet de type de clé** (`PublicKey` / `VinxSignature` typées, 0 = Ed25519) ; champ `Transaction.from` supprimé, `pub_key` obligatoire, expéditeur dérivé (`sender()`) ; les *signing bytes* engagent la clé typée.
+- **Gouvernance à la Linux** : l'autorité admin on-chain s'éteint 365 jours après le premier bloc (`ADMIN_TENURE_SECS`), sans prolongation possible.
+- **Nettoyage** : registre de modules et `AnchorState` retirés, champ dormant `foundry` supprimé, migrations de stockage v6→v21 supprimées, **bincode remplacé par borsh** partout.
+- Wallet web, console admin et SDK TypeScript alignés sur le nouveau format.
+
+---
+
 ## [0.51.0] — 2026-09-10 — Durcissement post-audit & prérequis de lancement (ADRs 0069–0080)
 
 > Transforme trois audits indépendants (Claude, ChatGPT, Gemini) en correctifs de sécurité vérifiés et reproductibles, plus les prérequis de lancement. Chaque correctif est adossé à un test PoC échouant avant / vert après. **Breaking protocole** (hachage, `signing_bytes`, formats disque & wire) — réalisé en pré-mainnet, coût de coordination minimal. `STORAGE_VERSION 19 → 20` (bases pré-BLAKE3 refusées, pas de migration). **429 tests verts, clippy `-D warnings` propre.**
