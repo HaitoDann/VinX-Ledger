@@ -1,10 +1,11 @@
 use crate::protocol::ProtocolVersion;
+use borsh::{BorshDeserialize, BorshSerialize};
 use serde::{Deserialize, Serialize};
 use vinx_crypto::Address;
 
 /// Action executed immediately by the admin key.
 /// Community proposals happen off-chain; this is the on-chain execution step only.
-#[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
+#[derive(Clone, Debug, Serialize, Deserialize, BorshSerialize, BorshDeserialize, PartialEq)]
 pub enum GovernanceAction {
     AddValidator(Address),
     RemoveValidator(Address),
@@ -22,7 +23,7 @@ pub enum GovernanceAction {
     /// signatures among `signers` are required to enact any governance action. A single
     /// signer with `threshold == 1` is equivalent to the legacy single admin key.
     ///
-    /// Appended last so existing bincode discriminants (0..=4) are unchanged — the encoding
+    /// Appended last so existing borsh discriminants (0..=4) are unchanged — the encoding
     /// is consensus-critical (it enters the signed `AdminAction` payload).
     SetAdminPolicy {
         signers: Vec<Address>,
@@ -49,7 +50,7 @@ mod tests {
 
     #[test]
     fn test_governance_action_encoding_is_canonical() {
-        // ADR 0020: the bincode encoding of a GovernanceAction enters the AdminAction
+        // ADR 0020: the borsh encoding of a GovernanceAction enters the AdminAction
         // transaction payload signed by the admin — it is consensus-critical. Pin that
         // it is deterministic and canonical (re-encoding a decoded value is identical),
         // so no accidental layout change slips through.
@@ -71,19 +72,19 @@ mod tests {
             GovernanceAction::UpdateMinValidatorBond { atoms: 1_000 },
         ];
         for a in actions {
-            let bytes = bincode::serialize(&a).unwrap();
+            let bytes = borsh::to_vec(&a).unwrap();
             // Deterministic: encoding twice yields the same bytes.
-            assert_eq!(bytes, bincode::serialize(&a).unwrap());
+            assert_eq!(bytes, borsh::to_vec(&a).unwrap());
             // Canonical: decode then re-encode is byte-identical.
-            let decoded: GovernanceAction = bincode::deserialize(&bytes).unwrap();
-            assert_eq!(bincode::serialize(&decoded).unwrap(), bytes);
+            let decoded: GovernanceAction = borsh::from_slice(&bytes).unwrap();
+            assert_eq!(borsh::to_vec(&decoded).unwrap(), bytes);
             assert_eq!(decoded, a);
         }
     }
 
     #[test]
     fn test_governance_action_golden_vectors() {
-        // ADR 0020 t2: pin the EXACT bincode bytes of every GovernanceAction variant.
+        // ADR 0020 t2: pin the EXACT borsh bytes of every GovernanceAction variant.
         // Stronger than the round-trip test above — this catches a discriminant shift or a
         // field reorder that is still internally consistent, which would silently break
         // cross-implementation signature verification of the AdminAction payload.
@@ -92,47 +93,47 @@ mod tests {
         let cases: [(GovernanceAction, &str); 8] = [
             (
                 GovernanceAction::AddValidator(a),
-                "000000001111111111111111111111111111111111111111",
+                "001111111111111111111111111111111111111111",
             ),
             (
                 GovernanceAction::RemoveValidator(a),
-                "010000001111111111111111111111111111111111111111",
+                "011111111111111111111111111111111111111111",
             ),
             (
                 GovernanceAction::UpdateFeeFloor { atoms: 123_456 },
-                "0200000040e2010000000000",
+                "0240e2010000000000",
             ),
             (
                 GovernanceAction::ScheduleUpgrade {
                     version: ProtocolVersion::new(1, 2, 3),
                     activation_ts: 999,
                 },
-                "03000000010002000300e703000000000000",
+                "03010002000300e703000000000000",
             ),
             (
                 GovernanceAction::RotateAdmin(a),
-                "040000001111111111111111111111111111111111111111",
+                "041111111111111111111111111111111111111111",
             ),
             (
                 GovernanceAction::SetAdminPolicy {
                     signers: vec![a, b],
                     threshold: 2,
                 },
-                "050000000200000000000000111111111111111111111111111111111111111122222222222222222222222222222222222222220200",
+                "0502000000111111111111111111111111111111111111111122222222222222222222222222222222222222220200",
             ),
             // discriminant 6: UpdateActiveSetSize { new_size: 21 }
             (
                 GovernanceAction::UpdateActiveSetSize { new_size: 21 },
-                "0600000015000000",
+                "0615000000",
             ),
             // discriminant 7: UpdateMinValidatorBond { atoms: 1000 }
             (
                 GovernanceAction::UpdateMinValidatorBond { atoms: 1_000 },
-                "07000000e8030000000000000000000000000000",
+                "07e8030000000000000000000000000000",
             ),
         ];
         for (action, hex_want) in cases {
-            assert_eq!(hex::encode(bincode::serialize(&action).unwrap()), hex_want);
+            assert_eq!(hex::encode(borsh::to_vec(&action).unwrap()), hex_want);
         }
     }
 }

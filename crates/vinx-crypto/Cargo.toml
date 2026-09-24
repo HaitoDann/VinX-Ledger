@@ -19,4 +19,3 @@ curve25519-dalek = { workspace = true }
 
 [dev-dependencies]
 serde_json = { workspace = true }
-bincode = { workspace = true }

@@ -13,6 +13,7 @@
 //! l'ADR (fenêtre de co-signatures absentes) est aussi différée à la tranche 2.
 
 use crate::ValidatorSet;
+use borsh::{BorshDeserialize, BorshSerialize};
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
 use vinx_crypto::Address;
@@ -27,7 +28,9 @@ pub const UNJAIL_COOLDOWN_HEIGHTS: u64 = 100;
 
 /// Méta de fiabilité d'un validateur (destinée au meta `WorldState` une fois câblée, comme
 /// `pending_unbonds` — dérivée déterministiquement de la séquence de blocs, hors `state_root`).
-#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(
+    Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize, BorshSerialize, BorshDeserialize,
+)]
 pub struct ValidatorReliability {
     /// Manquements **consécutifs** de proposition — remis à 0 dès que ce validateur produit.
     pub missed_proposals: u32,

@@ -112,7 +112,7 @@ fn test_storage_roundtrip_preserves_typed_tx_index() {
     let storage = Storage::new(tmp.path());
     storage.save(&mut state, &mut chain).unwrap();
 
-    // Reload and confirm the raw-byte-keyed indexes survive the bincode round-trip
+    // Reload and confirm the raw-byte-keyed indexes survive the borsh round-trip
     // (Hash32 keys for tx_index, Address keys for account_tx_index).
     let (_, loaded) = storage.load().expect("should load");
     assert!(

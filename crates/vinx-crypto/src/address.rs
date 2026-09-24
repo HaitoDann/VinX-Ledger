@@ -101,8 +101,8 @@ impl FromStr for Address {
 }
 
 // serde is format-aware: human-readable formats (JSON, used by the RPC API and CLI)
-// carry the bech32 string `"vinx1..."`, while binary formats (bincode on disk) carry
-// the raw 20 bytes. Borsh (P2P wire) is always the raw 20 bytes.
+// carry the bech32 string `"vinx1..."`, while binary serde formats carry the raw 20
+// bytes. Borsh — the only binary encoding of the protocol (ADR 0081) — is always raw.
 impl Serialize for Address {
     fn serialize<S: Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
         if serializer.is_human_readable() {
@@ -207,7 +207,7 @@ mod tests {
     // Format contract for the 20-byte representation:
     // - JSON (human-readable) carries the bech32 string, so the RPC API and the
     //   TypeScript SDK are unaffected.
-    // - bincode (on disk) and borsh (P2P wire) carry the raw 20 bytes.
+    // - borsh (disk, P2P wire, signed payloads) carries the raw 20 bytes.
 
     #[test]
     fn test_json_is_the_bech32_string() {
@@ -215,16 +215,6 @@ mod tests {
         let json = serde_json::to_string(&addr).unwrap();
         assert_eq!(json, format!("\"{}\"", addr.to_bech32()));
         let back: Address = serde_json::from_str(&json).unwrap();
-        assert_eq!(addr, back);
-    }
-
-    #[test]
-    fn test_bincode_is_raw_20_bytes() {
-        let addr = Address::from_public_key(&KeyPair::generate().public_key());
-        let bytes = bincode::serialize(&addr).unwrap();
-        assert_eq!(bytes.len(), ADDRESS_LEN);
-        assert_eq!(bytes.as_slice(), addr.as_bytes());
-        let back: Address = bincode::deserialize(&bytes).unwrap();
         assert_eq!(addr, back);
     }
 

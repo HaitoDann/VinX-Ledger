@@ -12,13 +12,13 @@ pub enum TransactionType {
     Unstake,
     /// Admin-only: schedule a protocol upgrade at a future block height.
     AnnounceUpgrade,
-    /// Slash a validator who double-signed. `to` = validator, `payload` = bincode(SlashEvidence).
+    /// Slash a validator who double-signed. `to` = validator, `payload` = borsh(SlashEvidence).
     SlashValidator,
-    /// Admin-only governance action executed immediately. `payload` = bincode(GovernanceAction).
+    /// Admin-only governance action executed immediately. `payload` = borsh(GovernanceAction).
     AdminAction,
     /// Validator self-registers their BLS12-381 public key + Proof-of-Possession (ADR 0046).
-    /// `payload` = bincode(RegisterBlsKeyPayload). Any bonded validator may call this for
-    /// themselves; no admin authorization required. Appended last to preserve bincode/borsh
+    /// `payload` = borsh(RegisterBlsKeyPayload). Any bonded validator may call this for
+    /// themselves; no admin authorization required. Appended last to preserve borsh
     /// discriminants of all prior variants.
     RegisterBlsKey,
     /// Jailed validator requests to re-enter the active set (ADR 0027).
@@ -91,8 +91,8 @@ pub struct Transaction {
 }
 
 /// Payload for a `RegisterBlsKey` transaction (ADR 0046).
-/// Both fields are serialized as length-prefixed byte vectors (bincode default).
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+/// Both fields are serialized as length-prefixed byte vectors (borsh: u32 length prefix).
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, BorshSerialize, BorshDeserialize)]
 pub struct RegisterBlsKeyPayload {
     /// BLS12-381 G1 compressed public key, 48 bytes.
     pub bls_pub_key: Vec<u8>,
@@ -288,7 +288,7 @@ impl Transaction {
             nonce,
             chain_id,
             expires_at_height: None,
-            payload: bincode::serialize(&payload)
+            payload: borsh::to_vec(&payload)
                 .expect("RegisterBlsKeyPayload serialization is infallible"),
             pub_key: Some(pk),
             signature: None,
@@ -386,7 +386,7 @@ impl Transaction {
     ) -> Self {
         let pk = keypair.public_key();
         let from = Address::from_public_key(&pk);
-        let payload = bincode::serialize(evidence).expect("slash evidence serializable");
+        let payload = borsh::to_vec(evidence).expect("slash evidence serializable");
         let mut tx = Self {
             tx_type: TransactionType::SlashValidator,
             from,
@@ -416,8 +416,7 @@ impl Transaction {
     ) -> Self {
         let pk = keypair.public_key();
         let from = Address::from_public_key(&pk);
-        let payload =
-            bincode::serialize(action).expect("GovernanceAction serialization is infallible");
+        let payload = borsh::to_vec(action).expect("GovernanceAction serialization is infallible");
         let mut tx = Self {
             tx_type: TransactionType::AdminAction,
             from,
@@ -448,7 +447,7 @@ impl Transaction {
         let pk = keypair.public_key();
         let from = Address::from_public_key(&pk);
         let raw =
-            bincode::serialize(payload).expect("RegisterBlsKeyPayload serialization is infallible");
+            borsh::to_vec(payload).expect("RegisterBlsKeyPayload serialization is infallible");
         let mut tx = Self {
             tx_type: TransactionType::RegisterBlsKey,
             from,
@@ -645,11 +644,11 @@ mod tests {
         };
 
         // ADR 0007: validator-set changes go through AdminAction (0x08) carrying a
-        // bincode(GovernanceAction). The admin console (rpc/ui.rs) reproduces the same
-        // bincode: enum tag u32 LE (AddValidator = 0) ‖ address(20 raw bytes).
+        // borsh(GovernanceAction). The admin console (rpc/ui.rs) reproduces the same
+        // borsh: enum tag u8 (AddValidator = 0) ‖ address(20 raw bytes).
         // Here `to = from` (self), amount/fee = 0.
-        let mut add_payload = Vec::with_capacity(24);
-        add_payload.extend_from_slice(&0u32.to_le_bytes()); // GovernanceAction::AddValidator
+        let mut add_payload = Vec::with_capacity(21);
+        add_payload.push(0u8); // GovernanceAction::AddValidator
         add_payload.extend_from_slice(to.as_bytes());
         let add = mk(TransactionType::AdminAction, from, add_payload);
         let expected_add = concat!(
@@ -661,17 +660,17 @@ mod tests {
             "0000000000000007",                         // nonce 7
             "0000002a",                                 // chain_id 42
             "00",                                       // expiry None
-            "00000018",                                 // payload_len = 24 (VINX-12)
-            "00000000", // GovernanceAction::AddValidator (u32 LE = 0)
+            "00000015",                                 // payload_len = 21 (VINX-12)
+            "00", // GovernanceAction::AddValidator (borsh u8 tag = 0)
             "15161718191a1b1c1d1e1f202122232425262728", // validator address = 15..28
-            "00",       // sponsor None
+            "00", // sponsor None
         );
         assert_eq!(hex::encode(add.signing_bytes()), expected_add);
 
-        // Cross-check that the hand-built payload equals bincode(GovernanceAction) —
+        // Cross-check that the hand-built payload equals borsh(GovernanceAction) —
         // this is exactly what the in-browser admin console must reproduce.
         let gov = crate::governance::GovernanceAction::AddValidator(to);
-        assert_eq!(add.payload, bincode::serialize(&gov).unwrap());
+        assert_eq!(add.payload, borsh::to_vec(&gov).unwrap());
 
         // AnnounceUpgrade: to = self, payload = major(1) minor(2) patch(3) activation_ts(1000).
         let mut pl = Vec::with_capacity(14);

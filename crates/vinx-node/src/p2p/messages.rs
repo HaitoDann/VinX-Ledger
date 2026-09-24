@@ -280,7 +280,7 @@ mod tests {
 
     #[test]
     fn test_decode_garbage_returns_none() {
-        assert!(P2pMessage::decode(b"not valid bincode").is_none());
+        assert!(P2pMessage::decode(b"not valid borsh").is_none());
     }
 
     #[test]

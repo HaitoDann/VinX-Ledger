@@ -566,7 +566,7 @@ pub async fn snapshot_sync_from_peer(
         }
     };
 
-    // 3. Decode: hex → decompress with zstd → deserialize bincode → WorldState.
+    // 3. Decode: hex → decompress with zstd → deserialize borsh → WorldState.
     let compressed = match hex::decode(&snap.state_hex) {
         Ok(b) => b,
         Err(e) => {
@@ -581,10 +581,10 @@ pub async fn snapshot_sync_from_peer(
             return false;
         }
     };
-    let mut new_state: WorldState = match bincode::deserialize(&raw) {
+    let mut new_state: WorldState = match borsh::from_slice(&raw) {
         Ok(s) => s,
         Err(e) => {
-            tracing::error!(error = %e, "Snapshot sync: bincode deserialize failed");
+            tracing::error!(error = %e, "Snapshot sync: borsh deserialize failed");
             return false;
         }
     };

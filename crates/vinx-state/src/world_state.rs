@@ -1,3 +1,4 @@
+use borsh::{BorshDeserialize, BorshSerialize};
 use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, HashMap, HashSet};
 use vinx_core::{
@@ -30,7 +31,7 @@ const STATE_ROOT_DST: &[u8] = b"VINX:state_root:v2";
 /// Domain-separation tag for the consensus subtree (VINX-04).
 const CONSENSUS_ROOT_DST: &[u8] = b"VINX:consensus_root:v1";
 
-#[derive(Clone, Debug, Serialize, Deserialize)]
+#[derive(Clone, Debug, Serialize, Deserialize, BorshSerialize, BorshDeserialize)]
 pub struct WorldState {
     /// Accounts keyed by bech32 address. A `BTreeMap` (not `HashMap`) so iteration
     /// is already sorted by address — the Merkle leaf order — avoiding an O(n log n)
@@ -60,11 +61,13 @@ pub struct WorldState {
     /// Timestamp of the block currently being applied — set before draining txs so
     /// `apply_unstake` can compute a real-time unlock. Not persisted.
     #[serde(skip)]
+    #[borsh(skip)]
     current_block_ts: u64,
     /// Fees collected from the transactions of the block currently being applied.
     /// Credited in full to the block producer by `settle_block`. Not persisted
     /// (transient within a single block).
     #[serde(skip)]
+    #[borsh(skip)]
     block_fees: Amount,
     /// Static minimum fee floor; dynamic base_fee is always >= this.
     pub fee_floor: Amount,
@@ -87,30 +90,31 @@ pub struct WorldState {
     /// Incremental Merkle tree over sorted account leaf hashes.
     /// Not persisted — rebuilt lazily on the first `compute_state_root` call after load.
     #[serde(skip)]
+    #[borsh(skip)]
     merkle_tree: IncrementalMerkleTree,
     /// Maps address string → leaf index in `merkle_tree.leaves()`.
     #[serde(skip)]
+    #[borsh(skip)]
     leaf_index: HashMap<Address, usize>,
     /// Accounts modified since the last `compute_state_root` call.
     #[serde(skip)]
+    #[borsh(skip)]
     dirty_addrs: HashSet<Address>,
     /// True when an account was added/removed — requires a full O(n) rebuild.
     #[serde(skip)]
+    #[borsh(skip)]
     needs_rebuild: bool,
     /// Accounts modified since the last persistence flush. Distinct from
     /// `dirty_addrs` (which is consumed by `compute_state_root`): this set survives
     /// until `take_persist_dirty` drains it, so incremental persistence can write
     /// only the accounts that actually changed instead of the whole map.
     #[serde(skip)]
+    #[borsh(skip)]
     persist_dirty: HashSet<Address>,
     /// Optional K-of-M admin committee (ADR 0011). When set, governance actions require
     /// `threshold` approvals among `signers`, superseding the single `admin_address`. When
-    /// `None`, `admin_address` is the sole authority (legacy 1-of-1). `serde(default)` so
-    /// pre-0011 state (bincode meta / JSON snapshot) loads with no committee.
-    ///
-    /// Declared after the `serde(skip)` fields so it is the last *serialized* field: a
-    /// pre-0011 meta blob is a strict prefix of a current one, which the v7→v8 storage
-    /// migration exploits by appending this field's default encoding.
+    /// `None`, `admin_address` is the sole authority (1-of-1). Either way the authority
+    /// expires after `ADMIN_TENURE_SECS` (ADR 0081 D7b).
     #[serde(default)]
     pub admin_policy: Option<AdminPolicy>,
     /// Governance proposals awaiting enough committee approvals to execute (ADR 0011).
@@ -124,12 +128,10 @@ pub struct WorldState {
     pub epoch_dist_emission_pot: Amount,
     /// Cumulative atoms permanently destroyed by reaping dust (ADR 0026 + ADR 0040).
     /// The only source of destruction on VinX — amounts are ≤ 0.001 VINX per account.
-    /// Appended after `epoch_dist_emission_pot` — same append-only migration strategy.
     #[serde(default)]
     pub destroyed_atoms: u128,
     /// Fiabilité des validateurs (ADR 0027) : manquements de proposition + jailing, dérivés
     /// **déterministiquement** de la séquence de blocs (comme `pending_unbonds`).
-    /// `serde(default)` pour l'état pré-0027.
     ///
     /// Depuis VINX-04 (ADR 0072) ce champ **est engagé** par `consensus_root` : ses intrants
     /// (`rel`, `validator_set`, hauteur, proposeur, `block_ts`, `last_block_ts`) sont tous
@@ -138,56 +140,43 @@ pub struct WorldState {
     #[serde(default)]
     pub reliability: ReliabilityMap,
     // ── Open PoA (ADR 0038) ─────────────────────────────────────────────────────
-    // All fields below are appended after `reliability` — the v11→v12 migration
-    // appends their default encodings (empty map / empty set / default value).
-    // The bincode prefix-append property requires these fields to stay LAST and
-    // be individually serde(default)-gated so pre-v12 blobs load cleanly.
-    //
     /// Pool of all bonded validators (ADR 0038). Keyed by validator signing address.
     /// Includes active, benched, warming-up, and unbonding entries.
-    /// Appended after `reliability` — v11→v12 migration appends its default (empty).
     #[serde(default)]
     pub validator_pool: BTreeMap<Address, vinx_core::ValidatorPoolEntry>,
     /// Validator keys permanently banned after a proven equivocation (ADR 0038).
     /// `AddValidator`/bond transactions referencing a banned key are rejected.
-    /// Appended after `validator_pool`.
     #[serde(default)]
     pub banned_validator_keys: std::collections::HashSet<Address>,
     /// Current governable active-set size N (ADR 0038). Default: DEFAULT_ACTIVE_SET_SIZE.
     /// Governable within [MIN_ACTIVE_SET_SIZE, MAX_ACTIVE_SET_SIZE] in steps of
     /// ACTIVE_SET_STEP with ACTIVE_SET_COOLDOWN_SECS between modifications.
-    /// Appended after `banned_validator_keys`.
     #[serde(default = "default_active_set_size")]
     pub active_set_size: u32,
     /// Timestamp of the last governance modification to `active_set_size` (ADR 0038).
     /// Used to enforce the ACTIVE_SET_COOLDOWN_SECS between modifications.
-    /// Appended after `active_set_size`.
     #[serde(default)]
     pub last_active_set_size_change_ts: u64,
     /// Timestamp of the last governance modification to `min_validator_bond` (ADR 0038).
     /// Used to enforce BOND_COOLDOWN_SECS between modifications.
-    /// Appended after `last_active_set_size_change_ts`.
     #[serde(default)]
     pub last_bond_change_ts: u64,
     /// Timestamp of the most recent epoch close (ADR 0028 / ADR 0038).
     /// Epoch closes trigger score decay, active-set rotation, warmup ticks, and
     /// epoch-pot distribution. Zero until the first epoch close fires.
-    /// Appended after `last_bond_change_ts` — v12→v13 migration appends `u64 = 0`.
     #[serde(default)]
     pub last_epoch_close_ts: u64,
     // ── ADR 0038 complement ─────────────────────────────────────────────────────
     /// Governable minimum bond to enter the validator pool (ADR 0038).
     /// Default: MIN_VALIDATOR_BOND_ATOMS (100 000 VinX). Adjustable within
     /// [MIN_BOND_HARD_FLOOR, MAX_BOND_HARD_CAP] in steps of ±BOND_STEP_BPS with
-    /// BOND_COOLDOWN_SECS between modifications. Appended after `last_epoch_close_ts`
-    /// — v15→v16 migration appends its default (u128 = MIN_VALIDATOR_BOND_ATOMS).
+    /// BOND_COOLDOWN_SECS between modifications.
     #[serde(default = "default_min_validator_bond")]
     pub min_validator_bond_atoms: u128,
     // ── ADR 0029 Phase 2 — epoch beacon ─────────────────────────────────────────
     /// Epoch beacon for committee selection (ADR 0029 Phase 2, SHA-256 placeholder
     /// until ECVRF RFC 9381 is integrated). Updated at every epoch close.
     /// All-zeros until the first epoch close occurs.
-    /// Appended after `min_validator_bond_atoms` — v16→v17 migration appends 32 zeros.
     #[serde(default)]
     pub epoch_beacon: Hash32,
     // ── ADR 0036 — validator churn bounds ───────────────────────────────────────
@@ -196,21 +185,18 @@ pub struct WorldState {
     /// at most `MAX_VALIDATOR_EXITS_PER_EPOCH` per epoch. This rate-limits churn and
     /// prevents a coordinated mass-exit from draining the active set in one epoch.
     /// Bond remains slashable while the request sits in the queue.
-    /// Appended after `epoch_beacon` — v17→v18 migration appends the empty-Vec encoding.
     #[serde(default)]
     pub exit_queue: Vec<ValidatorExitRequest>,
     /// Timestamp of the previous block, needed to decide deterministically whether a
     /// scheduled leader's slot actually elapsed before a backup proposed (ADR 0027,
     /// VINX-06). Zero until the first block is settled.
-    /// Appended after `exit_queue` — same append-only migration strategy as the fields
-    /// above, so a pre-v19 blob remains a strict prefix.
     #[serde(default)]
     pub last_block_ts: u64,
 }
 
 /// A bond amount in its unbonding delay, waiting to return to `address`'s balance
 /// at `unlock_ts` (unix seconds). Slashable until it matures.
-#[derive(Clone, Debug, Serialize, Deserialize)]
+#[derive(Clone, Debug, Serialize, Deserialize, BorshSerialize, BorshDeserialize)]
 pub struct PendingUnbond {
     pub address: Address,
     pub amount: Amount,
@@ -219,16 +205,16 @@ pub struct PendingUnbond {
 
 /// A K-of-M admin committee (ADR 0011). `threshold` signatures among the distinct
 /// `signers` are required to enact any governance action.
-#[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
+#[derive(Clone, Debug, Serialize, Deserialize, BorshSerialize, BorshDeserialize, PartialEq)]
 pub struct AdminPolicy {
     pub signers: Vec<Address>,
     pub threshold: u16,
 }
 
 /// A governance action accumulating committee approvals until it reaches the threshold and
-/// executes (ADR 0011). Identified by `action_hash = hash256(bincode(action))` so identical
+/// executes (ADR 0011). Identified by `action_hash = hash256(borsh(action))` so identical
 /// actions proposed by different signers converge on the same tally.
-#[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
+#[derive(Clone, Debug, Serialize, Deserialize, BorshSerialize, BorshDeserialize, PartialEq)]
 pub struct GovernanceProposal {
     pub action_hash: Hash32,
     pub action: GovernanceAction,
@@ -1031,9 +1017,9 @@ impl WorldState {
     ///
     /// The resulting blob deserializes back into a `WorldState` whose `accounts`
     /// map is empty; the caller repopulates it via [`WorldState::load_account`].
-    pub fn serialize_meta(&mut self) -> Result<Vec<u8>, bincode::Error> {
+    pub fn serialize_meta(&mut self) -> Result<Vec<u8>, std::io::Error> {
         let accounts = std::mem::take(&mut self.accounts);
-        let result = bincode::serialize(&*self);
+        let result = borsh::to_vec(&*self);
         self.accounts = accounts;
         result
     }
@@ -1721,7 +1707,7 @@ impl WorldState {
         let mut banned: Vec<&Address> = self.banned_validator_keys.iter().collect();
         banned.sort_unstable();
 
-        #[derive(Serialize)]
+        #[derive(BorshSerialize)]
         struct ConsensusCommitment<'a> {
             chain_id: u32,
             block_height: u64,
@@ -1789,8 +1775,8 @@ impl WorldState {
             // 16 octets et supprime la question « est-il vraiment mort ? ».
         };
 
-        let encoded = bincode::serialize(&commitment)
-            .expect("consensus commitment serialization is infallible");
+        let encoded =
+            borsh::to_vec(&commitment).expect("consensus commitment serialization is infallible");
         let mut buf = Vec::with_capacity(CONSENSUS_ROOT_DST.len() + encoded.len());
         buf.extend_from_slice(CONSENSUS_ROOT_DST);
         buf.extend_from_slice(&encoded);
@@ -1822,7 +1808,7 @@ impl WorldState {
     }
 
     fn apply_slash_validator(&mut self, tx: &Transaction) -> Result<(), CoreError> {
-        let evidence: SlashEvidence = bincode::deserialize(&tx.payload)
+        let evidence: SlashEvidence = borsh::from_slice(&tx.payload)
             .map_err(|_| CoreError::InvalidTransaction("malformed slash evidence".to_string()))?;
 
         let target = &tx.to;
@@ -1978,7 +1964,7 @@ impl WorldState {
             });
         }
 
-        let action: GovernanceAction = bincode::deserialize(&tx.payload).map_err(|_| {
+        let action: GovernanceAction = borsh::from_slice(&tx.payload).map_err(|_| {
             CoreError::InvalidTransaction("malformed governance action payload".to_string())
         })?;
 
@@ -2033,7 +2019,7 @@ impl WorldState {
         approver: Address,
         threshold: u16,
     ) -> Result<(), CoreError> {
-        let action_hash = hash256(&bincode::serialize(&action).map_err(|_| {
+        let action_hash = hash256(&borsh::to_vec(&action).map_err(|_| {
             CoreError::InvalidTransaction("cannot serialize governance action".to_string())
         })?);
         let existing = self
@@ -2236,7 +2222,7 @@ impl WorldState {
         owner: Address,
         payload_bytes: &[u8],
     ) -> Result<(Vec<u8>, Vec<u8>), CoreError> {
-        let payload: RegisterBlsKeyPayload = bincode::deserialize(payload_bytes).map_err(|_| {
+        let payload: RegisterBlsKeyPayload = borsh::from_slice(payload_bytes).map_err(|_| {
             CoreError::InvalidTransaction("malformed RegisterBlsKey payload".to_string())
         })?;
         if payload.bls_pub_key.len() != 48 {

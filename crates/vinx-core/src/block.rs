@@ -66,7 +66,7 @@ pub struct BlockSignature {
 /// At block production time `bls_aggregate = individual_proposer_sig` (single-element
 /// aggregate), so the initial `bls_aggregate` bytes from each competing block serve
 /// directly as `bls_sig_a` / `bls_sig_b`.
-#[derive(Clone, Debug, Serialize, Deserialize)]
+#[derive(Clone, Debug, Serialize, Deserialize, BorshSerialize, BorshDeserialize)]
 pub struct SlashEvidence {
     pub header_a: BlockHeader,
     pub header_b: BlockHeader,
@@ -471,7 +471,7 @@ mod tests {
     #[test]
     fn test_slash_evidence_encoding_is_canonical() {
         // ADR 0020: SlashEvidence enters the SlashValidator transaction payload —
-        // consensus-critical. Pin that its bincode encoding is deterministic and
+        // consensus-critical. Pin that its borsh encoding is deterministic and
         // canonical (decode then re-encode is byte-identical).
         use vinx_crypto::BlsSecretKey;
         let ed_kp = KeyPair::generate();
@@ -499,10 +499,10 @@ mod tests {
             bls_sig_a,
             bls_sig_b,
         };
-        let bytes = bincode::serialize(&ev).unwrap();
-        assert_eq!(bytes, bincode::serialize(&ev).unwrap());
-        let decoded: SlashEvidence = bincode::deserialize(&bytes).unwrap();
-        assert_eq!(bincode::serialize(&decoded).unwrap(), bytes);
+        let bytes = borsh::to_vec(&ev).unwrap();
+        assert_eq!(bytes, borsh::to_vec(&ev).unwrap());
+        let decoded: SlashEvidence = borsh::from_slice(&bytes).unwrap();
+        assert_eq!(borsh::to_vec(&decoded).unwrap(), bytes);
     }
 
     #[test]

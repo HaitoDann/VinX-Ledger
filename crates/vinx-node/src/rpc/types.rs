@@ -299,7 +299,7 @@ pub struct ChainSnapshotResponse {
     pub state_root: String,
     /// The block at `height` (needed to call `Chain::new_from_snapshot`).
     pub block: vinx_core::Block,
-    /// WorldState serialized as bincode, compressed with zstd, hex-encoded.
+    /// WorldState serialized as borsh, compressed with zstd, hex-encoded.
     pub state_hex: String,
 }
 

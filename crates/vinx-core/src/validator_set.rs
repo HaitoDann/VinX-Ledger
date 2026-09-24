@@ -1,3 +1,4 @@
+use borsh::{BorshDeserialize, BorshSerialize};
 use serde::{Deserialize, Serialize};
 use vinx_crypto::Address;
 
@@ -7,7 +8,7 @@ use vinx_crypto::Address;
 /// `leader_at(height) = validators[height % len]`.
 ///
 /// Quorum = ceil(2n/3), which ensures >66% of the set must co-sign every block.
-#[derive(Clone, Debug, Serialize, Deserialize)]
+#[derive(Clone, Debug, Serialize, Deserialize, BorshSerialize, BorshDeserialize)]
 pub struct ValidatorSet {
     validators: Vec<Address>,
 }

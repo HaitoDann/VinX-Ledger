@@ -25,10 +25,10 @@ const STORAGE_VERSION: u64 = 22;
 const ZSTD_LEVEL: i32 = 3;
 
 const STATE: TableDefinition<&str, &[u8]> = TableDefinition::new("state");
-/// Per-account rows: bech32 address → bincode(Account), stored uncompressed.
+/// Per-account rows: bech32 address → borsh(Account), stored uncompressed.
 /// Accounts are tiny (~100 B); per-row zstd framing would cost more than it saves.
 const ACCOUNTS: TableDefinition<&[u8], &[u8]> = TableDefinition::new("accounts");
-/// Per-block rows: height → zstd(bincode((block_hash, Block))). Written
+/// Per-block rows: height → zstd(borsh((block_hash, Block))). Written
 /// incrementally — only heights dirtied since the last flush (v10).
 const BLOCKS: TableDefinition<u64, &[u8]> = TableDefinition::new("blocks");
 const META: TableDefinition<&str, u64> = TableDefinition::new("meta");
@@ -46,7 +46,7 @@ pub struct Storage {
 pub struct StateWrite {
     /// Serialized `WorldState` meta — every field except the accounts map.
     pub meta: Vec<u8>,
-    /// Changed account rows: (20-byte address, bincode(Account)). Empty on a no-op flush.
+    /// Changed account rows: (20-byte address, borsh(Account)). Empty on a no-op flush.
     pub account_rows: Vec<([u8; 20], Vec<u8>)>,
     /// Addresses of accounts reaped this flush (ADR 0026): their rows must be **deleted**
     /// from the accounts table, not merely absent from `account_rows`, or they would
@@ -57,7 +57,7 @@ pub struct StateWrite {
     pub replace_accounts: bool,
     /// Tiny chain metadata blob (finalized height) — rewritten every flush.
     pub chain_meta: Vec<u8>,
-    /// Changed block rows: (height, bincode((hash, Block))). Only the heights
+    /// Changed block rows: (height, borsh((hash, Block))). Only the heights
     /// dirtied since the last flush — O(new blocks), not O(chain length).
     pub block_rows: Vec<(u64, Vec<u8>)>,
     /// When true, the blocks table is wiped before writing `block_rows`
@@ -147,20 +147,25 @@ impl Storage {
     fn serialize_chain(
         chain: &mut Chain,
     ) -> io::Result<(Vec<u8>, Vec<(u64, Vec<u8>)>, Vec<u8>, Vec<u8>)> {
-        let chain_meta = bincode::serialize(&chain.finalized_height())
+        let chain_meta = borsh::to_vec(&chain.finalized_height())
             .map_err(|e| Self::io_err(format!("serialize chain_meta: {e}")))?;
         let mut block_rows = Vec::new();
         for height in chain.take_dirty_heights() {
             if let Some(row) = chain.block_row(height) {
-                let bytes = bincode::serialize(row)
+                let bytes = borsh::to_vec(row)
                     .map_err(|e| Self::io_err(format!("serialize block {height}: {e}")))?;
                 block_rows.push((height, bytes));
             }
         }
         let (tx_index, account_tx_index) = chain.export_tx_indexes();
-        let tx_index_bytes = bincode::serialize(tx_index)
+        // AHashMap has no borsh impl: persist as a sorted entry list (deterministic bytes).
+        let mut tx_entries: Vec<(&Hash32, &(u64, u32))> = tx_index.iter().collect();
+        tx_entries.sort_unstable_by_key(|(k, _)| *k);
+        let mut acc_entries: Vec<(&Address, &Vec<Hash32>)> = account_tx_index.iter().collect();
+        acc_entries.sort_unstable_by_key(|(k, _)| *k);
+        let tx_index_bytes = borsh::to_vec(&tx_entries)
             .map_err(|e| Self::io_err(format!("serialize tx_index: {e}")))?;
-        let account_tx_index_bytes = bincode::serialize(account_tx_index)
+        let account_tx_index_bytes = borsh::to_vec(&acc_entries)
             .map_err(|e| Self::io_err(format!("serialize account_tx_index: {e}")))?;
         Ok((
             chain_meta,
@@ -186,7 +191,7 @@ impl Storage {
         let mut account_deletes = Vec::new();
         for addr in dirty {
             if let Some(acc) = state.account_by_addr(&addr) {
-                let bytes = bincode::serialize(acc)
+                let bytes = borsh::to_vec(acc)
                     .map_err(|e| Self::io_err(format!("serialize account: {e}")))?;
                 account_rows.push((*addr.as_bytes(), bytes));
             } else {
@@ -302,7 +307,7 @@ impl Storage {
             .map_err(|e| tracing::warn!("Cannot decompress state meta: {e}"))
             .ok()?;
         // Deserializes into a WorldState whose accounts map is empty — repopulated below.
-        let mut state: WorldState = bincode::deserialize(&meta_bytes)
+        let mut state: WorldState = borsh::from_slice(&meta_bytes)
             .map_err(|e| tracing::warn!("Cannot deserialize state meta: {e}"))
             .ok()?;
 
@@ -311,7 +316,7 @@ impl Storage {
             let mut count = 0usize;
             if let Ok(iter) = atbl.iter() {
                 for entry in iter.flatten() {
-                    match bincode::deserialize::<Account>(entry.1.value()) {
+                    match borsh::from_slice::<Account>(entry.1.value()) {
                         Ok(acc) => {
                             state.load_account(acc);
                             count += 1;
@@ -327,7 +332,7 @@ impl Storage {
         let chain_meta_bytes = Self::decompress(tbl.get("chain_meta").ok()??.value())
             .map_err(|e| tracing::warn!("Cannot decompress chain_meta: {e}"))
             .ok()?;
-        let finalized_height: u64 = bincode::deserialize(&chain_meta_bytes)
+        let finalized_height: u64 = borsh::from_slice(&chain_meta_bytes)
             .map_err(|e| tracing::warn!("Cannot deserialize chain_meta: {e}"))
             .ok()?;
 
@@ -351,7 +356,7 @@ impl Storage {
             let bytes = Self::decompress(row)
                 .map_err(|e| tracing::warn!("Cannot decompress block {height}: {e}"))
                 .ok()?;
-            let parsed: (Hash32, Block) = bincode::deserialize(&bytes)
+            let parsed: (Hash32, Block) = borsh::from_slice(&bytes)
                 .map_err(|e| tracing::warn!("Cannot deserialize block {height}: {e}"))
                 .ok()?;
             blocks.push(parsed);
@@ -369,9 +374,15 @@ impl Storage {
             let account_tx_index_bytes =
                 Self::decompress(tbl.get("account_tx_index").ok()??.value()).ok()?;
             let tx_index: AHashMap<Hash32, (u64, u32)> =
-                bincode::deserialize(&tx_index_bytes).ok()?;
+                borsh::from_slice::<Vec<(Hash32, (u64, u32))>>(&tx_index_bytes)
+                    .ok()?
+                    .into_iter()
+                    .collect();
             let account_tx_index: AHashMap<Address, Vec<Hash32>> =
-                bincode::deserialize(&account_tx_index_bytes).ok()?;
+                borsh::from_slice::<Vec<(Address, Vec<Hash32>)>>(&account_tx_index_bytes)
+                    .ok()?
+                    .into_iter()
+                    .collect();
             chain.import_tx_indexes(tx_index, account_tx_index);
             Some(())
         })();
@@ -386,7 +397,7 @@ impl Storage {
 
     /// Serializes pending mempool transactions to raw bytes.
     pub fn serialize_mempool(txs: &[&Transaction]) -> io::Result<Vec<u8>> {
-        bincode::serialize(txs).map_err(|e| Self::io_err(format!("serialize mempool: {e}")))
+        borsh::to_vec(txs).map_err(|e| Self::io_err(format!("serialize mempool: {e}")))
     }
 
     /// Compresses and writes a pre-serialized mempool blob to redb.
@@ -460,7 +471,7 @@ impl Storage {
         let bytes = Self::decompress(&compressed)
             .map_err(|e| tracing::warn!("Cannot decompress mempool: {e}"))
             .ok()?;
-        bincode::deserialize(&bytes)
+        borsh::from_slice(&bytes)
             .map_err(|e| tracing::warn!("Cannot deserialize mempool: {e}"))
             .ok()
     }

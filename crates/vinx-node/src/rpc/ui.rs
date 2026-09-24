@@ -1150,13 +1150,13 @@ async function submitGov(txName, disc, toAddr, payloadBytes){
 }
 
 // ADR 0007: validator-set changes go through AdminAction (0x08). The payload is
-// bincode(GovernanceAction): a little-endian u32 variant tag (AddValidator=0,
-// RemoveValidator=1) followed by the 20-byte address. `to` is the admin (self).
+// borsh(GovernanceAction): a one-byte variant tag (AddValidator=0, RemoveValidator=1)
+// followed by the 20-byte address (ADR 0081 D7c). `to` is the admin (self).
 function govValidatorPayload(variant,addr){
   const a=bech32Decode20(addr);
-  const b=new Uint8Array(24);
-  b[0]=variant&0xff;b[1]=(variant>>8)&0xff;b[2]=(variant>>16)&0xff;b[3]=(variant>>24)&0xff;
-  b.set(a,4);
+  const b=new Uint8Array(21);
+  b[0]=variant&0xff;
+  b.set(a,1);
   return b;
 }
 

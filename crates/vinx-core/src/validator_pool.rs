@@ -2,6 +2,7 @@
 ///
 /// Every bonded address lives in the pool. The *active set* is the top-N pool
 /// entries by co-signature score, rotated at each epoch close (ADR 0028).
+use borsh::{BorshDeserialize, BorshSerialize};
 use serde::{Deserialize, Serialize};
 use vinx_crypto::Address;
 
@@ -12,7 +13,7 @@ use crate::amount::VALIDATOR_WARMUP_EPOCHS;
 /// Requests are processed FIFO — sorted by `(request_height, address)` — at each
 /// epoch close, up to `MAX_VALIDATOR_EXITS_PER_EPOCH` per epoch.  The validator's
 /// bond remains slashable while the request sits in the queue.
-#[derive(Clone, Debug, Serialize, Deserialize)]
+#[derive(Clone, Debug, Serialize, Deserialize, BorshSerialize, BorshDeserialize)]
 pub struct ValidatorExitRequest {
     /// Address of the exiting validator.
     pub address: Address,
@@ -24,7 +25,7 @@ pub struct ValidatorExitRequest {
 }
 
 /// Status of a validator in the pool.
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, BorshSerialize, BorshDeserialize)]
 pub enum PoolStatus {
     /// Completing the mandatory warm-up period before being eligible for the
     /// active set. `epochs_remaining` counts down from VALIDATOR_WARMUP_EPOCHS
@@ -41,7 +42,7 @@ pub enum PoolStatus {
 }
 
 /// A single entry in the validator pool.
-#[derive(Clone, Debug, Serialize, Deserialize)]
+#[derive(Clone, Debug, Serialize, Deserialize, BorshSerialize, BorshDeserialize)]
 pub struct ValidatorPoolEntry {
     /// Bond locked by this validator (atoms). Must stay ≥ MIN_VALIDATOR_BOND_ATOMS.
     pub bond_atoms: u128,

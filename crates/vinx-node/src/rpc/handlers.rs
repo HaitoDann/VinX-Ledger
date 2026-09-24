@@ -502,7 +502,7 @@ pub async fn get_snapshot(
 
 /// Public bootstrap snapshot — GET /chain/snapshot (ADR snapshot-sync).
 /// No auth required: any new node can call this to bootstrap from a trusted peer.
-/// Returns the full WorldState (bincode+zstd+hex) and the tip block so the caller
+/// Returns the full WorldState (borsh+zstd+hex) and the tip block so the caller
 /// can initialize `Chain::new_from_snapshot` without replaying history from genesis.
 pub async fn get_chain_snapshot(State(node): State<Arc<Node>>) -> impl IntoResponse {
     let mut state_guard = node.state.write().await;
@@ -519,8 +519,8 @@ pub async fn get_chain_snapshot(State(node): State<Arc<Node>>) -> impl IntoRespo
     };
     let block = block.clone();
     let state_root = hex::encode(state_guard.compute_state_root());
-    // Encode: bincode → zstd → hex
-    let Ok(raw) = bincode::serialize(&*state_guard) else {
+    // Encode: borsh → zstd → hex
+    let Ok(raw) = borsh::to_vec(&*state_guard) else {
         return (
             StatusCode::INTERNAL_SERVER_ERROR,
             Json(ErrorResponse {

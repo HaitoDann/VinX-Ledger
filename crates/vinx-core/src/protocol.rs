@@ -1,8 +1,9 @@
+use borsh::{BorshDeserialize, BorshSerialize};
 use serde::{Deserialize, Serialize};
 use std::fmt;
 
 /// Semantic version of the VinX protocol running on-chain.
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, BorshSerialize, BorshDeserialize)]
 pub struct ProtocolVersion {
     pub major: u16,
     pub minor: u16,
@@ -67,7 +68,7 @@ impl std::str::FromStr for ProtocolVersion {
 }
 
 /// An upgrade scheduled to activate at a specific wall-clock time (ADR 0006).
-#[derive(Clone, Debug, Serialize, Deserialize)]
+#[derive(Clone, Debug, Serialize, Deserialize, BorshSerialize, BorshDeserialize)]
 pub struct ScheduledUpgrade {
     pub version: ProtocolVersion,
     /// Unix timestamp (seconds) at which the upgrade activates.

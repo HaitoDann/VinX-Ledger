@@ -205,7 +205,7 @@ pub fn build_unstake(
 }
 
 /// ADR 0007: validator-set changes go through the single governance path
-/// (AdminAction carrying a bincode(GovernanceAction)), not a dedicated tx type.
+/// (AdminAction carrying a borsh(GovernanceAction)), not a dedicated tx type.
 /// `to` is the admin itself, matching `Transaction::new_admin_action`.
 fn build_admin_action(
     kp: &KeyPair,
@@ -214,7 +214,7 @@ fn build_admin_action(
     chain_id: u32,
 ) -> Transaction {
     let from = Address::from_public_key(&kp.public_key());
-    let payload = bincode::serialize(action).expect("GovernanceAction serialization is infallible");
+    let payload = borsh::to_vec(action).expect("GovernanceAction serialization is infallible");
     build_signed(
         kp,
         TransactionType::AdminAction,
@@ -335,7 +335,7 @@ mod tests {
         // ADR 0007: routed through the unified governance path.
         assert_eq!(add.tx_type, TransactionType::AdminAction);
         assert_eq!(add.fee, Amount::ZERO);
-        let decoded: GovernanceAction = bincode::deserialize(&add.payload).unwrap();
+        let decoded: GovernanceAction = borsh::from_slice(&add.payload).unwrap();
         assert_eq!(
             decoded,
             GovernanceAction::AddValidator(parse_address(&v.address).unwrap())
