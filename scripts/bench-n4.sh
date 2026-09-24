@@ -42,7 +42,8 @@ ko()     { echo "  ✗ $*"; FAIL=1; }
 start() { # id
     local i="$1" peers=()
     for j in 1 2 3 4; do [[ $j != "$i" ]] && peers+=("/ip4/127.0.0.1/tcp/$((9000 + j))"); done
-    VINX_GENESIS_SPEC="$BASE/genesis.json" "$NODE" --data-dir "$BASE/node$i" \
+    # shellcheck disable=SC2046
+    VINX_GENESIS_SPEC="$BASE/genesis.json" "$NODE" --data-dir "$BASE/node$i" $(owner_args "$i") \
         --rpc-listen "127.0.0.1:$((8544 + i))" --p2p-listen "/ip4/127.0.0.1/tcp/$((9000 + i))" \
         --peers "${peers[@]}" >>"$BASE/node$i.log" 2>&1 &
     PID[$i]=$!
@@ -72,9 +73,17 @@ agree() { # upto nodes...
 }
 
 echo "=== Phase 0 : clés et genèse à 4 validateurs ==="
+# node4 runs with SEPARATE keys (ADR 0084 S5): its owner key lives elsewhere (here a
+# directory standing for the owner's offline wallet); the node only gets the operator
+# and BLS keys.
+"$NODE" --data-dir "$BASE/owner4" --chain-id $CHAIN_ID --genesis-entry >/dev/null 2>&1
+OWNER4=$(python3 -c "import json;print(json.load(open('$BASE/owner4/validator.json'))['address'])")
+owner_args() { [[ "$1" == 4 ]] && echo "--validator-owner $OWNER4"; }
 ENTRIES=()
 for i in 1 2 3 4; do
-    ENTRIES+=("$("$NODE" --data-dir "$BASE/node$i" --chain-id $CHAIN_ID --genesis-entry 2>/dev/null | grep "^{")")
+    # shellcheck disable=SC2046
+    ENTRIES+=("$("$NODE" --data-dir "$BASE/node$i" --chain-id $CHAIN_ID $(owner_args "$i") \
+        --genesis-entry 2>/dev/null | grep "^{")")
 done
 ADMIN=$(python3 -c "import json;print(json.load(open('$BASE/node1/admin.json'))['address'])")
 python3 - "$BASE/genesis.json" "$ADMIN" "$GENESIS_TS" "$BLOCK_TIME" "${ENTRIES[@]}" <<'PY'
@@ -96,6 +105,14 @@ echo "=== Phase 1 : 4 nœuds — progression ==="
 for i in 1 2 3 4; do start "$i"; done
 if wait_height 5 120 1 2 3 4; then ok "les 4 nœuds atteignent la hauteur 5"; else ko "pas de progression à 4"; fi
 agree 5 1 2 3 4 || true
+
+PROPOSED=0
+for h in $(seq 1 "$(height 1)"); do
+    [[ "$(rpc 8545 "block/$h" | jfield "['validator']")" == "$OWNER4" ]] && PROPOSED=$((PROPOSED + 1))
+done
+if (( PROPOSED > 0 )); then
+    ok "node4 (clés séparées, sans la clé du propriétaire) a proposé $PROPOSED bloc(s) au nom de $OWNER4"
+else ko "aucun bloc proposé par node4"; fi
 
 echo "=== Phase 1b : paiement réel + reçu vérifié depuis un autre nœud ==="
 DEST=$(python3 -c "import json;print(json.load(open('$BASE/node2/validator.json'))['address'])")

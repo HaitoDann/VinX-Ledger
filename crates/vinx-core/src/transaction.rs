@@ -94,6 +94,11 @@ pub struct RegisterBlsKeyPayload {
     pub bls_pub_key: Vec<u8>,
     /// Proof-of-Possession: BLS G2 signature over `bls_pub_key` using `BLS_POP_DST`, 96 bytes.
     pub bls_pop: Vec<u8>,
+    /// Operator address (ADR 0084 S5): the key kept on the validator server, allowed only
+    /// operational actions (unjail). Funds, bond and keys stay with the owner — the
+    /// address that signs this payload. `None` = the owner operates its node itself.
+    #[serde(default)]
+    pub operator: Option<Address>,
 }
 
 /// serde default for a missing `chain_id` (ADR 0008): the invalid sentinel, not devnet.
@@ -277,6 +282,7 @@ impl Transaction {
                 .proof_of_possession(from.as_bytes(), chain_id)
                 .0
                 .to_vec(),
+            operator: None,
         };
         let mut tx = Self {
             tx_type: TransactionType::Stake,
@@ -460,14 +466,18 @@ impl Transaction {
         tx
     }
 
-    /// Constructs and signs an Unjail transaction (ADR 0027).
-    /// The jailed validator calls this for themselves after UNJAIL_COOLDOWN_HEIGHTS have elapsed.
+    /// Constructs and signs an Unjail transaction (ADR 0027) for the keypair's own address.
     pub fn new_unjail(keypair: &KeyPair, nonce: u64) -> Self {
+        let own = Address::from_public_key(&keypair.public_key());
+        Self::new_unjail_for(keypair, own, nonce)
+    }
+
+    /// Unjail of `validator`, signed by its owner or its registered operator (ADR 0084 S5).
+    pub fn new_unjail_for(keypair: &KeyPair, validator: Address, nonce: u64) -> Self {
         let pk = keypair.public_key();
-        let from = Address::from_public_key(&pk);
         let mut tx = Self {
             tx_type: TransactionType::Unjail,
-            to: from,
+            to: validator,
             amount: Amount::ZERO,
             fee: Amount::ZERO,
             nonce,

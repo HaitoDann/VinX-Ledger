@@ -4230,6 +4230,7 @@ dependencies = [
  "aes-gcm",
  "argon2",
  "bip39",
+ "borsh",
  "clap",
  "hex",
  "rand 0.8.6",

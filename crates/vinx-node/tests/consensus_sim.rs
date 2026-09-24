@@ -56,12 +56,15 @@ struct SimHost {
     now: u64,
     post: BTreeMap<Hash32, WorldState>,
     signed: HashSet<(u32, u8)>,
+    /// Mempool candidates for the blocks this node proposes.
+    txs: Vec<vinx_core::Transaction>,
 }
 
 impl Host for SimHost {
     fn build_block(&mut self, round: u32) -> Option<Block> {
         let (b, s, _) =
-            execution::build_block(&self.base, &self.tip, &[], self.me, round, self.now).ok()?;
+            execution::build_block(&self.base, &self.tip, &self.txs, self.me, round, self.now)
+                .ok()?;
         self.post.insert(b.hash(), s);
         Some(b)
     }
@@ -86,6 +89,7 @@ struct SimNode {
     engine: Engine,
     host: SimHost,
     commits: Vec<(Block, CommitCert)>,
+    mempool: Vec<vinx_core::Transaction>,
 }
 
 fn params(state: &WorldState, height: u64, me: Option<(Address, BlsSecretKey)>) -> HeightParams {
@@ -127,10 +131,12 @@ impl SimNode {
                 now,
                 post: BTreeMap::new(),
                 signed: HashSet::new(),
+                txs: vec![],
             },
             state,
             chain,
             commits: vec![],
+            mempool: vec![],
         }
     }
 
@@ -145,6 +151,7 @@ impl SimNode {
             now,
             post: BTreeMap::new(),
             signed: HashSet::new(),
+            txs: self.mempool.clone(),
         };
     }
 }
@@ -164,11 +171,18 @@ struct Net {
     seq: u64,
     clock_ms: u64,
     genesis: WorldState,
+    /// Funded account used to report equivocations.
+    reporter: KeyPair,
 }
 
 impl Net {
     fn new(n: usize) -> Self {
-        let (state, vals) = genesis(n);
+        let (mut state, vals) = genesis(n);
+        let reporter = KeyPair::generate();
+        state.credit_emit_for_test(
+            Address::from_public_key(&reporter.public_key()),
+            vinx_core::Amount::from_vinx(100),
+        );
         let now = 12;
         let nodes = (0..n)
             .map(|i| SimNode::new(state.clone(), i, &vals, now))
@@ -182,6 +196,7 @@ impl Net {
             seq: 0,
             clock_ms: 0,
             genesis: state,
+            reporter,
         }
     }
 
@@ -226,6 +241,8 @@ impl Net {
             .remove(&block.hash())
             .expect("a committed block was validated first");
         node.state = post;
+        let included: HashSet<Hash32> = block.transactions.iter().map(|t| t.hash()).collect();
+        node.mempool.retain(|t| !included.contains(&t.hash()));
         node.chain.push(block.clone(), Some(cert.clone()));
         node.commits.push((block, cert));
         let now = node.chain.tip_timestamp() + node.state.block_time_secs;
@@ -240,6 +257,14 @@ impl Net {
             if j != from {
                 self.push(self.clock_ms + 50, Ev::Deliver(j, input.clone()));
             }
+        }
+    }
+
+    /// Gossips a transaction to every node's mempool.
+    fn submit(&mut self, tx: vinx_core::Transaction) {
+        for n in &mut self.nodes {
+            n.mempool.push(tx.clone());
+            n.host.txs.push(tx.clone());
         }
     }
 
@@ -437,4 +462,46 @@ fn future_timestamp_is_rejected() {
     let (_, s1, tip, b2, _) = committed_pair();
     let now = b2.header.timestamp - vinx_core::amount::MAX_CLOCK_DRIFT_SECS - 1;
     assert!(execution::execute_block(&s1, &tip, &b2, now).is_err());
+}
+
+#[test]
+fn equivocation_is_slashed_identically_by_every_node() {
+    // Validator 3 signs two conflicting prevotes; a report lands in a block and every
+    // node excludes it the same way — then the remaining three keep committing.
+    let mut net = Net::new(4);
+    net.start();
+    net.run_until(1, 600_000);
+    let (v3, sk3) = (net.vals[3].addr, net.vals[3].sk.clone());
+    let vote = |value: Option<Hash32>| {
+        let mut v = SignedVote {
+            kind: VoteKind::Prevote,
+            height: 1,
+            round: 0,
+            value,
+            validator: v3,
+            signature: vec![],
+        };
+        v.signature = sk3.sign(&v.sign_bytes(CHAIN)).0.to_vec();
+        v
+    };
+    let evidence = vinx_core::VoteEquivocation {
+        vote_a: vote(Some([1; 32])),
+        vote_b: vote(Some([2; 32])),
+    };
+    let mut tx = vinx_core::Transaction::new_slash_validator(&net.reporter, v3, &evidence, 0);
+    tx.chain_id = CHAIN;
+    tx.sign(&net.reporter);
+    net.submit(tx);
+
+    net.run_until(4, 1_200_000);
+    assert!(net.all_online_at(4), "the chain keeps going");
+    net.assert_agreement();
+    for n in &net.nodes {
+        assert!(
+            !n.state.validator_set.contains(&v3),
+            "excluded from the set"
+        );
+        assert!(n.state.banned_validator_keys.contains(&v3), "banned");
+        assert_eq!(n.state.slash_history.len(), 1);
+    }
 }

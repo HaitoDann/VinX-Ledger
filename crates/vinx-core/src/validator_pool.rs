@@ -63,6 +63,10 @@ pub struct ValidatorPoolEntry {
     /// Proof-of-Possession BLS signature (G2 compressed, 96 bytes). None before ADR 0046.
     #[serde(default)]
     pub bls_pop: Option<Vec<u8>>,
+    /// Operator address (ADR 0084 S5): may sign operational actions (unjail) for this
+    /// validator. The bond, withdrawals, rewards and key changes stay with the owner.
+    #[serde(default)]
+    pub operator: Option<Address>,
 }
 
 impl ValidatorPoolEntry {
@@ -78,6 +82,7 @@ impl ValidatorPoolEntry {
             eligible_blocks_in_window: 0,
             bls_pub_key: None,
             bls_pop: None,
+            operator: None,
         }
     }
 
