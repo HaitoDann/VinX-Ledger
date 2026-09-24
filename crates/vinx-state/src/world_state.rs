@@ -1096,7 +1096,7 @@ impl WorldState {
             )));
         }
 
-        let Some(account) = self.accounts.get(&tx.from) else {
+        let Some(account) = self.accounts.get(&tx.sender()) else {
             return Err(CoreError::InvalidTransaction(
                 "sender account does not exist (zero balance)".to_string(),
             ));
@@ -1248,11 +1248,9 @@ impl WorldState {
     /// batch driver lives at the block-validation call sites in `vinx-node`, which then
     /// apply state sequentially via [`WorldState::apply_transaction_trusted`].
     pub fn verify_tx_signature_pure(tx: &Transaction) -> Result<(), CoreError> {
-        let pk = tx.pub_key.as_ref().ok_or(CoreError::InvalidSignature)?;
-        let derived = Address::from_public_key(pk);
-        if derived != tx.from {
-            return Err(CoreError::PubKeyMismatch);
-        }
+        // ADR 0081 D6: the sender is derived from `pub_key`, so there is no separate
+        // `from` that could disagree with it — only the signature needs checking.
+        let pk = &tx.pub_key;
         let sig = tx.signature.as_ref().ok_or(CoreError::InvalidSignature)?;
         pk.verify(&tx.signing_bytes(), sig)?;
 
@@ -1308,7 +1306,7 @@ impl WorldState {
         let Some(ref admin) = self.admin_address else {
             return Err(CoreError::Unauthorized);
         };
-        if &tx.from != admin {
+        if &tx.sender() != admin {
             return Err(CoreError::Unauthorized);
         }
         Ok(())
@@ -1332,7 +1330,7 @@ impl WorldState {
                 .amount
                 .checked_add(tx.fee)
                 .ok_or(CoreError::AmountOverflow)?;
-            (total, tx.from)
+            (total, tx.sender())
         };
 
         // ── ADR 0026: existential deposit. Validate every party's resulting balance
@@ -1343,8 +1341,8 @@ impl WorldState {
         {
             let ed = EXISTENTIAL_DEPOSIT_ATOMS;
             let mut deltas: HashMap<Address, i128> = HashMap::new();
-            *deltas.entry(tx.from).or_default() -= sender_debit.atoms() as i128;
-            if fee_payer != tx.from {
+            *deltas.entry(tx.sender()).or_default() -= sender_debit.atoms() as i128;
+            if fee_payer != tx.sender() {
                 *deltas.entry(fee_payer).or_default() -= tx.fee.atoms() as i128;
             }
             *deltas.entry(tx.to).or_default() += tx.amount.atoms() as i128;
@@ -1366,7 +1364,7 @@ impl WorldState {
         {
             let sender = self
                 .accounts
-                .get_mut(&tx.from)
+                .get_mut(&tx.sender())
                 .ok_or(CoreError::InsufficientBalance)?;
             if sender.nonce != tx.nonce {
                 return Err(CoreError::InvalidNonce {
@@ -1382,7 +1380,7 @@ impl WorldState {
         }
 
         // Debit fee from sponsor (if different from sender)
-        if fee_payer != tx.from {
+        if fee_payer != tx.sender() {
             let sponsor_acc = self
                 .accounts
                 .get_mut(&fee_payer)
@@ -1407,16 +1405,16 @@ impl WorldState {
         // hands, so `circulating_supply` is unchanged (sender −fee, producer +fee).
         self.block_fees = self.block_fees.saturating_add(tx.fee);
 
-        self.mark_dirty(&tx.from);
+        self.mark_dirty(&tx.sender());
         self.mark_dirty(&tx.to);
-        if fee_payer != tx.from {
+        if fee_payer != tx.sender() {
             self.mark_dirty(&fee_payer);
         }
 
         // ADR 0026: reap any party the transfer left at exactly zero (no balance, no
         // stake, no bond unbonding), returning its 60 bytes to the free state.
-        self.reap_if_empty(&tx.from);
-        if fee_payer != tx.from {
+        self.reap_if_empty(&tx.sender());
+        if fee_payer != tx.sender() {
             self.reap_if_empty(&fee_payer);
         }
         self.reap_if_empty(&tx.to);
@@ -1444,15 +1442,15 @@ impl WorldState {
         // Validé avant toute mutation : un bond refusé ne doit pas consommer le nonce.
         let creates_pool_entry = {
             let staked_after = self
-                .account_staked(&tx.from)
+                .account_staked(&tx.sender())
                 .checked_add(tx.amount)
                 .ok_or(CoreError::AmountOverflow)?;
             staked_after.atoms() >= self.min_validator_bond_atoms
-                && !self.banned_validator_keys.contains(&tx.from)
-                && !self.validator_pool.contains_key(&tx.from)
+                && !self.banned_validator_keys.contains(&tx.sender())
+                && !self.validator_pool.contains_key(&tx.sender())
         };
         let entry_bls = if creates_pool_entry {
-            Some(self.validate_bls_registration(tx.from, &tx.payload)?)
+            Some(self.validate_bls_registration(tx.sender(), &tx.payload)?)
         } else {
             None
         };
@@ -1460,7 +1458,7 @@ impl WorldState {
         let new_staked = {
             let account = self
                 .accounts
-                .get_mut(&tx.from)
+                .get_mut(&tx.sender())
                 .ok_or(CoreError::InsufficientBalance)?;
             if account.nonce != tx.nonce {
                 return Err(CoreError::InvalidNonce {
@@ -1480,11 +1478,13 @@ impl WorldState {
             account.nonce += 1;
             account.staked
         };
-        self.mark_dirty(&tx.from);
+        self.mark_dirty(&tx.sender());
         // ADR 0038: auto-enter the validator pool once the bond floor is met.
         let bond = new_staked.atoms();
-        if bond >= self.min_validator_bond_atoms && !self.banned_validator_keys.contains(&tx.from) {
-            if let Some(entry) = self.validator_pool.get_mut(&tx.from) {
+        if bond >= self.min_validator_bond_atoms
+            && !self.banned_validator_keys.contains(&tx.sender())
+        {
+            if let Some(entry) = self.validator_pool.get_mut(&tx.sender()) {
                 entry.bond_atoms = bond;
             } else {
                 let mut entry = vinx_core::ValidatorPoolEntry::new(bond, self.current_block_ts);
@@ -1497,8 +1497,8 @@ impl WorldState {
                 })?;
                 entry.bls_pub_key = Some(pk);
                 entry.bls_pop = Some(pop);
-                self.validator_pool.insert(tx.from, entry);
-                tracing::info!(addr = %tx.from, bond, "ADR 0038: validator auto-entered pool");
+                self.validator_pool.insert(tx.sender(), entry);
+                tracing::info!(addr = %tx.sender(), bond, "ADR 0038: validator auto-entered pool");
             }
         }
         Ok(())
@@ -1506,7 +1506,7 @@ impl WorldState {
 
     fn apply_unstake(&mut self, tx: &Transaction) -> Result<(), CoreError> {
         let bond_floor = Amount::from_atoms(self.min_validator_bond_atoms);
-        let is_active_validator = self.validator_set.contains(&tx.from);
+        let is_active_validator = self.validator_set.contains(&tx.sender());
         let unlock_ts = self.current_block_ts.saturating_add(UNBONDING_SECS);
 
         // ADR 0009: cap concurrent unbonding entries per account (anti-spam on
@@ -1514,7 +1514,7 @@ impl WorldState {
         let pending_for_sender = self
             .pending_unbonds
             .iter()
-            .filter(|u| u.address == tx.from)
+            .filter(|u| u.address == tx.sender())
             .count();
         if pending_for_sender >= vinx_core::amount::MAX_PENDING_UNBONDS_PER_ACCOUNT {
             return Err(CoreError::InvalidTransaction(
@@ -1525,7 +1525,7 @@ impl WorldState {
         let remaining = {
             let account = self
                 .accounts
-                .get_mut(&tx.from)
+                .get_mut(&tx.sender())
                 .ok_or(CoreError::InsufficientBalance)?;
             if account.nonce != tx.nonce {
                 return Err(CoreError::InvalidNonce {
@@ -1552,28 +1552,28 @@ impl WorldState {
         // The withdrawn amount does NOT return to the balance now: it enters the
         // unbonding delay and stays slashable until `unlock_ts`. Circulation-neutral.
         self.pending_unbonds.push(PendingUnbond {
-            address: tx.from,
+            address: tx.sender(),
             amount: tx.amount,
             unlock_ts,
         });
-        self.mark_dirty(&tx.from);
+        self.mark_dirty(&tx.sender());
         // ADR 0038 + ADR 0036: update pool entry when bond drops below the floor.
         // Instead of immediately transitioning to Unbonding, enqueue for rate-limited
         // exit at the next epoch close (at most MAX_VALIDATOR_EXITS_PER_EPOCH per epoch).
         // Bond remains slashable while queued.
         let new_bond = remaining.atoms();
-        if let Some(entry) = self.validator_pool.get_mut(&tx.from) {
+        if let Some(entry) = self.validator_pool.get_mut(&tx.sender()) {
             entry.bond_atoms = new_bond;
             if new_bond < self.min_validator_bond_atoms {
-                let already_queued = self.exit_queue.iter().any(|r| r.address == tx.from);
+                let already_queued = self.exit_queue.iter().any(|r| r.address == tx.sender());
                 if !already_queued {
                     self.exit_queue.push(ValidatorExitRequest {
-                        address: tx.from,
+                        address: tx.sender(),
                         request_height: self.block_height,
                         unlock_ts,
                     });
                     tracing::info!(
-                        addr = %tx.from,
+                        addr = %tx.sender(),
                         new_bond,
                         "ADR 0036: bond below floor, validator enqueued for rate-limited exit"
                     );
@@ -1611,7 +1611,7 @@ impl WorldState {
 
         let sender = self
             .accounts
-            .get_mut(&tx.from)
+            .get_mut(&tx.sender())
             .ok_or(CoreError::InsufficientBalance)?;
         if sender.nonce != tx.nonce {
             return Err(CoreError::InvalidNonce {
@@ -1620,7 +1620,7 @@ impl WorldState {
             });
         }
         sender.nonce += 1;
-        self.mark_dirty(&tx.from);
+        self.mark_dirty(&tx.sender());
 
         self.pending_upgrade = Some(ScheduledUpgrade {
             version: new_version,
@@ -1874,7 +1874,7 @@ impl WorldState {
 
         let sender = self
             .accounts
-            .get_mut(&tx.from)
+            .get_mut(&tx.sender())
             .ok_or(CoreError::InsufficientBalance)?;
         if sender.nonce != tx.nonce {
             return Err(CoreError::InvalidNonce {
@@ -1915,11 +1915,11 @@ impl WorldState {
             if returned > 0 {
                 self.credit(target, Amount::from_atoms(returned));
             }
-            self.credit(&tx.from, Amount::from_atoms(bounty)); // reporter bounty (10%)
+            self.credit(&tx.sender(), Amount::from_atoms(bounty)); // reporter bounty (10%)
             self.move_to_epoch_pot(Amount::from_atoms(to_melt)); // 90% → honest validators
         }
 
-        self.mark_dirty(&tx.from);
+        self.mark_dirty(&tx.sender());
 
         // Remove from validator set (can't produce blocks anymore).
         if self.validator_set.len() > 1 {
@@ -1944,7 +1944,7 @@ impl WorldState {
         let Some(ref signers) = signers else {
             return Err(CoreError::Unauthorized);
         };
-        if !signers.contains(&tx.from) {
+        if !signers.contains(&tx.sender()) {
             return Err(CoreError::Unauthorized);
         }
 
@@ -1954,7 +1954,7 @@ impl WorldState {
         // recorded) successfully.
         let cur_nonce = self
             .accounts
-            .get(&tx.from)
+            .get(&tx.sender())
             .ok_or(CoreError::InsufficientBalance)?
             .nonce;
         if cur_nonce != tx.nonce {
@@ -1975,15 +1975,15 @@ impl WorldState {
         if threshold <= 1 {
             self.execute_governance_action(action)?;
         } else {
-            self.record_governance_approval(action, tx.from, threshold)?;
+            self.record_governance_approval(action, tx.sender(), threshold)?;
         }
 
         // Success: consume the nonce.
         self.accounts
-            .get_mut(&tx.from)
+            .get_mut(&tx.sender())
             .expect("sender existence checked above")
             .nonce += 1;
-        self.mark_dirty(&tx.from);
+        self.mark_dirty(&tx.sender());
         Ok(())
     }
 
@@ -2262,7 +2262,7 @@ impl WorldState {
     fn apply_register_bls_key(&mut self, tx: &Transaction) -> Result<(), CoreError> {
         let account = self
             .accounts
-            .get(&tx.from)
+            .get(&tx.sender())
             .ok_or(CoreError::InsufficientBalance)?;
         if account.nonce != tx.nonce {
             return Err(CoreError::InvalidNonce {
@@ -2271,7 +2271,7 @@ impl WorldState {
             });
         }
 
-        if !self.validator_pool.contains_key(&tx.from) {
+        if !self.validator_pool.contains_key(&tx.sender()) {
             return Err(CoreError::InvalidTransaction(
                 "only bonded validators may register a BLS key".to_string(),
             ));
@@ -2280,21 +2280,21 @@ impl WorldState {
         // Contrôle unique, partagé avec le chemin de bonding (ADR 0075 §3.1) : longueurs,
         // point G1 valide, PoP liée à (clé, validateur, chain_id), unicité de la clé.
         // Validation avant mutation — un payload refusé ne consomme pas le nonce.
-        let (pk, pop) = self.validate_bls_registration(tx.from, &tx.payload)?;
+        let (pk, pop) = self.validate_bls_registration(tx.sender(), &tx.payload)?;
 
         let entry = self
             .validator_pool
-            .get_mut(&tx.from)
+            .get_mut(&tx.sender())
             .expect("existence checked above");
         entry.bls_pub_key = Some(pk);
         entry.bls_pop = Some(pop);
 
         self.accounts
-            .get_mut(&tx.from)
+            .get_mut(&tx.sender())
             .expect("existence checked above")
             .nonce += 1;
-        self.mark_dirty(&tx.from);
-        tracing::info!(validator = %tx.from, "ADR 0046: BLS key registered");
+        self.mark_dirty(&tx.sender());
+        tracing::info!(validator = %tx.sender(), "ADR 0046: BLS key registered");
         Ok(())
     }
 
@@ -2304,7 +2304,7 @@ impl WorldState {
     fn apply_register_vrf_key(&mut self, tx: &Transaction) -> Result<(), CoreError> {
         let account = self
             .accounts
-            .get(&tx.from)
+            .get(&tx.sender())
             .ok_or(CoreError::InsufficientBalance)?;
         if account.nonce != tx.nonce {
             return Err(CoreError::InvalidNonce {
@@ -2313,7 +2313,7 @@ impl WorldState {
             });
         }
 
-        if !self.validator_pool.contains_key(&tx.from) {
+        if !self.validator_pool.contains_key(&tx.sender()) {
             return Err(CoreError::InvalidTransaction(
                 "only bonded validators may register a VRF key".to_string(),
             ));
@@ -2342,23 +2342,23 @@ impl WorldState {
         // Mutation: store the VRF public key in the pool entry.
         let entry = self
             .validator_pool
-            .get_mut(&tx.from)
+            .get_mut(&tx.sender())
             .expect("existence checked above");
         entry.vrf_pub_key = Some(key_bytes);
 
         self.accounts
-            .get_mut(&tx.from)
+            .get_mut(&tx.sender())
             .expect("existence checked above")
             .nonce += 1;
-        self.mark_dirty(&tx.from);
-        tracing::info!(validator = %tx.from, "ADR 0029: VRF key registered");
+        self.mark_dirty(&tx.sender());
+        tracing::info!(validator = %tx.sender(), "ADR 0029: VRF key registered");
         Ok(())
     }
 
     fn apply_unjail(&mut self, tx: &Transaction) -> Result<(), CoreError> {
         let account = self
             .accounts
-            .get(&tx.from)
+            .get(&tx.sender())
             .ok_or(CoreError::InsufficientBalance)?;
         if account.nonce != tx.nonce {
             return Err(CoreError::InvalidNonce {
@@ -2367,17 +2367,17 @@ impl WorldState {
             });
         }
         let height = self.block_height;
-        if !reliability::try_unjail(&mut self.reliability, &tx.from, height) {
+        if !reliability::try_unjail(&mut self.reliability, &tx.sender(), height) {
             return Err(CoreError::InvalidTransaction(
                 "unjail failed: validator is not jailed or cooldown has not elapsed".to_string(),
             ));
         }
         self.accounts
-            .get_mut(&tx.from)
+            .get_mut(&tx.sender())
             .expect("existence checked above")
             .nonce += 1;
-        self.mark_dirty(&tx.from);
-        tracing::info!(validator = %tx.from, height, "ADR 0027: validator unjailed");
+        self.mark_dirty(&tx.sender());
+        tracing::info!(validator = %tx.sender(), height, "ADR 0027: validator unjailed");
         Ok(())
     }
 

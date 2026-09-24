@@ -667,15 +667,16 @@ async function sendTx(txType) {
   const chainId = wallet.chainId ?? 42;
   const discriminants = { Transfer:0x01, Stake:0x02, Unstake:0x03 };
   // Canonical signing bytes — must match vinx-core Transaction::signing_bytes():
-  // disc(1) ‖ from(20) ‖ to(20) ‖ amount(16 BE) ‖ fee(16 BE) ‖ nonce(8 BE)
+  // disc(1) ‖ key_type(1=0x00 Ed25519) ‖ pub_key(32) ‖ to(20) ‖ amount(16 BE) ‖ fee(16 BE) ‖ nonce(8 BE)
   // ‖ chain_id(4 BE) ‖ expiry(1=0x00) ‖ payload_len(4 BE) ‖ payload(empty) ‖ sponsor(1=0x00)
-  let fromB, toB;
-  try { fromB = bech32Decode20(wallet.address); toB = bech32Decode20(to); }
+  let toB;
+  try { toB = bech32Decode20(to); }
   catch (e) { result.innerHTML = `<p class="msg err">Adresse invalide : ${e.message}</p>`; return; }
-  const sigBytes = new Uint8Array(1+20+20+16+16+8+4+1+4+1);
+  const sigBytes = new Uint8Array(1+1+32+20+16+16+8+4+1+4+1);
   let i = 0;
   sigBytes[i++] = discriminants[txType];
-  sigBytes.set(fromB, i); i += 20;
+  sigBytes[i++] = 0x00; // key type: Ed25519 (ADR 0081 D6)
+  sigBytes.set(wallet.publicKey32, i); i += 32;
   sigBytes.set(toB, i);   i += 20;
   sigBytes.set(bigIntTo16BE(amountAtoms), i); i += 16;
   sigBytes.set(bigIntTo16BE(feeAtoms), i);    i += 16;
@@ -687,7 +688,7 @@ async function sendTx(txType) {
   const signature = nacl.sign.detached(sigBytes, wallet.secretKey64);
   const pubKeyArr = '['+Array.from(wallet.publicKey32).join(',')+']';
   const sigHex = bytesToHex(signature);
-  const body = `{"tx_type":"${txType}","from":"${wallet.address}","to":"${to}","amount":${amountAtoms},"fee":${feeAtoms},"nonce":${nonce},"chain_id":${chainId},"payload":[],"pub_key":${pubKeyArr},"signature":"${sigHex}"}`;
+  const body = `{"tx_type":"${txType}","to":"${to}","amount":${amountAtoms},"fee":${feeAtoms},"nonce":${nonce},"chain_id":${chainId},"payload":[],"pub_key":${pubKeyArr},"signature":"${sigHex}"}`;
   try {
     const resp = await fetch(BASE+'/tx/submit', { method:'POST', headers:{'Content-Type':'application/json'}, body });
     const json = await resp.json();
@@ -1117,19 +1118,20 @@ function updateGate(){
 
 // ─── Governance signing ───────────────────────────────────────────────────────
 // Canonical signing bytes — must match vinx-core Transaction::signing_bytes():
-// disc(1) ‖ from(20) ‖ to(20) ‖ amount(16 BE) ‖ fee(16 BE) ‖ nonce(8 BE)
+// disc(1) ‖ key_type(1=0x00 Ed25519) ‖ pub_key(32) ‖ to(20) ‖ amount(16 BE) ‖ fee(16 BE) ‖ nonce(8 BE)
 // ‖ chain_id(4 BE) ‖ expiry(1=0x00) ‖ payload_len(4 BE) ‖ payload ‖ sponsor(1=0x00)
 async function submitGov(txName, disc, toAddr, payloadBytes){
   if(!wallet||!isAdmin)throw new Error('Clé admin requise.');
   let nonce=0;
   try{const a=await (await fetch(BASE+'/account/'+wallet.address)).json();nonce=a.nonce??0;}catch{}
   const chainId=wallet.chainId??42;
-  const fromB=bech32Decode20(wallet.address), toB=bech32Decode20(toAddr);
+  const toB=bech32Decode20(toAddr);
   const payload=payloadBytes||new Uint8Array(0);
-  const sig=new Uint8Array(1+20+20+16+16+8+4+1+4+payload.length+1);
+  const sig=new Uint8Array(1+1+32+20+16+16+8+4+1+4+payload.length+1);
   let i=0;
   sig[i++]=disc;
-  sig.set(fromB,i);i+=20;
+  sig[i++]=0x00; // key type: Ed25519 (ADR 0081 D6)
+  sig.set(wallet.publicKey32,i);i+=32;
   sig.set(toB,i);i+=20;
   sig.set(bigIntTo16BE(0n),i);i+=16; // amount 0
   sig.set(bigIntTo16BE(0n),i);i+=16; // fee 0
@@ -1142,7 +1144,7 @@ async function submitGov(txName, disc, toAddr, payloadBytes){
   const signature=nacl.sign.detached(sig,wallet.secretKey64);
   const pubKeyArr='['+Array.from(wallet.publicKey32).join(',')+']';
   const payloadArr='['+Array.from(payload).join(',')+']';
-  const body=`{"tx_type":"${txName}","from":"${wallet.address}","to":"${toAddr}","amount":0,"fee":0,"nonce":${nonce},"chain_id":${chainId},"payload":${payloadArr},"pub_key":${pubKeyArr},"signature":"${bytesToHex(signature)}"}`;
+  const body=`{"tx_type":"${txName}","to":"${toAddr}","amount":0,"fee":0,"nonce":${nonce},"chain_id":${chainId},"payload":${payloadArr},"pub_key":${pubKeyArr},"signature":"${bytesToHex(signature)}"}`;
   const resp=await fetch(BASE+'/tx/submit',{method:'POST',headers:{'Content-Type':'application/json'},body});
   const json=await resp.json();
   if(!resp.ok)throw new Error(json.error||('HTTP '+resp.status));

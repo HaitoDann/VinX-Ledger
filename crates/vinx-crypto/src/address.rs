@@ -21,8 +21,10 @@ pub const ADDRESS_LEN: usize = 20;
 pub struct Address([u8; ADDRESS_LEN]);
 
 impl Address {
+    /// Derives the address from the public key **and its key type** (ADR 0081 D6):
+    /// `BLAKE3(key_type ‖ key)[..20]`, so keys of different types can never collide.
     pub fn from_public_key(pk: &PublicKey) -> Self {
-        let hash = hash256(pk.as_bytes());
+        let hash = hash256(&pk.to_tagged_bytes());
         let mut payload = [0u8; ADDRESS_LEN];
         payload.copy_from_slice(&hash[..ADDRESS_LEN]);
         Address(payload)
@@ -181,7 +183,10 @@ mod tests {
         let kp = KeyPair::generate();
         let pk = kp.public_key();
         let addr = Address::from_public_key(&pk);
-        assert_eq!(addr.as_bytes(), &hash256(pk.as_bytes())[..ADDRESS_LEN]);
+        assert_eq!(
+            addr.as_bytes(),
+            &hash256(&pk.to_tagged_bytes())[..ADDRESS_LEN]
+        );
     }
 
     #[test]

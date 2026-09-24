@@ -208,18 +208,20 @@ mod tests {
     }
 
     #[test]
-    fn test_wrong_pubkey_rejected() {
+    fn test_swapped_pubkey_changes_sender_and_fails_signature() {
         let (mut state, sender_kp, _) = funded_state();
         let attacker_kp = KeyPair::generate();
         let receiver = Address::from_public_key(&KeyPair::generate().public_key());
         let amount = Amount::from_vinx(1);
         let mut tx = Transaction::new_transfer(&sender_kp, receiver, amount, fee_for(amount), 0);
-        tx.pub_key = Some(attacker_kp.public_key());
-
-        assert_eq!(
-            state.apply_transaction(&tx),
-            Err(vinx_core::CoreError::PubKeyMismatch)
+        // ADR 0081 D6: swapping the key re-derives the sender *and* invalidates the
+        // signature (the signing bytes commit to the key) — impersonation is impossible.
+        tx.pub_key = attacker_kp.public_key();
+        assert_ne!(
+            tx.sender(),
+            Address::from_public_key(&sender_kp.public_key())
         );
+        assert!(state.apply_transaction(&tx).is_err());
     }
 
     // ─── stake / unstake ────────────────────────────────────────────────────────

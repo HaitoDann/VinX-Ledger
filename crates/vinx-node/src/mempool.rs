@@ -86,7 +86,7 @@ impl Mempool {
     /// Inserts a pre-verified transaction into the per-account nonce queue.
     /// The caller is responsible for verifying the signature before calling this.
     pub fn add(&mut self, tx: Transaction) -> Result<(), MempoolError> {
-        let addr = tx.from;
+        let addr = tx.sender();
 
         // Reject transactions whose nonce is already consumed by a confirmed block.
         let min = self.min_nonce.get(&addr).copied().unwrap_or(0);
@@ -296,7 +296,10 @@ impl Mempool {
                 break;
             }
             self.seen.insert(hash);
-            self.queues.entry(tx.from).or_default().insert(tx.nonce, tx);
+            self.queues
+                .entry(tx.sender())
+                .or_default()
+                .insert(tx.nonce, tx);
             self.pending_count += 1;
         }
     }

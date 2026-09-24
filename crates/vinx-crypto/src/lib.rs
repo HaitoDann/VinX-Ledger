@@ -11,7 +11,7 @@ pub use bls::{
     BlsError, BlsPubKey, BlsSecretKey, BlsSignature, BLS_COSIG_DST, BLS_POP_DST,
 };
 pub use hash::{hash256, Hash32};
-pub use keys::{KeyPair, PublicKey, VinxSignature};
+pub use keys::{KeyPair, KeyType, PublicKey, VinxSignature};
 pub use merkle::{
     merkle_proof_for, merkle_root, verify_merkle_proof, IncrementalMerkleTree, MerkleProofStep,
 };

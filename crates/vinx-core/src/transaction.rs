@@ -56,7 +56,6 @@ impl TransactionType {
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, BorshSerialize, BorshDeserialize)]
 pub struct Transaction {
     pub tx_type: TransactionType,
-    pub from: Address,
     pub to: Address,
     pub amount: Amount,
     /// Fee the sender explicitly agrees to pay (validated against protocol minimum).
@@ -74,11 +73,13 @@ pub struct Transaction {
     /// AnnounceUpgrade: 14 bytes = major(2) || minor(2) || patch(2) || activation_ts(8)
     /// where activation_ts is a Unix timestamp in seconds (ADR 0006).
     pub payload: Vec<u8>,
-    /// Sender's public key — used to verify `from` ownership.
-    pub pub_key: Option<PublicKey>,
+    /// Sender's public key, tagged with its key type (ADR 0081 D6). Mandatory: the
+    /// sender address is *derived* from it ([`Transaction::sender`]), never sent
+    /// separately — so the two can never disagree.
+    pub pub_key: PublicKey,
     pub signature: Option<VinxSignature>,
     /// Optional sponsor: third party who pays the fee (gasless UX).
-    /// When set, the fee is debited from `sponsor` instead of `from`.
+    /// When set, the fee is debited from `sponsor` instead of the sender.
     #[serde(default)]
     pub sponsor: Option<Address>,
     /// Sponsor's public key — proves sponsor identity.
@@ -133,11 +134,11 @@ impl Transaction {
         }
     }
 
-    /// Canonical byte layout signed by the sender (and sponsor). Does NOT include
-    /// `pub_key` or `signature`.
+    /// Canonical byte layout signed by the sender (and sponsor). Includes the sender's
+    /// tagged `pub_key` but not the signatures.
     ///
     /// Addresses are the raw 20-byte payload (fixed length, so no length prefix).
-    /// Layout: discriminant(1) ‖ from(20) ‖ to(20) ‖ amount(16 BE) ‖ fee(16 BE) ‖
+    /// Layout: discriminant(1) ‖ pub_key(key_type(1) ‖ key) ‖ to(20) ‖ amount(16 BE) ‖ fee(16 BE) ‖
     /// nonce(8 BE) ‖ chain_id(4 BE) ‖ expiry(0 | 1‖8 BE) ‖ payload_len(4 BE) ‖ payload ‖
     /// sponsor(0 | 1‖20). Any client (web UI, SDK) must reproduce this exactly.
     ///
@@ -146,7 +147,9 @@ impl Transaction {
     pub fn signing_bytes(&self) -> Vec<u8> {
         let mut bytes = Vec::with_capacity(128);
         bytes.push(self.tx_type.discriminant());
-        bytes.extend_from_slice(self.from.as_bytes());
+        // ADR 0081 D6: the signer's tagged public key (key type ‖ key) replaces the old
+        // `from` address, so the signature commits to the exact key and its scheme.
+        bytes.extend_from_slice(&self.pub_key.to_tagged_bytes());
         bytes.extend_from_slice(self.to.as_bytes());
         bytes.extend_from_slice(&self.amount.atoms().to_be_bytes());
         bytes.extend_from_slice(&self.fee.atoms().to_be_bytes());
@@ -191,10 +194,14 @@ impl Transaction {
 
     /// Signs the transaction in place using the provided keypair.
     pub fn sign(&mut self, keypair: &KeyPair) {
-        let pk = keypair.public_key();
-        let sig = keypair.sign(&self.signing_bytes());
-        self.pub_key = Some(pk);
-        self.signature = Some(sig);
+        // The signing bytes commit to the public key, so set it first.
+        self.pub_key = keypair.public_key();
+        self.signature = Some(keypair.sign(&self.signing_bytes()));
+    }
+
+    /// Sender address, derived from the tagged public key (ADR 0081 D6).
+    pub fn sender(&self) -> Address {
+        Address::from_public_key(&self.pub_key)
     }
 
     /// Constructs and signs a Transfer transaction.
@@ -206,10 +213,8 @@ impl Transaction {
         nonce: u64,
     ) -> Self {
         let pk = keypair.public_key();
-        let from = Address::from_public_key(&pk);
         let mut tx = Self {
             tx_type: TransactionType::Transfer,
-            from,
             to,
             amount,
             fee,
@@ -217,7 +222,7 @@ impl Transaction {
             chain_id: CHAIN_ID_DEVNET,
             expires_at_height: None,
             payload: vec![],
-            pub_key: Some(pk),
+            pub_key: pk,
             signature: None,
             sponsor: None,
             sponsor_pub_key: None,
@@ -234,7 +239,6 @@ impl Transaction {
         let to = from;
         let mut tx = Self {
             tx_type: TransactionType::Stake,
-            from,
             to,
             amount,
             fee,
@@ -242,7 +246,7 @@ impl Transaction {
             chain_id: CHAIN_ID_DEVNET,
             expires_at_height: None,
             payload: vec![],
-            pub_key: Some(pk),
+            pub_key: pk,
             signature: None,
             sponsor: None,
             sponsor_pub_key: None,
@@ -281,7 +285,6 @@ impl Transaction {
         };
         let mut tx = Self {
             tx_type: TransactionType::Stake,
-            from,
             to: from,
             amount,
             fee,
@@ -290,7 +293,7 @@ impl Transaction {
             expires_at_height: None,
             payload: borsh::to_vec(&payload)
                 .expect("RegisterBlsKeyPayload serialization is infallible"),
-            pub_key: Some(pk),
+            pub_key: pk,
             signature: None,
             sponsor: None,
             sponsor_pub_key: None,
@@ -307,7 +310,6 @@ impl Transaction {
         let to = from;
         let mut tx = Self {
             tx_type: TransactionType::Unstake,
-            from,
             to,
             amount,
             fee,
@@ -315,7 +317,7 @@ impl Transaction {
             chain_id: CHAIN_ID_DEVNET,
             expires_at_height: None,
             payload: vec![],
-            pub_key: Some(pk),
+            pub_key: pk,
             signature: None,
             sponsor: None,
             sponsor_pub_key: None,
@@ -346,7 +348,6 @@ impl Transaction {
         payload.extend_from_slice(&activation_ts.to_be_bytes());
         let mut tx = Self {
             tx_type: TransactionType::AnnounceUpgrade,
-            from,
             to: from,
             amount: Amount::ZERO,
             fee: Amount::ZERO,
@@ -354,7 +355,7 @@ impl Transaction {
             chain_id: CHAIN_ID_DEVNET,
             expires_at_height: None,
             payload,
-            pub_key: Some(pk),
+            pub_key: pk,
             signature: None,
             sponsor: None,
             sponsor_pub_key: None,
@@ -385,11 +386,9 @@ impl Transaction {
         nonce: u64,
     ) -> Self {
         let pk = keypair.public_key();
-        let from = Address::from_public_key(&pk);
         let payload = borsh::to_vec(evidence).expect("slash evidence serializable");
         let mut tx = Self {
             tx_type: TransactionType::SlashValidator,
-            from,
             to: validator,
             amount: Amount::ZERO,
             fee: Amount::ZERO,
@@ -397,7 +396,7 @@ impl Transaction {
             chain_id: CHAIN_ID_DEVNET,
             expires_at_height: None,
             payload,
-            pub_key: Some(pk),
+            pub_key: pk,
             signature: None,
             sponsor: None,
             sponsor_pub_key: None,
@@ -419,7 +418,6 @@ impl Transaction {
         let payload = borsh::to_vec(action).expect("GovernanceAction serialization is infallible");
         let mut tx = Self {
             tx_type: TransactionType::AdminAction,
-            from,
             to: from,
             amount: Amount::ZERO,
             fee: Amount::ZERO,
@@ -427,7 +425,7 @@ impl Transaction {
             chain_id: CHAIN_ID_DEVNET,
             expires_at_height: None,
             payload,
-            pub_key: Some(pk),
+            pub_key: pk,
             signature: None,
             sponsor: None,
             sponsor_pub_key: None,
@@ -450,7 +448,6 @@ impl Transaction {
             borsh::to_vec(payload).expect("RegisterBlsKeyPayload serialization is infallible");
         let mut tx = Self {
             tx_type: TransactionType::RegisterBlsKey,
-            from,
             to: from,
             amount: Amount::ZERO,
             fee: Amount::ZERO,
@@ -458,7 +455,7 @@ impl Transaction {
             chain_id: CHAIN_ID_DEVNET,
             expires_at_height: None,
             payload: raw,
-            pub_key: Some(pk),
+            pub_key: pk,
             signature: None,
             sponsor: None,
             sponsor_pub_key: None,
@@ -475,7 +472,6 @@ impl Transaction {
         let from = Address::from_public_key(&pk);
         let mut tx = Self {
             tx_type: TransactionType::Unjail,
-            from,
             to: from,
             amount: Amount::ZERO,
             fee: Amount::ZERO,
@@ -483,7 +479,7 @@ impl Transaction {
             chain_id: CHAIN_ID_DEVNET,
             expires_at_height: None,
             payload: vec![],
-            pub_key: Some(pk),
+            pub_key: pk,
             signature: None,
             sponsor: None,
             sponsor_pub_key: None,
@@ -500,7 +496,6 @@ impl Transaction {
         let from = Address::from_public_key(&pk);
         let mut tx = Self {
             tx_type: TransactionType::RegisterVrfKey,
-            from,
             to: from,
             amount: Amount::ZERO,
             fee: Amount::ZERO,
@@ -508,7 +503,7 @@ impl Transaction {
             chain_id: CHAIN_ID_DEVNET,
             expires_at_height: None,
             payload: vrf_pub_key.to_vec(),
-            pub_key: Some(pk),
+            pub_key: pk,
             signature: None,
             sponsor: None,
             sponsor_pub_key: None,
@@ -576,7 +571,7 @@ mod tests {
     fn test_transfer_is_signed() {
         let (_, tx) = make_transfer();
         assert!(tx.signature.is_some());
-        assert!(tx.pub_key.is_some());
+        assert_eq!(tx.sender(), Address::from_public_key(&tx.pub_key));
     }
 
     /// Golden vector locking the canonical `signing_bytes` layout. Any external
@@ -586,7 +581,7 @@ mod tests {
     fn test_signing_bytes_golden_vector() {
         let tx = Transaction {
             tx_type: TransactionType::Transfer,
-            from: Address::from_bytes([0x11; 20]),
+            pub_key: PublicKey::Ed25519([0x11; 32]),
             to: Address::from_bytes([0x22; 20]),
             amount: Amount::from_atoms(1_000_000),
             fee: Amount::from_atoms(500),
@@ -594,17 +589,17 @@ mod tests {
             chain_id: 42,
             expires_at_height: None,
             payload: vec![],
-            pub_key: None,
             signature: None,
             sponsor: None,
             sponsor_pub_key: None,
             sponsor_signature: None,
         };
-        // disc(01) ‖ from(0x11×20) ‖ to(0x22×20) ‖ amount(16 BE) ‖ fee(16 BE)
+        // disc(01) ‖ pub_key(00 ‖ 0x11×32) ‖ to(0x22×20) ‖ amount(16 BE) ‖ fee(16 BE)
         //   ‖ nonce(8 BE) ‖ chain_id(4 BE) ‖ expiry(00) ‖ payload_len(4 BE) ‖ sponsor(00)
         let expected = concat!(
             "01",
-            "1111111111111111111111111111111111111111",
+            "00",
+            "1111111111111111111111111111111111111111111111111111111111111111",
             "2222222222222222222222222222222222222222",
             "000000000000000000000000000f4240",
             "000000000000000000000000000001f4",
@@ -624,11 +619,12 @@ mod tests {
         // were generated by an independent JS implementation (scratchpad/gov_sign.js)
         // replicating the admin page's byte layout — matching them proves the
         // JS ↔ Rust equivalence for zero amount/fee and payload placement.
-        let from = Address::from_bytes(std::array::from_fn(|i| (i + 1) as u8)); // 01..14
+        let pk = PublicKey::Ed25519(std::array::from_fn(|i| (i + 1) as u8)); // 01..20
+        let admin = Address::from_bytes(std::array::from_fn(|i| (i + 1) as u8)); // 01..14
         let to = Address::from_bytes(std::array::from_fn(|i| (i + 21) as u8)); // 15..28
         let mk = |tx_type: TransactionType, to: Address, payload: Vec<u8>| Transaction {
             tx_type,
-            from,
+            pub_key: pk.clone(),
             to,
             amount: Amount::ZERO,
             fee: Amount::ZERO,
@@ -636,7 +632,6 @@ mod tests {
             chain_id: 42,
             expires_at_height: None,
             payload,
-            pub_key: None,
             signature: None,
             sponsor: None,
             sponsor_pub_key: None,
@@ -646,20 +641,21 @@ mod tests {
         // ADR 0007: validator-set changes go through AdminAction (0x08) carrying a
         // borsh(GovernanceAction). The admin console (rpc/ui.rs) reproduces the same
         // borsh: enum tag u8 (AddValidator = 0) ‖ address(20 raw bytes).
-        // Here `to = from` (self), amount/fee = 0.
+        // Here `to` = an arbitrary admin address, amount/fee = 0.
         let mut add_payload = Vec::with_capacity(21);
         add_payload.push(0u8); // GovernanceAction::AddValidator
         add_payload.extend_from_slice(to.as_bytes());
-        let add = mk(TransactionType::AdminAction, from, add_payload);
+        let add = mk(TransactionType::AdminAction, admin, add_payload);
         let expected_add = concat!(
-            "08",                                       // AdminAction discriminant
-            "0102030405060708090a0b0c0d0e0f1011121314", // from  = 01..14
-            "0102030405060708090a0b0c0d0e0f1011121314", // to    = self (from)
-            "00000000000000000000000000000000",         // amount 0
-            "00000000000000000000000000000000",         // fee 0
-            "0000000000000007",                         // nonce 7
-            "0000002a",                                 // chain_id 42
-            "00",                                       // expiry None
+            "08",                                                               // AdminAction discriminant
+            "00",                                                               // key type Ed25519
+            "0102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f20", // pub_key
+            "0102030405060708090a0b0c0d0e0f1011121314",                         // to    = 01..14
+            "00000000000000000000000000000000",                                 // amount 0
+            "00000000000000000000000000000000",                                 // fee 0
+            "0000000000000007",                                                 // nonce 7
+            "0000002a",                                                         // chain_id 42
+            "00",                                                               // expiry None
             "00000015",                                 // payload_len = 21 (VINX-12)
             "00", // GovernanceAction::AddValidator (borsh u8 tag = 0)
             "15161718191a1b1c1d1e1f202122232425262728", // validator address = 15..28
@@ -678,10 +674,11 @@ mod tests {
         pl.extend_from_slice(&2u16.to_be_bytes());
         pl.extend_from_slice(&3u16.to_be_bytes());
         pl.extend_from_slice(&1000u64.to_be_bytes());
-        let upgrade = mk(TransactionType::AnnounceUpgrade, from, pl);
+        let upgrade = mk(TransactionType::AnnounceUpgrade, admin, pl);
         assert_eq!(
             hex::encode(upgrade.signing_bytes()),
-            "040102030405060708090a0b0c0d0e0f10111213140102030405060708090a0b0c0d0e0f1011121314\
+            "04000102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f20\
+             0102030405060708090a0b0c0d0e0f1011121314\
              000000000000000000000000000000000000000000000000000000000000000000000000000000070000002a00\
              0000000e\
              00010002000300000000000003e800"
@@ -695,7 +692,7 @@ mod tests {
     /// signature was valid for both — and they disagree on who pays the fee.
     #[test]
     fn test_signing_bytes_payload_sponsor_boundary_is_unambiguous() {
-        let from = Address::from_bytes([0x11; 20]);
+        let pub_key = PublicKey::Ed25519([0x11; 32]);
         let to = Address::from_bytes([0x22; 20]);
         // Worst case: a sponsor address whose last byte is 0x00.
         let mut sponsor_raw = [0x33u8; 20];
@@ -704,7 +701,7 @@ mod tests {
 
         let mk = |payload: Vec<u8>, sponsor: Option<Address>| Transaction {
             tx_type: TransactionType::Transfer,
-            from,
+            pub_key: pub_key.clone(),
             to,
             amount: Amount::from_atoms(1),
             fee: Amount::from_atoms(1),
@@ -712,7 +709,6 @@ mod tests {
             chain_id: 42,
             expires_at_height: None,
             payload,
-            pub_key: None,
             signature: None,
             sponsor,
             sponsor_pub_key: None,
@@ -742,7 +738,7 @@ mod tests {
     fn test_signing_bytes_payload_length_is_committed() {
         let mk = |payload: Vec<u8>| Transaction {
             tx_type: TransactionType::Transfer,
-            from: Address::from_bytes([0x11; 20]),
+            pub_key: PublicKey::Ed25519([0x11; 32]),
             to: Address::from_bytes([0x22; 20]),
             amount: Amount::from_atoms(1),
             fee: Amount::from_atoms(1),
@@ -750,7 +746,6 @@ mod tests {
             chain_id: 42,
             expires_at_height: None,
             payload,
-            pub_key: None,
             signature: None,
             sponsor: None,
             sponsor_pub_key: None,
@@ -786,7 +781,7 @@ mod tests {
     #[test]
     fn test_signature_verifies_against_pub_key() {
         let (_, tx) = make_transfer();
-        let pk = tx.pub_key.as_ref().unwrap();
+        let pk = &tx.pub_key;
         let sig = tx.signature.as_ref().unwrap();
         assert!(pk.verify(&tx.signing_bytes(), sig).is_ok());
     }
@@ -811,7 +806,7 @@ mod tests {
         use crate::chain_id::{CHAIN_ID_DEVNET, CHAIN_ID_INVALID};
         let tx = Transaction {
             tx_type: TransactionType::Transfer,
-            from: Address::from_bytes([0x11; 20]),
+            pub_key: PublicKey::Ed25519([0x11; 32]),
             to: Address::from_bytes([0x22; 20]),
             amount: Amount::from_atoms(5),
             fee: Amount::from_atoms(1),
@@ -819,7 +814,6 @@ mod tests {
             chain_id: CHAIN_ID_DEVNET,
             expires_at_height: None,
             payload: vec![],
-            pub_key: None,
             signature: None,
             sponsor: None,
             sponsor_pub_key: None,

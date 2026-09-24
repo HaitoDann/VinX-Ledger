@@ -128,15 +128,27 @@ export interface FaucetResponse {
 
 // ─── Transaction payload ──────────────────────────────────────────────────────
 
+/**
+ * Signed transaction as accepted by `POST /tx/submit`.
+ *
+ * There is no `from` field (ADR 0081 D6): the sender address is derived by the node
+ * from `pub_key`. The signature covers the canonical signing bytes:
+ * `disc(1) ‖ key_type(1, 0 = Ed25519) ‖ pub_key(32) ‖ to(20) ‖ amount(16 BE) ‖ fee(16 BE)
+ *  ‖ nonce(8 BE) ‖ chain_id(4 BE) ‖ expiry(0 | 1‖8 BE) ‖ payload_len(4 BE) ‖ payload
+ *  ‖ sponsor(0 | 1‖20)`. Amounts are in atoms (1 VINX = 10^9 atoms).
+ */
 export interface SignedTransaction {
   tx_type: string;
-  from: string;
   to: string;
-  amount: string;
-  fee: string;
+  amount: string | number;
+  fee: string | number;
   nonce: number;
-  pub_key?: string;
-  signature?: string;
+  chain_id: number;
+  payload: number[];
+  /** Ed25519 public key, 32 bytes. */
+  pub_key: number[];
+  /** Ed25519 signature, 64 bytes, lowercase hex. */
+  signature: string;
 }
 
 // ─── Client ───────────────────────────────────────────────────────────────────

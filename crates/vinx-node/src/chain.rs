@@ -451,10 +451,10 @@ impl Chain {
             let tx_hash = tx.hash();
             self.tx_index.insert(tx_hash, (height, idx as u32));
             self.account_tx_index
-                .entry(tx.from)
+                .entry(tx.sender())
                 .or_default()
                 .push(tx_hash);
-            if tx.to != tx.from {
+            if tx.to != tx.sender() {
                 self.account_tx_index
                     .entry(tx.to)
                     .or_default()
@@ -499,10 +499,10 @@ impl Chain {
                 let tx_hash = tx.hash();
                 self.tx_index.insert(tx_hash, (height, idx as u32));
                 self.account_tx_index
-                    .entry(tx.from)
+                    .entry(tx.sender())
                     .or_default()
                     .push(tx_hash);
-                if tx.to != tx.from {
+                if tx.to != tx.sender() {
                     self.account_tx_index
                         .entry(tx.to)
                         .or_default()

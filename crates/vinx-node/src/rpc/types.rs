@@ -71,7 +71,7 @@ impl TxResponse {
     pub fn from_tx(tx: &Transaction) -> Self {
         Self {
             tx_type: format!("{:?}", tx.tx_type),
-            from: tx.from.to_string(),
+            from: tx.sender().to_string(),
             to: tx.to.to_string(),
             amount: tx.amount.to_string(),
             amount_atoms: tx.amount.atoms().to_string(),

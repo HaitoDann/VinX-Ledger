@@ -122,10 +122,8 @@ fn build_signed(
     chain_id: u32,
     payload: Vec<u8>,
 ) -> Transaction {
-    let from = Address::from_public_key(&kp.public_key());
     let mut tx = Transaction {
         tx_type,
-        from,
         to,
         amount,
         fee,
@@ -133,7 +131,7 @@ fn build_signed(
         chain_id,
         expires_at_height: None,
         payload,
-        pub_key: Some(kp.public_key()),
+        pub_key: kp.public_key(),
         signature: None,
         sponsor: None,
         sponsor_pub_key: None,
@@ -322,7 +320,7 @@ mod tests {
         assert_eq!(tx.chain_id, 7);
         assert_eq!(tx.tx_type, TransactionType::Transfer);
         // Signature verifies over the canonical signing bytes (incl. chain_id).
-        let pk = tx.pub_key.as_ref().unwrap();
+        let pk = &tx.pub_key;
         let sig = tx.signature.as_ref().unwrap();
         assert!(pk.verify(&tx.signing_bytes(), sig).is_ok());
     }

@@ -178,9 +178,9 @@ async fn admit_to_mempool(node: &Arc<Node>, tx: Transaction) -> Result<(), Strin
     state.admission_check(&tx).map_err(|e| e.to_string())?;
 
     let mut mempool = node.mempool.write().await;
-    let queued = mempool.queued_cost_atoms(&tx.from);
+    let queued = mempool.queued_cost_atoms(&tx.sender());
     let needed = queued.saturating_add(tx.admission_cost_atoms());
-    if state.account_balance(&tx.from).atoms() < needed {
+    if state.account_balance(&tx.sender()).atoms() < needed {
         return Err(format!(
             "sender balance does not cover already-queued transactions plus this one \
              (queued cost {queued} atoms)"
@@ -841,9 +841,9 @@ pub async fn submit_tx_batch(
     for (tx, (hash, sig_result)) in txs.into_iter().zip(verifications) {
         let admit = sig_result.and_then(|()| {
             state.admission_check(&tx).map_err(|e| e.to_string())?;
-            let queued = mempool.queued_cost_atoms(&tx.from);
+            let queued = mempool.queued_cost_atoms(&tx.sender());
             let needed = queued.saturating_add(tx.admission_cost_atoms());
-            if state.account_balance(&tx.from).atoms() < needed {
+            if state.account_balance(&tx.sender()).atoms() < needed {
                 return Err(format!(
                     "sender balance does not cover already-queued transactions plus this one \
                      (queued cost {queued} atoms)"
