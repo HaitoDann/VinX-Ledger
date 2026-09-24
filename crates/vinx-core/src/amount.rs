@@ -197,7 +197,19 @@ pub const BATCH_WINDOW_MS: u64 = 200;
 /// governance actions and BLS registrations, all well under 1 KiB.
 pub const MAX_TX_PAYLOAD_BYTES: usize = 16 * 1024;
 
-pub const MAX_CLOCK_DRIFT_SECS: u64 = 120;
+/// Maximum tolerated clock skew between a block timestamp and local time (ADR 0081 C7).
+/// Validators are expected to run NTP; 15 s leaves room for ordinary skew without letting a
+/// producer shift protocol time (and therefore emission) by minutes.
+pub const MAX_CLOCK_DRIFT_SECS: u64 = 15;
+
+/// Default block time for a new genesis (ADR 0081 C6). The block time is a **protocol**
+/// parameter committed in the state (`WorldState::block_time_secs`), fixed at genesis —
+/// never a per-node setting. It is lowered by a software release, step by step.
+pub const DEFAULT_BLOCK_TIME_SECS: u64 = 12;
+
+/// Bounds accepted for the genesis block time.
+pub const MIN_BLOCK_TIME_SECS: u64 = 1;
+pub const MAX_BLOCK_TIME_SECS: u64 = 60;
 
 /// Grace period a scheduled leader gets before a backup proposal counts as a missed
 /// proposal against it (ADR 0027, VINX-06).
@@ -210,10 +222,12 @@ pub const MAX_CLOCK_DRIFT_SECS: u64 = 120;
 ///
 /// A miss is only real if the leader actually had its turn and did not take it, so the
 /// charge now requires the block to arrive at least this long after the previous one.
-/// Derived from the 12 s target cadence plus the clock-drift allowance, so an honest
+/// Derived from the protocol block time plus the clock-drift allowance, so an honest
 /// backup stepping in for a genuinely absent leader still charges the miss, while a
 /// pre-emptive proposal at normal cadence does not.
-pub const SLOT_TIMEOUT_SECS: u64 = 3 * 12 + MAX_CLOCK_DRIFT_SECS;
+pub const fn slot_timeout_secs(block_time_secs: u64) -> u64 {
+    3 * block_time_secs + MAX_CLOCK_DRIFT_SECS
+}
 
 /// Window (number of recent blocks) for the Median Time Past (ADR 0005): a single
 /// producer cannot make the network's time reference jump because it is a median.

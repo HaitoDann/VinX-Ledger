@@ -87,6 +87,10 @@ pub struct WorldState {
     /// Chain ID for replay protection — transactions must match this value.
     #[serde(default = "default_chain_id")]
     pub chain_id: u32,
+    /// Protocol block time in seconds (ADR 0081 C6) — fixed at genesis, committed in the
+    /// consensus root, never a per-node setting.
+    #[serde(default = "default_block_time_secs")]
+    pub block_time_secs: u64,
     /// Incremental Merkle tree over sorted account leaf hashes.
     /// Not persisted — rebuilt lazily on the first `compute_state_root` call after load.
     #[serde(skip)]
@@ -272,6 +276,10 @@ fn default_fee_floor() -> Amount {
     Amount::from_atoms(DEFAULT_FEE_FLOOR_ATOMS)
 }
 
+fn default_block_time_secs() -> u64 {
+    vinx_core::amount::DEFAULT_BLOCK_TIME_SECS
+}
+
 fn default_chain_id() -> u32 {
     CHAIN_ID_DEVNET
 }
@@ -311,6 +319,7 @@ impl WorldState {
             // Placeholder — always overwritten by create_genesis_state before use.
             validator_set: ValidatorSet::single(Address::zero()),
             chain_id: CHAIN_ID_DEVNET,
+            block_time_secs: vinx_core::amount::DEFAULT_BLOCK_TIME_SECS,
             merkle_tree: IncrementalMerkleTree::new(),
             leaf_index: HashMap::new(),
             dirty_addrs: HashSet::new(),
@@ -485,6 +494,7 @@ impl WorldState {
                 producer,
                 block_ts,
                 self.last_block_ts,
+                vinx_core::amount::slot_timeout_secs(self.block_time_secs),
             );
             if jailed {
                 tracing::warn!(
@@ -1710,6 +1720,7 @@ impl WorldState {
         #[derive(BorshSerialize)]
         struct ConsensusCommitment<'a> {
             chain_id: u32,
+            block_time_secs: u64,
             block_height: u64,
             validator_set: &'a ValidatorSet,
             validator_pool: &'a BTreeMap<Address, vinx_core::ValidatorPoolEntry>,
@@ -1741,6 +1752,7 @@ impl WorldState {
 
         let commitment = ConsensusCommitment {
             chain_id: self.chain_id,
+            block_time_secs: self.block_time_secs,
             block_height: self.block_height,
             validator_set: &self.validator_set,
             validator_pool: &self.validator_pool,

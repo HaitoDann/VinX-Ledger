@@ -10,9 +10,6 @@ pub struct NodeConfig {
     pub validator_address: Address,
     /// Authorized validator set used for leader selection and quorum checks.
     pub validator_set: ValidatorSet,
-    /// Block time in seconds: fixed floor cadence (ADR 0041). At most one block every
-    /// `block_time_secs`; no back-to-back acceleration. Congestion handled via base-fee.
-    pub block_time_secs: u64,
     /// Maximum transactions per block.
     pub max_block_txs: usize,
     /// Maximum transactions held in the mempool at once (across all senders).
@@ -60,8 +57,6 @@ impl NodeConfig {
             validator_keypair,
             validator_address,
             validator_set,
-            // ADR 0041 — 12 s fixed: wide propagation margin, rare forks.
-            block_time_secs: 12,
             // ADR 0041 — 3 000 tx/bloc max (~250 TPS) ; raised progressively as network grows.
             max_block_txs: 3_000,
             max_mempool_size: 100_000,
@@ -93,11 +88,6 @@ impl NodeConfig {
 
     pub fn with_peers(mut self, peers: Vec<String>) -> Self {
         self.peer_addrs = peers;
-        self
-    }
-
-    pub fn with_block_time(mut self, secs: u64) -> Self {
-        self.block_time_secs = secs;
         self
     }
 

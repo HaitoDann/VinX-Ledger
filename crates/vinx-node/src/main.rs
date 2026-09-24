@@ -61,7 +61,8 @@ struct Args {
     /// Path to TOML config file (default: config.toml if it exists)
     #[arg(long)]
     config: Option<PathBuf>,
-    /// Block time in seconds (overrides config)
+    /// Block time in seconds for a **new** single-node dev genesis (ADR 0081 C6). The block
+    /// time is a protocol parameter fixed at genesis; it is ignored once the chain exists.
     #[arg(long)]
     block_time: Option<u64>,
     /// RPC listen address, e.g. 0.0.0.0:8545 (overrides config)
@@ -211,6 +212,9 @@ struct GenesisSpec {
     initial_validator: String,
     #[serde(default)]
     prefund_initial_validator_vinx: u128,
+    /// Protocol block time (ADR 0081 C6). Defaults to `DEFAULT_BLOCK_TIME_SECS` (12 s).
+    #[serde(default)]
+    block_time_secs: Option<u64>,
     /// Initial validator's BLS G1 public key, hex (48 bytes), with its
     /// Proof-of-Possession, hex (96 bytes). Required for a multi-node network: without
     /// it the BLS registry is empty at genesis and peers refuse every block.
@@ -218,6 +222,17 @@ struct GenesisSpec {
     initial_validator_bls_pub_key: Option<String>,
     #[serde(default)]
     initial_validator_bls_pop: Option<String>,
+}
+
+/// Validates a genesis block time against the protocol bounds (ADR 0081 C6).
+fn checked_block_time(secs: u64) -> u64 {
+    use vinx_core::amount::{MAX_BLOCK_TIME_SECS, MIN_BLOCK_TIME_SECS};
+    assert!(
+        (MIN_BLOCK_TIME_SECS..=MAX_BLOCK_TIME_SECS).contains(&secs),
+        "block time {secs}s outside the protocol bounds \
+         [{MIN_BLOCK_TIME_SECS}, {MAX_BLOCK_TIME_SECS}]"
+    );
+    secs
 }
 
 // ─── Main ─────────────────────────────────────────────────────────────────────
@@ -244,7 +259,11 @@ async fn main() {
     };
 
     // CLI flag > config file > hardcoded default
-    let block_time = args.block_time.or(file_cfg.block_time_secs).unwrap_or(12); // ADR 0043
+    // ADR 0081 C6: only used when this node creates a fresh genesis.
+    let block_time = args
+        .block_time
+        .or(file_cfg.block_time_secs)
+        .unwrap_or(vinx_core::amount::DEFAULT_BLOCK_TIME_SECS);
     let rpc_listen = args
         .rpc_listen
         .or(file_cfg.rpc_listen)
@@ -368,7 +387,11 @@ async fn main() {
                     initial_validator = %spec.initial_validator,
                     "⚠ Genèse construite depuis une spec partagée (testnet dev)"
                 );
-                let state = create_genesis_state_with_dev_prefund(&cfg, prefund_atoms);
+                let mut state = create_genesis_state_with_dev_prefund(&cfg, prefund_atoms);
+                state.block_time_secs = checked_block_time(
+                    spec.block_time_secs
+                        .unwrap_or(vinx_core::amount::DEFAULT_BLOCK_TIME_SECS),
+                );
                 let (chain, _genesis) = Chain::new_with_genesis(init_val, spec.genesis_timestamp);
                 (state, chain, false)
             } else {
@@ -391,7 +414,9 @@ async fn main() {
                     .and_then(|v| v.parse::<u128>().ok())
                     .map(|vinx| vinx.saturating_mul(vinx_core::amount::DECIMAL_FACTOR))
                     .unwrap_or(0);
-                let state = create_genesis_state_with_dev_prefund(&genesis_cfg, dev_prefund_atoms);
+                let mut state =
+                    create_genesis_state_with_dev_prefund(&genesis_cfg, dev_prefund_atoms);
+                state.block_time_secs = checked_block_time(block_time);
                 let (chain, _genesis) = Chain::new_with_genesis(validator_addr, timestamp);
                 (state, chain, false)
             }
@@ -406,7 +431,6 @@ async fn main() {
 
     let mut config = NodeConfig::new(validator_kp)
         .with_bls_key(bls_sk)
-        .with_block_time(block_time)
         .with_rpc_listen(&rpc_listen)
         .with_data_dir(&data_dir);
 

@@ -457,7 +457,7 @@ impl Node {
     /// - validator at distance 2 activates after `3 × block_time`
     /// - etc.
     async fn try_backup_production(&self) {
-        let block_time = self.config.block_time_secs;
+        let block_time = self.state.read().await.block_time_secs;
         let elapsed = self.last_block_instant.read().await.elapsed().as_secs();
 
         // Grace period: at least 2 full slot-times must have elapsed
@@ -543,10 +543,10 @@ impl Node {
     /// Slot skip (ADR 0027): if the scheduled leader is offline, backup validators
     /// step in after 2 × block-times via `try_backup_production`.
     pub async fn run_block_producer(self: Arc<Self>) {
-        let block_time = std::time::Duration::from_secs(self.config.block_time_secs);
-
         loop {
-            tokio::time::sleep(block_time).await;
+            // ADR 0081 C6: the cadence is the protocol value committed in the state.
+            let block_time = self.state.read().await.block_time_secs;
+            tokio::time::sleep(std::time::Duration::from_secs(block_time)).await;
 
             match self.tick().await {
                 Ok(block) => {

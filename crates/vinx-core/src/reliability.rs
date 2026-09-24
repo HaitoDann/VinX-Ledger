@@ -86,7 +86,7 @@ pub fn active_quorum(vs: &ValidatorSet, rel: &ReliabilityMap) -> usize {
 /// À l'application du bloc de hauteur `height` produit par `actual_proposer` :
 /// - remet à 0 le compteur du **proposeur effectif** (production réussie) ;
 /// - si le proposeur diffère du **leader actif prévu** *et* que le créneau du leader est
-///   écoulé ([`SLOT_TIMEOUT_SECS`] depuis le bloc précédent), incrémente le manquement de ce
+///   écoulé (`slot_timeout_secs` depuis le bloc précédent), incrémente le manquement de ce
 ///   leader et le **jaile** s'il atteint [`MAX_MISSED_PROPOSALS`].
 ///
 /// Fait 100 % déterministe (un créneau inactif ne produit pas de bloc, donc n'est jamais
@@ -98,6 +98,7 @@ pub fn on_block_applied(
     actual_proposer: &Address,
     block_ts: u64,
     prev_block_ts: u64,
+    slot_timeout_secs: u64,
 ) -> bool {
     let expected = active_leader_at(vs, rel, height);
     rel.entry(*actual_proposer).or_default().missed_proposals = 0;
@@ -106,7 +107,7 @@ pub fn on_block_applied(
     // avant le leader prévu jaile tout le set honnête en trois tours — les blocs d'un
     // non-leader sont acceptés par le chemin P2P sans aucune contrainte de créneau.
     // `block_ts`/`prev_block_ts` sont des quantités d'en-tête, donc déterministes.
-    let slot_elapsed = block_ts.saturating_sub(prev_block_ts) >= crate::amount::SLOT_TIMEOUT_SECS;
+    let slot_elapsed = block_ts.saturating_sub(prev_block_ts) >= slot_timeout_secs;
     if *actual_proposer != expected && slot_elapsed {
         let e = rel.entry(expected).or_default();
         if e.jailed_until.is_none() {
@@ -136,7 +137,8 @@ pub fn try_unjail(rel: &mut ReliabilityMap, addr: &Address, height: u64) -> bool
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::amount::SLOT_TIMEOUT_SECS;
+    const SLOT_TIMEOUT_SECS: u64 =
+        crate::amount::slot_timeout_secs(crate::amount::DEFAULT_BLOCK_TIME_SECS);
     use vinx_crypto::KeyPair;
 
     fn addrs(n: usize) -> Vec<Address> {
@@ -158,7 +160,8 @@ mod tests {
             1,
             &a[0],
             SLOT_TIMEOUT_SECS,
-            0
+            0,
+            SLOT_TIMEOUT_SECS,
         ));
         assert_eq!(rel[&a[1]].missed_proposals, 1);
         // a[0] a produit → son compteur est à 0.
@@ -171,7 +174,8 @@ mod tests {
             4,
             &a[1],
             SLOT_TIMEOUT_SECS,
-            0
+            0,
+            SLOT_TIMEOUT_SECS,
         ));
         assert_eq!(
             rel[&a[1]].missed_proposals, 0,
@@ -197,14 +201,22 @@ mod tests {
         ];
         for (h, p) in plan {
             assert!(
-                !on_block_applied(&mut rel, &vs, h, p, SLOT_TIMEOUT_SECS, 0),
+                !on_block_applied(&mut rel, &vs, h, p, SLOT_TIMEOUT_SECS, 0, SLOT_TIMEOUT_SECS),
                 "pas encore de jail à h={h}"
             );
         }
         assert_eq!(rel[&a[1]].missed_proposals, 2);
         // height 7 → 3ᵉ manquement de a[1] → jail.
         assert!(
-            on_block_applied(&mut rel, &vs, 7, &a[0], SLOT_TIMEOUT_SECS, 0),
+            on_block_applied(
+                &mut rel,
+                &vs,
+                7,
+                &a[0],
+                SLOT_TIMEOUT_SECS,
+                0,
+                SLOT_TIMEOUT_SECS
+            ),
             "jail au 3ᵉ manquement"
         );
         assert!(rel[&a[1]].is_jailed());
@@ -308,7 +320,7 @@ mod tests {
         for h in 1..=60u64 {
             let ts = prev_ts + 12;
             assert!(
-                !on_block_applied(&mut rel, &vs, h, &attacker, ts, prev_ts),
+                !on_block_applied(&mut rel, &vs, h, &attacker, ts, prev_ts, SLOT_TIMEOUT_SECS),
                 "a block at normal cadence must never jail the scheduled leader"
             );
             prev_ts = ts;
@@ -341,7 +353,8 @@ mod tests {
         let mut prev_ts = 0u64;
         for h in 1..=12u64 {
             let ts = prev_ts + SLOT_TIMEOUT_SECS + 1;
-            jailed_any |= on_block_applied(&mut rel, &vs, h, &proposer, ts, prev_ts);
+            jailed_any |=
+                on_block_applied(&mut rel, &vs, h, &proposer, ts, prev_ts, SLOT_TIMEOUT_SECS);
             prev_ts = ts;
         }
         assert!(

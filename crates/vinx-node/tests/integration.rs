@@ -47,8 +47,6 @@ async fn start_test_node() -> (Arc<Node>, String) {
     let (chain, _genesis_block) = Chain::new_with_genesis(validator_addr, 0);
 
     let config = NodeConfig::new(validator_kp)
-        // Very long block time so auto-ticking never fires during tests
-        .with_block_time(9_999)
         .with_rpc_listen(local_addr.to_string())
         // Admin routes are fail-closed: without a token they refuse everything,
         // so tests exercising them need one configured.
@@ -372,7 +370,6 @@ async fn test_faucet_endpoint() {
     const FAUCET_ATOMS: u128 = 100 * vinx_core::amount::DECIMAL_FACTOR; // 100 VinX
 
     let config = NodeConfig::new(validator_kp)
-        .with_block_time(9_999)
         .with_rpc_listen(local_addr.to_string())
         .with_faucet(faucet_kp, FAUCET_ATOMS, 86_400);
 
@@ -521,9 +518,7 @@ async fn test_crash_recovery() {
             validator_bls: None,
         });
         let (chain, _) = Chain::new_with_genesis(validator_addr, 0);
-        let config = NodeConfig::new(validator_kp.clone())
-            .with_block_time(9_999)
-            .with_data_dir(&data_dir);
+        let config = NodeConfig::new(validator_kp.clone()).with_data_dir(&data_dir);
 
         let node = Node::new(state, chain, config);
 
