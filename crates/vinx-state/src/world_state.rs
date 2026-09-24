@@ -1,3 +1,4 @@
+use crate::account_map::AccountMap;
 use borsh::{BorshDeserialize, BorshSerialize};
 use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, HashMap, HashSet};
@@ -29,10 +30,8 @@ const CONSENSUS_ROOT_DST: &[u8] = b"VINX:consensus_root:v1";
 
 #[derive(Clone, Debug, Serialize, Deserialize, BorshSerialize, BorshDeserialize)]
 pub struct WorldState {
-    /// Accounts keyed by bech32 address. A `BTreeMap` (not `HashMap`) so iteration
-    /// is already sorted by address — the Merkle leaf order — avoiding an O(n log n)
-    /// sort on every state-root rebuild and every inclusion-proof lookup.
-    pub(crate) accounts: BTreeMap<Address, Account>,
+    /// Accounts, sorted by address; persistent map with O(1) clone (ADR 0083).
+    pub(crate) accounts: AccountMap,
     /// Tokens in circulation (Σ balances + staked + pending unbonds). Together with
     /// `epoch_dist_emission_pot` and `destroyed_atoms` this always equals `emitted_atoms`.
     pub circulating_supply: Amount,
@@ -276,7 +275,7 @@ impl WorldState {
     pub fn new() -> Self {
         let fee_floor = Amount::from_atoms(DEFAULT_FEE_FLOOR_ATOMS);
         Self {
-            accounts: BTreeMap::new(),
+            accounts: AccountMap::new(),
             circulating_supply: Amount::ZERO,
             block_height: 0,
             emission_epoch_ts: 0,
@@ -324,11 +323,12 @@ impl WorldState {
     /// the changed accounts, O(log n) each.
     fn flush_dirty(&mut self) {
         if !self.tree_synced {
-            let mut tree = SparseMerkleTree::new();
-            for a in self.accounts.values() {
-                tree.insert(account_key(&a.address), hash_account(a));
-            }
-            self.account_tree = tree;
+            self.account_tree = SparseMerkleTree::from_entries(
+                self.accounts
+                    .values()
+                    .map(|a| (account_key(&a.address), hash_account(a)))
+                    .collect(),
+            );
             self.tree_synced = true;
             self.dirty_addrs.clear();
             return;

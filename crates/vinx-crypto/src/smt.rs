@@ -152,6 +152,19 @@ fn remove(node: &Option<Arc<Node>>, key: &Hash32, depth: usize) -> Option<Arc<No
     }
 }
 
+/// Builds the canonical subtree of sorted, distinct `entries` sharing a prefix of `depth`.
+fn build(entries: &[(Hash32, Hash32)], depth: usize) -> Option<Arc<Node>> {
+    match entries {
+        [] => None,
+        [(k, v)] => Some(Node::leaf(*k, *v)),
+        _ => {
+            let split = entries.partition_point(|(k, _)| !bit(k, depth));
+            let (l, r) = entries.split_at(split);
+            Some(Node::internal(build(l, depth + 1), build(r, depth + 1)))
+        }
+    }
+}
+
 /// Proof that a key maps to a value, or to nothing, under a root.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct SmtProof {
@@ -208,6 +221,20 @@ pub struct SparseMerkleTree {
 impl SparseMerkleTree {
     pub fn new() -> Self {
         Self::default()
+    }
+
+    /// Builds a tree from `(key, value)` pairs in one pass, O(n · depth) hashing with no
+    /// intermediate copies. Duplicate keys keep the last value.
+    pub fn from_entries(mut entries: Vec<(Hash32, Hash32)>) -> Self {
+        entries.sort_by(|a, b| a.0.cmp(&b.0));
+        entries.reverse();
+        entries.dedup_by(|a, b| a.0 == b.0); // keeps the first of each run = the last inserted
+        entries.reverse();
+        let len = entries.len();
+        Self {
+            root: build(&entries, 0),
+            len,
+        }
     }
 
     pub fn root(&self) -> Hash32 {
@@ -330,6 +357,22 @@ mod tests {
         }
         assert_eq!(a.root(), SMT_EMPTY);
         assert!(a.is_empty());
+    }
+
+    #[test]
+    fn bulk_build_matches_inserts() {
+        let mut t = SparseMerkleTree::new();
+        let mut entries = vec![];
+        for i in 0..500 {
+            t.insert(k(i), k(i + 3));
+            entries.push((k(i), k(i + 3)));
+        }
+        entries.push((k(7), k(1))); // later duplicate wins
+        t.insert(k(7), k(1));
+        let b = SparseMerkleTree::from_entries(entries);
+        assert_eq!(b.root(), t.root());
+        assert_eq!(b.len(), t.len());
+        assert_eq!(SparseMerkleTree::from_entries(vec![]).root(), SMT_EMPTY);
     }
 
     #[test]

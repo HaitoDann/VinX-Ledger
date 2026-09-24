@@ -1,3 +1,4 @@
+pub mod account_map;
 pub mod genesis;
 pub mod world_state;
 
