@@ -14,7 +14,11 @@ fn genesis_with(admin: Address) -> WorldState {
         chain_id: vinx_core::CHAIN_ID_DEVNET,
         admin_address: admin,
         validator_address: validator,
-        validator_bls: None,
+        validator_bls: vinx_state::GenesisBlsKey::from_secret(
+            &vinx_crypto::BlsSecretKey::generate(),
+            &validator,
+            vinx_core::CHAIN_ID_DEVNET,
+        ),
     })
 }
 
@@ -288,30 +292,16 @@ fn genesis_registers_the_validator_bls_key() {
     let validator = Address::from_public_key(&KeyPair::generate().public_key());
     let sk = BlsSecretKey::generate();
 
-    // Without the key, the registry is empty — the deadlock this fixes.
-    let bare = create_genesis_state(&GenesisConfig {
-        chain_id: vinx_core::CHAIN_ID_DEVNET,
-        admin_address: admin,
-        validator_address: validator,
-        validator_bls: None,
-    });
-    assert_eq!(
-        bare.indexed_bls_keys(&bare.validator_set),
-        vec![None],
-        "no key configured ⇒ empty registry (single-node use only)"
-    );
-
-    // With it, the genesis validator is authenticable from block 1.
+    // The key is mandatory (ADR 0082): the genesis validator is authenticable from block 1.
     let state = create_genesis_state(&GenesisConfig {
         chain_id: vinx_core::CHAIN_ID_DEVNET,
         admin_address: admin,
         validator_address: validator,
-        validator_bls: Some(vinx_state::GenesisBlsKey {
-            pub_key: sk.public_key().0,
-            pop: sk
-                .proof_of_possession(validator.as_bytes(), vinx_core::CHAIN_ID_DEVNET)
-                .0,
-        }),
+        validator_bls: vinx_state::GenesisBlsKey::from_secret(
+            &sk,
+            &validator,
+            vinx_core::CHAIN_ID_DEVNET,
+        ),
     });
     assert_eq!(
         state.indexed_bls_keys(&state.validator_set),
@@ -336,13 +326,13 @@ fn genesis_rejects_an_invalid_bls_pop() {
         chain_id: vinx_core::CHAIN_ID_DEVNET,
         admin_address: admin,
         validator_address: validator,
-        validator_bls: Some(vinx_state::GenesisBlsKey {
+        validator_bls: vinx_state::GenesisBlsKey {
             pub_key: sk.public_key().0,
             // PoP d'une autre clé — la genèse doit refuser d'écrire une clé invérifiable.
             pop: other
                 .proof_of_possession(validator.as_bytes(), vinx_core::CHAIN_ID_DEVNET)
                 .0,
-        }),
+        },
     });
 }
 
@@ -458,7 +448,7 @@ fn state_root_commits_emission_flag() {
 
     // Un état identique sauf `emission_started` doit avoir une racine différente.
     let mut started = base.clone();
-    started.settle_block(&admin, 1, 0); // établit l'époque à t=0 → emission_epoch_ts reste 0
+    started.settle_block(&admin, 0); // établit l'époque à t=0 → emission_epoch_ts reste 0
     assert_ne!(
         started.compute_consensus_root(),
         baseline,

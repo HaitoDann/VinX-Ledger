@@ -45,7 +45,11 @@ fn test_storage_roundtrip() {
         chain_id: vinx_core::CHAIN_ID_DEVNET,
         admin_address: admin,
         validator_address: validator,
-        validator_bls: None,
+        validator_bls: vinx_state::GenesisBlsKey::from_secret(
+            &vinx_crypto::BlsSecretKey::generate(),
+            &validator,
+            vinx_core::CHAIN_ID_DEVNET,
+        ),
     });
     let (mut chain, _) = Chain::new_with_genesis(validator, 0);
 
@@ -77,7 +81,11 @@ fn test_storage_roundtrip_preserves_typed_tx_index() {
         chain_id: vinx_core::CHAIN_ID_DEVNET,
         admin_address: admin,
         validator_address: validator,
-        validator_bls: None,
+        validator_bls: vinx_state::GenesisBlsKey::from_secret(
+            &vinx_crypto::BlsSecretKey::generate(),
+            &validator,
+            vinx_core::CHAIN_ID_DEVNET,
+        ),
     });
     let (mut chain, _) = Chain::new_with_genesis(validator, 0);
 
@@ -93,6 +101,7 @@ fn test_storage_roundtrip_preserves_typed_tx_index() {
     let block = Block {
         header: BlockHeader {
             height: 1,
+            round: 0,
             prev_hash: chain.tip_hash(),
             timestamp: 1,
             validator,
@@ -100,13 +109,12 @@ fn test_storage_roundtrip_preserves_typed_tx_index() {
             state_root: [0u8; 32],
             base_fee: 0,
             receipts_root: [0u8; 32],
+            last_commit_hash: [0u8; 32],
         },
         transactions: vec![tx],
-        bls_aggregate: None,
-        bls_cosigner_pks: vec![],
-        bls_bitmap: vec![],
+        last_commit: None,
     };
-    chain.push(block);
+    chain.push(block, None);
 
     let storage = Storage::new(tmp.path());
     storage.save(&mut state, &mut chain).unwrap();
@@ -133,7 +141,11 @@ fn test_incremental_persist_writes_only_dirty_rows() {
         chain_id: vinx_core::CHAIN_ID_DEVNET,
         admin_address: admin,
         validator_address: validator,
-        validator_bls: None,
+        validator_bls: vinx_state::GenesisBlsKey::from_secret(
+            &vinx_crypto::BlsSecretKey::generate(),
+            &validator,
+            vinx_core::CHAIN_ID_DEVNET,
+        ),
     });
     let (mut chain, _) = Chain::new_with_genesis(validator, 0);
     let storage = Storage::new(tmp.path());
@@ -172,14 +184,21 @@ async fn test_state_persists_across_node_restarts() {
 
     // ── First run: produce 5 blocks ──────────────────────────────────────────
     {
+        let bls_sk = vinx_crypto::BlsSecretKey::generate();
         let state = create_genesis_state(&GenesisConfig {
             chain_id: vinx_core::CHAIN_ID_DEVNET,
             admin_address: admin_addr,
             validator_address: validator_addr,
-            validator_bls: None,
+            validator_bls: vinx_state::GenesisBlsKey::from_secret(
+                &bls_sk,
+                &validator_addr,
+                vinx_core::CHAIN_ID_DEVNET,
+            ),
         });
         let (chain, _) = Chain::new_with_genesis(validator_addr, 0);
-        let config = NodeConfig::new(validator_kp.clone()).with_data_dir(tmp.path());
+        let config = NodeConfig::new(validator_kp.clone())
+            .with_data_dir(tmp.path())
+            .with_bls_key(bls_sk);
         let node = Node::new(state, chain, config);
 
         for _ in 0..5 {
@@ -200,38 +219,5 @@ async fn test_state_persists_across_node_restarts() {
         assert_eq!(state.block_height, 5);
         // Fair launch: the admin/founder is granted nothing at genesis.
         assert_eq!(state.account_balance(&admin_addr), Amount::ZERO);
-    }
-}
-
-/// VX-RED-003 / VX-RED-007 — the vote lock must make "one validator, one vote per
-/// height" an enforced invariant, and it must survive a restart: an attacker who sends a
-/// competing block after a reboot would otherwise still induce equivocation.
-#[test]
-fn vote_lock_prevents_equivocation_and_survives_restart() {
-    let dir = TmpDir::new();
-    let hash_a = [0xAAu8; 32];
-    let hash_b = [0xBBu8; 32];
-
-    {
-        let storage = Storage::open(dir.path()).unwrap();
-        // First vote at height 7 is granted.
-        assert!(storage.claim_vote(7, hash_a).unwrap());
-        // Re-signing the *same* block is idempotent — a re-gossiped block is not
-        // equivocation and must not be refused.
-        assert!(storage.claim_vote(7, hash_a).unwrap());
-        // A different block at the same height is refused.
-        assert!(!storage.claim_vote(7, hash_b).unwrap());
-        // Other heights are unaffected.
-        assert!(storage.claim_vote(8, hash_b).unwrap());
-        assert_eq!(storage.recorded_vote(7), Some(hash_a));
-    }
-
-    // Reopen: the lock is durable, so the refusal still stands after a restart.
-    {
-        let storage = Storage::open(dir.path()).unwrap();
-        assert_eq!(storage.recorded_vote(7), Some(hash_a));
-        assert!(!storage.claim_vote(7, hash_b).unwrap());
-        assert!(storage.claim_vote(7, hash_a).unwrap());
-        assert_eq!(storage.recorded_vote(9), None);
     }
 }

@@ -2,23 +2,25 @@ use std::io;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
-use crate::chain::Chain;
+use crate::chain::{Chain, ChainRow};
 use ahash::AHashMap;
 use redb::{Database, ReadableTable, TableDefinition};
-use vinx_core::{Account, Block, Transaction};
+use vinx_core::{Account, SignedVote, Transaction, VoteKind};
 use vinx_crypto::{Address, Hash32};
 use vinx_state::WorldState;
 use zstd;
 
 /// Schema version stored in the meta table. Increment when the on-disk layout changes.
 ///
+/// v23 (ADR 0082): block rows carry their commit certificate; the vote lock is keyed by
+/// (height, round, kind). Pre-genesis, so older databases are refused like v22.
 /// v22 (ADR 0081): pre-genesis reset. The protocol changed incompatibly (1 Md supply,
 /// 9 decimals, Bech32m, module registry removed, fee split), so there is no migration
 /// path from any older database: a pre-v22 database belongs to another protocol and is
 /// refused, left untouched. Every earlier step (v2–v21) predates the public genesis and
 /// its migration code has been retired. From v22 on, layout changes that must preserve
 /// a live network add an explicit step to `Storage::open`.
-const STORAGE_VERSION: u64 = 22;
+const STORAGE_VERSION: u64 = 23;
 
 /// zstd compression level — level 3 is the sweet spot: ~60-70% size reduction,
 /// negligible latency compared to disk I/O.
@@ -28,13 +30,14 @@ const STATE: TableDefinition<&str, &[u8]> = TableDefinition::new("state");
 /// Per-account rows: bech32 address → borsh(Account), stored uncompressed.
 /// Accounts are tiny (~100 B); per-row zstd framing would cost more than it saves.
 const ACCOUNTS: TableDefinition<&[u8], &[u8]> = TableDefinition::new("accounts");
-/// Per-block rows: height → zstd(borsh((block_hash, Block))). Written
+/// Per-block rows: height → zstd(borsh(ChainRow)) — hash, block and commit. Written
 /// incrementally — only heights dirtied since the last flush (v10).
 const BLOCKS: TableDefinition<u64, &[u8]> = TableDefinition::new("blocks");
 const META: TableDefinition<&str, u64> = TableDefinition::new("meta");
-/// Height → the single block hash this validator has co-signed at that height
-/// (VX-RED-003 / VX-RED-007). Durable and committed *before* a signature is released.
-const VOTES: TableDefinition<u64, [u8; 32]> = TableDefinition::new("votes");
+/// Double-sign guard (ADR 0082, VX-RED-003): `height(8 BE) ‖ round(4 BE) ‖ kind(1)` →
+/// the value signed (`0` for nil, `1 ‖ hash`). Durable and committed *before* a signature
+/// is released.
+const VOTES: TableDefinition<&[u8], &[u8]> = TableDefinition::new("votes");
 
 pub struct Storage {
     db: Arc<Database>,
@@ -147,11 +150,11 @@ impl Storage {
     fn serialize_chain(
         chain: &mut Chain,
     ) -> io::Result<(Vec<u8>, Vec<(u64, Vec<u8>)>, Vec<u8>, Vec<u8>)> {
-        let chain_meta = borsh::to_vec(&chain.finalized_height())
+        let chain_meta = borsh::to_vec(&chain.height_base)
             .map_err(|e| Self::io_err(format!("serialize chain_meta: {e}")))?;
         let mut block_rows = Vec::new();
         for height in chain.take_dirty_heights() {
-            if let Some(row) = chain.block_row(height) {
+            if let Some(row) = chain.row(height) {
                 let bytes = borsh::to_vec(row)
                     .map_err(|e| Self::io_err(format!("serialize block {height}: {e}")))?;
                 block_rows.push((height, bytes));
@@ -328,16 +331,16 @@ impl Storage {
             tracing::debug!(accounts = count, "Loaded accounts from per-key store");
         }
 
-        // Chain: finalized-height watermark + per-height block rows (v10).
+        // Chain: base height + per-height rows (block and commit certificate).
         let chain_meta_bytes = Self::decompress(tbl.get("chain_meta").ok()??.value())
             .map_err(|e| tracing::warn!("Cannot decompress chain_meta: {e}"))
             .ok()?;
-        let finalized_height: u64 = borsh::from_slice(&chain_meta_bytes)
+        let stored_base: u64 = borsh::from_slice(&chain_meta_bytes)
             .map_err(|e| tracing::warn!("Cannot deserialize chain_meta: {e}"))
             .ok()?;
 
         let btbl = tx.open_table(BLOCKS).ok()?;
-        let mut blocks: Vec<(Hash32, Block)> = Vec::new();
+        let mut blocks: Vec<ChainRow> = Vec::new();
         let mut height_base: Option<u64> = None;
         let iter = btbl.iter().ok()?;
         for entry in iter.flatten() {
@@ -356,7 +359,7 @@ impl Storage {
             let bytes = Self::decompress(row)
                 .map_err(|e| tracing::warn!("Cannot decompress block {height}: {e}"))
                 .ok()?;
-            let parsed: (Hash32, Block) = borsh::from_slice(&bytes)
+            let parsed: ChainRow = borsh::from_slice(&bytes)
                 .map_err(|e| tracing::warn!("Cannot deserialize block {height}: {e}"))
                 .ok()?;
             blocks.push(parsed);
@@ -365,8 +368,16 @@ impl Storage {
             tracing::warn!("chain_meta present but no block rows — refusing to load");
             return None;
         }
-        let mut chain = Chain::from_parts(blocks, finalized_height);
-        chain.height_base = height_base.unwrap_or(0);
+        let base = height_base.unwrap_or(0);
+        if base != stored_base {
+            tracing::warn!(
+                base,
+                stored_base,
+                "Chain base height mismatch — refusing to load"
+            );
+            return None;
+        }
+        let mut chain = Chain::from_rows(blocks, base);
 
         // Restore persisted indexes — O(1) vs O(blocks×txs) rebuild
         let indexes_restored = (|| -> Option<()> {
@@ -400,56 +411,81 @@ impl Storage {
         borsh::to_vec(txs).map_err(|e| Self::io_err(format!("serialize mempool: {e}")))
     }
 
-    /// Compresses and writes a pre-serialized mempool blob to redb.
-    /// Designed to run inside `tokio::task::spawn_blocking`.
-    /// Claims the right to co-sign `block_hash` at `height` — the vote lock that makes
-    /// "one validator, one vote per height" an enforced invariant rather than an
-    /// observation (VX-RED-003 / VX-RED-007).
+    fn vote_key(height: u64, round: u32, kind: VoteKind) -> [u8; 13] {
+        let mut k = [0u8; 13];
+        k[..8].copy_from_slice(&height.to_be_bytes());
+        k[8..12].copy_from_slice(&round.to_be_bytes());
+        k[12] = match kind {
+            VoteKind::Prevote => 1,
+            VoteKind::Precommit => 2,
+        };
+        k
+    }
+
+    fn vote_value(value: &Option<Hash32>) -> Vec<u8> {
+        match value {
+            Some(h) => {
+                let mut v = vec![1u8];
+                v.extend_from_slice(h);
+                v
+            }
+            None => vec![0u8],
+        }
+    }
+
+    /// Claims the right to sign `vote` — the double-sign guard (ADR 0082, VX-RED-003).
     ///
-    /// Returns `Ok(true)` when the caller may sign: either no vote is recorded at this
-    /// height, or the recorded vote is for this exact hash (so re-signing is idempotent —
-    /// a re-gossiped block must not be treated as equivocation). Returns `Ok(false)` when
-    /// a *different* hash is already locked at that height; the caller must not sign.
-    ///
-    /// The write is committed before this returns, so the lock survives a crash between
-    /// claiming and signing. Committing durably before the signature is released is the
-    /// whole point: a lock recorded after the fact cannot prevent anything.
-    pub fn claim_vote(&self, height: u64, block_hash: [u8; 32]) -> io::Result<bool> {
-        let write = self
-            .db
-            .begin_write()
-            .map_err(|e| io::Error::other(e.to_string()))?;
+    /// Returns `Ok(true)` when no vote of this `(height, round, kind)` was signed before,
+    /// or the recorded one has the same value (re-signing is idempotent). Returns
+    /// `Ok(false)` when a *different* value is recorded: signing would be equivocation.
+    /// The record is committed before this returns, so it survives a crash between the
+    /// claim and the signature — a lock written after the fact prevents nothing.
+    pub fn claim_sign(&self, vote: &SignedVote) -> io::Result<bool> {
+        let key = Self::vote_key(vote.height, vote.round, vote.kind);
+        let value = Self::vote_value(&vote.value);
+        let write = self.db.begin_write().map_err(Self::io_err)?;
         let allowed = {
-            let mut t = write
-                .open_table(VOTES)
-                .map_err(|e| io::Error::other(e.to_string()))?;
+            let mut t = write.open_table(VOTES).map_err(Self::io_err)?;
             let existing = t
-                .get(height)
-                .map_err(|e| io::Error::other(e.to_string()))?
-                .map(|v| v.value());
+                .get(key.as_slice())
+                .map_err(Self::io_err)?
+                .map(|v| v.value().to_vec());
             match existing {
-                Some(h) if h != block_hash => false,
-                Some(_) => true, // same block — idempotent
+                Some(prev) => prev == value,
                 None => {
-                    t.insert(height, block_hash)
-                        .map_err(|e| io::Error::other(e.to_string()))?;
+                    t.insert(key.as_slice(), value.as_slice())
+                        .map_err(Self::io_err)?;
                     true
                 }
             }
         };
-        write
-            .commit()
-            .map_err(|e| io::Error::other(e.to_string()))?;
+        write.commit().map_err(Self::io_err)?;
         Ok(allowed)
     }
 
-    /// The block hash this validator co-signed at `height`, if any.
-    pub fn recorded_vote(&self, height: u64) -> Option<[u8; 32]> {
+    /// The highest-round non-nil precommit we signed at `height` — our Tendermint lock,
+    /// restored after a restart so the node keeps honouring it.
+    pub fn last_precommit(&self, height: u64) -> Option<(u32, Hash32)> {
         let read = self.db.begin_read().ok()?;
         let t = read.open_table(VOTES).ok()?;
-        t.get(height).ok()?.map(|v| v.value())
+        let from = Self::vote_key(height, 0, VoteKind::Prevote);
+        let to = Self::vote_key(height, u32::MAX, VoteKind::Precommit);
+        let mut best: Option<(u32, Hash32)> = None;
+        for entry in t.range(from.as_slice()..=to.as_slice()).ok()?.flatten() {
+            let (k, v) = (entry.0.value(), entry.1.value());
+            if k.len() == 13 && k[12] == 2 && v.len() == 33 && v[0] == 1 {
+                let round = u32::from_be_bytes(k[8..12].try_into().ok()?);
+                let hash: Hash32 = v[1..].try_into().ok()?;
+                if best.is_none_or(|(r, _)| round > r) {
+                    best = Some((round, hash));
+                }
+            }
+        }
+        best
     }
 
+    /// Compresses and writes a pre-serialized mempool blob to redb.
+    /// Designed to run inside `tokio::task::spawn_blocking`.
     pub fn save_mempool_blob(&self, blob: Vec<u8>) -> io::Result<()> {
         let compressed = Self::compress(&blob)?;
         let tx = self.db.begin_write().map_err(Self::io_err)?;
@@ -619,7 +655,11 @@ mod tests {
             chain_id: vinx_core::CHAIN_ID_DEVNET,
             admin_address: admin,
             validator_address: validator,
-            validator_bls: None,
+            validator_bls: vinx_state::GenesisBlsKey::from_secret(
+                &vinx_crypto::BlsSecretKey::generate(),
+                &validator,
+                vinx_core::CHAIN_ID_DEVNET,
+            ),
         });
         let (mut chain, _) = Chain::new_with_genesis(validator, 0);
 
@@ -662,11 +702,12 @@ mod tests {
         );
     }
 
-    fn make_test_block(height: u64, prev_hash: Hash32, validator: Address) -> Block {
+    fn make_test_block(height: u64, prev_hash: Hash32, validator: Address) -> vinx_core::Block {
         use vinx_core::BlockHeader;
-        Block {
+        vinx_core::Block {
             header: BlockHeader {
                 height,
+                round: 0,
                 prev_hash,
                 timestamp: height,
                 validator,
@@ -674,11 +715,20 @@ mod tests {
                 state_root: [0u8; 32],
                 base_fee: 0,
                 receipts_root: [0u8; 32],
+                last_commit_hash: [0u8; 32],
             },
             transactions: vec![],
-            bls_aggregate: None,
-            bls_cosigner_pks: vec![],
-            bls_bitmap: vec![],
+            last_commit: None,
+        }
+    }
+
+    fn cert_for(block: &vinx_core::Block) -> vinx_core::CommitCert {
+        vinx_core::CommitCert {
+            height: block.header.height,
+            round: 0,
+            block_hash: block.hash(),
+            bitmap: vec![1],
+            aggregate: vec![0u8; 96],
         }
     }
 
@@ -696,7 +746,11 @@ mod tests {
             chain_id: vinx_core::CHAIN_ID_DEVNET,
             admin_address: admin,
             validator_address: validator,
-            validator_bls: None,
+            validator_bls: vinx_state::GenesisBlsKey::from_secret(
+                &vinx_crypto::BlsSecretKey::generate(),
+                &validator,
+                vinx_core::CHAIN_ID_DEVNET,
+            ),
         });
         let (mut chain, _) = Chain::new_with_genesis(validator, 0);
 
@@ -705,8 +759,11 @@ mod tests {
             storage.save(&mut state, &mut chain).unwrap();
 
             // Two new blocks → exactly two dirty rows in the next flush.
-            chain.push(make_test_block(1, chain.tip_hash(), validator));
-            chain.push(make_test_block(2, chain.tip_hash(), validator));
+            for h in 1..=2 {
+                let b = make_test_block(h, chain.tip_hash(), validator);
+                let c = cert_for(&b);
+                chain.push(b, Some(c));
+            }
             let w = Storage::serialize_incremental(&mut state, &mut chain).unwrap();
             let mut heights: Vec<u64> = w.block_rows.iter().map(|(h, _)| *h).collect();
             heights.sort_unstable();
@@ -724,8 +781,60 @@ mod tests {
         assert_eq!(loaded.tip_height(), 2);
         assert_eq!(loaded.tip_hash(), chain.tip_hash());
         assert_eq!(loaded.finalized_height(), chain.finalized_height());
+        assert_eq!(
+            loaded.get_commit(2),
+            chain.get_commit(2),
+            "commit survives reload"
+        );
     }
 
-    // v9 → v10: a monolithic v9 "chain" blob is exploded into per-height rows on
-    // open, the blob removed, and the chain loads identically afterwards.
+    // ADR 0082 — the double-sign guard: one value per (height, round, kind), durable,
+    // idempotent for the same value, and the lock is recoverable after a restart.
+    #[test]
+    fn test_sign_guard_and_lock_recovery() {
+        use vinx_core::{SignedVote, VoteKind};
+        let tmp = Tmp::new();
+        let vote = |kind, round, value: Option<Hash32>| SignedVote {
+            kind,
+            height: 7,
+            round,
+            value,
+            validator: Address::from_bytes([1; 20]),
+            signature: vec![],
+        };
+        {
+            let storage = Storage::open(&tmp.0).unwrap();
+            assert!(storage
+                .claim_sign(&vote(VoteKind::Prevote, 0, Some([1; 32])))
+                .unwrap());
+            assert!(
+                storage
+                    .claim_sign(&vote(VoteKind::Prevote, 0, Some([1; 32])))
+                    .unwrap(),
+                "same value again is idempotent"
+            );
+            assert!(
+                !storage
+                    .claim_sign(&vote(VoteKind::Prevote, 0, None))
+                    .unwrap(),
+                "another value at the same (height, round, kind) is refused"
+            );
+            assert!(storage
+                .claim_sign(&vote(VoteKind::Precommit, 0, Some([1; 32])))
+                .unwrap());
+            assert!(storage
+                .claim_sign(&vote(VoteKind::Precommit, 2, Some([2; 32])))
+                .unwrap());
+            assert!(storage
+                .claim_sign(&vote(VoteKind::Precommit, 3, None))
+                .unwrap());
+        }
+        // After a restart the refusal still holds and the lock is recovered.
+        let storage = Storage::open(&tmp.0).unwrap();
+        assert!(!storage
+            .claim_sign(&vote(VoteKind::Prevote, 0, None))
+            .unwrap());
+        assert_eq!(storage.last_precommit(7), Some((2, [2; 32])));
+        assert_eq!(storage.last_precommit(8), None);
+    }
 }

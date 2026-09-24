@@ -1,8 +1,9 @@
-use std::collections::{HashMap, HashSet};
-
 use serde::{Deserialize, Serialize};
-use vinx_core::{Account, Block, ProtocolVersion, ScheduledUpgrade, Transaction, ValidatorSet};
-use vinx_crypto::{Address, Hash32};
+use vinx_core::{
+    reliability::ReliabilityMap, Account, Block, CommitCert, ProtocolVersion, ScheduledUpgrade,
+    Transaction, ValidatorSet,
+};
+use vinx_crypto::Hash32;
 
 fn hash_to_hex(h: &Hash32) -> String {
     hex::encode(h)
@@ -86,29 +87,29 @@ impl TxResponse {
 #[derive(Serialize)]
 pub struct BlockResponse {
     pub height: u64,
+    /// Consensus round in which the block was built (ADR 0082).
+    pub round: u32,
     pub hash: String,
     pub prev_hash: String,
     pub timestamp: u64,
     pub validator: String,
     pub tx_count: u32,
     pub state_root: String,
-    /// Dynamic fee floor (in atoms) at block production time.
+    /// Base fee (in atoms) of this block.
     pub base_fee: u64,
-    /// Number of valid co-signatures from registered validators.
+    /// Validators whose precommits are in this block's commit certificate.
     pub signatures_count: usize,
-    /// True when signatures_count >= quorum.
+    /// Every stored block is committed by a certificate (ADR 0082): always true, kept for
+    /// API compatibility.
     pub finalized: bool,
     pub transactions: Vec<TxResponse>,
 }
 
 impl BlockResponse {
-    pub fn from_block(
-        block: &Block,
-        validator_set: &ValidatorSet,
-        indexed_bls_pks: &[Option<[u8; 48]>],
-    ) -> Self {
+    pub fn from_block(block: &Block, commit: Option<&CommitCert>) -> Self {
         Self {
             height: block.header.height,
+            round: block.header.round,
             hash: hash_to_hex(&block.hash()),
             prev_hash: hash_to_hex(&block.header.prev_hash),
             timestamp: block.header.timestamp,
@@ -116,12 +117,8 @@ impl BlockResponse {
             tx_count: block.header.tx_count,
             state_root: hash_to_hex(&block.header.state_root),
             base_fee: block.header.base_fee,
-            // VINX-02: report co-signers actually bound to registered validator keys,
-            // not the count the block advertises for itself.
-            signatures_count: block
-                .bls_signer_count_from_bitmap(indexed_bls_pks)
-                .unwrap_or(0),
-            finalized: block.is_finalized(validator_set, indexed_bls_pks),
+            signatures_count: commit.map(|c| c.signers().len()).unwrap_or(0),
+            finalized: true,
             transactions: block.transactions.iter().map(TxResponse::from_tx).collect(),
         }
     }
@@ -153,55 +150,52 @@ impl TxWithBlockResponse {
 #[derive(Serialize)]
 pub struct ValidatorInfo {
     pub address: String,
-    /// True if this validator is the round-robin leader for the next block.
+    /// True if this validator proposes round 0 of the next height.
     pub is_next_leader: bool,
-    /// Last block height produced by this validator (None = never seen on this node).
-    pub last_seen_height: Option<u64>,
-    /// Considered online if it produced a block within the last 10 slots.
+    /// Voting power (bond in VINX, capped — ADR 0081 C4).
+    pub power: u64,
+    /// Consecutive missed proposals (ADR 0027).
+    pub missed_proposals: u32,
+    /// Not jailed and no missed proposal in a row.
     pub online: bool,
-    /// True when the validator has been offline for too many consecutive blocks and
-    /// has been temporarily suspended from the round-robin by liveness eviction.
+    /// Jailed (skipped by the proposer rotation until `Unjail`).
     pub suspended: bool,
 }
 
 #[derive(Serialize)]
 pub struct ValidatorSetResponse {
     pub count: usize,
-    pub quorum: usize,
+    /// Voting power needed to commit: strictly more than 2/3 of `total_power`.
+    pub quorum: u64,
+    pub total_power: u64,
     pub next_leader: String,
     pub validators: Vec<ValidatorInfo>,
 }
 
 impl ValidatorSetResponse {
-    pub fn from_validator_set(
-        vs: &ValidatorSet,
-        next_height: u64,
-        liveness: &HashMap<Address, u64>,
-        slot_window: u64,
-        suspended: &HashSet<Address>,
-    ) -> Self {
-        let next_leader_addr = vs.leader_at(next_height);
-        let next_leader = next_leader_addr.to_string();
+    pub fn from_validator_set(vs: &ValidatorSet, rel: &ReliabilityMap) -> Self {
+        let next_leader_addr = vinx_core::reliability::proposer_for_round(vs, rel, 0);
         let validators = vs
             .validators()
             .iter()
-            .map(|a| {
-                let last_seen = liveness.get(a).copied();
-                let online =
-                    last_seen.is_some_and(|h| next_height.saturating_sub(h) <= slot_window);
+            .enumerate()
+            .map(|(i, a)| {
+                let r = rel.get(a).cloned().unwrap_or_default();
                 ValidatorInfo {
-                    is_next_leader: a == next_leader_addr,
-                    suspended: suspended.contains(a),
+                    is_next_leader: *a == next_leader_addr,
                     address: a.to_string(),
-                    last_seen_height: last_seen,
-                    online,
+                    power: vs.power_at(i),
+                    missed_proposals: r.missed_proposals,
+                    online: !r.is_jailed() && r.missed_proposals == 0,
+                    suspended: r.is_jailed(),
                 }
             })
             .collect();
         Self {
             count: vs.len(),
-            quorum: vs.quorum(),
-            next_leader,
+            quorum: vs.quorum_power(),
+            total_power: vs.total_power(),
+            next_leader: next_leader_addr.to_string(),
             validators,
         }
     }
@@ -299,6 +293,8 @@ pub struct ChainSnapshotResponse {
     pub state_root: String,
     /// The block at `height` (needed to call `Chain::new_from_snapshot`).
     pub block: vinx_core::Block,
+    /// Its commit certificate (ADR 0082), verified against the snapshot's voting set.
+    pub commit: vinx_core::CommitCert,
     /// WorldState serialized as borsh, compressed with zstd, hex-encoded.
     pub state_hex: String,
 }

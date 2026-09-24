@@ -10,7 +10,8 @@ pub struct NodeConfig {
     pub validator_address: Address,
     /// Authorized validator set used for leader selection and quorum checks.
     pub validator_set: ValidatorSet,
-    /// Maximum transactions per block.
+    /// Maximum transactions this node puts in a block it proposes (capped by the protocol's
+    /// `MAX_BLOCK_TXS`).
     pub max_block_txs: usize,
     /// Maximum transactions held in the mempool at once (across all senders).
     /// Should be several blocks' worth so bursts can queue while blocks drain.
@@ -41,6 +42,11 @@ pub struct NodeConfig {
     pub chain_id: u32,
     /// Bootstrap peer multiaddrs dialed on P2P startup for initial peer discovery.
     pub bootstrap_peers: Vec<String>,
+    /// Trusted checkpoints (ADR 0074): a committed block at a checkpoint height must carry
+    /// the expected hash, or it is refused.
+    pub checkpoints: crate::checkpoints::Checkpoints,
+    /// Consensus round timeouts (ADR 0082).
+    pub timeouts: crate::bft::Timeouts,
 }
 
 impl NodeConfig {
@@ -67,7 +73,18 @@ impl NodeConfig {
             faucet_cooldown_secs: 86_400,
             chain_id: CHAIN_ID_DEVNET,
             bootstrap_peers: vec![],
+            checkpoints: crate::checkpoints::Checkpoints::none(),
+            timeouts: crate::bft::Timeouts::default(),
         }
+    }
+
+    /// Genesis key material of this node's BLS key (for a genesis it validates).
+    pub fn genesis_bls(&self) -> vinx_state::GenesisBlsKey {
+        vinx_state::GenesisBlsKey::from_secret(
+            &self.bls_secret_key,
+            &self.validator_address,
+            self.chain_id,
+        )
     }
 
     pub fn with_validator_set(mut self, validator_set: ValidatorSet) -> Self {

@@ -283,6 +283,56 @@ impl Mempool {
         result
     }
 
+    /// Non-destructive block selection (ADR 0082): the same ordering as [`Self::drain`]
+    /// (highest fee first, nonce order kept per sender), but nothing leaves the mempool.
+    /// A proposal may not be committed; transactions are only removed once their block
+    /// is, via [`Self::update_confirmed_nonces`].
+    pub fn select(&self, limit: usize) -> Vec<Transaction> {
+        let mut result = Vec::with_capacity(limit.min(self.pending_count));
+        let mut iters: AHashMap<
+            Address,
+            std::collections::btree_map::Values<'_, u64, Transaction>,
+        > = self.queues.iter().map(|(a, q)| (*a, q.values())).collect();
+        let mut heads: AHashMap<Address, &Transaction> = AHashMap::new();
+        let mut heap: BinaryHeap<(u128, Address)> = BinaryHeap::new();
+        for (addr, it) in iters.iter_mut() {
+            if let Some(tx) = it.next() {
+                heads.insert(*addr, tx);
+                heap.push((tx.fee.atoms(), *addr));
+            }
+        }
+        while result.len() < limit {
+            let Some((_, addr)) = heap.pop() else { break };
+            let Some(tx) = heads.remove(&addr) else {
+                continue;
+            };
+            result.push(tx.clone());
+            if let Some(next) = iters.get_mut(&addr).and_then(|it| it.next()) {
+                heads.insert(addr, next);
+                heap.push((next.fee.atoms(), addr));
+            }
+        }
+        result
+    }
+
+    /// Removes the given transactions (e.g. found invalid while building a proposal).
+    pub fn remove_txs(&mut self, txs: &[Transaction]) {
+        let mut removed = 0usize;
+        for tx in txs {
+            if let Some(queue) = self.queues.get_mut(&tx.sender()) {
+                if queue.get(&tx.nonce).map(|t| t.hash()) == Some(tx.hash()) {
+                    queue.remove(&tx.nonce);
+                    self.seen.remove(&tx.hash());
+                    removed += 1;
+                }
+            }
+        }
+        if removed > 0 {
+            self.pending_count = self.pending_count.saturating_sub(removed);
+            self.queues.retain(|_, q| !q.is_empty());
+        }
+    }
+
     /// Re-inserts transactions that were dequeued for a block but could not be
     /// applied yet (e.g. future-nonce relative to what the state accepted).
     pub fn requeue(&mut self, txs: Vec<Transaction>) {

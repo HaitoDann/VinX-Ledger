@@ -10,8 +10,8 @@ use vinx_core::{
         MIN_BOND_HARD_FLOOR, MIN_STAKE_ATOMS, MIN_VALIDATOR_BOND_ATOMS, PROPOSER_SHARE_BPS,
         SLASH_BOUNTY_BPS, SLASH_EQUIVOCATION_BPS, UNBONDING_SECS, VALIDATOR_SCORE_WINDOW_SECS,
     },
-    block::SlashEvidence,
     chain_id::CHAIN_ID_DEVNET,
+    consensus::VoteEquivocation,
     governance::GovernanceAction,
     protocol::{ProtocolVersion, ScheduledUpgrade},
     reliability::{self, ReliabilityMap},
@@ -134,7 +134,7 @@ pub struct WorldState {
     /// **déterministiquement** de la séquence de blocs (comme `pending_unbonds`).
     ///
     /// Depuis VINX-04 (ADR 0072) ce champ **est engagé** par `consensus_root` : ses intrants
-    /// (`rel`, `validator_set`, hauteur, proposeur, `block_ts`, `last_block_ts`) sont tous
+    /// (`rel`, `validator_set`, hauteur, tour, proposeur — ADR 0082) sont tous
     /// déterministes et il est persisté, donc l'engager rend visible toute divergence de
     /// jailing au lieu de la laisser silencieuse.
     #[serde(default)]
@@ -159,7 +159,7 @@ pub struct WorldState {
     pub last_epoch_close_ts: u64,
     // ── ADR 0038 complement ─────────────────────────────────────────────────────
     /// Governable minimum bond to enter the validator pool (ADR 0038).
-    /// Default: MIN_VALIDATOR_BOND_ATOMS (100 000 VinX). Adjustable within
+    /// Default: MIN_VALIDATOR_BOND_ATOMS (10 000 VinX). Adjustable within
     /// [MIN_BOND_HARD_FLOOR, MAX_BOND_HARD_CAP] in steps of ±BOND_STEP_BPS with
     /// BOND_COOLDOWN_SECS between modifications.
     #[serde(default = "default_min_validator_bond")]
@@ -172,11 +172,11 @@ pub struct WorldState {
     /// Bond remains slashable while the request sits in the queue.
     #[serde(default)]
     pub exit_queue: Vec<ValidatorExitRequest>,
-    /// Timestamp of the previous block, needed to decide deterministically whether a
-    /// scheduled leader's slot actually elapsed before a backup proposed (ADR 0027,
-    /// VINX-06). Zero until the first block is settled.
+    /// The validator set that voted on the last committed block, with its proposer
+    /// priorities as they were when it voted (ADR 0082). `Block::last_commit` of the next
+    /// block is a certificate by *this* set — the active set may have rotated since.
     #[serde(default)]
-    pub last_block_ts: u64,
+    pub last_voting_set: Option<ValidatorSet>,
 }
 
 /// A bond amount in its unbonding delay, waiting to return to `address`'s balance
@@ -313,7 +313,7 @@ impl WorldState {
             last_epoch_close_ts: 0,
             min_validator_bond_atoms: MIN_VALIDATOR_BOND_ATOMS,
             exit_queue: Vec::new(),
-            last_block_ts: 0,
+            last_voting_set: None,
         }
     }
 
@@ -426,6 +426,90 @@ impl WorldState {
         self.current_block_ts = block_ts;
     }
 
+    /// Opens block `header` (ADR 0082) — call it on a state at height `header.height - 1`,
+    /// **before** applying the block's transactions, on every path that executes a block.
+    ///
+    /// 1. The proposer must be the scheduled proposer of `header.round` (weighted proposer
+    ///    priorities, jailed validators skipped).
+    /// 2. `last_commit` must be a valid certificate for the previous block, signed by more
+    ///    than 2/3 of the power of the set that voted on it (`last_voting_set`). Its signers
+    ///    are credited as co-signers (ADR 0028) — rewards follow data every node holds.
+    /// 3. Proposers of the rounds before `header.round` are charged a missed proposal.
+    /// 4. The current set becomes `last_voting_set` and its proposer priority advances.
+    ///
+    /// Deterministic and self-contained: it reads only the state and the header, so every
+    /// node reaches the same result. Fails without mutating anything.
+    pub fn begin_block(
+        &mut self,
+        header: &vinx_core::BlockHeader,
+        last_commit: Option<&vinx_core::CommitCert>,
+    ) -> Result<(), CoreError> {
+        let height = header.height;
+        if height != self.block_height + 1 {
+            return Err(CoreError::InvalidTransaction(format!(
+                "block {height} does not follow state height {}",
+                self.block_height
+            )));
+        }
+        let expected =
+            reliability::proposer_for_round(&self.validator_set, &self.reliability, header.round);
+        if header.validator != expected {
+            return Err(CoreError::InvalidTransaction(format!(
+                "block {height} round {} proposed by {}, expected {expected}",
+                header.round, header.validator
+            )));
+        }
+        let cosigners: Vec<Address> = match (height, last_commit) {
+            (1, None) => vec![],
+            (1, Some(_)) => {
+                return Err(CoreError::InvalidTransaction(
+                    "block 1 cannot carry a last commit".to_string(),
+                ))
+            }
+            (_, None) => {
+                return Err(CoreError::InvalidTransaction(format!(
+                    "block {height} is missing the commit certificate of block {}",
+                    height - 1
+                )))
+            }
+            (_, Some(cert)) => {
+                let voters = self.last_voting_set.as_ref().ok_or_else(|| {
+                    CoreError::InvalidTransaction("no voting set recorded".to_string())
+                })?;
+                let keys = self.indexed_bls_keys(voters);
+                cert.verify(self.chain_id, height - 1, &header.prev_hash, voters, &keys)
+                    .map_err(|e| {
+                        CoreError::InvalidTransaction(format!("invalid last commit: {e}"))
+                    })?;
+                cert.signers()
+                    .into_iter()
+                    .filter_map(|i| voters.validators().get(i).copied())
+                    .collect()
+            }
+        };
+        // ── validated: mutate ──
+        if !cosigners.is_empty() {
+            self.record_block_cosigns(&cosigners);
+        }
+        if reliability::on_block_committed(
+            &mut self.reliability,
+            &self.validator_set,
+            height,
+            header.round,
+            &header.validator,
+        ) {
+            tracing::warn!(
+                height,
+                "ADR 0027 : validateur jailé (manquements de proposition consécutifs)"
+            );
+        }
+        self.last_voting_set = Some(self.validator_set.clone());
+        let rel = &self.reliability;
+        self.validator_set
+            .advance_proposer_priority(|a| reliability::is_eligible(rel, a));
+        Ok(())
+    }
+
     /// Settles block-level rewards to the producer and matures due unbonds. Call once
     /// per block, after applying all transactions and before `compute_state_root`, in
     /// every path that builds/replays a block (producer, P2P apply, sync). Returns
@@ -434,12 +518,7 @@ impl WorldState {
     /// Fees stay in circulation (they move sender → producer). Emission is newly minted
     /// (progressive minting, ADR 0040). Both are computed deterministically from the
     /// block so validators re-applying it reach the identical state.
-    pub fn settle_block(
-        &mut self,
-        producer: &Address,
-        height: u64,
-        block_ts: u64,
-    ) -> (Amount, Amount) {
+    pub fn settle_block(&mut self, producer: &Address, block_ts: u64) -> (Amount, Amount) {
         // 1. Collected transaction fees (ADR 0081 D4): FEE_PRODUCER_SHARE_BPS to the
         //    producer now, the rest into the epoch pot for the co-signers. Nothing burned.
         let fees = std::mem::replace(&mut self.block_fees, Amount::ZERO);
@@ -459,28 +538,7 @@ impl WorldState {
         self.mature_unbonds(block_ts);
         // 3. Work emission — mint new tokens → producer (ADR 0040).
         let emission = self.emit_work_reward(producer, block_ts);
-        // 4. Fiabilité des validateurs (ADR 0027) : attributions + jailing.
-        if height > 0 {
-            let jailed = reliability::on_block_applied(
-                &mut self.reliability,
-                &self.validator_set,
-                height,
-                producer,
-                block_ts,
-                self.last_block_ts,
-                vinx_core::amount::slot_timeout_secs(self.block_time_secs),
-            );
-            if jailed {
-                tracing::warn!(
-                    height,
-                    "ADR 0027 : validateur jailé (manquements de proposition consécutifs)"
-                );
-            }
-        }
-        // Record this block's timestamp for the next block's slot-timeout decision.
-        // Set after the reliability update so a block never compares against itself.
-        self.last_block_ts = block_ts;
-        // 5. Epoch close (ADR 0028/0038) — triggered when EPOCH_DURATION_SECS have elapsed
+        // 4. Epoch close (ADR 0028/0038) — triggered when EPOCH_DURATION_SECS have elapsed
         //    since the last close. Deterministic on block_ts so all nodes close the same epoch.
         if EPOCH_DURATION_SECS > 0 && self.emission_started {
             let since_last = block_ts.saturating_sub(if self.last_epoch_close_ts == 0 {
@@ -1601,7 +1659,7 @@ impl WorldState {
             emission_epoch_ts: u64,
             last_epoch_close_ts: u64,
             last_bond_change_ts: u64,
-            last_block_ts: u64,
+            last_voting_set: &'a Option<ValidatorSet>,
             emission_started: bool,
         }
 
@@ -1630,7 +1688,7 @@ impl WorldState {
             emission_epoch_ts: self.emission_epoch_ts,
             last_epoch_close_ts: self.last_epoch_close_ts,
             last_bond_change_ts: self.last_bond_change_ts,
-            last_block_ts: self.last_block_ts,
+            last_voting_set: &self.last_voting_set,
             // `emission_started` gouverne l'émission ET la clôture d'époque : deux nœuds
             // qui en divergent émettent différemment. Il n'était engagé qu'indirectement,
             // via `emission_epoch_ts` — donc invisible quand celui-ci vaut 0.
@@ -1672,35 +1730,22 @@ impl WorldState {
     }
 
     fn apply_slash_validator(&mut self, tx: &Transaction) -> Result<(), CoreError> {
-        let evidence: SlashEvidence = borsh::from_slice(&tx.payload)
+        let evidence: VoteEquivocation = borsh::from_slice(&tx.payload)
             .map_err(|_| CoreError::InvalidTransaction("malformed slash evidence".to_string()))?;
 
         let target = &tx.to;
 
-        // 1. Same height, different blocks — the definition of equivocation.
-        if evidence.header_a.height != evidence.header_b.height {
+        // 1. Two votes of the target, same kind/height/round, different values — the
+        //    definition of equivocation (ADR 0082).
+        if evidence.vote_a.validator != *target || !evidence.is_conflicting() {
             return Err(CoreError::InvalidTransaction(
-                "evidence headers are at different heights".to_string(),
-            ));
-        }
-        let hash_a = evidence.header_a.hash();
-        let hash_b = evidence.header_b.hash();
-        if hash_a == hash_b {
-            return Err(CoreError::InvalidTransaction(
-                "evidence headers are identical — not equivocation".to_string(),
+                "evidence is not a conflicting pair of votes by the target".to_string(),
             ));
         }
 
-        // 2. Both headers must name the target as proposer.
-        if evidence.header_a.validator != *target || evidence.header_b.validator != *target {
-            return Err(CoreError::InvalidTransaction(
-                "evidence headers do not name target as proposer".to_string(),
-            ));
-        }
-
-        // 3. THE crucial check: both BLS signatures must verify against the target's
-        //    registered BLS key (ADR 0046). Only the target could have produced both —
-        //    forging evidence requires forging a BLS signature over a real header.
+        // 2. THE crucial check: both signatures must verify against the target's
+        //    registered BLS key. Only the target could have produced both — forging
+        //    evidence requires forging a BLS signature.
         let bls_pk_bytes = self
             .validator_pool
             .get(target)
@@ -1714,23 +1759,15 @@ impl WorldState {
         let bls_pk = BlsPubKey::from_bytes(&bls_pk_bytes).map_err(|_| {
             CoreError::InvalidTransaction("target BLS public key is malformed".to_string())
         })?;
-        let sig_a_arr: [u8; 96] =
-            evidence.bls_sig_a.as_slice().try_into().map_err(|_| {
-                CoreError::InvalidTransaction("bls_sig_a must be 96 bytes".to_string())
-            })?;
-        let sig_b_arr: [u8; 96] =
-            evidence.bls_sig_b.as_slice().try_into().map_err(|_| {
-                CoreError::InvalidTransaction("bls_sig_b must be 96 bytes".to_string())
-            })?;
-        if vinx_crypto::bls_verify(&bls_pk, &BlsSignature(sig_a_arr), &hash_a).is_err()
-            || vinx_crypto::bls_verify(&bls_pk, &BlsSignature(sig_b_arr), &hash_b).is_err()
-        {
+        if !evidence.verify(self.chain_id, &bls_pk) {
             return Err(CoreError::InvalidTransaction(
                 "BLS equivocation proof does not verify".to_string(),
             ));
         }
 
-        if !self.validator_set.contains(target) {
+        // A validator that already left the active set stays slashable while its bond is
+        // still in the pool (warm-up, bench, unbonding).
+        if !self.validator_set.contains(target) && !self.validator_pool.contains_key(target) {
             return Err(CoreError::InvalidTransaction(
                 "target is not a validator".to_string(),
             ));
@@ -2240,8 +2277,6 @@ mod tests {
 
     // ─── Fair launch: emission, fees, bond, unbonding, slashing ──────────────
     use vinx_core::amount::{cumulative_emission_atoms, EMISSION_T_HALF_SECS};
-    use vinx_core::block::GENESIS_PREV_HASH;
-    use vinx_core::{BlockHeader, SlashEvidence};
 
     #[test]
     fn test_supply_invariant_detects_corruption() {
@@ -2260,7 +2295,7 @@ mod tests {
     fn test_first_block_sets_emission_epoch_and_emits_nothing() {
         let mut s = WorldState::new();
         let (_, producer) = kp_addr();
-        let (fees, emission) = s.settle_block(&producer, 1, 1_000);
+        let (fees, emission) = s.settle_block(&producer, 1_000);
         assert_eq!(fees, Amount::ZERO);
         assert_eq!(emission, Amount::ZERO);
         assert_eq!(s.emission_epoch_ts, 1_000);
@@ -2271,9 +2306,9 @@ mod tests {
     fn test_emission_rewards_producer_and_conserves_supply() {
         let mut s = WorldState::new();
         let (_, producer) = kp_addr();
-        s.settle_block(&producer, 1, 0); // establish epoch at t=0
-                                         // One full half-life later: ~50% of the supply has been minted.
-        let (_, emission) = s.settle_block(&producer, 2, EMISSION_T_HALF_SECS);
+        s.settle_block(&producer, 0); // establish epoch at t=0
+                                      // One full half-life later: ~50% of the supply has been minted.
+        let (_, emission) = s.settle_block(&producer, EMISSION_T_HALF_SECS);
         let expected = cumulative_emission_atoms(EMISSION_T_HALF_SECS);
         assert_eq!(emission.atoms(), expected);
         // ADR 0028: producer gets 20%, 80% goes to epoch pot.
@@ -2289,8 +2324,8 @@ mod tests {
         // A producer with zero stake still earns the full block emission.
         let mut s = WorldState::new();
         let (_, producer) = kp_addr();
-        s.settle_block(&producer, 1, 0);
-        let (_, emission) = s.settle_block(&producer, 2, EMISSION_T_HALF_SECS / 20); // ~1 year
+        s.settle_block(&producer, 0);
+        let (_, emission) = s.settle_block(&producer, EMISSION_T_HALF_SECS / 20); // ~1 year
         assert!(emission > Amount::ZERO);
         // ADR 0028: producer receives PROPOSER_SHARE_BPS (20%) of the emission.
         let expected_balance =
@@ -2313,7 +2348,7 @@ mod tests {
         // Fee is collected at apply time; the pot moves only when the block settles.
         assert_eq!(s.epoch_dist_emission_pot, pot_before);
         // Settling (epoch established, no emission) splits the fee (ADR 0081 D4).
-        s.settle_block(&producer, 1, 100);
+        s.settle_block(&producer, 100);
         let producer_part = Amount::from_atoms(fee.atoms() * FEE_PRODUCER_SHARE_BPS / BPS_DENOM);
         let cosigner_part = fee.checked_sub(producer_part).unwrap();
         assert!(producer_part > Amount::ZERO && cosigner_part > Amount::ZERO);
@@ -2419,10 +2454,10 @@ mod tests {
         assert_eq!(s.pending_unbonds.len(), 1);
 
         // Just before unlock: nothing matures. Use a separate producer so addr stays clean.
-        s.settle_block(&producer, 1, 1_000 + UNBONDING_SECS - 1);
+        s.settle_block(&producer, 1_000 + UNBONDING_SECS - 1);
         assert_eq!(s.pending_unbonds.len(), 1);
         // At unlock: the bond returns to addr's balance.
-        s.settle_block(&producer, 2, 1_000 + UNBONDING_SECS);
+        s.settle_block(&producer, 1_000 + UNBONDING_SECS);
         assert!(s.pending_unbonds.is_empty());
         assert_eq!(s.accounts[&addr].balance, Amount::from_vinx(1_000));
     }
@@ -2567,7 +2602,7 @@ mod tests {
         assert_eq!(s.accounts[&addr].balance, Amount::ZERO);
         assert_eq!(s.accounts[&addr].staked, Amount::ZERO);
         // After maturation the funds return.
-        s.settle_block(&addr, 1, 1_000 + UNBONDING_SECS);
+        s.settle_block(&addr, 1_000 + UNBONDING_SECS);
         assert_eq!(s.accounts[&addr].balance, stake);
     }
 
@@ -2773,26 +2808,22 @@ mod tests {
         assert!(s.apply_transaction(&bad).is_err());
     }
 
-    // Builds a BLS-signed header at `height` with a distinguishing `state_root`.
-    // Returns (header, bls_sig_bytes) — the 96-byte G2 individual BLS signature.
-    fn bls_signed_header(
+    // A prevote by `validator` at (5, 0) for `value`, signed with `bls_sk` (chain devnet).
+    fn signed_prevote(
         bls_sk: &vinx_crypto::BlsSecretKey,
         validator: Address,
-        height: u64,
-        tag: u8,
-    ) -> (BlockHeader, Vec<u8>) {
-        let header = BlockHeader {
-            height,
-            prev_hash: GENESIS_PREV_HASH,
-            timestamp: 0,
+        value: Option<[u8; 32]>,
+    ) -> vinx_core::SignedVote {
+        let mut v = vinx_core::SignedVote {
+            kind: vinx_core::VoteKind::Prevote,
+            height: 5,
+            round: 0,
+            value,
             validator,
-            tx_count: 0,
-            state_root: [tag; 32],
-            base_fee: 0,
-            receipts_root: [0u8; 32],
+            signature: vec![],
         };
-        let sig = bls_sk.sign(&header.hash());
-        (header, sig.0.to_vec())
+        v.signature = bls_sk.sign(&v.sign_bytes(CHAIN_ID_DEVNET)).0.to_vec();
+        v
     }
 
     // Registers a BLS key for `addr` in the validator_pool (bypasses PoP check for tests).
@@ -2825,16 +2856,10 @@ mod tests {
         register_bls_key_for_test(&mut s, victim, &victim_bls_sk);
         s.validator_set = ValidatorSet::new(vec![victim, reporter]);
 
-        let (header_a, _) = bls_signed_header(&victim_bls_sk, victim, 5, 0xAA);
-        let (header_b, _) = bls_signed_header(&victim_bls_sk, victim, 5, 0xBB);
-        // Forged: sign headers with the attacker's BLS key, not the victim's.
-        let forge_sig_a = attacker_bls_sk.sign(&header_a.hash()).0.to_vec();
-        let forge_sig_b = attacker_bls_sk.sign(&header_b.hash()).0.to_vec();
-        let evidence = SlashEvidence {
-            header_a,
-            header_b,
-            bls_sig_a: forge_sig_a,
-            bls_sig_b: forge_sig_b,
+        // Forged: two conflicting votes signed with the attacker's key, not the victim's.
+        let evidence = VoteEquivocation {
+            vote_a: signed_prevote(&attacker_bls_sk, victim, Some([0xAA; 32])),
+            vote_b: signed_prevote(&attacker_bls_sk, victim, Some([0xBB; 32])),
         };
         let tx = Transaction::new_slash_validator(&reporter_kp, victim, &evidence, 0);
         assert!(s.apply_transaction(&tx).is_err());
@@ -2856,14 +2881,10 @@ mod tests {
         register_bls_key_for_test(&mut s, victim, &victim_bls_sk);
         s.validator_set = ValidatorSet::new(vec![victim, reporter]);
 
-        // Two genuinely BLS-signed, different headers at the same height = equivocation.
-        let (header_a, bls_sig_a) = bls_signed_header(&victim_bls_sk, victim, 5, 0xAA);
-        let (header_b, bls_sig_b) = bls_signed_header(&victim_bls_sk, victim, 5, 0xBB);
-        let evidence = SlashEvidence {
-            header_a,
-            header_b,
-            bls_sig_a,
-            bls_sig_b,
+        // Two genuinely signed, conflicting votes at the same (height, round) = equivocation.
+        let evidence = VoteEquivocation {
+            vote_a: signed_prevote(&victim_bls_sk, victim, Some([0xAA; 32])),
+            vote_b: signed_prevote(&victim_bls_sk, victim, None),
         };
         let tx = Transaction::new_slash_validator(&reporter_kp, victim, &evidence, 0);
         s.apply_transaction(&tx).unwrap();

@@ -27,7 +27,11 @@ mod tests {
             chain_id: vinx_core::CHAIN_ID_DEVNET,
             admin_address: sender_addr,
             validator_address: validator_addr,
-            validator_bls: None,
+            validator_bls: crate::GenesisBlsKey::from_secret(
+                &vinx_crypto::BlsSecretKey::generate(),
+                &validator_addr,
+                vinx_core::CHAIN_ID_DEVNET,
+            ),
         });
         // Fair launch grants nothing at genesis — fund the sender for these unit tests.
         state.credit_for_test(sender_addr, Amount::from_vinx(1_000_000_000));
@@ -178,7 +182,7 @@ mod tests {
         let pot_before = state.epoch_dist_emission_pot;
         let tx = Transaction::new_transfer(&sender_kp, receiver, amount, fee, 0);
         state.apply_transaction(&tx).unwrap();
-        state.settle_block(&producer, 1, 1);
+        state.settle_block(&producer, 1);
 
         // ADR 0081 D4: the fee is split between the producer and the co-signers' pot.
         let producer_part = Amount::from_atoms(
@@ -272,7 +276,7 @@ mod tests {
         assert_eq!(state.account_balance(&sender_addr), balance_after_stake); // not yet back
 
         // After the unbonding delay, settling matures it back to the balance.
-        state.settle_block(&sender_addr, 1, 1_000 + UNBONDING_SECS);
+        state.settle_block(&sender_addr, 1_000 + UNBONDING_SECS);
         assert_eq!(
             state.account_balance(&sender_addr),
             balance_after_stake.checked_add(stake_amount).unwrap()

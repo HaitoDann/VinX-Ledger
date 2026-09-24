@@ -37,16 +37,22 @@ async fn start_test_node() -> (Arc<Node>, String) {
     // NOTE: GenesisConfig is written here with the NEW two-field signature that
     // will be in place once `validator_address` is added.  The existing codebase
     // only has `admin_address`; the compiler will surface any mismatch.
+    let validator_bls_sk = vinx_crypto::BlsSecretKey::generate();
     let state = create_genesis_state(&GenesisConfig {
         chain_id: vinx_core::CHAIN_ID_DEVNET,
         admin_address: admin_addr,
         validator_address: validator_addr,
-        validator_bls: None,
+        validator_bls: vinx_state::GenesisBlsKey::from_secret(
+            &validator_bls_sk,
+            &validator_addr,
+            vinx_core::CHAIN_ID_DEVNET,
+        ),
     });
 
     let (chain, _genesis_block) = Chain::new_with_genesis(validator_addr, 0);
 
     let config = NodeConfig::new(validator_kp)
+        .with_bls_key(validator_bls_sk.clone())
         .with_rpc_listen(local_addr.to_string())
         // Admin routes are fail-closed: without a token they refuse everything,
         // so tests exercising them need one configured.
@@ -359,17 +365,24 @@ async fn test_faucet_endpoint() {
     let recipient_kp = KeyPair::generate();
     let recipient_addr = Address::from_public_key(&recipient_kp.public_key());
 
+    let validator_bls_sk = vinx_crypto::BlsSecretKey::generate();
+
     let state = create_genesis_state(&GenesisConfig {
         chain_id: vinx_core::CHAIN_ID_DEVNET,
         admin_address: admin_addr,
         validator_address: validator_addr,
-        validator_bls: None,
+        validator_bls: vinx_state::GenesisBlsKey::from_secret(
+            &validator_bls_sk,
+            &validator_addr,
+            vinx_core::CHAIN_ID_DEVNET,
+        ),
     });
     let (chain, _) = Chain::new_with_genesis(validator_addr, 0);
 
     const FAUCET_ATOMS: u128 = 100 * vinx_core::amount::DECIMAL_FACTOR; // 100 VinX
 
     let config = NodeConfig::new(validator_kp)
+        .with_bls_key(validator_bls_sk.clone())
         .with_rpc_listen(local_addr.to_string())
         .with_faucet(faucet_kp, FAUCET_ATOMS, 86_400);
 
@@ -511,14 +524,21 @@ async fn test_crash_recovery() {
 
     // ── Phase 1 : run, produce blocks, persist ────────────────────────────
     let (saved_height, saved_supply, saved_sender, saved_receiver) = {
+        let validator_bls_sk = vinx_crypto::BlsSecretKey::generate();
         let state = create_genesis_state(&GenesisConfig {
             chain_id: vinx_core::CHAIN_ID_DEVNET,
             admin_address: admin_addr,
             validator_address: validator_addr,
-            validator_bls: None,
+            validator_bls: vinx_state::GenesisBlsKey::from_secret(
+                &validator_bls_sk,
+                &validator_addr,
+                vinx_core::CHAIN_ID_DEVNET,
+            ),
         });
         let (chain, _) = Chain::new_with_genesis(validator_addr, 0);
-        let config = NodeConfig::new(validator_kp.clone()).with_data_dir(&data_dir);
+        let config = NodeConfig::new(validator_kp.clone())
+            .with_bls_key(validator_bls_sk.clone())
+            .with_data_dir(&data_dir);
 
         let node = Node::new(state, chain, config);
 
@@ -769,11 +789,8 @@ async fn test_validator_liveness_tracking() {
         .iter()
         .find(|v| v["address"] == validator_addr)
         .expect("our validator should be in the set");
-    // Not yet online (no block produced on this node)
-    assert_eq!(
-        me["online"], false,
-        "online should be false before first block"
-    );
+    // Online is derived from reliability (not jailed, no missed proposal).
+    assert_eq!(me["online"], true, "fresh validator is eligible");
 
     // Produce 2 blocks
     node.tick().await.expect("tick 1");
@@ -798,10 +815,7 @@ async fn test_validator_liveness_tracking() {
         me["online"], true,
         "online should be true after producing blocks"
     );
-    assert_eq!(
-        me["last_seen_height"], 2,
-        "last_seen_height should be 2 after two ticks"
-    );
+    assert_eq!(me["missed_proposals"], 0, "no missed proposal");
     assert_eq!(
         after["next_leader"], validator_addr,
         "single validator is always next leader"

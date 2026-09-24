@@ -197,27 +197,14 @@ pub const MAX_CLOCK_DRIFT_SECS: u64 = 15;
 /// never a per-node setting. It is lowered by a software release, step by step.
 pub const DEFAULT_BLOCK_TIME_SECS: u64 = 12;
 
+/// Maximum transactions per block (protocol constant, ADR 0082). Validators reject a
+/// larger block; the base fee of the next block rises with the fill ratio of the previous
+/// one (EIP-1559 style), which keeps fee pricing deterministic across nodes.
+pub const MAX_BLOCK_TXS: usize = 3_000;
+
 /// Bounds accepted for the genesis block time.
 pub const MIN_BLOCK_TIME_SECS: u64 = 1;
 pub const MAX_BLOCK_TIME_SECS: u64 = 60;
-
-/// Grace period a scheduled leader gets before a backup proposal counts as a missed
-/// proposal against it (ADR 0027, VINX-06).
-///
-/// Jailing used to be charged whenever the actual proposer differed from the scheduled
-/// leader, with no timing condition at all — and the P2P path accepts a block from any
-/// set member, with no slot deadline. A single validator that simply proposed *first* at
-/// every height therefore charged a miss to every honest leader in turn and jailed the
-/// entire honest set after three rounds.
-///
-/// A miss is only real if the leader actually had its turn and did not take it, so the
-/// charge now requires the block to arrive at least this long after the previous one.
-/// Derived from the protocol block time plus the clock-drift allowance, so an honest
-/// backup stepping in for a genuinely absent leader still charges the miss, while a
-/// pre-emptive proposal at normal cadence does not.
-pub const fn slot_timeout_secs(block_time_secs: u64) -> u64 {
-    3 * block_time_secs + MAX_CLOCK_DRIFT_SECS
-}
 
 /// Window (number of recent blocks) for the Median Time Past (ADR 0005): a single
 /// producer cannot make the network's time reference jump because it is a median.

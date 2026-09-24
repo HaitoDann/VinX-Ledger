@@ -34,7 +34,11 @@ pub struct NetworkStats {
 pub struct Validator {
     pub address: String,
     pub is_next_leader: bool,
-    pub last_seen_height: Option<u64>,
+    /// Voting power (stake-weighted, capped at 10 %, ADR 0082).
+    #[serde(default)]
+    pub power: u64,
+    #[serde(default)]
+    pub missed_proposals: u64,
     pub online: bool,
     pub suspended: bool,
 }
@@ -42,7 +46,7 @@ pub struct Validator {
 #[derive(Debug, Serialize, Deserialize)]
 pub struct Validators {
     pub count: usize,
-    pub quorum: usize,
+    pub quorum: u64,
     pub next_leader: String,
     pub validators: Vec<Validator>,
 }

@@ -5,6 +5,18 @@ Format : `MAJEUR.MINEUR.CORRECTIF` — les versions `0.x.y` sont des versions de
 
 ---
 
+## [Non publié] — Consensus BFT par étapes (ADR 0082)
+
+> **Breaking protocole** — nouvelle genèse obligatoire. `STORAGE_VERSION 22 → 23`. **338 tests verts, clippy propre.**
+
+- **Tendermint** : proposition / prevote / precommit avec lock ; commit à > 2/3 de la puissance ; plus de fork-choice ni de réorg (tip = finalisé). ⚠ n=3 exige 3/3 ; tolérance d'une panne dès n=4.
+- Chaque bloc embarque le `CommitCert` du précédent (`last_commit`) : récompenses des co-signataires déterministes.
+- Proposeur par **rotation pondérée par le stake** (VRF supprimé), **comité échantillonné supprimé**, votes pondérés **plafonnés à 10 %**, **≤ 100 validateurs actifs** automatiques.
+- **Temps de bloc = paramètre de genèse** (12 s, borné 1–60 s), **dérive d'horloge 15 s**, jailing par rounds manqués.
+- Chemin d'exécution unique (`execution.rs`) ; base fee déterministe ; clé BLS de genèse obligatoire.
+- Bugs corrigés : compteurs de co-signature locaux (récompenses divergentes), base fee dépendant du mempool local, sync HTTP (Block vs BlockResponse), perte de tx du mempool quand une proposition échouait.
+- Tests : simulation pleine pile `tests/consensus_sim.rs` + 14 simulations du moteur. Anciens harnais (`bench_n3`, `adversarial_harness`, `audit_regression_node`) retirés car liés à l'ancien consensus ; `scripts/bench-n3.sh` à réécrire.
+
 ## [Non publié] — Décisions irréversibles avant la genèse (ADR 0081)
 
 > **Breaking protocole** — nouvelle genèse obligatoire. `STORAGE_VERSION 21 → 22` : toute base antérieure est refusée (et laissée intacte). **432 tests verts, clippy `-D warnings` propre.**

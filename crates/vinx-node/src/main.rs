@@ -358,19 +358,12 @@ async fn main() {
                             .expect("spec initial_validator_bls_pop: hex")
                             .try_into()
                             .expect("spec BLS PoP must be 96 bytes");
-                        Some(vinx_state::GenesisBlsKey { pub_key: pk, pop })
-                    }
-                    (None, None) => {
-                        tracing::warn!(
-                            "⚠ Genesis spec carries no initial_validator_bls_pub_key: the BLS \
-                             registry will be empty and peers will refuse every block. Set it \
-                             for any multi-node network."
-                        );
-                        None
+                        vinx_state::GenesisBlsKey { pub_key: pk, pop }
                     }
                     _ => panic!(
-                        "genesis spec must set both initial_validator_bls_pub_key and \
-                         initial_validator_bls_pop, or neither"
+                        "genesis spec must set initial_validator_bls_pub_key and \
+                         initial_validator_bls_pop: every block is committed by BLS-signed \
+                         votes verified against the on-chain registry (ADR 0082)"
                     ),
                 };
                 let cfg = GenesisConfig {
@@ -401,12 +394,11 @@ async fn main() {
                     chain_id,
                     // This node *is* the genesis validator here, so register its own key:
                     // otherwise it could never produce a block its peers accept.
-                    validator_bls: Some(vinx_state::GenesisBlsKey {
-                        pub_key: bls_sk.public_key().0,
-                        pop: bls_sk
-                            .proof_of_possession(validator_addr.as_bytes(), chain_id)
-                            .0,
-                    }),
+                    validator_bls: vinx_state::GenesisBlsKey::from_secret(
+                        &bls_sk,
+                        &validator_addr,
+                        chain_id,
+                    ),
                 };
                 // VINX_DEV_PREFUND_VINX : pré-finance le validateur de genèse (mono-nœud dev).
                 let dev_prefund_atoms = std::env::var("VINX_DEV_PREFUND_VINX")
@@ -538,6 +530,7 @@ async fn main() {
         &rpc_listen,
     );
 
+    config.checkpoints = checkpoints;
     let node = vinx_node::Node::new_with_p2p(state, chain, config).await;
 
     // ── BLS key registration (bootstrap) ──────────────────────────────────────
@@ -611,8 +604,9 @@ async fn main() {
         }
     }
 
-    let block_node = std::sync::Arc::clone(&node);
-    tokio::spawn(async move { block_node.run_block_producer().await });
+    // ADR 0082 — BFT consensus: one engine per height, driven by P2P and timers.
+    let consensus_node = std::sync::Arc::clone(&node);
+    tokio::spawn(async move { consensus_node.run_consensus().await });
 
     if let Err(e) = node.run_rpc().await {
         tracing::error!(error = %e, "RPC server terminated");

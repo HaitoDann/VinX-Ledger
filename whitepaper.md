@@ -169,17 +169,15 @@ Le staking dans VinX a une seule fonction : **poser une caution**. Ce n'est pas 
 
 ## 6. Infrastructure : Validateurs & Full Nodes
 
-### 6.1 Validateurs (PoA avec comité VRF)
+### 6.1 Validateurs (consensus BFT Tendermint, ADR 0082)
 
-Nœuds qui produisent et co-signent les blocs, responsables de la sécurité du réseau.
-
-**Mécanisme actuel (testnet) :** PoA — un comité de validateurs autorisés co-signent les blocs via **BLS12-381 agrégé**. Le leader est sélectionné par **ECVRF RFC 9381** (tirage imprévisible jusqu'au dernier moment — résistance DoS). Le bloc est finalisé lorsque **≥ 67 % du comité** l'ont co-signé. La finalité est BFT déterministe : un bloc quorum-signé ne peut jamais être réorganisé.
-
-**Admission :** n'importe qui peut rejoindre le pool en postant le bond requis. Warmup de 3 époques avant d'être éligible. L'admin fixe seulement le montant du bond via gouvernance, dans des bornes immuables.
-
-**Rémunération :** par le travail uniquement — émission d'époque + frais immédiats. Le bond sécurise, il ne rémunère pas.
-
-**Tolérance aux pannes :** le réseau reste opérationnel tant que 67 % du comité sont en ligne.
+Jusqu'à 100 validateurs actifs, sélectionnés automatiquement par leur bond, votent sur chaque
+bloc en trois étapes (proposition, prevote, precommit). Un bloc est définitif dès que plus de
+2/3 de la puissance de vote l'a precommité : il n'y a jamais de réorganisation. La puissance
+suit le stake, plafonnée à 10 % par validateur pour limiter la centralisation. Le proposeur
+tourne selon le stake. Le temps de bloc (12 s au départ) est un paramètre de genèse qui
+pourra baisser progressivement. Les frais sont partagés 50/50 entre le producteur et les
+co-signataires du certificat de commit.
 
 ### 6.2 Full Nodes Communautaires
 

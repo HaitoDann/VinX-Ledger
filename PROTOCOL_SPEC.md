@@ -169,31 +169,18 @@ frais = base_fee × poids(type) × multiplicateur_congestion
 
 ## 8. Consensus
 
-### 8.1 Consensus implémenté — PoA Threshold + sélection VRF du leader ✅
+### 8.1 Consensus implémenté — BFT par étapes (Tendermint) ✅ (ADR 0082)
 
-| Règle | Valeur |
-|---|---|
-| Leader (défaut) | Round-robin sur le **set actif** (jailés sautés — ADR 0027) |
-| Leader (VRF, ADR 0029 Phase 2a) 🔧 | Auto-sélection VRF : candidat si `VRF(epoch_beacon ‖ height) ≤ seuil` (espérance ≈ 2) ; le fork-choice garde la **plus petite sortie**. Repli round-robin si pas de clé VRF |
-| Preuve VRF | ECVRF RFC 9381, portée par `Block::vrf_proof` (hors en-tête), vérifiée contre la clé VRF enregistrée on-chain |
-| Quorum de finalité | `⌈2n/3⌉` sur le **set complet bondé** à cette hauteur (inchangé par la Phase 2a) |
-| Jailing | Jamais ne réduit le quorum — sûreté sous partition |
-| Finalité | Prefix-closed — `finalized_height` avance sur le plus long préfixe contigu ≥ quorum |
-| Signatures | BLS12-381 agrégé + bitmap (ADR 0029 Phase 1) — vérification O(1) |
-| Sûreté vérifiée | Banc n=3 : à 2/3 vivant la finalité avance, à 1/3 elle gèle |
-| Fork-choice | `canonical_head` pur, réorg par snapshot+rejeu (ADR 0031) ; priorité VRF puis round-robin |
-
-### 8.2 Consensus cible — comité VRF échantillonné 🔴 (ADR 0029 Phase 2b/2c)
-
-| Règle | Valeur |
-|---|---|
-| Taille du comité | **k ≈ 100** — tirage uniforme parmi les bondés (`k < N`) |
-| Co-signature | **Seuls les `k` tirés** co-signent (aujourd'hui : tout le set actif) |
-| Finalité | BFT ≥ 67 % **du comité** (aujourd'hui : du set complet) |
-| Beacon | Accumulation de sorties VRF anti-grinding (Cardano 2/3-freeze) — remplace le beacon `hash(beacon ‖ epoch ‖ ts)` actuel, influençable via `ts` |
-| Anti-DoS | Leader inconnu jusqu'au dernier moment (déjà acquis en Phase 2a) |
-
----
+- **Hauteur h, round r :** le proposeur `proposer_for_round(vs, rel, r)` (priorités Tendermint pondérées, jailed sautés) diffuse `Proposal{h, r, pol_round, block}` signée BLS sur `proposal_sign_bytes`.
+- **Votes :** `SignedVote{kind ∈ {Prevote, Precommit}, h, r, value: Option<hash>}` signés BLS sur `vote_sign_bytes` (domaine `VINX_CONSENSUS_V1`, chain_id lié).
+- **Règles :** lock/valid value, saut de round sur f+1, timeouts croissants (propose 3 s + 1 s·r, vote 1 s + 0,5 s·r).
+- **Commit :** precommits pour un même hash totalisant `⌊2W/3⌋ + 1` de puissance → `CommitCert{h, r, block_hash, bitmap, agrégat BLS}` ; exige `cert.round ≥ header.round`.
+- **Chaînage :** le bloc h+1 embarque `last_commit` (cert de h), engagé par `header.last_commit_hash` ; obligatoire dès h=2, vérifié contre `last_voting_set`.
+- **Puissance :** bond en VINX (plancher = bond minimal), plafonnée à `max(10 %, 1/n)` par water-filling ; ≤ 100 validateurs actifs.
+- **Validation d'un bloc :** chaînage, `last_commit`, timestamp strictement croissant et ≤ now + 15 s, ≤ 3000 tx, receipts root, signatures, proposeur du round, base fee, exécution, state root.
+- **Pénalités :** proposeurs des rounds < `header.round` comptés en proposition manquée (jailing) ; `VoteEquivocation` (deux votes conflictuels signés) → slashing.
+- **Temps de bloc :** `block_time_secs` de genèse (1–60 s, 12 s par défaut), engagé dans l'état.
+- **Tolérance :** < 1/3 de la puissance. n=3 exige 3/3. Sans quorum : arrêt (pas de fork). Tip = finalisé.
 
 ## 9. Pool de validateurs ✅ / 🔴 (ADR 0038)
 

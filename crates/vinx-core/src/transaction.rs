@@ -12,7 +12,7 @@ pub enum TransactionType {
     Unstake,
     /// Admin-only: schedule a protocol upgrade at a future block height.
     AnnounceUpgrade,
-    /// Slash a validator who double-signed. `to` = validator, `payload` = borsh(SlashEvidence).
+    /// Slash a validator who double-signed. `to` = validator, `payload` = borsh(VoteEquivocation).
     SlashValidator,
     /// Admin-only governance action executed immediately. `payload` = borsh(GovernanceAction).
     AdminAction,
@@ -373,11 +373,11 @@ impl Transaction {
         Some((ProtocolVersion::new(major, minor, patch), activation_ts))
     }
 
-    /// Constructs a SlashValidator tx with equivocation evidence.
+    /// Constructs a SlashValidator tx carrying vote-equivocation evidence (ADR 0082).
     pub fn new_slash_validator(
         keypair: &KeyPair,
         validator: Address,
-        evidence: &crate::block::SlashEvidence,
+        evidence: &crate::consensus::VoteEquivocation,
         nonce: u64,
     ) -> Self {
         let pk = keypair.public_key();
