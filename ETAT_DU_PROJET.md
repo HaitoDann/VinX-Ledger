@@ -489,6 +489,7 @@ sync_peer_rpc = "http://1.2.3.4:8545"  # Sync depuis un pair au démarrage
 | 🔴 Haute | **Cérémonie de genèse multi-validateurs** + `genesis_hash` (chaque validateur fournit clé BLS + PoP) | 0075 §1, 0033 §1 |
 | 🟠 Moyenne | **Récompenses par époque** — distribuer `epoch_dist_emission_pot` + émission entre proposeurs + co-signataires (1 h, `PROPOSER_SHARE_BPS=20 %`) ; frais restent immédiats au producteur | 0028 (Accepté) |
 | 🟠 Moyenne | **Garde-fous de gouvernance** (🚧 à discuter), **bornes de churn** & **de ressources par tx** | 0032, 0036, 0035 |
+| 🔴 Haute | **Étape 3 — État léger** : Jellyfish/Sparse Merkle Tree (insertion O(log n), preuves de solde), état sur disque, **snapshots d'état signés par le quorum** (sync sans rejouer l'historique), **élagage** (fenêtre de rétention courte par défaut, ≥ période d'unbonding pour les preuves de slashing), **mode `--archive`** optionnel pour explorateurs/plateformes, **reçus de paiement** (tx + preuve d'inclusion) conservés par le wallet et le SDK | 0014, 0074, 0081 |
 | 🟢 Future | **Blocs compacts**, light client, rent d'état, clés HSM, halt d'urgence, TLS natif, post-quantique, SLO | 0037, 0014, 0013, 0012, 0017, 0019, 0016, 0018 |
 | ❄️ **Gelé (0064)** | **Appchains ZK / SP1 (0050), ForceExit (0048), Clearinghouse (0049), Celestia DA (0034), modules bondés & escrow (0010/0024/0039), tokenomics Appchains (0041/0044/0047), slashing de fraude (0023)** — abandonnés au profit du rail de paiement pur | — |
 
