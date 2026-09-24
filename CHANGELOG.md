@@ -5,6 +5,16 @@ Format : `MAJEUR.MINEUR.CORRECTIF` — les versions `0.x.y` sont des versions de
 
 ---
 
+## [Non publié] — Staking (ADR 0084)
+
+> **Breaking protocole** — nouvelle genèse obligatoire.
+
+- **Désengagement 21 jours** (au lieu de 3) ; preuves d'équivocation valables 21 jours.
+- **Slashing corrélé** : 5 % + 3 × part de puissance fautive dans la fenêtre (plafond 100 %) ; exclusion et bannissement définitifs ; le reliquat repasse par le désengagement.
+- **Clés séparées** : `vinx-node --validator-owner` — le serveur n'a que la clé BLS et une clé opérateur (unjail) ; le propriétaire garde bond, retraits, récompenses et rotation (`vinx-wallet stake --validator-keys`, `set-validator-keys`, `unjail`).
+- Bugs corrigés : blocage de chaîne possible par rotation de clé ou slash dans un bloc (certificat vérifié avec des clés changées) ; validateur slashé non exclu ; reliquat de slash libéré immédiatement ; nonce de la dénonciation.
+- Banc n=4 : node4 tourne sans la clé du propriétaire ✅.
+
 ## [Non publié] — État léger (ADR 0083)
 
 > **Breaking protocole** (racine d'état, `receipts_root`) — nouvelle genèse obligatoire.

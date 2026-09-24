@@ -68,6 +68,11 @@ enum Commands {
         /// Amount to stake (e.g. 1000)
         #[arg(long)]
         amount: String,
+        /// Validator keys file, as printed by
+        /// `vinx-node --genesis-entry --validator-owner <this wallet>` — required for the
+        /// bond that makes this wallet a validator (ADR 0075/0084).
+        #[arg(long)]
+        validator_keys: Option<PathBuf>,
         #[arg(short, long, default_value = "wallet.json")]
         wallet: PathBuf,
         #[arg(long, default_value = "http://127.0.0.1:8545")]
@@ -156,6 +161,26 @@ enum Commands {
         #[arg(long, default_value = "http://127.0.0.1:8545")]
         node: String,
     },
+    /// Change the validator's BLS voting key and operator (owner only, ADR 0084)
+    SetValidatorKeys {
+        /// Keys file printed by `vinx-node --genesis-entry --validator-owner <owner>`
+        #[arg(long)]
+        keys: PathBuf,
+        #[arg(short, long, default_value = "wallet.json")]
+        wallet: PathBuf,
+        #[arg(long, default_value = "http://127.0.0.1:8545")]
+        node: String,
+    },
+    /// Put a jailed validator back in rotation (signed by its owner or operator)
+    Unjail {
+        /// Validator (owner) address
+        #[arg(long)]
+        validator: String,
+        #[arg(short, long, default_value = "wallet.json")]
+        wallet: PathBuf,
+        #[arg(long, default_value = "http://127.0.0.1:8545")]
+        node: String,
+    },
     /// Verify a saved payment receipt offline
     VerifyReceipt {
         /// Receipt file (<hash>.json)
@@ -227,9 +252,18 @@ async fn run(cmd: Commands) -> Result<(), WalletError> {
         } => cmd_transfer(&to, &amount, &wallet, &node).await,
         Commands::Stake {
             amount,
+            validator_keys,
             wallet,
             node,
-        } => cmd_stake(&amount, &wallet, &node).await,
+        } => cmd_stake(&amount, validator_keys.as_deref(), &wallet, &node).await,
+        Commands::SetValidatorKeys { keys, wallet, node } => {
+            cmd_set_validator_keys(&keys, &wallet, &node).await
+        }
+        Commands::Unjail {
+            validator,
+            wallet,
+            node,
+        } => cmd_unjail(&validator, &wallet, &node).await,
         Commands::Unstake {
             amount,
             wallet,
@@ -340,7 +374,42 @@ async fn cmd_transfer(
     Ok(())
 }
 
-async fn cmd_stake(amount_str: &str, wallet: &Path, node: &str) -> Result<(), WalletError> {
+/// Reads a validator keys file (`vinx-node --genesis-entry`) and checks it was made for
+/// `owner` — the Proof-of-Possession is bound to the owner address.
+fn load_validator_keys(
+    path: &Path,
+    owner: &str,
+) -> Result<vinx_core::RegisterBlsKeyPayload, WalletError> {
+    let bad = |m: &str| WalletError::Keystore(format!("validator keys file: {m}"));
+    let v: serde_json::Value = serde_json::from_str(&std::fs::read_to_string(path)?)?;
+    if v["address"].as_str() != Some(owner) {
+        return Err(bad(&format!(
+            "made for {}, not for this wallet ({owner}) — regenerate it with              `vinx-node --genesis-entry --validator-owner {owner}`",
+            v["address"].as_str().unwrap_or("?")
+        )));
+    }
+    let hexf = |k: &str| {
+        v[k].as_str()
+            .and_then(|s| hex::decode(s).ok())
+            .ok_or_else(|| bad(&format!("missing or invalid {k}")))
+    };
+    let operator = match v["operator"].as_str() {
+        Some(s) => Some(s.parse().map_err(|_| bad("invalid operator address"))?),
+        None => None,
+    };
+    Ok(vinx_core::RegisterBlsKeyPayload {
+        bls_pub_key: hexf("bls_pub_key")?,
+        bls_pop: hexf("bls_pop")?,
+        operator,
+    })
+}
+
+async fn cmd_stake(
+    amount_str: &str,
+    validator_keys: Option<&Path>,
+    wallet: &Path,
+    node: &str,
+) -> Result<(), WalletError> {
     let ks = KeyStore::load(wallet)?;
     let kp = ks.to_keypair()?;
     let amount = parse_amount(amount_str)?;
@@ -349,7 +418,12 @@ async fn cmd_stake(amount_str: &str, wallet: &Path, node: &str) -> Result<(), Wa
     let acc = client.get_account(ks.address()).await?;
     let nonce = acc.nonce;
 
-    let tx = Transaction::new_stake(&kp, amount, Amount::ZERO, nonce);
+    let mut tx = Transaction::new_stake(&kp, amount, Amount::ZERO, nonce);
+    if let Some(path) = validator_keys {
+        let payload = load_validator_keys(path, ks.address())?;
+        tx.payload = borsh::to_vec(&payload).expect("payload serialization");
+        tx.sign(&kp);
+    }
 
     println!("Address : {}", ks.address());
     println!("Stake   : {}", amount);
@@ -362,6 +436,50 @@ async fn cmd_stake(amount_str: &str, wallet: &Path, node: &str) -> Result<(), Wa
     } else {
         println!("Status  : rejected");
     }
+    Ok(())
+}
+
+async fn cmd_set_validator_keys(keys: &Path, wallet: &Path, node: &str) -> Result<(), WalletError> {
+    let ks = KeyStore::load(wallet)?;
+    let kp = ks.to_keypair()?;
+    let payload = load_validator_keys(keys, ks.address())?;
+    let client = RpcClient::new(node);
+    let nonce = client.get_account(ks.address()).await?.nonce;
+    let tx = Transaction::new_register_bls_key(&kp, &payload, nonce);
+    let resp = client.submit_tx(&tx).await?;
+    println!("Validator : {}", ks.address());
+    if let Some(op) = payload.operator {
+        println!("Operator  : {op}");
+    }
+    println!(
+        "Status    : {}",
+        if resp.accepted {
+            "accepted"
+        } else {
+            "rejected"
+        }
+    );
+    println!("Tx hash   : {}", resp.tx_hash);
+    println!("Restart the validator node with the matching BLS key once included.");
+    Ok(())
+}
+
+async fn cmd_unjail(validator: &str, wallet: &Path, node: &str) -> Result<(), WalletError> {
+    let ks = KeyStore::load(wallet)?;
+    let kp = ks.to_keypair()?;
+    let target: vinx_crypto::Address = validator.parse()?;
+    let client = RpcClient::new(node);
+    let nonce = client.get_account(ks.address()).await?.nonce;
+    let tx = Transaction::new_unjail_for(&kp, target, nonce);
+    let resp = client.submit_tx(&tx).await?;
+    println!(
+        "Unjail {target}: {}",
+        if resp.accepted {
+            "accepted"
+        } else {
+            "rejected"
+        }
+    );
     Ok(())
 }
 

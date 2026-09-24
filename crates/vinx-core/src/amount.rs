@@ -81,11 +81,18 @@ pub const BOND_STEP_BPS: u128 = 2_500;
 /// Minimum real-time gap between two bond governance modifications (7 days). Immutable.
 pub const BOND_COOLDOWN_SECS: u64 = 7 * 24 * 3_600;
 
-/// Unbonding delay: withdrawn bond returns to the balance only after this much
-/// **real time** (3 days), measured on block timestamps. During this window the
+/// Unbonding delay (ADR 0084 S1): withdrawn bond returns to the balance only after this
+/// much **real time** (21 days), measured on block timestamps. During this window the
 /// funds remain slashable, so a validator cannot equivocate then exit before the
-/// evidence lands.
-pub const UNBONDING_SECS: u64 = 3 * 24 * 3_600;
+/// evidence lands — nor sign an alternative history for syncing nodes once unbonded
+/// (long-range attack). Shorter than the block retention window (30 days), so the
+/// evidence of any slashable fault is still available.
+pub const UNBONDING_SECS: u64 = 21 * 24 * 3_600;
+
+/// Maximum age of equivocation evidence (ADR 0084 S2), in real time: past the unbonding
+/// delay, the funds it could slash are gone. Converted to heights with the protocol
+/// block time.
+pub const EVIDENCE_MAX_AGE_SECS: u64 = UNBONDING_SECS;
 
 // ─── Open PoA — active set (ADR 0038) ─────────────────────────────────────────
 
@@ -125,8 +132,14 @@ pub const MAX_VALIDATOR_EXITS_PER_EPOCH: usize = 2;
 /// Basis-point denominator (10_000 = 100%).
 pub const BPS_DENOM: u128 = 10_000;
 
-/// Fraction of the bond destroyed on a proven equivocation (100%).
-pub const SLASH_EQUIVOCATION_BPS: u128 = 10_000;
+/// Correlated slashing (ADR 0084 S3): the fraction of the bond slashed for an
+/// equivocation is `SLASH_BASE_BPS + SLASH_CORRELATION_FACTOR × (share of the voting
+/// power slashed within the evidence window, this fault included)`, capped at 100 %.
+/// An isolated mistake (a node started twice) costs a few percent; a coordinated attack
+/// by a third of the network costs everything.
+pub const SLASH_BASE_BPS: u128 = 500;
+/// See [`SLASH_BASE_BPS`].
+pub const SLASH_CORRELATION_FACTOR: u128 = 3;
 
 /// Fraction of the slashed amount paid to the reporter as a bounty (10%).
 /// The remainder (90%) is redistributed to honest validators via the epoch

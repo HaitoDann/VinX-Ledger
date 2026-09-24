@@ -392,7 +392,12 @@ pub async fn snapshot_sync_from_peer(
                 return false;
             }
         };
-        let keys = new_state.indexed_bls_keys(&voters);
+        // The keys the voters signed with, frozen with the voting set (ADR 0084).
+        let keys: Vec<Option<[u8; 48]>> = new_state
+            .last_voting_keys
+            .iter()
+            .map(|k| k.as_deref().and_then(|b| b.try_into().ok()))
+            .collect();
         if let Err(e) = snap.commit.verify(
             new_state.chain_id,
             snap.height,

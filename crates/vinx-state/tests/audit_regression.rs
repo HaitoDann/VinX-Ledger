@@ -187,6 +187,7 @@ fn bls_key_cannot_be_registered_by_two_validators() {
             .proof_of_possession(v1_addr.as_bytes(), chain_id)
             .0
             .to_vec(),
+        operator: None,
     };
     assert!(
         state
@@ -203,6 +204,7 @@ fn bls_key_cannot_be_registered_by_two_validators() {
             .proof_of_possession(v2_addr.as_bytes(), chain_id)
             .0
             .to_vec(),
+        operator: None,
     };
     assert!(
         state

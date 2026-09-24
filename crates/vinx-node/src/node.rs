@@ -669,7 +669,9 @@ impl Node {
         tracing::warn!(validator = %target, height = ev.vote_a.height, "vote equivocation detected");
         let (chain_id, nonce) = {
             let s = self.state.read().await;
-            let me = self.config.validator_address;
+            // Signed by this node's own key (the operator key when owner and operator are
+            // separate, ADR 0084), so its own nonce.
+            let me = Address::from_public_key(&self.config.validator_keypair.public_key());
             (s.chain_id, s.get_account(&me).map(|a| a.nonce).unwrap_or(0))
         };
         let mut tx =

@@ -35,6 +35,8 @@ struct NodeConfigFile {
     faucet_cooldown_secs: Option<u64>,
     /// Archive node (same as `--archive`).
     archive: Option<bool>,
+    /// Owner address of the validator (same as `--validator-owner`).
+    validator_owner: Option<String>,
 }
 
 impl NodeConfigFile {
@@ -93,6 +95,12 @@ struct Args {
     /// the shared spec's `validators` list (multi-validator genesis, ADR 0082).
     #[arg(long)]
     genesis_entry: bool,
+    /// Owner address of the validator this node runs (ADR 0084 S5). The owner — a wallet
+    /// kept off the server — holds the bond, withdraws and receives the rewards; this node
+    /// only holds the operator key (`validator.json`) and the BLS voting key. Default: the
+    /// node's own key is also the owner (single-key setup).
+    #[arg(long)]
+    validator_owner: Option<String>,
     /// Archive node: keep every block instead of pruning those older than 30 days
     /// (ADR 0083). For explorers and history services.
     #[arg(long)]
@@ -244,6 +252,10 @@ struct SpecValidator {
     address: String,
     bls_pub_key: String,
     bls_pop: String,
+    /// Operator address when separate from the owner (ADR 0084 S5). Also what
+    /// `vinx-wallet stake --validator-keys` reads.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    operator: Option<String>,
 }
 
 impl SpecValidator {
@@ -346,7 +358,17 @@ async fn main() {
     tracing::info!(bls_pub_key = %bls_kf.pub_key_hex, "Clé BLS du validateur chargée");
 
     let admin_addr: Address = admin_kf.address.parse().expect("admin address");
-    let validator_addr: Address = validator_kf.address.parse().expect("validator address");
+    let operator_addr: Address = validator_kf.address.parse().expect("validator address");
+    // ADR 0084 S5: the validator's identity is its owner; this node holds only the
+    // operator and BLS keys when they are separate.
+    let validator_addr: Address = match args
+        .validator_owner
+        .clone()
+        .or(file_cfg.validator_owner.clone())
+    {
+        Some(s) => s.parse().expect("--validator-owner: invalid address"),
+        None => operator_addr,
+    };
 
     if args.genesis_entry {
         let key = vinx_state::GenesisBlsKey::from_secret(&bls_sk, &validator_addr, chain_id);
@@ -354,6 +376,7 @@ async fn main() {
             address: validator_addr.to_string(),
             bls_pub_key: hex::encode(key.pub_key),
             bls_pop: hex::encode(key.pop),
+            operator: (operator_addr != validator_addr).then(|| operator_addr.to_string()),
         };
         println!("{}", serde_json::to_string(&entry).unwrap());
         return;
@@ -431,6 +454,14 @@ async fn main() {
                 let mut state = create_genesis_state_with_dev_prefund(&cfg, prefund_atoms);
                 let extra: Vec<_> = spec.validators.iter().map(SpecValidator::parse).collect();
                 vinx_state::add_genesis_validators(&mut state, &extra);
+                for v in &spec.validators {
+                    if let (Some(op), Ok(addr)) = (&v.operator, v.address.parse::<Address>()) {
+                        let op: Address = op.parse().expect("spec validator operator");
+                        if let Some(e) = state.validator_pool.get_mut(&addr) {
+                            e.operator = Some(op);
+                        }
+                    }
+                }
                 state.block_time_secs = checked_block_time(
                     spec.block_time_secs
                         .unwrap_or(vinx_core::amount::DEFAULT_BLOCK_TIME_SECS),
@@ -478,6 +509,14 @@ async fn main() {
         .with_data_dir(&data_dir);
 
     config.archive = archive;
+    // ADR 0084 S5: votes, proposals and rewards are for the owner.
+    config.validator_address = validator_addr;
+    if operator_addr != validator_addr {
+        tracing::info!(
+            owner = %validator_addr, operator = %operator_addr,
+            "Validator runs with separate owner and operator keys"
+        );
+    }
     if archive {
         tracing::info!("Archive node: blocks are never pruned");
     }
@@ -605,6 +644,19 @@ async fn main() {
         match registered {
             // Bonded, and the registered key is already ours: nothing to do.
             Some(true) => {}
+            // Separate owner (ADR 0084 S5): only the owner may change the keys, from its
+            // wallet (`vinx-wallet set-validator-keys`); the node cannot and must not.
+            Some(false) | None
+                if st.validator_pool.contains_key(&me)
+                    && vinx_crypto::Address::from_public_key(
+                        &node.config.validator_keypair.public_key(),
+                    ) != me =>
+            {
+                tracing::warn!(
+                    validator = %me,
+                    "the BLS key registered for this validator is not this node's: register                      it from the owner's wallet (vinx-wallet set-validator-keys)"
+                );
+            }
             // Bonded, but no key registered or a stale one.
             Some(false) | None if st.validator_pool.contains_key(&me) => {
                 let nonce = st.get_account(&me).map(|a| a.nonce).unwrap_or(0);
@@ -619,6 +671,7 @@ async fn main() {
                         .proof_of_possession(me.as_bytes(), chain_id)
                         .0
                         .to_vec(),
+                    operator: None,
                 };
                 let mut tx = vinx_core::Transaction::new_register_bls_key(
                     &node.config.validator_keypair,

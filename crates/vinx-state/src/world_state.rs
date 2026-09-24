@@ -5,11 +5,12 @@ use std::collections::{BTreeMap, HashMap, HashSet};
 use vinx_core::{
     amount::{
         cumulative_emission_atoms, Amount, ADMIN_TENURE_SECS, BOND_COOLDOWN_SECS, BOND_STEP_BPS,
-        BPS_DENOM, DEFAULT_FEE_FLOOR_ATOMS, EPOCH_DURATION_SECS, EXISTENTIAL_DEPOSIT_ATOMS,
-        FEE_PRODUCER_SHARE_BPS, MAX_ACTIVE_SET_SIZE, MAX_BOND_HARD_CAP, MAX_NONCE_AHEAD,
-        MAX_TX_PAYLOAD_BYTES, MAX_VALIDATOR_EXITS_PER_EPOCH, MIN_ACTIVE_SET_SIZE,
+        BPS_DENOM, DEFAULT_FEE_FLOOR_ATOMS, EPOCH_DURATION_SECS, EVIDENCE_MAX_AGE_SECS,
+        EXISTENTIAL_DEPOSIT_ATOMS, FEE_PRODUCER_SHARE_BPS, MAX_ACTIVE_SET_SIZE, MAX_BOND_HARD_CAP,
+        MAX_NONCE_AHEAD, MAX_TX_PAYLOAD_BYTES, MAX_VALIDATOR_EXITS_PER_EPOCH, MIN_ACTIVE_SET_SIZE,
         MIN_BOND_HARD_FLOOR, MIN_STAKE_ATOMS, MIN_VALIDATOR_BOND_ATOMS, PROPOSER_SHARE_BPS,
-        SLASH_BOUNTY_BPS, SLASH_EQUIVOCATION_BPS, UNBONDING_SECS, VALIDATOR_SCORE_WINDOW_SECS,
+        SLASH_BASE_BPS, SLASH_BOUNTY_BPS, SLASH_CORRELATION_FACTOR, UNBONDING_SECS,
+        VALIDATOR_SCORE_WINDOW_SECS,
     },
     chain_id::CHAIN_ID_DEVNET,
     consensus::VoteEquivocation,
@@ -173,6 +174,29 @@ pub struct WorldState {
     /// block is a certificate by *this* set — the active set may have rotated since.
     #[serde(default)]
     pub last_voting_set: Option<ValidatorSet>,
+    /// BLS keys of `last_voting_set`, frozen when it voted (ADR 0084). The certificate
+    /// of a block is checked against the keys its voters signed with — a key rotated, or
+    /// a validator slashed out of the pool, in that very block must not make a valid
+    /// certificate unverifiable (which would halt the chain).
+    #[serde(default)]
+    pub last_voting_keys: Vec<Option<Vec<u8>>>,
+    /// Equivocations slashed within the evidence window (ADR 0084 S3), for correlated
+    /// penalties.
+    #[serde(default)]
+    pub slash_history: Vec<SlashRecord>,
+}
+
+/// Validated `(bls_pub_key, bls_pop, operator)` of a key registration.
+type BlsRegistration = (Vec<u8>, Vec<u8>, Option<Address>);
+
+/// One slashed equivocation (ADR 0084 S3).
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, BorshSerialize, BorshDeserialize)]
+pub struct SlashRecord {
+    pub validator: Address,
+    /// Height at which the slash was applied.
+    pub height: u64,
+    /// Share of the total voting power the validator held, in basis points.
+    pub power_bps: u128,
 }
 
 /// A bond amount in its unbonding delay, waiting to return to `address`'s balance
@@ -309,6 +333,8 @@ impl WorldState {
             min_validator_bond_atoms: MIN_VALIDATOR_BOND_ATOMS,
             exit_queue: Vec::new(),
             last_voting_set: None,
+            last_voting_keys: Vec::new(),
+            slash_history: Vec::new(),
         }
     }
 
@@ -460,7 +486,11 @@ impl WorldState {
                 let voters = self.last_voting_set.as_ref().ok_or_else(|| {
                     CoreError::InvalidTransaction("no voting set recorded".to_string())
                 })?;
-                let keys = self.indexed_bls_keys(voters);
+                let keys: Vec<Option<[u8; 48]>> = self
+                    .last_voting_keys
+                    .iter()
+                    .map(|k| k.as_deref().and_then(|b| b.try_into().ok()))
+                    .collect();
                 cert.verify(self.chain_id, height - 1, &header.prev_hash, voters, &keys)
                     .map_err(|e| {
                         CoreError::InvalidTransaction(format!("invalid last commit: {e}"))
@@ -488,6 +518,11 @@ impl WorldState {
             );
         }
         self.last_voting_set = Some(self.validator_set.clone());
+        self.last_voting_keys = self
+            .indexed_bls_keys(&self.validator_set)
+            .into_iter()
+            .map(|k| k.map(|k| k.to_vec()))
+            .collect();
         let rel = &self.reliability;
         self.validator_set
             .advance_proposer_priority(|a| reliability::is_eligible(rel, a));
@@ -1397,13 +1432,14 @@ impl WorldState {
                 let mut entry = vinx_core::ValidatorPoolEntry::new(bond, self.current_block_ts);
                 // `creates_pool_entry` a été calculé sur le même prédicat, donc la clé est
                 // présente ici — mais on ne suppose pas : sans elle, pas d'entrée.
-                let (pk, pop) = entry_bls.clone().ok_or_else(|| {
+                let (pk, pop, operator) = entry_bls.clone().ok_or_else(|| {
                     CoreError::InvalidTransaction(
                         "bond entering the validator pool must carry a BLS key".to_string(),
                     )
                 })?;
                 entry.bls_pub_key = Some(pk);
                 entry.bls_pop = Some(pop);
+                entry.operator = operator;
                 self.validator_pool.insert(tx.sender(), entry);
                 tracing::info!(addr = %tx.sender(), bond, "ADR 0038: validator auto-entered pool");
             }
@@ -1637,6 +1673,8 @@ impl WorldState {
             last_epoch_close_ts: u64,
             last_bond_change_ts: u64,
             last_voting_set: &'a Option<ValidatorSet>,
+            last_voting_keys: &'a [Option<Vec<u8>>],
+            slash_history: &'a [SlashRecord],
             emission_started: bool,
         }
 
@@ -1666,6 +1704,8 @@ impl WorldState {
             last_epoch_close_ts: self.last_epoch_close_ts,
             last_bond_change_ts: self.last_bond_change_ts,
             last_voting_set: &self.last_voting_set,
+            last_voting_keys: &self.last_voting_keys,
+            slash_history: &self.slash_history,
             // `emission_started` gouverne l'émission ET la clôture d'époque : deux nœuds
             // qui en divergent émettent différemment. Il n'était engagé qu'indirectement,
             // via `emission_epoch_ts` — donc invisible quand celui-ci vaut 0.
@@ -1749,6 +1789,13 @@ impl WorldState {
                 "target is not a validator".to_string(),
             ));
         }
+        // ADR 0084 S2: evidence expires with the unbonding delay.
+        let max_age = EVIDENCE_MAX_AGE_SECS / self.block_time_secs.max(1);
+        if self.block_height.saturating_sub(evidence.vote_a.height) > max_age {
+            return Err(CoreError::InvalidTransaction(
+                "equivocation evidence is older than the unbonding delay".to_string(),
+            ));
+        }
 
         let sender = self
             .accounts
@@ -1777,27 +1824,68 @@ impl WorldState {
             .sum();
         let slashable = staked.atoms().saturating_add(unbonding);
 
+        // ADR 0084 S3 — correlated penalty: base + factor × share of the voting power
+        // slashed within the evidence window, this fault included.
+        let window = EVIDENCE_MAX_AGE_SECS / self.block_time_secs.max(1);
+        let height = self.block_height;
+        self.slash_history
+            .retain(|r| height.saturating_sub(r.height) <= window);
+        let set = if self.validator_set.contains(target) {
+            &self.validator_set
+        } else {
+            self.last_voting_set.as_ref().unwrap_or(&self.validator_set)
+        };
+        let power_bps = (set.power_of(target) as u128 * BPS_DENOM)
+            .checked_div(set.total_power() as u128)
+            .unwrap_or(0);
+        self.slash_history.push(SlashRecord {
+            validator: *target,
+            height,
+            power_bps,
+        });
+        let correlated_bps: u128 = self.slash_history.iter().map(|r| r.power_bps).sum();
+        let penalty_bps = SLASH_BASE_BPS
+            .saturating_add(SLASH_CORRELATION_FACTOR.saturating_mul(correlated_bps))
+            .min(BPS_DENOM);
+
         if slashable > 0 {
             if let Some(acc) = self.accounts.get_mut(target) {
                 acc.staked = Amount::ZERO;
             }
             self.pending_unbonds.retain(|u| &u.address != target);
 
-            // slashed = slashable × equivocation rate (100%); any remainder returns.
-            let slashed = slashable * SLASH_EQUIVOCATION_BPS / BPS_DENOM;
+            let slashed = slashable * penalty_bps / BPS_DENOM;
             let returned = slashable.saturating_sub(slashed);
             let bounty = slashed * SLASH_BOUNTY_BPS / BPS_DENOM;
-            let to_melt = slashed.saturating_sub(bounty);
+            let to_pot = slashed.saturating_sub(bounty);
 
             self.mark_dirty(target);
+            // The remainder is not freed at once: it serves a full unbonding delay, like
+            // any exit, and stays slashable by further evidence meanwhile.
             if returned > 0 {
-                self.credit(target, Amount::from_atoms(returned));
+                self.pending_unbonds.push(PendingUnbond {
+                    address: *target,
+                    amount: Amount::from_atoms(returned),
+                    unlock_ts: self.current_block_ts.saturating_add(UNBONDING_SECS),
+                });
             }
             self.credit(&tx.sender(), Amount::from_atoms(bounty)); // reporter bounty (10%)
-            self.move_to_epoch_pot(Amount::from_atoms(to_melt)); // 90% → honest validators
+            self.move_to_epoch_pot(Amount::from_atoms(to_pot)); // 90% → honest validators
+            tracing::warn!(
+                validator = %target,
+                penalty_bps,
+                slashed,
+                "ADR 0084: correlated slash applied"
+            );
         }
 
         self.mark_dirty(&tx.sender());
+
+        // ADR 0084: an equivocator is excluded for good — out of the pool and the exit
+        // queue, and banned from bonding again. (Its remaining funds unbond normally.)
+        self.validator_pool.remove(target);
+        self.exit_queue.retain(|r| &r.address != target);
+        self.banned_validator_keys.insert(*target);
 
         // Remove from validator set (can't produce blocks anymore).
         if self.validator_set.len() > 1 {
@@ -2107,7 +2195,7 @@ impl WorldState {
         &self,
         owner: Address,
         payload_bytes: &[u8],
-    ) -> Result<(Vec<u8>, Vec<u8>), CoreError> {
+    ) -> Result<BlsRegistration, CoreError> {
         let payload: RegisterBlsKeyPayload = borsh::from_slice(payload_bytes).map_err(|_| {
             CoreError::InvalidTransaction("malformed RegisterBlsKey payload".to_string())
         })?;
@@ -2142,7 +2230,12 @@ impl WorldState {
                 "BLS public key already registered by another validator".to_string(),
             ));
         }
-        Ok((payload.bls_pub_key, payload.bls_pop))
+        if payload.operator == Some(owner) {
+            return Err(CoreError::InvalidTransaction(
+                "the operator must differ from the owner (omit it instead)".to_string(),
+            ));
+        }
+        Ok((payload.bls_pub_key, payload.bls_pop, payload.operator))
     }
 
     fn apply_register_bls_key(&mut self, tx: &Transaction) -> Result<(), CoreError> {
@@ -2166,7 +2259,7 @@ impl WorldState {
         // Contrôle unique, partagé avec le chemin de bonding (ADR 0075 §3.1) : longueurs,
         // point G1 valide, PoP liée à (clé, validateur, chain_id), unicité de la clé.
         // Validation avant mutation — un payload refusé ne consomme pas le nonce.
-        let (pk, pop) = self.validate_bls_registration(tx.sender(), &tx.payload)?;
+        let (pk, pop, operator) = self.validate_bls_registration(tx.sender(), &tx.payload)?;
 
         let entry = self
             .validator_pool
@@ -2174,6 +2267,7 @@ impl WorldState {
             .expect("existence checked above");
         entry.bls_pub_key = Some(pk);
         entry.bls_pop = Some(pop);
+        entry.operator = operator;
 
         self.accounts
             .get_mut(&tx.sender())
@@ -2195,8 +2289,14 @@ impl WorldState {
                 got: tx.nonce,
             });
         }
+        // ADR 0084 S5: `to` is the validator; the owner or its registered operator signs.
+        let target = tx.to;
+        let operator = self.validator_pool.get(&target).and_then(|e| e.operator);
+        if tx.sender() != target && Some(tx.sender()) != operator {
+            return Err(CoreError::Unauthorized);
+        }
         let height = self.block_height;
-        if !reliability::try_unjail(&mut self.reliability, &tx.sender(), height) {
+        if !reliability::try_unjail(&mut self.reliability, &target, height) {
             return Err(CoreError::InvalidTransaction(
                 "unjail failed: validator is not jailed or cooldown has not elapsed".to_string(),
             ));
@@ -2206,7 +2306,7 @@ impl WorldState {
             .expect("existence checked above")
             .nonce += 1;
         self.mark_dirty(&tx.sender());
-        tracing::info!(validator = %tx.sender(), height, "ADR 0027: validator unjailed");
+        tracing::info!(validator = %target, height, "ADR 0027: validator unjailed");
         Ok(())
     }
 
@@ -2958,6 +3058,159 @@ mod tests {
         assert_eq!(s.epoch_dist_emission_pot, Amount::from_vinx(900));
     }
 
+    // ─── ADR 0084: staking ───────────────────────────────────────────────────
+
+    /// 20 equally bonded validators (5 % of the power each) with BLS keys.
+    fn twenty_validators() -> (WorldState, Vec<(Address, vinx_crypto::BlsSecretKey)>) {
+        let mut s = WorldState::new();
+        let vals: Vec<_> = (0..20)
+            .map(|_| (kp_addr().1, vinx_crypto::BlsSecretKey::generate()))
+            .collect();
+        for (a, sk) in &vals {
+            s.set_staked_for_test(a, Amount::from_vinx(10_000));
+            register_bls_key_for_test(&mut s, *a, sk);
+        }
+        s.validator_set = s.weighted_validator_set(vals.iter().map(|v| v.0).collect());
+        s.block_height = 10;
+        (s, vals)
+    }
+
+    fn equivocation(sk: &vinx_crypto::BlsSecretKey, v: Address) -> VoteEquivocation {
+        VoteEquivocation {
+            vote_a: signed_prevote(sk, v, Some([0xAA; 32])),
+            vote_b: signed_prevote(sk, v, None),
+        }
+    }
+
+    #[test]
+    fn test_correlated_slash_grows_with_simultaneous_faults() {
+        let (mut s, vals) = twenty_validators();
+        let (rep_kp, rep) = kp_addr();
+        s.credit_for_test(rep, Amount::from_vinx(10));
+
+        // Alone with 5 % of the power: 5 % + 3 × 5 % = 20 % of 10 000 VINX.
+        let (v1, sk1) = &vals[0];
+        let tx = Transaction::new_slash_validator(&rep_kp, *v1, &equivocation(sk1, *v1), 0);
+        s.apply_transaction(&tx).unwrap();
+        assert_eq!(s.accounts[v1].staked, Amount::ZERO);
+        let returned: u128 = s
+            .pending_unbonds
+            .iter()
+            .filter(|u| &u.address == v1)
+            .map(|u| u.amount.atoms())
+            .sum();
+        assert_eq!(
+            returned,
+            Amount::from_vinx(8_000).atoms(),
+            "80 % returns, unbonding"
+        );
+        assert!(s.banned_validator_keys.contains(v1));
+        assert!(!s.validator_pool.contains_key(v1), "excluded for good");
+
+        // A second fault in the window: 5 % + 3 × (5 % + ~5.3 %) ≈ 36 %.
+        let (v2, sk2) = &vals[1];
+        let tx = Transaction::new_slash_validator(&rep_kp, *v2, &equivocation(sk2, *v2), 1);
+        s.apply_transaction(&tx).unwrap();
+        let returned2: u128 = s
+            .pending_unbonds
+            .iter()
+            .filter(|u| &u.address == v2)
+            .map(|u| u.amount.atoms())
+            .sum();
+        assert!(
+            returned2 < Amount::from_vinx(6_500).atoms()
+                && returned2 > Amount::from_vinx(6_000).atoms(),
+            "correlated penalty ≈ 36 %: returned {returned2}"
+        );
+
+        // The same validator cannot be slashed twice.
+        let tx = Transaction::new_slash_validator(&rep_kp, *v1, &equivocation(sk1, *v1), 2);
+        assert!(s.apply_transaction(&tx).is_err());
+    }
+
+    #[test]
+    fn test_slash_evidence_expires_with_unbonding() {
+        let (mut s, vals) = twenty_validators();
+        let (rep_kp, rep) = kp_addr();
+        s.credit_for_test(rep, Amount::from_vinx(10));
+        let (v, sk) = &vals[0];
+        // Evidence is at height 5; move just past the window.
+        s.block_height = 5 + EVIDENCE_MAX_AGE_SECS / s.block_time_secs + 1;
+        let tx = Transaction::new_slash_validator(&rep_kp, *v, &equivocation(sk, *v), 0);
+        assert!(s.apply_transaction(&tx).is_err(), "expired evidence");
+        s.block_height -= 1;
+        s.apply_transaction(&tx)
+            .expect("evidence at the edge of the window");
+    }
+
+    #[test]
+    fn test_operator_may_unjail_but_not_strangers() {
+        let (owner_kp, owner) = kp_addr();
+        let (op_kp, op) = kp_addr();
+        let (x_kp, x) = kp_addr();
+        let mut s = WorldState::new();
+        for a in [owner, op, x] {
+            s.credit_for_test(a, Amount::from_vinx(1));
+        }
+        let mut e = vinx_core::ValidatorPoolEntry::new(MIN_VALIDATOR_BOND_ATOMS, 0);
+        e.operator = Some(op);
+        s.validator_pool.insert(owner, e);
+        s.reliability.entry(owner).or_default().jailed_until = Some(0);
+        s.block_height = 10;
+
+        let tx = Transaction::new_unjail_for(&x_kp, owner, 0);
+        assert!(matches!(
+            s.apply_transaction(&tx),
+            Err(CoreError::Unauthorized)
+        ));
+        let _ = x;
+        let tx = Transaction::new_unjail_for(&op_kp, owner, 0);
+        s.apply_transaction(&tx).expect("operator unjails");
+        assert!(!s.reliability[&owner].is_jailed());
+        let _ = owner_kp;
+    }
+
+    #[test]
+    fn test_certificate_survives_key_rotation_in_its_block() {
+        // Block 1 is voted with the old key; a key change applied *in* block 1 must not
+        // make its certificate unverifiable at block 2.
+        use vinx_core::{BlockHeader, CommitCert};
+        let (_, v) = kp_addr();
+        let old = vinx_crypto::BlsSecretKey::generate();
+        let mut s = WorldState::new();
+        s.set_staked_for_test(&v, Amount::from_vinx(10_000));
+        register_bls_key_for_test(&mut s, v, &old);
+        s.validator_set = ValidatorSet::single(v);
+        let header = |height: u64, prev: [u8; 32]| BlockHeader {
+            height,
+            round: 0,
+            prev_hash: prev,
+            timestamp: height,
+            validator: v,
+            tx_count: 0,
+            state_root: [0; 32],
+            base_fee: 0,
+            receipts_root: [0; 32],
+            last_commit_hash: [0; 32],
+        };
+        let h1 = header(1, [0; 32]);
+        s.begin_block(&h1, None).unwrap();
+        s.block_height = 1;
+        // Rotation inside block 1.
+        register_bls_key_for_test(&mut s, v, &vinx_crypto::BlsSecretKey::generate());
+        let hash1 = h1.hash();
+        let sig = old.sign(&vinx_core::consensus::vote_sign_bytes(
+            CHAIN_ID_DEVNET,
+            vinx_core::VoteKind::Precommit,
+            1,
+            0,
+            Some(&hash1),
+        ));
+        let cert = CommitCert::from_precommits(1, 0, hash1, vec![(0, sig)]).unwrap();
+        s.begin_block(&header(2, hash1), Some(&cert))
+            .expect("certificate checked against the keys its voters used");
+    }
+
     // ─── ADR 0027: unjail ────────────────────────────────────────────────────
 
     #[test]
@@ -3285,6 +3538,7 @@ mod tests {
         let payload = RegisterBlsKeyPayload {
             bls_pub_key: bls_pk.0.to_vec(),
             bls_pop: pop.0.to_vec(),
+            operator: None,
         };
         let tx = Transaction::new_register_bls_key(&kp, &payload, 0);
         s.apply_transaction(&tx).unwrap();
@@ -3311,6 +3565,7 @@ mod tests {
         let payload = RegisterBlsKeyPayload {
             bls_pub_key: bls_sk.public_key().0.to_vec(),
             bls_pop: pop.0.to_vec(),
+            operator: None,
         };
         let tx = Transaction::new_register_bls_key(&kp, &payload, 0);
         assert!(s.apply_transaction(&tx).is_err());
@@ -3332,6 +3587,7 @@ mod tests {
         let payload = RegisterBlsKeyPayload {
             bls_pub_key: bls_sk.public_key().0.to_vec(),
             bls_pop: bad_pop.0.to_vec(),
+            operator: None,
         };
         let tx = Transaction::new_register_bls_key(&kp, &payload, 0);
         assert!(s.apply_transaction(&tx).is_err());
@@ -3352,6 +3608,7 @@ mod tests {
         let bad_pk = RegisterBlsKeyPayload {
             bls_pub_key: vec![0u8; 47],
             bls_pop: vec![0u8; 96],
+            operator: None,
         };
         assert!(matches!(
             s.apply_transaction(&Transaction::new_register_bls_key(&kp, &bad_pk, 0)),
@@ -3362,6 +3619,7 @@ mod tests {
         let bad_pop = RegisterBlsKeyPayload {
             bls_pub_key: vec![0u8; 48],
             bls_pop: vec![0u8; 95],
+            operator: None,
         };
         assert!(matches!(
             s.apply_transaction(&Transaction::new_register_bls_key(&kp, &bad_pop, 0)),
@@ -3382,6 +3640,7 @@ mod tests {
         let payload_a = RegisterBlsKeyPayload {
             bls_pub_key: sk_a.public_key().0.to_vec(),
             bls_pop: pop_a.0.to_vec(),
+            operator: None,
         };
         s.apply_transaction(&Transaction::new_register_bls_key(&kp, &payload_a, 0))
             .unwrap();
@@ -3392,6 +3651,7 @@ mod tests {
         let payload_b = RegisterBlsKeyPayload {
             bls_pub_key: sk_b.public_key().0.to_vec(),
             bls_pop: pop_b.0.to_vec(),
+            operator: None,
         };
         s.apply_transaction(&Transaction::new_register_bls_key(&kp, &payload_b, 1))
             .unwrap();
@@ -3735,6 +3995,7 @@ mod tests {
                 eligible_blocks_in_window: 0,
                 bls_pub_key: None,
                 bls_pop: None,
+                operator: None,
             };
             s.validator_pool.insert(extra, entry);
         }
@@ -3798,6 +4059,7 @@ mod tests {
                 eligible_blocks_in_window: 0,
                 bls_pub_key: None,
                 bls_pop: None,
+                operator: None,
             };
             s.validator_pool.insert(addr, entry);
             addrs.push(addr);
@@ -3835,6 +4097,7 @@ mod tests {
                 eligible_blocks_in_window: 0,
                 bls_pub_key: None,
                 bls_pop: None,
+                operator: None,
             };
             s.validator_pool.insert(extra, entry);
         }
@@ -3885,6 +4148,7 @@ mod tests {
                 eligible_blocks_in_window: 0,
                 bls_pub_key: None,
                 bls_pop: None,
+                operator: None,
             };
             s.validator_pool.insert(addr, entry);
             targets.push(addr);
@@ -3932,6 +4196,7 @@ mod tests {
             eligible_blocks_in_window: 0,
             bls_pub_key: None,
             bls_pop: None,
+            operator: None,
         };
         s.validator_pool.insert(addr, entry);
 
@@ -3981,6 +4246,7 @@ mod tests {
                 eligible_blocks_in_window: 0,
                 bls_pub_key: None,
                 bls_pop: None,
+                operator: None,
             };
             s.validator_pool.insert(extra, entry);
         }
