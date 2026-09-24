@@ -3,13 +3,12 @@ use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, HashMap, HashSet};
 use vinx_core::{
     amount::{
-        cumulative_emission_atoms, Amount, ACTIVE_SET_COOLDOWN_SECS, ACTIVE_SET_STEP,
-        ADMIN_TENURE_SECS, BOND_COOLDOWN_SECS, BOND_STEP_BPS, BPS_DENOM, DEFAULT_ACTIVE_SET_SIZE,
-        DEFAULT_FEE_FLOOR_ATOMS, EPOCH_DURATION_SECS, EXISTENTIAL_DEPOSIT_ATOMS,
-        FEE_PRODUCER_SHARE_BPS, MAX_BOND_HARD_CAP, MAX_NONCE_AHEAD, MAX_TX_PAYLOAD_BYTES,
-        MAX_VALIDATOR_EXITS_PER_EPOCH, MIN_ACTIVE_SET_SIZE, MIN_BOND_HARD_FLOOR, MIN_STAKE_ATOMS,
-        MIN_VALIDATOR_BOND_ATOMS, PROPOSER_SHARE_BPS, SLASH_BOUNTY_BPS, SLASH_EQUIVOCATION_BPS,
-        UNBONDING_SECS, VALIDATOR_SCORE_WINDOW_SECS,
+        cumulative_emission_atoms, Amount, ADMIN_TENURE_SECS, BOND_COOLDOWN_SECS, BOND_STEP_BPS,
+        BPS_DENOM, DEFAULT_FEE_FLOOR_ATOMS, EPOCH_DURATION_SECS, EXISTENTIAL_DEPOSIT_ATOMS,
+        FEE_PRODUCER_SHARE_BPS, MAX_ACTIVE_SET_SIZE, MAX_BOND_HARD_CAP, MAX_NONCE_AHEAD,
+        MAX_TX_PAYLOAD_BYTES, MAX_VALIDATOR_EXITS_PER_EPOCH, MIN_ACTIVE_SET_SIZE,
+        MIN_BOND_HARD_FLOOR, MIN_STAKE_ATOMS, MIN_VALIDATOR_BOND_ATOMS, PROPOSER_SHARE_BPS,
+        SLASH_BOUNTY_BPS, SLASH_EQUIVOCATION_BPS, UNBONDING_SECS, VALIDATOR_SCORE_WINDOW_SECS,
     },
     block::SlashEvidence,
     chain_id::CHAIN_ID_DEVNET,
@@ -152,15 +151,6 @@ pub struct WorldState {
     /// `AddValidator`/bond transactions referencing a banned key are rejected.
     #[serde(default)]
     pub banned_validator_keys: std::collections::HashSet<Address>,
-    /// Current governable active-set size N (ADR 0038). Default: DEFAULT_ACTIVE_SET_SIZE.
-    /// Governable within [MIN_ACTIVE_SET_SIZE, MAX_ACTIVE_SET_SIZE] in steps of
-    /// ACTIVE_SET_STEP with ACTIVE_SET_COOLDOWN_SECS between modifications.
-    #[serde(default = "default_active_set_size")]
-    pub active_set_size: u32,
-    /// Timestamp of the last governance modification to `active_set_size` (ADR 0038).
-    /// Used to enforce the ACTIVE_SET_COOLDOWN_SECS between modifications.
-    #[serde(default)]
-    pub last_active_set_size_change_ts: u64,
     /// Timestamp of the last governance modification to `min_validator_bond` (ADR 0038).
     /// Used to enforce BOND_COOLDOWN_SECS between modifications.
     #[serde(default)]
@@ -284,10 +274,6 @@ fn default_chain_id() -> u32 {
     CHAIN_ID_DEVNET
 }
 
-fn default_active_set_size() -> u32 {
-    DEFAULT_ACTIVE_SET_SIZE
-}
-
 fn default_min_validator_bond() -> u128 {
     MIN_VALIDATOR_BOND_ATOMS
 }
@@ -332,8 +318,6 @@ impl WorldState {
             reliability: ReliabilityMap::new(),
             validator_pool: BTreeMap::new(),
             banned_validator_keys: std::collections::HashSet::new(),
-            active_set_size: DEFAULT_ACTIVE_SET_SIZE,
-            last_active_set_size_change_ts: 0,
             last_bond_change_ts: 0,
             last_epoch_close_ts: 0,
             min_validator_bond_atoms: MIN_VALIDATOR_BOND_ATOMS,
@@ -637,7 +621,7 @@ impl WorldState {
         }
 
         // 3. Rank eligible validators by score, BLAKE3 tiebreaker.
-        let n = self.active_set_size as usize;
+        let n = MAX_ACTIVE_SET_SIZE as usize;
         let mut eligible: Vec<(Address, u32)> = self
             .validator_pool
             .iter()
@@ -1725,7 +1709,6 @@ impl WorldState {
             validator_set: &'a ValidatorSet,
             validator_pool: &'a BTreeMap<Address, vinx_core::ValidatorPoolEntry>,
             banned_validator_keys: Vec<&'a Address>,
-            active_set_size: u32,
             min_validator_bond_atoms: u128,
             admin_address: &'a Option<Address>,
             admin_policy: &'a Option<AdminPolicy>,
@@ -1744,7 +1727,6 @@ impl WorldState {
             epoch_dist_emission_pot: u128,
             emission_epoch_ts: u64,
             last_epoch_close_ts: u64,
-            last_active_set_size_change_ts: u64,
             last_bond_change_ts: u64,
             last_block_ts: u64,
             emission_started: bool,
@@ -1757,7 +1739,6 @@ impl WorldState {
             validator_set: &self.validator_set,
             validator_pool: &self.validator_pool,
             banned_validator_keys: banned,
-            active_set_size: self.active_set_size,
             min_validator_bond_atoms: self.min_validator_bond_atoms,
             admin_address: &self.admin_address,
             admin_policy: &self.admin_policy,
@@ -1776,7 +1757,6 @@ impl WorldState {
             epoch_dist_emission_pot: self.epoch_dist_emission_pot.atoms(),
             emission_epoch_ts: self.emission_epoch_ts,
             last_epoch_close_ts: self.last_epoch_close_ts,
-            last_active_set_size_change_ts: self.last_active_set_size_change_ts,
             last_bond_change_ts: self.last_bond_change_ts,
             last_block_ts: self.last_block_ts,
             // `emission_started` gouverne l'émission ET la clôture d'époque : deux nœuds
@@ -2145,36 +2125,6 @@ impl WorldState {
                 self.admin_policy = Some(policy);
                 self.pending_governance.clear();
                 tracing::info!(threshold, "Admin: committee policy set");
-            }
-            GovernanceAction::UpdateActiveSetSize { new_size } => {
-                // ADR 0038: governable active-set N — must move by exactly ±ACTIVE_SET_STEP,
-                // stay ≥ MIN_ACTIVE_SET_SIZE, and observe ACTIVE_SET_COOLDOWN_SECS.
-                let current = self.active_set_size;
-                let diff = (new_size as i64 - current as i64).unsigned_abs() as u32;
-                if diff == 0 || diff != ACTIVE_SET_STEP {
-                    return Err(CoreError::InvalidTransaction(format!(
-                        "active_set_size must change by exactly ±{ACTIVE_SET_STEP} (current {current}, requested {new_size})"
-                    )));
-                }
-                if new_size < MIN_ACTIVE_SET_SIZE {
-                    return Err(CoreError::InvalidTransaction(format!(
-                        "active_set_size {new_size} is below the minimum {MIN_ACTIVE_SET_SIZE}"
-                    )));
-                }
-                if self.last_active_set_size_change_ts > 0 {
-                    let elapsed = self
-                        .current_block_ts
-                        .saturating_sub(self.last_active_set_size_change_ts);
-                    if elapsed < ACTIVE_SET_COOLDOWN_SECS {
-                        return Err(CoreError::InvalidTransaction(format!(
-                            "active_set_size was changed {} s ago; cooldown is {} s",
-                            elapsed, ACTIVE_SET_COOLDOWN_SECS
-                        )));
-                    }
-                }
-                self.active_set_size = new_size;
-                self.last_active_set_size_change_ts = self.current_block_ts;
-                tracing::info!(new_size, "Admin: active_set_size updated (ADR 0038)");
             }
             GovernanceAction::UpdateMinValidatorBond { atoms } => {
                 // ADR 0038: governable bond floor — within hard bounds, move by at most
@@ -3250,12 +3200,6 @@ mod tests {
             }),
         ));
         mutations.push((
-            "active_set_size",
-            Box::new(|s: &mut WorldState| {
-                s.active_set_size += 1;
-            }),
-        ));
-        mutations.push((
             "min_validator_bond_atoms",
             Box::new(|s: &mut WorldState| {
                 s.min_validator_bond_atoms += 1;
@@ -3644,127 +3588,6 @@ mod tests {
             "pool entry must be Unbonding after epoch close processes the exit queue"
         );
         assert!(s.exit_queue.is_empty(), "exit queue must be drained");
-    }
-
-    // ─── ADR 0038: UpdateActiveSetSize governance ─────────────────────────────
-
-    #[test]
-    fn test_update_active_set_size_happy_path() {
-        use vinx_core::amount::{ACTIVE_SET_STEP, DEFAULT_ACTIVE_SET_SIZE};
-        use vinx_core::GovernanceAction;
-        let (mut s, admin_kp, _) = admin_state();
-        s.current_block_ts = 1_000;
-        let new_size = DEFAULT_ACTIVE_SET_SIZE + ACTIVE_SET_STEP;
-
-        s.apply_transaction(&Transaction::new_admin_action(
-            &admin_kp,
-            &GovernanceAction::UpdateActiveSetSize { new_size },
-            0,
-        ))
-        .unwrap();
-
-        assert_eq!(s.active_set_size, new_size);
-        assert_eq!(s.last_active_set_size_change_ts, 1_000);
-    }
-
-    #[test]
-    fn test_update_active_set_size_wrong_step_rejected() {
-        use vinx_core::amount::DEFAULT_ACTIVE_SET_SIZE;
-        use vinx_core::GovernanceAction;
-        let (mut s, admin_kp, _) = admin_state();
-
-        // Step of 4 (not ACTIVE_SET_STEP=2) must be rejected.
-        assert!(s
-            .apply_transaction(&Transaction::new_admin_action(
-                &admin_kp,
-                &GovernanceAction::UpdateActiveSetSize {
-                    new_size: DEFAULT_ACTIVE_SET_SIZE + 4,
-                },
-                0,
-            ))
-            .is_err());
-        assert_eq!(s.active_set_size, DEFAULT_ACTIVE_SET_SIZE);
-    }
-
-    #[test]
-    fn test_update_active_set_size_below_minimum_rejected() {
-        use vinx_core::amount::{ACTIVE_SET_STEP, MIN_ACTIVE_SET_SIZE};
-        use vinx_core::GovernanceAction;
-        let (mut s, admin_kp, _) = admin_state();
-        // Force the size down to MIN_ACTIVE_SET_SIZE + ACTIVE_SET_STEP so one more
-        // decrement would cross the floor.
-        s.active_set_size = MIN_ACTIVE_SET_SIZE + ACTIVE_SET_STEP;
-
-        assert!(s
-            .apply_transaction(&Transaction::new_admin_action(
-                &admin_kp,
-                &GovernanceAction::UpdateActiveSetSize {
-                    new_size: MIN_ACTIVE_SET_SIZE, // exactly the floor — still ok
-                },
-                0,
-            ))
-            .is_ok());
-
-        // One more decrement would go below the floor.
-        s.last_active_set_size_change_ts = 0; // bypass cooldown
-        assert!(s
-            .apply_transaction(&Transaction::new_admin_action(
-                &admin_kp,
-                &GovernanceAction::UpdateActiveSetSize {
-                    new_size: MIN_ACTIVE_SET_SIZE - ACTIVE_SET_STEP,
-                },
-                1,
-            ))
-            .is_err());
-        assert_eq!(s.active_set_size, MIN_ACTIVE_SET_SIZE);
-    }
-
-    #[test]
-    fn test_update_active_set_size_cooldown_enforced() {
-        use vinx_core::amount::{
-            ACTIVE_SET_COOLDOWN_SECS, ACTIVE_SET_STEP, DEFAULT_ACTIVE_SET_SIZE,
-        };
-        use vinx_core::GovernanceAction;
-        let (mut s, admin_kp, _) = admin_state();
-        // Use a non-zero baseline so last_change_ts > 0 after the first change.
-        s.current_block_ts = 1_000;
-
-        // First change succeeds.
-        s.apply_transaction(&Transaction::new_admin_action(
-            &admin_kp,
-            &GovernanceAction::UpdateActiveSetSize {
-                new_size: DEFAULT_ACTIVE_SET_SIZE + ACTIVE_SET_STEP,
-            },
-            0,
-        ))
-        .unwrap();
-
-        // Second change within cooldown must fail.
-        s.current_block_ts = 1_000 + ACTIVE_SET_COOLDOWN_SECS - 1;
-        assert!(s
-            .apply_transaction(&Transaction::new_admin_action(
-                &admin_kp,
-                &GovernanceAction::UpdateActiveSetSize {
-                    new_size: DEFAULT_ACTIVE_SET_SIZE + ACTIVE_SET_STEP * 2,
-                },
-                1,
-            ))
-            .is_err());
-
-        // After cooldown elapses it succeeds again.
-        s.current_block_ts = 1_000 + ACTIVE_SET_COOLDOWN_SECS + 1;
-        s.apply_transaction(&Transaction::new_admin_action(
-            &admin_kp,
-            &GovernanceAction::UpdateActiveSetSize {
-                new_size: DEFAULT_ACTIVE_SET_SIZE + ACTIVE_SET_STEP * 2,
-            },
-            1,
-        ))
-        .unwrap();
-        assert_eq!(
-            s.active_set_size,
-            DEFAULT_ACTIVE_SET_SIZE + ACTIVE_SET_STEP * 2
-        );
     }
 
     // ─── ADR 0038: UpdateMinValidatorBond governance ──────────────────────────

@@ -29,12 +29,6 @@ pub enum GovernanceAction {
         signers: Vec<Address>,
         threshold: u16,
     },
-    /// Update the governable active-set size N (ADR 0038).
-    /// `new_size` must differ from the current value by exactly ±ACTIVE_SET_STEP and stay
-    /// ≥ MIN_ACTIVE_SET_SIZE. Subject to ACTIVE_SET_COOLDOWN_SECS between modifications.
-    UpdateActiveSetSize {
-        new_size: u32,
-    },
     /// Update the minimum validator bond floor (ADR 0038).
     /// `atoms` must be in [MIN_BOND_HARD_FLOOR, MAX_BOND_HARD_CAP], change by at most
     /// BOND_STEP_BPS of the current value, with BOND_COOLDOWN_SECS between modifications.
@@ -68,7 +62,6 @@ mod tests {
                 signers: vec![addr, Address::from_bytes([0x22; 20])],
                 threshold: 2,
             },
-            GovernanceAction::UpdateActiveSetSize { new_size: 21 },
             GovernanceAction::UpdateMinValidatorBond { atoms: 1_000 },
         ];
         for a in actions {
@@ -90,7 +83,7 @@ mod tests {
         // cross-implementation signature verification of the AdminAction payload.
         let a = Address::from_bytes([0x11; 20]);
         let b = Address::from_bytes([0x22; 20]);
-        let cases: [(GovernanceAction, &str); 8] = [
+        let cases: [(GovernanceAction, &str); 7] = [
             (
                 GovernanceAction::AddValidator(a),
                 "001111111111111111111111111111111111111111",
@@ -121,15 +114,10 @@ mod tests {
                 },
                 "0502000000111111111111111111111111111111111111111122222222222222222222222222222222222222220200",
             ),
-            // discriminant 6: UpdateActiveSetSize { new_size: 21 }
-            (
-                GovernanceAction::UpdateActiveSetSize { new_size: 21 },
-                "0615000000",
-            ),
-            // discriminant 7: UpdateMinValidatorBond { atoms: 1000 }
+            // discriminant 6: UpdateMinValidatorBond { atoms: 1000 }
             (
                 GovernanceAction::UpdateMinValidatorBond { atoms: 1_000 },
-                "07e8030000000000000000000000000000",
+                "06e8030000000000000000000000000000",
             ),
         ];
         for (action, hex_want) in cases {

@@ -89,27 +89,17 @@ pub const UNBONDING_SECS: u64 = 3 * 24 * 3_600;
 
 // ─── Open PoA — active set (ADR 0038) ─────────────────────────────────────────
 
-/// Default number of validators in the active signing set (ADR 0038). Governable
-/// in steps of ACTIVE_SET_STEP with ACTIVE_SET_COOLDOWN_SECS between modifications.
-/// No hard upper cap — governance controls the ceiling. Note: above ~100 validators,
-/// Ed25519 individual co-signatures stress the gossip layer; BLS aggregation (ADR 0029)
-/// is recommended for large committees.
-pub const DEFAULT_ACTIVE_SET_SIZE: u32 = 21;
+/// Maximum number of validators in the active voting set (ADR 0081 C5). A protocol
+/// constant, not a governable value: while fewer are bonded, every eligible validator is
+/// active; beyond it, the top `MAX_ACTIVE_SET_SIZE` by score are selected at each epoch
+/// and the rest wait on the bench. BLS aggregation keeps 100 votes to one signature.
+pub const MAX_ACTIVE_SET_SIZE: u32 = 100;
 
 /// Hard floor on the active set size (ADR 0038). Immutable — below 5 the BFT
 /// safety threshold (⌈2n/3⌉ = 4) has no tolerance for faults.
 /// Activated once the validator pool reaches 5 entries; below that the set equals
 /// the pool size.
 pub const MIN_ACTIVE_SET_SIZE: u32 = 5;
-
-/// Active-set size changes are limited to this step per governance action (ADR 0038).
-/// Prevents an attacker from jumping from 21 to the floor of 5 in a single transaction.
-pub const ACTIVE_SET_STEP: u32 = 2;
-
-/// Minimum real-time gap between two active-set-size governance modifications (7 days).
-/// Immutable. Combined with ACTIVE_SET_STEP, going from 21 to the floor of 5 takes
-/// 8 steps × 7 days = 56 days of sustained governance control (ADR 0038).
-pub const ACTIVE_SET_COOLDOWN_SECS: u64 = 7 * 24 * 3_600;
 
 /// Duration of one epoch in real-time seconds (ADR 0028). With a fixed 12s block cadence
 /// (ADR 0043/0045), each epoch contains exactly EPOCH_DURATION_SECS / block_time_secs = 300

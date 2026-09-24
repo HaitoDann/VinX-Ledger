@@ -1174,7 +1174,7 @@ async fn dispatch_message(
             if count >= quorum {
                 let proofs_typed: Vec<(Address, VrfProof)> =
                     entry.iter().map(|(a, b)| (*a, VrfProof(*b))).collect();
-                let active_set_size = state.read().await.active_set_size as usize;
+                let active_set_size = vinx_core::amount::MAX_ACTIVE_SET_SIZE as usize;
                 let committee = state.read().await.committee_from_vrf_proofs(
                     height,
                     &proofs_typed,
