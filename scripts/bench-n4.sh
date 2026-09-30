@@ -114,6 +114,14 @@ if (( PROPOSED > 0 )); then
     ok "node4 (clés séparées, sans la clé du propriétaire) a proposé $PROPOSED bloc(s) au nom de $OWNER4"
 else ko "aucun bloc proposé par node4"; fi
 
+echo "=== Phase 1a : redémarrage de node1 avant toute transaction ==="
+# Régression : les comptes de genèse jamais modifiés n'étaient pas écrits sur disque ;
+# un nœud relancé les perdait et calculait des racines d'état différentes.
+stop 1; start 1
+H=$(height 2)
+if wait_height $((H + 3)) 120 1 2 3 4; then ok "node1 relancé suit la chaîne ($(height 1))"; else ko "node1 relancé bloqué"; fi
+agree "$(height 1)" 1 2 3 4 || true
+
 echo "=== Phase 1b : paiement réel + reçu vérifié depuis un autre nœud ==="
 DEST=$(python3 -c "import json;print(json.load(open('$BASE/node2/validator.json'))['address'])")
 OUT=$("$WALLET" transfer --to "$DEST" --amount 5 --memo "FAC-2026-0412" --wallet "$BASE/node1/validator.json" \

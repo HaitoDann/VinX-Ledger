@@ -17,6 +17,8 @@ pub fn router(node: Arc<Node>) -> Router {
     let limiter = RateLimiter::new(node.metrics.clone());
     Router::new()
         .route("/", get(ui::index))
+        .route("/assets/nacl.min.js", get(ui::nacl_js))
+        .route("/assets/blake3.min.js", get(ui::blake3_js))
         .route("/admin", get(ui::admin))
         .route("/health", get(handlers::health))
         .route("/chain/height", get(handlers::get_height))

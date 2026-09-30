@@ -1,5 +1,21 @@
 use axum::response::Html;
 
+/// Signing and hashing libraries, served by the node itself (no CDN): the UI works
+/// offline and a compromised CDN cannot tamper with the code that holds the keys.
+pub async fn nacl_js() -> impl axum::response::IntoResponse {
+    (
+        [(axum::http::header::CONTENT_TYPE, "application/javascript")],
+        include_str!("../../assets/nacl.min.js"),
+    )
+}
+
+pub async fn blake3_js() -> impl axum::response::IntoResponse {
+    (
+        [(axum::http::header::CONTENT_TYPE, "application/javascript")],
+        include_str!("../../assets/blake3.min.js"),
+    )
+}
+
 pub async fn index() -> Html<&'static str> {
     Html(HTML)
 }
@@ -16,7 +32,8 @@ const HTML: &str = r####"<!DOCTYPE html>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
 <title>VinX Ledger — Explorateur</title>
-<script src="https://cdn.jsdelivr.net/npm/tweetnacl@1.0.3/nacl-fast.min.js"></script>
+<script src="/assets/nacl.min.js"></script>
+<script src="/assets/blake3.min.js"></script>
 <style>
   :root {
     --bg:#0d1117;--surface:#161b22;--surface2:#21262d;--border:#30363d;
@@ -188,6 +205,7 @@ const HTML: &str = r####"<!DOCTYPE html>
   <div class="card-body">
     <div class="sec-notice">Votre clé secrète ne quitte jamais le navigateur — la signature est effectuée localement.</div>
     <div id="wallet-load-row" class="row">
+      <button class="green" style="flex:1" onclick="newWallet()">Nouveau portefeuille</button>
       <label style="flex:1">
         <input type="file" accept=".json" id="wallet-file" style="display:none" onchange="onWalletFile(this)">
         <button style="width:100%;background:var(--surface2);color:var(--text);border:1px solid var(--border)" onclick="document.getElementById('wallet-file').click()">
@@ -218,7 +236,10 @@ const HTML: &str = r####"<!DOCTYPE html>
     </div>
     <div id="form-transfer">
       <div class="row" style="margin-bottom:8px">
-        <input type="text" class="mono" id="tx-to" placeholder="Adresse destinataire vinx1…" />
+        <input type="text" class="mono" id="tx-to" placeholder="Destinataire : vinx1… ou nom@domaine" />
+      </div>
+      <div class="row" style="margin-bottom:8px">
+        <input type="text" id="tx-memo" maxlength="32" placeholder="Mémo (optionnel, public, 32 octets max) — ex. FAC-2026-0412" />
       </div>
       <div class="row">
         <input type="number" id="tx-amount" placeholder="Montant (VINX)" min="0" step="any" oninput="updateFee()" />
@@ -368,6 +389,11 @@ function u32To4BE(n) {
 // Decode a bech32 `vinx1...` address to its raw 20-byte payload — the canonical
 // form the node signs and hashes over. Mirrors vinx-crypto's Address encoding.
 const BECH32_CHARSET = 'qpzry9x8gf2tvdw0s3jn54khce6mua7l';
+// Texte fourni par des tiers (mémo) : toujours échappé avant insertion dans le DOM.
+function escHtml(t) {
+  return String(t).replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
+}
+
 function bech32Decode20(addr) {
   const s = addr.toLowerCase();
   const pos = s.lastIndexOf('1');
@@ -566,6 +592,53 @@ async function requestFaucet() {
 }
 
 // ─── Wallet ───────────────────────────────────────────────────────────────────
+// ── Nouveau portefeuille : clé générée dans le navigateur ─────────────────
+// Adresse = Bech32m("vinx", BLAKE3(0x00 ‖ clé publique)[..20]) — comme
+// vinx_crypto::Address::from_public_key (0x00 = type de clé Ed25519, ADR 0081 D6).
+const B32 = 'qpzry9x8gf2tvdw0s3jn54khce6mua7l';
+function b32Polymod(v) {
+  const G = [0x3b6a57b2, 0x26508e6d, 0x1ea119fa, 0x3d4233dd, 0x2a1462b3];
+  let chk = 1;
+  for (const x of v) {
+    const top = chk >>> 25;
+    chk = ((chk & 0x1ffffff) << 5) ^ x;
+    for (let i = 0; i < 5; i++) if ((top >>> i) & 1) chk ^= G[i];
+  }
+  return chk;
+}
+function bech32mEncode(hrp, bytes) {
+  const data = []; let acc = 0, bits = 0;
+  for (const b of bytes) { acc = (acc << 8) | b; bits += 8; while (bits >= 5) { bits -= 5; data.push((acc >> bits) & 31); } }
+  if (bits > 0) data.push((acc << (5 - bits)) & 31);
+  const hx = [...hrp].map(c => c.charCodeAt(0) >> 5).concat([0], [...hrp].map(c => c.charCodeAt(0) & 31));
+  const pm = b32Polymod(hx.concat(data, [0,0,0,0,0,0])) ^ 0x2bc830a3;
+  const chk = [0,1,2,3,4,5].map(i => (pm >>> (5 * (5 - i))) & 31);
+  return hrp + '1' + data.concat(chk).map(d => B32[d]).join('');
+}
+async function newWallet() {
+  const err = document.getElementById('wallet-err');
+  try {
+    if (!window.vinxBlake3) throw new Error('bibliothèque BLAKE3 non chargée');
+    const seed = nacl.randomBytes(32);
+    const kp = nacl.sign.keyPair.fromSeed(seed);
+    const tagged = new Uint8Array(33); tagged.set(kp.publicKey, 1);
+    const address = bech32mEncode('vinx', window.vinxBlake3(tagged).slice(0, 20));
+    const file = { address, secret_key_hex: bytesToHex(seed) };
+    wallet = { address, secretKey64: kp.secretKey, publicKey32: kp.publicKey, chainId: 42 };
+    fetch(`${BASE}/health`).then(r => r.json()).then(h => {
+      if (wallet && typeof h.chain_id === 'number') wallet.chainId = h.chain_id;
+    }).catch(() => {});
+    // Sauvegarde : sans ce fichier, les fonds sont perdus à la fermeture de la page.
+    const a = document.createElement('a');
+    a.href = URL.createObjectURL(new Blob([JSON.stringify(file, null, 2)], {type:'application/json'}));
+    a.download = `vinx-wallet-${address.slice(5, 13)}.json`;
+    a.click();
+    err.textContent = '';
+    const fa = document.getElementById('faucet-addr'); if (fa) fa.value = address;
+    showWallet();
+  } catch (e) { err.textContent = 'Erreur : ' + e.message; }
+}
+
 function onWalletFile(input) {
   const file = input.files[0];
   if (!file) return;
@@ -655,8 +728,23 @@ async function sendTx(txType) {
   let to = wallet.address;
   if (txType === 'Transfer') {
     to = document.getElementById('tx-to').value.trim();
+    // Adresse de paiement nom@domaine (ADR 0085) : résolue hors chaîne, adresse affichée.
+    if (/^[a-z0-9._-]{1,64}@[a-zA-Z0-9.-]+(:[0-9]+)?$/.test(to)) {
+      const [name, domain] = to.split('@');
+      const local = domain.startsWith('localhost') || domain.startsWith('127.0.0.1');
+      try {
+        const doc = await (await fetch(`${local ? 'http' : 'https'}://${domain}/.well-known/vinx.json?name=${name}`, {redirect:'error'})).json();
+        const resolved = doc.names && doc.names[name];
+        if (typeof resolved !== 'string' || !resolved.startsWith('vinx1')) throw new Error('nom inconnu');
+        if (!confirm(`${to}\n→ ${resolved}\n\nPayer cette adresse ?`)) { result.innerHTML = ''; return; }
+        to = resolved;
+      } catch (e) { result.innerHTML = `<p class="msg err">Résolution de ${to} impossible : ${e.message}</p>`; return; }
+    }
     if (!to.startsWith('vinx1')) { result.innerHTML = `<p class="msg err">Adresse invalide.</p>`; return; }
   }
+  const memoBytes = txType === 'Transfer'
+    ? new TextEncoder().encode(document.getElementById('tx-memo').value) : new Uint8Array(0);
+  if (memoBytes.length > 32) { result.innerHTML = `<p class="msg err">Mémo trop long (${memoBytes.length} octets, 32 max).</p>`; return; }
   const feeAtoms = calcFee(amountAtoms);
   result.innerHTML = `<p class="msg">Signature…</p>`;
   try {
@@ -668,11 +756,11 @@ async function sendTx(txType) {
   const discriminants = { Transfer:0x01, Stake:0x02, Unstake:0x03 };
   // Canonical signing bytes — must match vinx-core Transaction::signing_bytes():
   // disc(1) ‖ key_type(1=0x00 Ed25519) ‖ pub_key(32) ‖ to(20) ‖ amount(16 BE) ‖ fee(16 BE) ‖ nonce(8 BE)
-  // ‖ chain_id(4 BE) ‖ expiry(1=0x00) ‖ payload_len(4 BE) ‖ payload(empty) ‖ sponsor(1=0x00)
+  // ‖ chain_id(4 BE) ‖ expiry(1=0x00) ‖ payload_len(4 BE) ‖ payload(mémo) ‖ sponsor(1=0x00)
   let toB;
   try { toB = bech32Decode20(to); }
   catch (e) { result.innerHTML = `<p class="msg err">Adresse invalide : ${e.message}</p>`; return; }
-  const sigBytes = new Uint8Array(1+1+32+20+16+16+8+4+1+4+1);
+  const sigBytes = new Uint8Array(1+1+32+20+16+16+8+4+1+4+memoBytes.length+1);
   let i = 0;
   sigBytes[i++] = discriminants[txType];
   sigBytes[i++] = 0x00; // key type: Ed25519 (ADR 0081 D6)
@@ -683,12 +771,13 @@ async function sendTx(txType) {
   sigBytes.set(bigIntTo8BE(BigInt(nonce)), i); i += 8;
   sigBytes.set(u32To4BE(chainId), i);          i += 4;
   sigBytes[i++] = 0x00; // expires_at_height: None
-  sigBytes.set(u32To4BE(0), i); i += 4; // payload_len = 0 (VINX-12: always prefixed)
+  sigBytes.set(u32To4BE(memoBytes.length), i); i += 4; // payload_len (VINX-12: always prefixed)
+  sigBytes.set(memoBytes, i); i += memoBytes.length; // payload = mémo (ADR 0085)
   sigBytes[i++] = 0x00; // sponsor: None
   const signature = nacl.sign.detached(sigBytes, wallet.secretKey64);
   const pubKeyArr = '['+Array.from(wallet.publicKey32).join(',')+']';
   const sigHex = bytesToHex(signature);
-  const body = `{"tx_type":"${txType}","to":"${to}","amount":${amountAtoms},"fee":${feeAtoms},"nonce":${nonce},"chain_id":${chainId},"payload":[],"pub_key":${pubKeyArr},"signature":"${sigHex}"}`;
+  const body = `{"tx_type":"${txType}","to":"${to}","amount":${amountAtoms},"fee":${feeAtoms},"nonce":${nonce},"chain_id":${chainId},"payload":[${Array.from(memoBytes).join(',')}],"pub_key":${pubKeyArr},"signature":"${sigHex}"}`;
   try {
     const resp = await fetch(BASE+'/tx/submit', { method:'POST', headers:{'Content-Type':'application/json'}, body });
     const json = await resp.json();
@@ -742,6 +831,7 @@ async function loadAccTxs(addr, offset = 0) {
           <div style="font-size:11px;color:var(--muted);margin-top:1px">
             Bloc #${tx.block_height} — <span title="${tx.from}">${shortA(tx.from)}</span> → <span title="${tx.to}">${shortA(tx.to)}</span>
           </div>
+          ${tx.memo ? `<div style="font-size:11px;margin-top:1px">📝 ${escHtml(tx.memo)}</div>` : ''}
         </div>
         <div style="text-align:right;white-space:nowrap">
           <div style="font-weight:600;font-size:12px">${tx.amount}</div>
@@ -833,6 +923,7 @@ async function lookupTx() {
         <div class="ri"><div class="l">Montant</div><div class="v">${tx.amount}</div></div>
         <div class="ri"><div class="l">Fee</div><div class="v">${tx.fee}</div></div>
         <div class="ri"><div class="l">Nonce</div><div class="v">${tx.nonce}</div></div>
+        ${tx.memo ? `<div class="ri"><div class="l">Mémo</div><div class="v">${escHtml(tx.memo)}</div></div>` : ''}
         <div class="ri full"><div class="l">Hash</div><div class="v mono">${tx.hash}</div></div>
         <div class="ri full"><div class="l">De</div><div class="v mono"><a href="#" onclick="document.getElementById('acc-in').value='${tx.from}';lookupAccount();return false" style="color:var(--accent)">${tx.from}</a></div></div>
         <div class="ri full"><div class="l">Vers</div><div class="v mono"><a href="#" onclick="document.getElementById('acc-in').value='${tx.to}';lookupAccount();return false" style="color:var(--accent)">${tx.to}</a></div></div>
@@ -890,7 +981,7 @@ const ADMIN_HTML: &str = r####"<!DOCTYPE html>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
 <title>VinX Ledger — Console Admin</title>
-<script src="https://cdn.jsdelivr.net/npm/tweetnacl@1.0.3/nacl-fast.min.js"></script>
+<script src="/assets/nacl.min.js"></script>
 <style>
   :root{
     --bg:#0d1117;--surface:#161b22;--surface2:#21262d;--border:#30363d;

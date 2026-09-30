@@ -499,6 +499,16 @@ async fn main() {
     // Read the persisted mempool now, then release this Storage handle: the Node
     // opens the same redb file itself, and redb forbids two open handles to one
     // database within a process (DatabaseAlreadyOpen).
+    // A new chain is written to disk in full right away. Incremental persistence only
+    // writes what changes, so a genesis account nobody has touched yet (e.g. a dev
+    // prefund) would otherwise never reach the disk — and a node restarted before it
+    // moved would reload without it, compute different state roots and fork off.
+    if !resumed {
+        if let Err(e) = storage.save(&mut state, &mut chain) {
+            eprintln!("\n❌ Impossible d'écrire la genèse sur disque : {e}\n");
+            std::process::exit(1);
+        }
+    }
     let restored_mempool = storage.load_mempool();
     drop(storage);
 
