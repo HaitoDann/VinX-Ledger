@@ -103,7 +103,11 @@ pub async fn get_account(
     let address = node.parse_address(&raw_address).await?;
     let state = node.state.read().await;
     match state.get_account(&address) {
-        Some(account) => Ok(Json(AccountResponse::from_account(account))),
+        Some(account) => {
+            let mut r = AccountResponse::from_account(account);
+            r.memo_required = state.memo_required.contains(&address);
+            Ok(Json(r))
+        }
         None => Err(ApiError::NotFound(format!(
             "Account {} not found",
             raw_address

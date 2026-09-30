@@ -34,6 +34,8 @@ pub struct AccountResponse {
     pub nonce: u64,
     pub staked: String,
     pub staked_atoms: String,
+    /// The account refuses transfers without a memo (ADR 0085).
+    pub memo_required: bool,
 }
 
 impl AccountResponse {
@@ -45,6 +47,7 @@ impl AccountResponse {
             nonce: account.nonce,
             staked: account.staked.to_string(),
             staked_atoms: account.staked.atoms().to_string(),
+            memo_required: false,
         }
     }
 }
@@ -66,6 +69,11 @@ pub struct TxResponse {
     pub fee_atoms: String,
     pub nonce: u64,
     pub hash: String,
+    /// Transfer memo (ADR 0085): UTF-8 text when valid, else null (see `memo_hex`).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub memo: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub memo_hex: Option<String>,
 }
 
 impl TxResponse {
@@ -80,6 +88,11 @@ impl TxResponse {
             fee_atoms: tx.fee.atoms().to_string(),
             nonce: tx.nonce,
             hash: hash_to_hex(&tx.hash()),
+            memo: tx
+                .memo()
+                .and_then(|m| std::str::from_utf8(m).ok())
+                .map(str::to_string),
+            memo_hex: tx.memo().map(hex::encode),
         }
     }
 }

@@ -116,7 +116,7 @@ else ko "aucun bloc proposé par node4"; fi
 
 echo "=== Phase 1b : paiement réel + reçu vérifié depuis un autre nœud ==="
 DEST=$(python3 -c "import json;print(json.load(open('$BASE/node2/validator.json'))['address'])")
-OUT=$("$WALLET" transfer --to "$DEST" --amount 5 --wallet "$BASE/node1/validator.json" \
+OUT=$("$WALLET" transfer --to "$DEST" --amount 5 --memo "FAC-2026-0412" --wallet "$BASE/node1/validator.json" \
     --node http://127.0.0.1:8545 2>&1 || true)
 TXH=$(echo "$OUT" | grep -oE '[0-9a-f]{64}' | head -1)
 if [[ -z "$TXH" ]]; then ko "transfert refusé : $OUT"; else
@@ -128,6 +128,8 @@ if [[ -z "$TXH" ]]; then ko "transfert refusé : $OUT"; else
     if [[ -n "$GOT" ]] && "$WALLET" verify-receipt "$BASE/receipts/$TXH.json" >/dev/null; then
         ok "paiement inclus, reçu obtenu de node3 et vérifié hors-ligne"
     else ko "pas de reçu pour $TXH"; fi
+    MEMO=$(rpc 8547 "tx/$TXH" | jfield "['memo']")
+    [[ "$MEMO" == "FAC-2026-0412" ]] && ok "mémo signé lu sur node3 : $MEMO" || ko "mémo inattendu : $MEMO"
     BAL=$(rpc 8546 "account/$DEST" | jfield "['balance_atoms']")
     [[ "$BAL" == "5000000000" ]] && ok "solde du destinataire = 5 VINX (vu par node2)" || ko "solde inattendu : $BAL"
 fi

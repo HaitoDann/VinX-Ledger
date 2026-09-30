@@ -7,10 +7,10 @@ use vinx_core::{
         cumulative_emission_atoms, Amount, ADMIN_TENURE_SECS, BOND_COOLDOWN_SECS, BOND_STEP_BPS,
         BPS_DENOM, DEFAULT_FEE_FLOOR_ATOMS, EPOCH_DURATION_SECS, EVIDENCE_MAX_AGE_SECS,
         EXISTENTIAL_DEPOSIT_ATOMS, FEE_PRODUCER_SHARE_BPS, MAX_ACTIVE_SET_SIZE, MAX_BOND_HARD_CAP,
-        MAX_NONCE_AHEAD, MAX_TX_PAYLOAD_BYTES, MAX_VALIDATOR_EXITS_PER_EPOCH, MIN_ACTIVE_SET_SIZE,
-        MIN_BOND_HARD_FLOOR, MIN_STAKE_ATOMS, MIN_VALIDATOR_BOND_ATOMS, PROPOSER_SHARE_BPS,
-        SLASH_BASE_BPS, SLASH_BOUNTY_BPS, SLASH_CORRELATION_FACTOR, UNBONDING_SECS,
-        VALIDATOR_SCORE_WINDOW_SECS,
+        MAX_MEMO_BYTES, MAX_NONCE_AHEAD, MAX_TX_PAYLOAD_BYTES, MAX_VALIDATOR_EXITS_PER_EPOCH,
+        MIN_ACTIVE_SET_SIZE, MIN_BOND_HARD_FLOOR, MIN_STAKE_ATOMS, MIN_VALIDATOR_BOND_ATOMS,
+        PROPOSER_SHARE_BPS, SLASH_BASE_BPS, SLASH_BOUNTY_BPS, SLASH_CORRELATION_FACTOR,
+        UNBONDING_SECS, VALIDATOR_SCORE_WINDOW_SECS,
     },
     chain_id::CHAIN_ID_DEVNET,
     consensus::VoteEquivocation,
@@ -184,6 +184,10 @@ pub struct WorldState {
     /// penalties.
     #[serde(default)]
     pub slash_history: Vec<SlashRecord>,
+    /// Accounts that refuse transfers without a memo (ADR 0085) — exchange deposit
+    /// addresses. Committed in the consensus root.
+    #[serde(default)]
+    pub memo_required: std::collections::BTreeSet<Address>,
 }
 
 /// Validated `(bls_pub_key, bls_pop, operator)` of a key registration.
@@ -335,6 +339,7 @@ impl WorldState {
             last_voting_set: None,
             last_voting_keys: Vec::new(),
             slash_history: Vec::new(),
+            memo_required: Default::default(),
         }
     }
 
@@ -1018,11 +1023,19 @@ impl WorldState {
     pub fn admission_check(&self, tx: &Transaction) -> Result<(), CoreError> {
         // VINX-13: bound the payload before anything else. The fee is derived from
         // `amount`, not from size, so an oversized payload is otherwise free block bloat.
-        if tx.payload.len() > MAX_TX_PAYLOAD_BYTES {
+        if tx.payload.len() > payload_limit(&tx.tx_type) {
             return Err(CoreError::InvalidTransaction(format!(
-                "payload of {} bytes exceeds the {MAX_TX_PAYLOAD_BYTES}-byte limit",
+                "payload of {} bytes exceeds the limit of this transaction type",
                 tx.payload.len()
             )));
+        }
+        if tx.tx_type == TransactionType::Transfer
+            && tx.payload.is_empty()
+            && self.memo_required.contains(&tx.to)
+        {
+            return Err(CoreError::InvalidTransaction(
+                "the recipient requires a memo (deposit reference)".to_string(),
+            ));
         }
         if tx.chain_id != self.chain_id {
             return Err(CoreError::InvalidTransaction(format!(
@@ -1151,9 +1164,10 @@ impl WorldState {
         // admission because both `apply_transaction` and `apply_transaction_trusted` go
         // through this gate — so an oversized payload cannot enter state via a block
         // either, and every node agrees on which blocks are valid.
-        if tx.payload.len() > MAX_TX_PAYLOAD_BYTES {
+        let limit = payload_limit(&tx.tx_type);
+        if tx.payload.len() > limit {
             return Err(CoreError::InvalidTransaction(format!(
-                "payload of {} bytes exceeds the {MAX_TX_PAYLOAD_BYTES}-byte limit",
+                "payload of {} bytes exceeds the {limit}-byte limit of this transaction type",
                 tx.payload.len()
             )));
         }
@@ -1226,6 +1240,7 @@ impl WorldState {
             TransactionType::AdminAction => self.apply_admin_action(tx),
             TransactionType::RegisterBlsKey => self.apply_register_bls_key(tx),
             TransactionType::Unjail => self.apply_unjail(tx),
+            TransactionType::SetMemoRequired => self.apply_set_memo_required(tx),
         }
     }
 
@@ -1262,6 +1277,14 @@ impl WorldState {
                 "fee {} is below minimum {}",
                 tx.fee, expected_fee
             )));
+        }
+
+        // ADR 0085: an account that requires a memo (exchange deposit address) refuses
+        // anonymous transfers — the funds could not be attributed to a customer.
+        if tx.payload.is_empty() && self.memo_required.contains(&tx.to) {
+            return Err(CoreError::InvalidTransaction(
+                "the recipient requires a memo (deposit reference)".to_string(),
+            ));
         }
 
         // Sponsored tx: sender pays only the transfer amount; sponsor pays the fee separately
@@ -1675,6 +1698,7 @@ impl WorldState {
             last_voting_set: &'a Option<ValidatorSet>,
             last_voting_keys: &'a [Option<Vec<u8>>],
             slash_history: &'a [SlashRecord],
+            memo_required: &'a std::collections::BTreeSet<Address>,
             emission_started: bool,
         }
 
@@ -1706,6 +1730,7 @@ impl WorldState {
             last_voting_set: &self.last_voting_set,
             last_voting_keys: &self.last_voting_keys,
             slash_history: &self.slash_history,
+            memo_required: &self.memo_required,
             // `emission_started` gouverne l'émission ET la clôture d'époque : deux nœuds
             // qui en divergent émettent différemment. Il n'était engagé qu'indirectement,
             // via `emission_epoch_ts` — donc invisible quand celui-ci vaut 0.
@@ -2278,6 +2303,56 @@ impl WorldState {
         Ok(())
     }
 
+    fn apply_set_memo_required(&mut self, tx: &Transaction) -> Result<(), CoreError> {
+        let required = match tx.payload.as_slice() {
+            [0] => false,
+            [1] => true,
+            _ => {
+                return Err(CoreError::InvalidTransaction(
+                    "SetMemoRequired payload must be [0] or [1]".to_string(),
+                ))
+            }
+        };
+        if tx.fee < self.base_fee {
+            return Err(CoreError::InvalidTransaction(format!(
+                "fee {} is below minimum {}",
+                tx.fee, self.base_fee
+            )));
+        }
+        let acc = self
+            .accounts
+            .get(&tx.sender())
+            .ok_or(CoreError::InsufficientBalance)?;
+        if acc.nonce != tx.nonce {
+            return Err(CoreError::InvalidNonce {
+                expected: acc.nonce,
+                got: tx.nonce,
+            });
+        }
+        let after = acc
+            .balance
+            .checked_sub(tx.fee)
+            .ok_or(CoreError::InsufficientBalance)?;
+        if after.atoms() > 0
+            && acc.staked == Amount::ZERO
+            && after.atoms() < EXISTENTIAL_DEPOSIT_ATOMS
+        {
+            return Err(CoreError::BelowExistentialDeposit);
+        }
+        let acc = self.accounts.get_mut(&tx.sender()).expect("checked above");
+        acc.balance = after;
+        acc.nonce += 1;
+        self.block_fees = self.block_fees.saturating_add(tx.fee);
+        self.mark_dirty(&tx.sender());
+        if required {
+            self.memo_required.insert(tx.sender());
+        } else {
+            self.memo_required.remove(&tx.sender());
+        }
+        self.reap_if_empty(&tx.sender());
+        Ok(())
+    }
+
     fn apply_unjail(&mut self, tx: &Transaction) -> Result<(), CoreError> {
         let account = self
             .accounts
@@ -2318,6 +2393,17 @@ impl WorldState {
             .or_insert_with(|| vinx_core::Account::new(*address));
         acc.balance = Amount::ZERO;
         acc.staked = staked;
+    }
+}
+
+/// Maximum payload per transaction type (ADR 0085): a transfer carries at most a memo,
+/// transactions without data carry nothing, the others their structured payload.
+fn payload_limit(t: &TransactionType) -> usize {
+    match t {
+        TransactionType::Transfer => MAX_MEMO_BYTES,
+        TransactionType::Unstake | TransactionType::Unjail => 0,
+        TransactionType::SetMemoRequired => 1,
+        _ => MAX_TX_PAYLOAD_BYTES,
     }
 }
 
@@ -3056,6 +3142,52 @@ mod tests {
         // 10% bounty to the reporter (100 VINX), 90% (900 VINX) moved to the epoch pot.
         assert_eq!(s.accounts[&reporter].balance, Amount::from_vinx(110));
         assert_eq!(s.epoch_dist_emission_pot, Amount::from_vinx(900));
+    }
+
+    // ─── ADR 0085: memo ──────────────────────────────────────────────────────
+
+    #[test]
+    fn test_memo_is_bounded_and_required_memo_is_enforced() {
+        let (alice_kp, alice) = kp_addr();
+        let (exch_kp, exch) = kp_addr();
+        let mut s = WorldState::new();
+        s.credit_for_test(alice, Amount::from_vinx(100));
+        s.credit_for_test(exch, Amount::from_vinx(10));
+        let fee = s.base_fee;
+        let amt = Amount::from_vinx(1);
+
+        // 33 bytes: refused; 32 bytes: fine.
+        let too_long =
+            Transaction::new_transfer_with_memo(&alice_kp, exch, amt, fee, 0, &[b'x'; 33]);
+        assert!(s.apply_transaction(&too_long).is_err());
+        let ok = Transaction::new_transfer_with_memo(&alice_kp, exch, amt, fee, 0, &[b'x'; 32]);
+        s.apply_transaction(&ok).unwrap();
+        assert_eq!(ok.memo(), Some(&[b'x'; 32][..]));
+
+        // The exchange requires a memo from now on.
+        let set = Transaction::new_set_memo_required(&exch_kp, true, fee, 0);
+        s.apply_transaction(&set).unwrap();
+        assert!(s.memo_required.contains(&exch));
+        let root_with = s.compute_state_root();
+
+        let anon = Transaction::new_transfer(&alice_kp, exch, amt, fee, 1);
+        assert!(s.apply_transaction(&anon).is_err(), "no memo → refused");
+        let tagged =
+            Transaction::new_transfer_with_memo(&alice_kp, exch, amt, fee, 1, b"client-4412");
+        s.apply_transaction(&tagged).unwrap();
+
+        // Lifted again.
+        let unset = Transaction::new_set_memo_required(&exch_kp, false, fee, 1);
+        s.apply_transaction(&unset).unwrap();
+        assert_ne!(s.compute_state_root(), root_with, "the option is committed");
+        let anon = Transaction::new_transfer(&alice_kp, exch, amt, fee, 2);
+        s.apply_transaction(&anon).unwrap();
+
+        // Unstake carries no payload at all.
+        let mut u = Transaction::new_unstake(&alice_kp, amt, Amount::ZERO, 3);
+        u.payload = vec![0];
+        u.sign(&alice_kp);
+        assert!(s.apply_transaction(&u).is_err());
     }
 
     // ─── ADR 0084: staking ───────────────────────────────────────────────────
