@@ -1,5 +1,33 @@
 # VinX Ledger — Guide de démarrage rapide
 
+## ⚡ Tester à la maison en une commande
+
+```bash
+git clone https://github.com/HaitoDann/vinx-ledger && cd vinx-ledger
+./vinx start          # compile, crée un réseau local, lance un validateur
+```
+
+Ouvrir **http://127.0.0.1:8545/** puis :
+1. **Nouveau portefeuille** : la clé est créée dans le navigateur et un fichier de
+   sauvegarde est téléchargé. Gardez-le, il permet de recharger le portefeuille.
+2. **Obtenir** (faucet) : 100 VINX de test arrivent au bloc suivant.
+3. **Envoyer** : vers une adresse `vinx1…` ou `nom@domaine`, avec un mémo optionnel.
+
+| Commande | Effet |
+|---|---|
+| `./vinx start -n 4` | 4 validateurs (tolère 1 panne) — après `./vinx reset` |
+| `./vinx status` | hauteur de chaque nœud, quorum |
+| `./vinx kill 3` / `./vinx revive 3` | simuler une panne, puis relancer |
+| `./vinx start --lan` | accessible depuis les autres appareils du réseau local (téléphone…) |
+| `./vinx wallet balance vinx1…` | le wallet en ligne de commande, branché sur le réseau local |
+| `./vinx logs 2` | journal du nœud 2 |
+| `./vinx stop` / `./vinx reset` | arrêter (données gardées) / tout effacer |
+
+Prérequis : Rust (rustup.rs), `python3`, `curl`. Tout fonctionne hors ligne : l'interface
+n'utilise aucune ressource externe.
+
+---
+
 > **Prérequis système**
 > - Rust ≥ 1.78 → [rustup.rs](https://rustup.rs)
 > - Git

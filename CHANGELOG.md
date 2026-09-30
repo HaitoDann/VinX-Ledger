@@ -5,6 +5,13 @@ Format : `MAJEUR.MINEUR.CORRECTIF` — les versions `0.x.y` sont des versions de
 
 ---
 
+## [Non publié] — Tester à la maison
+
+- **`./vinx`** : réseau local en une commande (`start [-n 4] [--lan]`, `status`, `kill`/`revive`, `logs`, `wallet`, `stop`, `reset`) avec faucet ; remplace `scripts/devnet.sh`.
+- **Interface web** : « Nouveau portefeuille » (clé générée dans le navigateur, sauvegarde téléchargée), mémo, adresses `nom@domaine` ; mémos échappés (anti-injection HTML).
+- **Plus aucune ressource externe** : tweetnacl et BLAKE3 sont servis par le nœud (fonctionne hors ligne, pas de dépendance à un CDN pour le code qui manipule les clés).
+- **Bug critique corrigé** : une chaîne neuve n'était jamais écrite en entier sur disque ; les comptes de genèse jamais modifiés (pré-financement) disparaissaient au premier redémarrage, et le nœud relancé calculait des racines d'état différentes et ne pouvait plus suivre. Test de régression ajouté au banc n=4.
+
 ## [Non publié] — Mémo et adresses de paiement (ADR 0085)
 
 - **Mémo** de transfert : 32 octets max, signé, public, élagué avec le bloc (zéro poids à long terme) ; `transfer --memo`.

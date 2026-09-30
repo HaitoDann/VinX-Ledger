@@ -1,0 +1,182 @@
+#!/usr/bin/env bash
+# ─────────────────────────────────────────────────────────────────────────────
+# VinX — réseau de test à la maison, en une commande.
+#
+#   ./vinx start            1 validateur + interface web + faucet
+#   ./vinx start -n 4       4 validateurs (tolère 1 panne)
+#   ./vinx status           hauteur, validateurs, santé
+#   ./vinx stop             arrête tout (les données sont conservées)
+#   ./vinx start            relance là où on s'était arrêté
+#   ./vinx kill 3           arrête le validateur 3 (test de panne)
+#   ./vinx revive 3         le relance
+#   ./vinx logs [i]         journal du nœud i (1 par défaut)
+#   ./vinx wallet <cmd>     vinx-wallet branché sur le nœud local
+#   ./vinx reset            efface le réseau local (nouvelle genèse)
+#
+# Options de start : -n <validateurs> (1–9), -t <temps de bloc en s> (défaut 5),
+#                    --lan (écoute sur le réseau local, pour d'autres machines/téléphones)
+# Données : ./.vinx-local/   (ou VINX_HOME)
+# ─────────────────────────────────────────────────────────────────────────────
+set -euo pipefail
+
+ROOT="$(cd "$(dirname "$0")" && pwd)"
+HOME_DIR="${VINX_HOME:-$ROOT/.vinx-local}"
+NODE="$ROOT/target/release/vinx-node"
+WALLET="$ROOT/target/release/vinx-wallet"
+CHAIN_ID=42
+
+c_ok=$'\e[32m'; c_dim=$'\e[2m'; c_b=$'\e[1m'; c_r=$'\e[31m'; c_0=$'\e[0m'
+say()  { echo "${c_b}▸${c_0} $*"; }
+ok()   { echo "  ${c_ok}✓${c_0} $*"; }
+die()  { echo "  ${c_r}✗ $*${c_0}" >&2; exit 1; }
+
+rpc_port() { echo $((8544 + $1)); }
+p2p_port() { echo $((9000 + $1)); }
+rpc() { curl -s --max-time 2 "http://127.0.0.1:$(rpc_port "$1")/$2" 2>/dev/null || true; }
+jget() { python3 -c "import sys,json
+try: print(json.load(sys.stdin)$1)
+except Exception: print('')"; }
+count() { cat "$HOME_DIR/validators" 2>/dev/null || echo 0; }
+pid_of() { cat "$HOME_DIR/node$1.pid" 2>/dev/null || true; }
+alive() { local p; p=$(pid_of "$1"); [[ -n "$p" ]] && kill -0 "$p" 2>/dev/null; }
+
+build() {
+    if [[ ! -x "$NODE" || ! -x "$WALLET" || -n "$(find "$ROOT/crates" -newer "$NODE" -name '*.rs' -print -quit 2>/dev/null)" ]]; then
+        say "Compilation (la première fois prend quelques minutes)…"
+        cargo build --release -p vinx-node -p vinx-wallet --manifest-path "$ROOT/Cargo.toml" 2>&1 \
+            | grep -E "^(error|warning: unused)" || true
+        [[ -x "$NODE" ]] || die "la compilation a échoué (cargo build --release -p vinx-node)"
+    fi
+}
+
+init_network() {
+    local n="$1" bt="$2"
+    say "Création d'un réseau local à $n validateur(s), bloc toutes les ${bt}s"
+    mkdir -p "$HOME_DIR"
+    local entries=()
+    for i in $(seq 1 "$n"); do
+        mkdir -p "$HOME_DIR/node$i"
+        entries+=("$("$NODE" --data-dir "$HOME_DIR/node$i" --chain-id $CHAIN_ID --genesis-entry 2>/dev/null | grep '^{')")
+    done
+    local admin
+    admin=$(python3 -c "import json;print(json.load(open('$HOME_DIR/node1/admin.json'))['address'])")
+    python3 - "$HOME_DIR/genesis.json" "$admin" "$bt" "${entries[@]}" <<'PY'
+import json, sys, time
+out, admin, bt, *entries = sys.argv[1:]
+e = [json.loads(x) for x in entries]
+json.dump({
+    "chain_id": 42, "genesis_timestamp": int(time.time()) - 60, "admin_address": admin,
+    "initial_validator": e[0]["address"],
+    "initial_validator_bls_pub_key": e[0]["bls_pub_key"],
+    "initial_validator_bls_pop": e[0]["bls_pop"],
+    "validators": e[1:], "block_time_secs": int(bt),
+    "prefund_initial_validator_vinx": 1000000,
+}, open(out, "w"), indent=2)
+PY
+    # Faucet: node1's validator account holds the dev prefund and hands it out.
+    cat >"$HOME_DIR/node1/config.toml" <<EOF
+faucet_key_file = "$HOME_DIR/node1/validator.json"
+faucet_cooldown_secs = 30
+EOF
+    echo "$n" >"$HOME_DIR/validators"
+    ok "genèse écrite ($HOME_DIR/genesis.json)"
+}
+
+start_node() {
+    local i="$1" host="127.0.0.1" n peers=()
+    [[ -f "$HOME_DIR/lan" ]] && host="0.0.0.0"
+    n=$(count)
+    alive "$i" && return 0
+    for j in $(seq 1 "$n"); do [[ $j != "$i" ]] && peers+=("/ip4/127.0.0.1/tcp/$(p2p_port "$j")"); done
+    local cfg=()
+    [[ -f "$HOME_DIR/node$i/config.toml" ]] && cfg=(--config "$HOME_DIR/node$i/config.toml")
+    VINX_GENESIS_SPEC="$HOME_DIR/genesis.json" nohup "$NODE" "${cfg[@]}" \
+        --data-dir "$HOME_DIR/node$i" --chain-id $CHAIN_ID \
+        --rpc-listen "$host:$(rpc_port "$i")" --p2p-listen "/ip4/$host/tcp/$(p2p_port "$i")" \
+        ${peers[@]+--peers "${peers[@]}"} >>"$HOME_DIR/node$i.log" 2>&1 &
+    echo $! >"$HOME_DIR/node$i.pid"
+}
+
+wait_up() {
+    for _ in $(seq 1 60); do
+        [[ "$(rpc 1 health | jget "['status']")" == "ok" ]] && return 0
+        sleep 0.5
+    done
+    die "le nœud 1 ne répond pas — voir ./vinx logs 1"
+}
+
+cmd_start() {
+    local n=1 bt=5 lan=0
+    while [[ $# -gt 0 ]]; do
+        case "$1" in
+            -n) n="$2"; shift 2 ;;
+            -t) bt="$2"; shift 2 ;;
+            --lan) lan=1; shift ;;
+            *) die "option inconnue : $1" ;;
+        esac
+    done
+    [[ "$n" =~ ^[1-9]$ ]] || die "-n doit être entre 1 et 9"
+    command -v python3 >/dev/null || die "python3 est requis"
+    command -v curl >/dev/null || die "curl est requis"
+    build
+    if [[ -f "$HOME_DIR/genesis.json" ]]; then
+        [[ "$n" != 1 && "$n" != "$(count)" ]] && die "réseau existant à $(count) validateur(s) — ./vinx reset pour en changer"
+        say "Reprise du réseau local existant ($(count) validateur(s))"
+    else
+        init_network "$n" "$bt"
+    fi
+    if [[ $lan == 1 ]]; then touch "$HOME_DIR/lan"; else rm -f "$HOME_DIR/lan"; fi
+    for i in $(seq 1 "$(count)"); do start_node "$i"; done
+    wait_up
+    ok "$(count) validateur(s) en marche"
+    local ip=127.0.0.1
+    [[ -f "$HOME_DIR/lan" ]] && ip=$(hostname -I 2>/dev/null | awk '{print $1}')
+    echo
+    echo "  ${c_b}Interface web :${c_0}  http://$ip:8545/"
+    echo "  ${c_dim}→ « Nouveau portefeuille », puis « Faucet » pour recevoir 100 VINX de test.${c_0}"
+    echo
+    echo "  ./vinx status     état du réseau        ./vinx stop    arrêter"
+    echo "  ./vinx kill 2     simuler une panne     ./vinx reset   repartir de zéro"
+    [[ "$(count)" -lt 4 ]] && echo "  ${c_dim}Astuce : ./vinx reset && ./vinx start -n 4 pour tester la tolérance aux pannes.${c_0}"
+    return 0
+}
+
+cmd_status() {
+    [[ -f "$HOME_DIR/genesis.json" ]] || die "aucun réseau local — ./vinx start"
+    local n; n=$(count)
+    echo "${c_b}Réseau local${c_0} — $n validateur(s), chaîne $CHAIN_ID"
+    for i in $(seq 1 "$n"); do
+        if alive "$i"; then
+            local h; h=$(rpc "$i" health | jget "['height']")
+            echo "  nœud $i  ${c_ok}● en marche${c_0}  hauteur ${h:-?}   http://127.0.0.1:$(rpc_port "$i")/"
+        else
+            echo "  nœud $i  ${c_r}○ arrêté${c_0}"
+        fi
+    done
+    local q=$(( n * 2 / 3 + 1 )) up=0
+    for i in $(seq 1 "$n"); do alive "$i" && up=$((up + 1)); done
+    if (( up >= q )); then ok "quorum atteint ($up/$n, il en faut $q) — la chaîne avance"
+    else echo "  ${c_r}✗ quorum perdu ($up/$n, il en faut $q) — la chaîne est à l'arrêt, sans fork${c_0}"; fi
+}
+
+cmd_stop() {
+    local n; n=$(count)
+    for i in $(seq 1 "$n"); do
+        local p; p=$(pid_of "$i")
+        [[ -n "$p" ]] && kill "$p" 2>/dev/null || true
+        rm -f "$HOME_DIR/node$i.pid"
+    done
+    ok "réseau arrêté (données conservées dans $HOME_DIR)"
+}
+
+case "${1:-help}" in
+    start)  shift; cmd_start "$@" ;;
+    status) cmd_status ;;
+    stop)   cmd_stop ;;
+    kill)   p=$(pid_of "${2:?numéro du nœud}"); [[ -n "$p" ]] && kill "$p" 2>/dev/null; rm -f "$HOME_DIR/node$2.pid"; ok "nœud $2 arrêté"; cmd_status ;;
+    revive) start_node "${2:?numéro du nœud}"; sleep 2; ok "nœud $2 relancé"; cmd_status ;;
+    logs)   tail -n 50 -f "$HOME_DIR/node${2:-1}.log" ;;
+    wallet) shift; build; cd "$HOME_DIR" && "$WALLET" "$@" ;;
+    reset)  cmd_stop >/dev/null 2>&1 || true; rm -rf "$HOME_DIR"; ok "réseau local effacé" ;;
+    *)      sed -n '3,18p' "$0" | sed 's/^# \{0,1\}//' ;;
+esac

@@ -182,6 +182,8 @@ async fn test_state_persists_across_node_restarts() {
     let (_, admin_addr) = make_addr();
     let (validator_kp, validator_addr) = make_addr();
 
+    let root_before;
+    let state_before;
     // ── First run: produce 5 blocks ──────────────────────────────────────────
     {
         let bls_sk = vinx_crypto::BlsSecretKey::generate();
@@ -207,6 +209,8 @@ async fn test_state_persists_across_node_restarts() {
         // Persist via the node's own storage (avoids opening a second redb instance)
         node.persist().await;
         assert_eq!(node.chain.read().await.tip_height(), 5);
+        state_before = node.state.read().await.clone();
+        root_before = state_before.clone().compute_state_root();
     }
 
     // ── Second run: resume from disk ─────────────────────────────────────────
@@ -217,6 +221,22 @@ async fn test_state_persists_across_node_restarts() {
         // Height and state should be exactly where we left off
         assert_eq!(chain.tip_height(), 5);
         assert_eq!(state.block_height, 5);
+        // The reloaded state must be the very state that was committed: a node that
+        // restarts with a different state computes different roots and forks off.
+        let mut reloaded = state.clone();
+        if reloaded.compute_state_root() != root_before {
+            let a = serde_json::to_value(&state_before).unwrap();
+            let b = serde_json::to_value(&state).unwrap();
+            for (k, v) in a.as_object().unwrap() {
+                if b.get(k) != Some(v) {
+                    panic!(
+                        "field `{k}` differs after reload:\n before {v}\n after  {}",
+                        b[k]
+                    );
+                }
+            }
+            panic!("state root differs after reload (non-serde field)");
+        }
         // Fair launch: the admin/founder is granted nothing at genesis.
         assert_eq!(state.account_balance(&admin_addr), Amount::ZERO);
     }

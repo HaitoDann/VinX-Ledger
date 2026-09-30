@@ -344,7 +344,6 @@ fn genesis_rejects_an_invalid_bls_pop() {
 /// oversized payload still enters state inside a block.
 #[test]
 fn oversized_payload_is_rejected_on_every_path() {
-
     let sender = KeyPair::generate();
     let sender_addr = Address::from_public_key(&sender.public_key());
     let recipient = Address::from_public_key(&KeyPair::generate().public_key());

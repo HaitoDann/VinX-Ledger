@@ -124,7 +124,7 @@ VinX Ledger est une blockchain L1 de paiement écrite intégralement en Rust, sa
 - [x] SDK TypeScript — 15 méthodes, 22 types, 19 tests Jest
 - [x] Docker Compose — testnet 3 validateurs prêt à l'emploi
 - [x] CI/CD GitHub Actions — 4 jobs automatiques
-- [x] Script devnet local `scripts/devnet.sh`
+- [x] Réseau local en une commande `./vinx` (validateurs, interface web, faucet)
 - [x] HD wallet BIP-39 — mnémonique 12 mots → clé ed25519
 
 ---
@@ -442,8 +442,8 @@ Lance 3 nœuds en réseau isolé :
 ### Devnet local (sans Docker)
 
 ```bash
-./scripts/devnet.sh           # démarre 3 nœuds en local
-./scripts/devnet.sh --clean   # repart de zéro
+./vinx start -n 4             # démarre 4 validateurs en local
+././vinx reset                 # repart de zéro
 ```
 
 ### CI/CD GitHub Actions
@@ -515,7 +515,7 @@ Le **socle L1 est solide** (banc n=3 + banc adversarial multi-nœuds, 429 tests,
 
 ```bash
 # Lancer le devnet local
-./scripts/devnet.sh
+./vinx start
 
 # Générer un wallet
 cargo run -p vinx-wallet -- new-wallet --output mon-wallet.json
