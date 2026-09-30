@@ -344,7 +344,6 @@ fn genesis_rejects_an_invalid_bls_pop() {
 /// oversized payload still enters state inside a block.
 #[test]
 fn oversized_payload_is_rejected_on_every_path() {
-    use vinx_core::amount::MAX_TX_PAYLOAD_BYTES;
 
     let sender = KeyPair::generate();
     let sender_addr = Address::from_public_key(&sender.public_key());
@@ -355,7 +354,8 @@ fn oversized_payload_is_rejected_on_every_path() {
 
     let amount = Amount::from_atoms(0);
     let mut tx = Transaction::new_transfer(&sender, recipient, amount, floor(), 0);
-    tx.payload = vec![0u8; MAX_TX_PAYLOAD_BYTES + 1];
+    // A transfer carries at most a memo (ADR 0085).
+    tx.payload = vec![0u8; vinx_core::amount::MAX_MEMO_BYTES + 1];
     tx.sign(&sender);
 
     assert!(
@@ -373,7 +373,7 @@ fn oversized_payload_is_rejected_on_every_path() {
 
     // Exactly at the limit is still accepted — the bound must not be off by one.
     let mut ok = Transaction::new_transfer(&sender, recipient, amount, floor(), 0);
-    ok.payload = vec![0u8; MAX_TX_PAYLOAD_BYTES];
+    ok.payload = vec![0u8; vinx_core::amount::MAX_MEMO_BYTES];
     ok.sign(&sender);
     state
         .admission_check(&ok)

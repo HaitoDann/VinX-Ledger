@@ -5,6 +5,13 @@ Format : `MAJEUR.MINEUR.CORRECTIF` — les versions `0.x.y` sont des versions de
 
 ---
 
+## [Non publié] — Mémo et adresses de paiement (ADR 0085)
+
+- **Mémo** de transfert : 32 octets max, signé, public, élagué avec le bloc (zéro poids à long terme) ; `transfer --memo`.
+- **Mémo obligatoire** par compte (`SetMemoRequired`, `memo-required on|off`) pour les adresses de dépôt d'exchange.
+- **Adresses `nom@domaine`** résolues hors chaîne (`.well-known/vinx.json`) dans le wallet et le SDK — aucun registre de noms sur la chaîne.
+- Faille corrigée : un transfert pouvait porter 16 Kio de données arbitraires au prix d'un transfert vide ; limites par type de transaction.
+
 ## [Non publié] — Staking (ADR 0084)
 
 > **Breaking protocole** — nouvelle genèse obligatoire.

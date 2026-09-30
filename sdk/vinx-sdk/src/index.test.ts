@@ -1,6 +1,6 @@
 import { readFileSync } from 'fs';
 import { join } from 'path';
-import { VinxClient, verifyAccountProof, accountKey, verifyPaymentReceipt, headerHash } from './index';
+import { VinxClient, resolvePaymentAddress, parsePaymentAddress, encodeMemo, verifyAccountProof, accountKey, verifyPaymentReceipt, headerHash } from './index';
 
 const BASE = 'http://localhost:8080';
 
@@ -285,5 +285,39 @@ describe('verifyPaymentReceipt()', () => {
   it('rejects a tampered header', () => {
     const header = { ...r.header, timestamp: r.header.timestamp + 1 };
     expect(verifyPaymentReceipt({ ...r, header }, r.tx_hash)).toBe(false);
+  });
+});
+
+describe('payment addresses and memo (ADR 0085)', () => {
+  const addr = JSON.parse(
+    readFileSync(join(__dirname, '__fixtures__', 'account_proof.json'), 'utf8')
+  ).cases[0].proof.address;
+
+  it('parses name@domain only', () => {
+    expect(parsePaymentAddress('julie@vinxpay.com')).toEqual({ name: 'julie', domain: 'vinxpay.com' });
+    expect(parsePaymentAddress('Julie@x.com')).toBeNull();
+    expect(parsePaymentAddress('a@x.com/evil')).toBeNull();
+    expect(parsePaymentAddress(addr)).toBeNull();
+  });
+
+  it('resolves through .well-known/vinx.json over https', async () => {
+    const f = jest.fn(async (url: string) => ({
+      ok: true,
+      json: async () => ({ names: { julie: addr } }),
+      url,
+    }));
+    await expect(resolvePaymentAddress('julie@vinxpay.com', f as any)).resolves.toBe(addr);
+    expect(f.mock.calls[0][0]).toBe('https://vinxpay.com/.well-known/vinx.json?name=julie');
+  });
+
+  it('rejects unknown names and invalid addresses', async () => {
+    const f = async () => ({ ok: true, json: async () => ({ names: { bob: 'nope' } }) });
+    await expect(resolvePaymentAddress('julie@x.com', f as any)).rejects.toThrow();
+    await expect(resolvePaymentAddress('bob@x.com', f as any)).rejects.toThrow();
+  });
+
+  it('bounds the memo to 32 bytes', () => {
+    expect(encodeMemo('FAC-2026-0412')).toHaveLength(13);
+    expect(() => encodeMemo('x'.repeat(33))).toThrow();
   });
 });

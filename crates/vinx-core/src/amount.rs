@@ -199,7 +199,12 @@ pub const BATCH_WINDOW_MS: u64 = 200;
 ///
 /// 16 KiB comfortably covers every payload the protocol defines — the largest are
 /// governance actions and BLS registrations, all well under 1 KiB.
-pub const MAX_TX_PAYLOAD_BYTES: usize = 16 * 1024;
+pub const MAX_TX_PAYLOAD_BYTES: usize = 2 * 1024;
+
+/// Maximum memo of a transfer (ADR 0085): a short, public, signed reference (invoice
+/// number, exchange deposit id). The memo lives in the transaction, so it is pruned with
+/// the block after the retention window — the payer's receipt keeps it.
+pub const MAX_MEMO_BYTES: usize = 32;
 
 /// Maximum tolerated clock skew between a block timestamp and local time (ADR 0081 C7).
 /// Validators are expected to run NTP; 15 s leaves room for ordinary skew without letting a

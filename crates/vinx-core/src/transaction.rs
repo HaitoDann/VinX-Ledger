@@ -25,6 +25,10 @@ pub enum TransactionType {
     /// `from` = the validator address; no payload. Requires `UNJAIL_COOLDOWN_HEIGHTS` to
     /// have elapsed since the jail sentence. Appended last to preserve discriminants.
     Unjail,
+    /// Account option (ADR 0085): `payload = [1]` makes the sender's account refuse
+    /// transfers without a memo (exchange deposit addresses), `[0]` lifts it. Pays the
+    /// base fee.
+    SetMemoRequired,
 }
 
 impl TransactionType {
@@ -43,6 +47,7 @@ impl TransactionType {
             // themselves (ADR 0064) — never reuse it.
             TransactionType::RegisterBlsKey => 0x0A,
             TransactionType::Unjail => 0x0B,
+            TransactionType::SetMemoRequired => 0x0D,
             // 0x0C (RegisterVrfKey) retired with the VRF leader selection (ADR 0081 C2).
         }
     }
@@ -467,6 +472,56 @@ impl Transaction {
     }
 
     /// Constructs and signs an Unjail transaction (ADR 0027) for the keypair's own address.
+    /// Transfer carrying a memo (ADR 0085), at most `MAX_MEMO_BYTES` bytes. The memo is
+    /// the transfer's `payload`, covered by the signature.
+    pub fn new_transfer_with_memo(
+        keypair: &KeyPair,
+        to: Address,
+        amount: Amount,
+        fee: Amount,
+        nonce: u64,
+        memo: &[u8],
+    ) -> Self {
+        let mut tx = Self::new_transfer(keypair, to, amount, fee, nonce);
+        tx.payload = memo.to_vec();
+        tx.signature = Some(keypair.sign(&tx.signing_bytes()));
+        tx
+    }
+
+    /// The memo of a transfer (its payload), if any.
+    pub fn memo(&self) -> Option<&[u8]> {
+        (self.tx_type == TransactionType::Transfer && !self.payload.is_empty())
+            .then_some(self.payload.as_slice())
+    }
+
+    /// Sets or lifts the "memo required" option on the signer's account (ADR 0085).
+    pub fn new_set_memo_required(
+        keypair: &KeyPair,
+        required: bool,
+        fee: Amount,
+        nonce: u64,
+    ) -> Self {
+        let pk = keypair.public_key();
+        let from = Address::from_public_key(&pk);
+        let mut tx = Self {
+            tx_type: TransactionType::SetMemoRequired,
+            to: from,
+            amount: Amount::ZERO,
+            fee,
+            nonce,
+            chain_id: CHAIN_ID_DEVNET,
+            expires_at_height: None,
+            payload: vec![required as u8],
+            pub_key: pk,
+            signature: None,
+            sponsor: None,
+            sponsor_pub_key: None,
+            sponsor_signature: None,
+        };
+        tx.signature = Some(keypair.sign(&tx.signing_bytes()));
+        tx
+    }
+
     pub fn new_unjail(keypair: &KeyPair, nonce: u64) -> Self {
         let own = Address::from_public_key(&keypair.public_key());
         Self::new_unjail_for(keypair, own, nonce)

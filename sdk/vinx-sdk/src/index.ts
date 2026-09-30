@@ -28,6 +28,8 @@ export interface AccountResponse {
   nonce: number;
   staked: string;
   staked_atoms: string;
+  /** The account refuses transfers without a memo (exchange deposit address). */
+  memo_required?: boolean;
 }
 
 export interface TxResponse {
@@ -40,6 +42,9 @@ export interface TxResponse {
   fee_atoms: string;
   nonce: number;
   hash: string;
+  /** Transfer memo (public, max 32 bytes) as UTF-8 text, when valid. */
+  memo?: string;
+  memo_hex?: string;
 }
 
 export interface TxWithBlockResponse extends TxResponse {
@@ -184,6 +189,7 @@ export interface SignedTransaction {
   fee: string | number;
   nonce: number;
   chain_id: number;
+  /** For a Transfer: the memo, at most MAX_MEMO_BYTES bytes (public). */
   payload: number[];
   /** Ed25519 public key, 32 bytes. */
   pub_key: number[];
@@ -486,6 +492,44 @@ export function verifyPaymentReceipt(receipt: PaymentReceipt, txHash: string): b
   } catch {
     return false;
   }
+}
+
+/** Maximum memo of a transfer, in bytes (ADR 0085). */
+export const MAX_MEMO_BYTES = 32;
+
+/** Memo bytes for a transfer payload; throws if longer than MAX_MEMO_BYTES. */
+export function encodeMemo(memo: string): number[] {
+  const bytes = Array.from(enc.encode(memo));
+  if (bytes.length > MAX_MEMO_BYTES) throw new Error(`memo exceeds ${MAX_MEMO_BYTES} bytes`);
+  return bytes;
+}
+
+/** Splits a payment address `name@domain`; null for anything else (ADR 0085). */
+export function parsePaymentAddress(handle: string): { name: string; domain: string } | null {
+  const m = /^([a-z0-9._-]{1,64})@([a-zA-Z0-9-]+(\.[a-zA-Z0-9-]+)*(:[0-9]+)?)$/.exec(handle);
+  return m ? { name: m[1], domain: m[2].toLowerCase() } : null;
+}
+
+/**
+ * Resolves `name@domain` to a `vinx1…` address, off-chain (ADR 0085): fetches
+ * `https://<domain>/.well-known/vinx.json?name=<name>`, which answers
+ * `{"names": {"<name>": "vinx1…"}}`. Show the resolved address to the user and pay it.
+ */
+export async function resolvePaymentAddress(
+  handle: string,
+  fetchFn: typeof fetch = fetch
+): Promise<string> {
+  const p = parsePaymentAddress(handle);
+  if (!p) throw new Error("not a name@domain payment address");
+  const local = p.domain.startsWith("localhost") || p.domain.startsWith("127.0.0.1");
+  const url = `${local ? "http" : "https"}://${p.domain}/.well-known/vinx.json?name=${p.name}`;
+  const res = await fetchFn(url, { redirect: "error" });
+  if (!res.ok) throw new Error(`${p.domain}: HTTP ${res.status}`);
+  const doc = (await res.json()) as { names?: Record<string, string> };
+  const addr = doc.names?.[p.name];
+  if (typeof addr !== "string") throw new Error(`${handle} is not known by ${p.domain}`);
+  addressBytes(addr); // throws on anything that is not a valid vinx1… address
+  return addr;
 }
 
 export default VinxClient;

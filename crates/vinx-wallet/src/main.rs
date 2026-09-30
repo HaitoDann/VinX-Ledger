@@ -2,6 +2,7 @@ mod amount;
 mod client;
 mod error;
 mod keystore;
+mod names;
 mod receipt;
 
 use amount::parse_amount;
@@ -52,12 +53,16 @@ enum Commands {
     },
     /// Transfer VINX to another address
     Transfer {
-        /// Recipient address (vinx1...)
+        /// Recipient: a vinx1… address, or a payment address name@domain (resolved
+        /// off-chain, the resolved vinx1… address is shown)
         #[arg(long)]
         to: String,
         /// Amount to send (e.g. 100 or 99.50)
         #[arg(long)]
         amount: String,
+        /// Public memo, at most 32 bytes (invoice number, deposit reference)
+        #[arg(long)]
+        memo: Option<String>,
         #[arg(short, long, default_value = "wallet.json")]
         wallet: PathBuf,
         #[arg(long, default_value = "http://127.0.0.1:8545")]
@@ -181,6 +186,15 @@ enum Commands {
         #[arg(long, default_value = "http://127.0.0.1:8545")]
         node: String,
     },
+    /// Require a memo on every transfer to this account (exchange deposit addresses)
+    MemoRequired {
+        /// on | off
+        state: String,
+        #[arg(short, long, default_value = "wallet.json")]
+        wallet: PathBuf,
+        #[arg(long, default_value = "http://127.0.0.1:8545")]
+        node: String,
+    },
     /// Verify a saved payment receipt offline
     VerifyReceipt {
         /// Receipt file (<hash>.json)
@@ -247,9 +261,15 @@ async fn run(cmd: Commands) -> Result<(), WalletError> {
         Commands::Transfer {
             to,
             amount,
+            memo,
             wallet,
             node,
-        } => cmd_transfer(&to, &amount, &wallet, &node).await,
+        } => cmd_transfer(&to, &amount, memo.as_deref(), &wallet, &node).await,
+        Commands::MemoRequired {
+            state,
+            wallet,
+            node,
+        } => cmd_memo_required(&state, &wallet, &node).await,
         Commands::Stake {
             amount,
             validator_keys,
@@ -341,12 +361,29 @@ async fn cmd_balance(address: &str, node: &str) -> Result<(), WalletError> {
 async fn cmd_transfer(
     to: &str,
     amount_str: &str,
+    memo: Option<&str>,
     wallet: &Path,
     node: &str,
 ) -> Result<(), WalletError> {
     let ks = KeyStore::load(wallet)?;
     let kp = ks.to_keypair()?;
-    let to_addr = Address::from_bech32(to)?;
+    let memo = memo.unwrap_or_default().as_bytes();
+    if memo.len() > vinx_core::amount::MAX_MEMO_BYTES {
+        return Err(WalletError::InvalidAmount(format!(
+            "memo of {} bytes exceeds {} bytes",
+            memo.len(),
+            vinx_core::amount::MAX_MEMO_BYTES
+        )));
+    }
+    let to_addr = if names::parse_handle(to).is_some() {
+        let a = names::resolve(to)
+            .await
+            .map_err(WalletError::InvalidAddress)?;
+        println!("Resolved: {to} → {a}");
+        a
+    } else {
+        Address::from_bech32(to)?
+    };
     let amount = parse_amount(amount_str)?;
     let floor = Amount::from_atoms(DEFAULT_FEE_FLOOR_ATOMS);
     let fee = amount.calculate_fee(floor);
@@ -356,10 +393,13 @@ async fn cmd_transfer(
     let acc = client.get_account(ks.address()).await?;
     let nonce = acc.nonce;
 
-    let tx = Transaction::new_transfer(&kp, to_addr, amount, fee, nonce);
+    let tx = Transaction::new_transfer_with_memo(&kp, to_addr, amount, fee, nonce, memo);
 
     println!("From    : {}", ks.address());
-    println!("To      : {}", to);
+    println!("To      : {}", to_addr);
+    if !memo.is_empty() {
+        println!("Memo    : {} (public)", String::from_utf8_lossy(memo));
+    }
     println!("Amount  : {}", amount);
     println!("Fee     : {}", fee);
     println!("Nonce   : {}", nonce);
@@ -436,6 +476,31 @@ async fn cmd_stake(
     } else {
         println!("Status  : rejected");
     }
+    Ok(())
+}
+
+async fn cmd_memo_required(state: &str, wallet: &Path, node: &str) -> Result<(), WalletError> {
+    let required = match state {
+        "on" => true,
+        "off" => false,
+        _ => return Err(WalletError::InvalidAmount("expected on or off".into())),
+    };
+    let ks = KeyStore::load(wallet)?;
+    let kp = ks.to_keypair()?;
+    let client = RpcClient::new(node);
+    let nonce = client.get_account(ks.address()).await?.nonce;
+    let fee = Amount::from_atoms(DEFAULT_FEE_FLOOR_ATOMS);
+    let tx = Transaction::new_set_memo_required(&kp, required, fee, nonce);
+    let resp = client.submit_tx(&tx).await?;
+    println!(
+        "Memo required = {state} for {}: {}",
+        ks.address(),
+        if resp.accepted {
+            "accepted"
+        } else {
+            "rejected"
+        }
+    );
     Ok(())
 }
 
