@@ -24,6 +24,7 @@ pub fn router(node: Arc<Node>) -> Router {
         .route("/admin", get(ui::admin))
         .route("/health", get(handlers::health))
         .route("/chain/height", get(handlers::get_height))
+        .route("/chain/genesis", get(handlers::get_genesis_spec))
         .route("/chain/sync", get(handlers::get_chain_sync))
         .route("/chain/commits", get(handlers::get_chain_commits))
         .route("/chain/snapshot", get(handlers::get_chain_snapshot))

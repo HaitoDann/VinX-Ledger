@@ -519,6 +519,9 @@ async fn main() {
         .with_data_dir(&data_dir);
 
     config.archive = archive;
+    config.genesis_spec = std::env::var("VINX_GENESIS_SPEC")
+        .ok()
+        .and_then(|p| std::fs::read_to_string(p).ok());
     // ADR 0084 S5: votes, proposals and rewards are for the owner.
     config.validator_address = validator_addr;
     if operator_addr != validator_addr {

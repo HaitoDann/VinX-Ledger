@@ -200,6 +200,20 @@ pub async fn start(
     })
 }
 
+/// Dials `peer` only if it is neither connected nor already being dialed, trying its
+/// known addresses within a single attempt.
+fn dial_once(swarm: &mut libp2p::Swarm<VinxBehaviour>, peer: PeerId, addrs: Vec<Multiaddr>) {
+    use libp2p::swarm::dial_opts::{DialOpts, PeerCondition};
+    if addrs.is_empty() || swarm.is_connected(&peer) {
+        return;
+    }
+    let opts = DialOpts::peer_id(peer)
+        .condition(PeerCondition::DisconnectedAndNotDialing)
+        .addresses(addrs)
+        .build();
+    let _ = swarm.dial(opts);
+}
+
 async fn run_event_loop(
     mut swarm: libp2p::Swarm<VinxBehaviour>,
     mut cmd_rx: mpsc::UnboundedReceiver<P2pCommand>,
@@ -242,7 +256,7 @@ async fn run_event_loop(
                     SwarmEvent::Behaviour(VinxBehaviourEvent::Mdns(mdns::Event::Discovered(peers))) => {
                         for (peer_id, addr) in peers {
                             swarm.behaviour_mut().gossipsub.add_explicit_peer(&peer_id);
-                            let _ = swarm.dial(addr);
+                            dial_once(&mut swarm, peer_id, vec![addr]);
                         }
                     }
                     SwarmEvent::Behaviour(VinxBehaviourEvent::Mdns(mdns::Event::Expired(peers))) => {
@@ -255,10 +269,13 @@ async fn run_event_loop(
                         info,
                         ..
                     })) => {
-                        for addr in info.listen_addrs {
-                            swarm.behaviour_mut().gossipsub.add_explicit_peer(&peer_id);
-                            let _ = swarm.dial(addr);
-                        }
+                        // Identify runs on every new connection: dialing every advertised
+                        // address unconditionally reconnected already-connected peers, each new
+                        // connection re-triggered identify, and two nodes listening on several
+                        // interfaces (LAN mode: TCP + QUIC × loopback + LAN) entered an
+                        // exponential connection storm until they ran out of file descriptors.
+                        swarm.behaviour_mut().gossipsub.add_explicit_peer(&peer_id);
+                        dial_once(&mut swarm, peer_id, info.listen_addrs);
                     }
                     SwarmEvent::Behaviour(VinxBehaviourEvent::Gossipsub(gossipsub::Event::Message {
                         message,
