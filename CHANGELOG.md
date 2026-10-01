@@ -5,6 +5,13 @@ Format : `MAJEUR.MINEUR.CORRECTIF` — les versions `0.x.y` sont des versions de
 
 ---
 
+## [Non publié] — Deux PC à la maison (`./vinx join`)
+
+- `./vinx join <ip>` (second PC) : récupère la genèse de l'hôte (`GET /chain/genesis`), se synchronise, dépose sa garantie avec sa clé BLS et devient validateur ; `./vinx accept <adresse>` (hôte) : finance, attend le dépôt, ajoute au set.
+- **Bug P2P corrigé** : à chaque identification d'un pair, le nœud recomposait *toutes* ses adresses sans vérifier s'il était déjà connecté ; chaque connexion relançant l'identification, deux nœuds en mode réseau local (TCP + QUIC × plusieurs interfaces) entraient dans une tempête de connexions (542 000 en 10 min) jusqu'à épuiser les descripteurs de fichiers. Désormais un pair n'est composé que s'il n'est ni connecté ni en cours de connexion.
+- **Bug corrigé** : les transactions reçues par RPC (`/tx/submit`, `/tx/batch`, faucet) n'étaient jamais relayées aux autres nœuds — elles n'entraient dans un bloc que si ce nœud devenait proposeur, et jamais depuis un nœud non validateur.
+- Testé : deux « machines » (ports décalés) — join, accept, propositions alternées, arrêt du second PC → chaîne figée sans fork, relance → reprise.
+
 ## [Non publié] — Interface au design d'ARCHI
 
 - Interface alignée sur le design system d'ARCHI (PlaZma, « PRO v4 ») : IBM Plex Sans / Mono, neutres froids, un seul accent (vert du logo désaturé), surfaces à plat à filet fin, sans ombre ni dégradé ni flou, icônes SVG ligne, aucun emoji d'interface.

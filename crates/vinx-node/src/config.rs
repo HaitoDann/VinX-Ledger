@@ -50,6 +50,9 @@ pub struct NodeConfig {
     /// Archive node (ADR 0083, L5): keeps every block forever instead of pruning those
     /// older than `BLOCK_RETENTION_SECS`. For explorers and history services.
     pub archive: bool,
+    /// The shared genesis spec this chain was created from (public data only), served at
+    /// `/chain/genesis` so a new machine can join the same chain (`./vinx join`).
+    pub genesis_spec: Option<String>,
 }
 
 impl NodeConfig {
@@ -79,6 +82,7 @@ impl NodeConfig {
             checkpoints: crate::checkpoints::Checkpoints::none(),
             timeouts: crate::bft::Timeouts::default(),
             archive: false,
+            genesis_spec: None,
         }
     }
 

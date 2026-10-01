@@ -100,6 +100,26 @@ pub async fn health(State(node): State<Arc<Node>>) -> ApiResult<HealthResponse> 
     }))
 }
 
+/// `GET /chain/genesis` — the shared genesis spec of this chain (public: addresses, BLS
+/// keys and their proofs of possession, parameters), so another machine can join it.
+pub async fn get_genesis_spec(State(node): State<Arc<Node>>) -> impl IntoResponse {
+    match &node.config.genesis_spec {
+        Some(spec) => (
+            StatusCode::OK,
+            [(axum::http::header::CONTENT_TYPE, "application/json")],
+            spec.clone(),
+        )
+            .into_response(),
+        None => (
+            StatusCode::NOT_FOUND,
+            Json(ErrorResponse {
+                error: "this node was not started from a shared genesis spec".into(),
+            }),
+        )
+            .into_response(),
+    }
+}
+
 pub async fn get_height(State(node): State<Arc<Node>>) -> ApiResult<HeightResponse> {
     let height = node.chain.read().await.tip_height();
     Ok(Json(HeightResponse { height }))
@@ -200,7 +220,18 @@ async fn admit_to_mempool(node: &Arc<Node>, tx: Transaction) -> Result<(), Strin
         ));
     }
     drop(state);
-    mempool.add(tx).map_err(|e| e.to_string())
+    mempool.add(tx.clone()).map_err(|e| e.to_string())?;
+    drop(mempool);
+    relay(node, &tx);
+    Ok(())
+}
+
+/// Gossips a transaction accepted over RPC to the other nodes, so it is included whoever
+/// proposes the next block — not only when this node does (it may not be a validator).
+fn relay(node: &Node, tx: &Transaction) {
+    if let Some(p2p) = &node.p2p {
+        p2p.broadcast_tx(tx);
+    }
 }
 
 pub async fn get_block(
@@ -762,8 +793,9 @@ pub async fn faucet_request(
     node.mempool
         .write()
         .await
-        .add(tx)
+        .add(tx.clone())
         .map_err(|e| ApiError::BadRequest(e.to_string()))?;
+    relay(&node, &tx);
 
     cooldowns.insert(to_addr, std::time::Instant::now());
 
@@ -883,7 +915,9 @@ pub async fn submit_tx_batch(
                      (queued cost {queued} atoms)"
                 ));
             }
-            mempool.add(tx).map_err(|e| e.to_string())
+            mempool.add(tx.clone()).map_err(|e| e.to_string())?;
+            relay(&node, &tx);
+            Ok(())
         });
         match admit {
             Ok(()) => {

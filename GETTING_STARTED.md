@@ -23,6 +23,26 @@ Ouvrir **http://127.0.0.1:8545/** puis :
 | `./vinx logs 2` | journal du nœud 2 |
 | `./vinx stop` / `./vinx reset` | arrêter (données gardées) / tout effacer |
 
+### Deux PC à la maison
+
+```bash
+# PC hôte
+./vinx start --lan                  # écoute sur le réseau local
+# Second PC (même Wi-Fi / box)
+./vinx join 192.168.1.20            # IP de l'hôte : il affiche son adresse vinx1…
+# PC hôte, avec l'adresse affichée
+./vinx accept vinx1…                # envoie 10 001 VINX de test, attend le dépôt, l'ajoute au set
+```
+
+Le second PC récupère la genèse de l'hôte, se synchronise, dépose sa garantie
+(10 000 VINX + clé de vote BLS) puis devient validateur. À deux validateurs, **les deux
+sont nécessaires** (plus des 2/3) : si l'un s'éteint, la chaîne s'arrête proprement et
+repart quand il revient. Pour tolérer une panne, il faut au moins 4 validateurs
+(`./vinx start --lan -n 3` sur l'hôte + le second PC).
+
+Ports à ouvrir sur le pare-feu de l'hôte : **8545/TCP** (genèse, synchronisation) et
+**9001/TCP + UDP** (P2P). Sur le second PC : 9001 aussi.
+
 Prérequis : Rust (rustup.rs), `python3`, `curl`. Tout fonctionne hors ligne : l'interface
 n'utilise aucune ressource externe.
 
