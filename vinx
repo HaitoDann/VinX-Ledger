@@ -13,7 +13,7 @@
 #   ./vinx wallet <cmd>     vinx-wallet branché sur le nœud local
 #   ./vinx reset            efface le réseau local (nouvelle genèse)
 #
-# Options de start : -n <validateurs> (1–9), -t <temps de bloc en s> (défaut 5),
+# Options de start : -n <validateurs> (1–9), -t <temps de bloc en s> (défaut 12, le paramètre du protocole),
 #                    --lan (écoute sur le réseau local, pour d'autres machines/téléphones)
 # Données : ./.vinx-local/   (ou VINX_HOME)
 # ─────────────────────────────────────────────────────────────────────────────
@@ -120,7 +120,7 @@ wait_up() {
 }
 
 cmd_start() {
-    local n=1 bt=5 lan=0
+    local n=1 bt=12 lan=0
     while [[ $# -gt 0 ]]; do
         case "$1" in
             -n) n="$2"; shift 2 ;;

@@ -1,0 +1,624 @@
+<!DOCTYPE html>
+<html lang="fr">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>VinX</title>
+<link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Ccircle cx='16' cy='16' r='15' fill='%230b0f0e' stroke='%231de9b6' stroke-width='2'/%3E%3Cpath d='M8 9l8 13 8-13' fill='none' stroke='%231de9b6' stroke-width='3' stroke-linejoin='round'/%3E%3C/svg%3E">
+<script src="/assets/nacl.min.js"></script>
+<script src="/assets/blake3.min.js"></script>
+<style>
+:root {
+  --bg: #07090a; --panel: #0f1413; --panel2: #151c1a; --line: #1f2a27;
+  --text: #e8f1ee; --muted: #8a9b96; --mint: #1de9b6; --mint-d: #12b48b;
+  --mint-bg: rgba(29,233,182,.08); --red: #ff6b6b; --amber: #ffc857;
+  --radius: 16px; --shadow: 0 8px 30px rgba(0,0,0,.35);
+  color-scheme: dark;
+}
+:root[data-theme="light"] {
+  --bg: #f4f7f6; --panel: #ffffff; --panel2: #f0f4f3; --line: #dfe7e4;
+  --text: #0c1412; --muted: #5d6e69; --mint: #0fa982; --mint-d: #0b8a6a;
+  --mint-bg: rgba(15,169,130,.08); --shadow: 0 6px 24px rgba(20,40,35,.08);
+  color-scheme: light;
+}
+* { box-sizing: border-box; }
+body { margin: 0; background: var(--bg); color: var(--text);
+  font: 15px/1.5 Inter, system-ui, -apple-system, "Segoe UI", Roboto, sans-serif; }
+.mono { font-family: ui-monospace, "SF Mono", Menlo, Consolas, monospace; }
+a { color: var(--mint); text-decoration: none; cursor: pointer; }
+button { font: inherit; cursor: pointer; border: 0; border-radius: 12px; padding: 11px 18px;
+  background: var(--mint); color: #04130e; font-weight: 600; transition: .15s; }
+button:hover { filter: brightness(1.08); }
+button:disabled { opacity: .45; cursor: not-allowed; }
+button.ghost { background: transparent; color: var(--text); border: 1px solid var(--line); }
+button.ghost:hover { border-color: var(--mint); color: var(--mint); }
+button.small { padding: 6px 12px; font-size: 13px; border-radius: 9px; }
+input { font: inherit; width: 100%; padding: 12px 14px; border-radius: 12px;
+  border: 1px solid var(--line); background: var(--panel2); color: var(--text); outline: none; }
+input:focus { border-color: var(--mint); box-shadow: 0 0 0 3px var(--mint-bg); }
+label { display: block; font-size: 13px; color: var(--muted); margin: 14px 0 6px; }
+
+/* ── Layout ── */
+header { position: sticky; top: 0; z-index: 10; backdrop-filter: blur(12px);
+  background: color-mix(in srgb, var(--bg) 85%, transparent); border-bottom: 1px solid var(--line); }
+.bar { max-width: 1080px; margin: 0 auto; padding: 12px 20px; display: flex; align-items: center; gap: 22px; }
+.brand { display: flex; align-items: center; gap: 10px; font-weight: 800; font-size: 19px; letter-spacing: .3px; }
+nav { display: flex; gap: 4px; background: var(--panel); border: 1px solid var(--line); border-radius: 12px; padding: 4px; }
+nav a { color: var(--muted); padding: 7px 14px; border-radius: 9px; font-weight: 500; font-size: 14px; }
+nav a.on { background: var(--panel2); color: var(--text); }
+.net { margin-left: auto; display: flex; align-items: center; gap: 12px; font-size: 13px; color: var(--muted); }
+.dot { width: 8px; height: 8px; border-radius: 50%; background: var(--red); display: inline-block; }
+.dot.ok { background: var(--mint); box-shadow: 0 0 0 4px var(--mint-bg); }
+.pulse { width: 64px; height: 4px; border-radius: 4px; background: var(--line); overflow: hidden; }
+.pulse i { display: block; height: 100%; width: 0; background: var(--mint); transition: width .5s linear; }
+.theme { background: transparent; color: var(--muted); padding: 6px 8px; font-size: 16px; }
+main { max-width: 1080px; margin: 0 auto; padding: 28px 20px 60px; }
+.view { display: none; } .view.on { display: block; animation: fade .2s; }
+@keyframes fade { from { opacity: 0; transform: translateY(4px); } }
+.grid { display: grid; grid-template-columns: minmax(0, 1.15fr) minmax(0, 1fr); gap: 20px; }
+.grid > *, .stack > * { min-width: 0; } input { min-width: 0; }
+@media (max-width: 860px) { .grid { grid-template-columns: minmax(0, 1fr); } }
+@media (max-width: 640px) {
+  .bar { flex-wrap: wrap; gap: 10px; padding: 10px 14px; }
+  nav { order: 3; width: 100%; } nav a { flex: 1; text-align: center; padding: 7px 4px; }
+  .pulse { display: none; } main { padding: 18px 14px 50px; } .amount { font-size: 34px; }
+}
+.card { background: var(--panel); border: 1px solid var(--line); border-radius: var(--radius); padding: 22px; box-shadow: var(--shadow); }
+.card h2 { margin: 0 0 4px; font-size: 17px; } .card .sub { color: var(--muted); font-size: 13px; margin: 0 0 16px; }
+.stack > * + * { margin-top: 20px; }
+
+/* ── Wallet ── */
+.hero { text-align: center; padding: 48px 24px; }
+.hero h1 { font-size: 30px; margin: 18px 0 8px; } .hero p { color: var(--muted); max-width: 460px; margin: 0 auto 26px; }
+.hero .btns { display: flex; gap: 12px; justify-content: center; flex-wrap: wrap; }
+.balance { background: radial-gradient(120% 140% at 0% 0%, rgba(29,233,182,.18), transparent 55%), var(--panel); }
+.amount { font-size: 40px; font-weight: 800; letter-spacing: -.5px; margin: 6px 0 2px; }
+.amount small { font-size: 18px; color: var(--muted); font-weight: 600; }
+.addr { display: flex; align-items: center; gap: 8px; background: var(--panel2); border: 1px solid var(--line);
+  border-radius: 10px; padding: 8px 10px; font-size: 12.5px; margin-top: 14px; word-break: break-all; }
+.addr span { flex: 1; }
+.row { display: flex; gap: 10px; flex-wrap: wrap; margin-top: 16px; }
+.seg { display: flex; background: var(--panel2); border-radius: 12px; padding: 4px; margin-bottom: 6px; }
+.seg a { flex: 1; text-align: center; padding: 8px; border-radius: 9px; color: var(--muted); font-weight: 600; font-size: 14px; }
+.seg a.on { background: var(--panel); color: var(--text); box-shadow: 0 1px 4px rgba(0,0,0,.25); }
+.hint { font-size: 12.5px; color: var(--muted); margin-top: 6px; }
+.inline { display: flex; gap: 8px; } .inline input { flex: 1; }
+.summary { background: var(--panel2); border-radius: 12px; padding: 14px 16px; margin-top: 16px; font-size: 14px; }
+.summary div { display: flex; justify-content: space-between; gap: 10px; padding: 3px 0; }
+.summary div span:first-child { color: var(--muted); }
+.summary .mono { word-break: break-all; text-align: right; }
+.msg { border-radius: 12px; padding: 12px 14px; margin-top: 14px; font-size: 14px; }
+.msg.ok { background: var(--mint-bg); color: var(--mint); } .msg.err { background: rgba(255,107,107,.1); color: var(--red); }
+.msg.wait { background: var(--panel2); color: var(--muted); }
+
+/* ── Lists ── */
+.list { display: flex; flex-direction: column; }
+.item { display: flex; align-items: center; gap: 12px; padding: 12px 6px; border-bottom: 1px solid var(--line); cursor: pointer; border-radius: 8px; }
+.item:last-child { border-bottom: 0; } .item:hover { background: var(--panel2); }
+.ico { width: 36px; height: 36px; border-radius: 50%; display: grid; place-items: center; flex: none; font-weight: 700; }
+.ico.in { background: var(--mint-bg); color: var(--mint); } .ico.out { background: rgba(255,107,107,.1); color: var(--red); }
+.ico.blk { background: var(--panel2); color: var(--muted); font-size: 12px; }
+.grow { flex: 1; min-width: 0; } .grow .t { font-weight: 600; font-size: 14px; }
+.grow .s { color: var(--muted); font-size: 12.5px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.val { text-align: right; font-weight: 700; font-size: 14px; white-space: nowrap; }
+.val.in { color: var(--mint); }
+.empty { color: var(--muted); text-align: center; padding: 26px 0; font-size: 14px; }
+.memo { display: inline-block; background: var(--panel2); border: 1px solid var(--line); border-radius: 6px; padding: 0 6px; font-size: 12px; margin-left: 4px; color: var(--text); }
+.tag { display: inline-block; font-size: 11.5px; font-weight: 600; padding: 2px 8px; border-radius: 20px; background: var(--panel2); color: var(--muted); }
+.tag.ok { background: var(--mint-bg); color: var(--mint); } .tag.bad { background: rgba(255,107,107,.1); color: var(--red); }
+
+/* ── Explorer / Network ── */
+.search { display: flex; gap: 10px; margin-bottom: 20px; } .search input { font-size: 15px; }
+.tiles { display: grid; grid-template-columns: repeat(auto-fit, minmax(170px, 1fr)); gap: 14px; margin-bottom: 20px; }
+.tile { background: var(--panel); border: 1px solid var(--line); border-radius: 14px; padding: 16px 18px; }
+.tile .k { font-size: 12.5px; color: var(--muted); } .tile .v { font-size: 22px; font-weight: 800; margin-top: 2px; }
+.kv { display: grid; grid-template-columns: 160px 1fr; gap: 8px 16px; font-size: 14px; }
+.kv > div:nth-child(odd) { color: var(--muted); } .kv .mono { word-break: break-all; font-size: 13px; }
+@media (max-width: 600px) { .kv { grid-template-columns: 1fr; } .kv > div:nth-child(odd) { margin-top: 8px; } }
+.bar-p { height: 6px; background: var(--panel2); border-radius: 6px; overflow: hidden; min-width: 80px; }
+.bar-p i { display: block; height: 100%; background: var(--mint); }
+table { width: 100%; border-collapse: collapse; font-size: 14px; }
+th { text-align: left; color: var(--muted); font-weight: 500; font-size: 12.5px; padding: 8px 6px; border-bottom: 1px solid var(--line); }
+td { padding: 11px 6px; border-bottom: 1px solid var(--line); vertical-align: middle; }
+tr:last-child td { border-bottom: 0; }
+.toast { position: fixed; bottom: 22px; left: 50%; transform: translateX(-50%) translateY(20px); opacity: 0;
+  background: var(--panel); border: 1px solid var(--line); box-shadow: var(--shadow); padding: 10px 16px;
+  border-radius: 12px; font-size: 14px; transition: .25s; pointer-events: none; z-index: 50; }
+.toast.on { opacity: 1; transform: translateX(-50%); }
+.warn { background: rgba(255,200,87,.08); color: var(--amber); border-radius: 12px; padding: 12px 14px; font-size: 13px; margin-top: 14px; }
+footer { text-align: center; color: var(--muted); font-size: 12.5px; padding: 20px; }
+</style>
+</head>
+<body>
+<header><div class="bar">
+  <div class="brand">
+    <svg width="30" height="30" viewBox="0 0 32 32" aria-hidden="true"><circle cx="16" cy="16" r="14.5" fill="none" stroke="var(--mint)" stroke-width="2"/><path d="M8.5 9.5l7.5 12.5 7.5-12.5" fill="none" stroke="var(--mint)" stroke-width="3" stroke-linejoin="round" stroke-linecap="round"/><path d="M16 9.5l-2 3h4z" fill="var(--mint)"/></svg>
+    VinX
+  </div>
+  <nav>
+    <a data-view="wallet" class="on">Portefeuille</a>
+    <a data-view="explorer">Explorateur</a>
+    <a data-view="network">Réseau</a>
+  </nav>
+  <div class="net">
+    <span class="dot" id="net-dot"></span>
+    <span class="txt" id="net-txt">Connexion…</span>
+    <div class="pulse" title="Prochain bloc"><i id="net-pulse"></i></div>
+    <button class="theme" id="theme" title="Thème clair / sombre">◐</button>
+  </div>
+</div></header>
+
+<main>
+<!-- ═══════════ Portefeuille ═══════════ -->
+<section class="view on" id="v-wallet">
+  <div class="card hero" id="w-welcome">
+    <svg width="72" height="72" viewBox="0 0 32 32" aria-hidden="true"><circle cx="16" cy="16" r="14.5" fill="var(--mint-bg)" stroke="var(--mint)" stroke-width="1.5"/><path d="M8.5 9.5l7.5 12.5 7.5-12.5" fill="none" stroke="var(--mint)" stroke-width="2.6" stroke-linejoin="round" stroke-linecap="round"/></svg>
+    <h1>Payer en VINX, simplement.</h1>
+    <p>Paiements définitifs en un bloc, frais minuscules. Votre clé est créée et reste dans ce navigateur — rien n'est envoyé au serveur.</p>
+    <div class="btns">
+      <button id="btn-new">Créer un portefeuille</button>
+      <button class="ghost" id="btn-import">Importer un fichier</button>
+      <input type="file" id="file" accept=".json" hidden>
+    </div>
+    <div class="msg err" id="w-err" hidden></div>
+  </div>
+
+  <div id="w-main" hidden>
+    <div class="grid">
+      <div class="stack">
+        <div class="card balance">
+          <div class="sub" style="margin:0">Solde disponible</div>
+          <div class="amount" id="w-bal">—</div>
+          <div class="hint" id="w-staked"></div>
+          <div class="addr mono"><span id="w-addr"></span><button class="ghost small" data-copy="w-addr">Copier</button></div>
+          <div class="row">
+            <button class="ghost small" id="btn-faucet">Recevoir 100 VINX de test</button>
+            <button class="ghost small" id="btn-lock">Verrouiller</button>
+          </div>
+          <div class="msg" id="faucet-msg" hidden></div>
+        </div>
+
+        <div class="card">
+          <div class="seg">
+            <a data-act="send" class="on">Envoyer</a><a data-act="receive">Recevoir</a><a data-act="stake">Staking</a>
+          </div>
+
+          <div id="act-send">
+            <label>Destinataire</label>
+            <input id="s-to" class="mono" placeholder="vinx1…  ou  nom@domaine" autocomplete="off">
+            <label>Montant</label>
+            <div class="inline"><input id="s-amount" type="text" inputmode="decimal" placeholder="0.00"><button class="ghost small" id="s-max">Max</button></div>
+            <label>Mémo <span class="hint">(optionnel · public · 32 octets max)</span></label>
+            <input id="s-memo" maxlength="32" placeholder="ex. FAC-2026-0412">
+            <div class="hint" id="s-fee">Frais : —</div>
+            <div class="row"><button id="s-review" style="flex:1">Vérifier le paiement</button></div>
+            <div id="s-confirm" hidden>
+              <div class="summary" id="s-summary"></div>
+              <div class="row"><button class="ghost" id="s-cancel" style="flex:1">Modifier</button><button id="s-send" style="flex:2">Confirmer et envoyer</button></div>
+            </div>
+            <div id="s-status"></div>
+          </div>
+
+          <div id="act-receive" hidden>
+            <p class="sub">Partagez cette adresse pour recevoir des VINX. Un paiement est définitif dès qu'il est inclus dans un bloc.</p>
+            <div class="addr mono" style="font-size:14px;padding:14px"><span id="r-addr"></span><button class="small" data-copy="r-addr">Copier</button></div>
+          </div>
+
+          <div id="act-stake" hidden>
+            <p class="sub">Verrouiller des VINX (bond). Pour devenir validateur, il faut 10 000 VINX et une clé de nœud : voir <span class="mono">vinx-wallet stake --validator-keys</span>. Le retrait prend 21 jours.</p>
+            <label>Montant</label>
+            <input id="k-amount" inputmode="decimal" placeholder="0.00">
+            <div class="row"><button id="k-stake" style="flex:1">Verrouiller</button><button class="ghost" id="k-unstake" style="flex:1">Retirer</button></div>
+            <div id="k-status"></div>
+          </div>
+        </div>
+      </div>
+
+      <div class="card">
+        <h2>Activité</h2>
+        <p class="sub">Vos derniers paiements</p>
+        <div class="list" id="w-hist"><div class="empty">Aucune transaction pour l'instant.</div></div>
+      </div>
+    </div>
+  </div>
+</section>
+
+<!-- ═══════════ Explorateur ═══════════ -->
+<section class="view" id="v-explorer">
+  <div class="search">
+    <input id="q" class="mono" placeholder="Hauteur de bloc, hash de transaction ou adresse vinx1…">
+    <button id="q-go">Rechercher</button>
+  </div>
+  <div id="x-detail"></div>
+  <div class="card">
+    <h2>Derniers blocs</h2>
+    <p class="sub">Chaque bloc est définitif dès sa publication — pas de réorganisation.</p>
+    <div class="list" id="x-blocks"><div class="empty">Chargement…</div></div>
+  </div>
+</section>
+
+<!-- ═══════════ Réseau ═══════════ -->
+<section class="view" id="v-network">
+  <div class="tiles" id="n-tiles"></div>
+  <div class="card">
+    <h2>Validateurs</h2>
+    <p class="sub" id="n-sub"></p>
+    <div style="overflow-x:auto"><table id="n-vals"></table></div>
+  </div>
+</section>
+</main>
+<footer>VinX — rail de paiement · <a href="/admin">administration</a></footer>
+<div class="toast" id="toast"></div>
+
+<script>
+'use strict';
+// ─── Utilitaires ──────────────────────────────────────────────────────────────
+const API = window.location.origin;
+const DEC = 1_000_000_000n;                     // 9 décimales (ADR 0081)
+const $ = id => document.getElementById(id);
+const esc = t => String(t ?? '').replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
+const get = async p => { const r = await fetch(API + p); if (!r.ok) throw new Error((await r.json().catch(() => ({}))).error || 'HTTP ' + r.status); return r.json(); };
+const short = (a, n = 8) => a && a.length > 2 * n + 3 ? a.slice(0, n + 5) + '…' + a.slice(-n) : (a || '');
+const hex = b => Array.from(b, x => x.toString(16).padStart(2, '0')).join('');
+const unhex = h => Uint8Array.from(h.match(/.{2}/g) || [], x => parseInt(x, 16));
+function fmt(atoms, digits = 2) {
+  const a = BigInt(atoms), w = a / DEC, f = (a % DEC).toString().padStart(9, '0').slice(0, digits);
+  return w.toLocaleString('fr-FR') + (digits ? ',' + f : '');
+}
+function parseAmount(s) {
+  s = String(s).trim().replace(/\s/g, '').replace(',', '.');
+  if (!/^\d+(\.\d{0,9})?$/.test(s)) throw new Error('montant invalide');
+  const [w, f = ''] = s.split('.');
+  return BigInt(w) * DEC + BigInt((f + '000000000').slice(0, 9));
+}
+function ago(ts) {
+  const d = Math.max(0, Math.floor(Date.now() / 1000) - ts);
+  if (d < 60) return `il y a ${d} s`; if (d < 3600) return `il y a ${Math.floor(d / 60)} min`;
+  if (d < 86400) return `il y a ${Math.floor(d / 3600)} h`; return new Date(ts * 1000).toLocaleDateString('fr-FR');
+}
+function toast(t) { const e = $('toast'); e.textContent = t; e.classList.add('on'); clearTimeout(toast.t); toast.t = setTimeout(() => e.classList.remove('on'), 2200); }
+const be = (v, n) => { const b = new Uint8Array(n); v = BigInt(v); for (let i = n - 1; i >= 0; i--) { b[i] = Number(v & 0xffn); v >>= 8n; } return b; };
+
+// Bech32m (adresses vinx1…) — identique à vinx_crypto::Address.
+const B32 = 'qpzry9x8gf2tvdw0s3jn54khce6mua7l';
+function polymod(v) { const G = [0x3b6a57b2, 0x26508e6d, 0x1ea119fa, 0x3d4233dd, 0x2a1462b3]; let c = 1;
+  for (const x of v) { const t = c >>> 25; c = ((c & 0x1ffffff) << 5) ^ x; for (let i = 0; i < 5; i++) if ((t >>> i) & 1) c ^= G[i]; } return c; }
+const hrpx = h => [...h].map(c => c.charCodeAt(0) >> 5).concat([0], [...h].map(c => c.charCodeAt(0) & 31));
+function b32enc(bytes) {
+  const d = []; let acc = 0, bits = 0;
+  for (const b of bytes) { acc = (acc << 8) | b; bits += 8; while (bits >= 5) { bits -= 5; d.push((acc >> bits) & 31); } }
+  if (bits) d.push((acc << (5 - bits)) & 31);
+  const pm = polymod(hrpx('vinx').concat(d, [0, 0, 0, 0, 0, 0])) ^ 0x2bc830a3;
+  return 'vinx1' + d.concat([0, 1, 2, 3, 4, 5].map(i => (pm >>> (5 * (5 - i))) & 31)).map(x => B32[x]).join('');
+}
+function b32dec(addr) {
+  const s = addr.trim().toLowerCase();
+  if (!s.startsWith('vinx1')) throw new Error('adresse invalide');
+  const v = [...s.slice(5)].map(c => { const i = B32.indexOf(c); if (i < 0) throw new Error('adresse invalide'); return i; });
+  if (polymod(hrpx('vinx').concat(v)) !== 0x2bc830a3) throw new Error('adresse invalide (somme de contrôle)');
+  const out = []; let acc = 0, bits = 0;
+  for (const w of v.slice(0, -6)) { acc = (acc << 5) | w; bits += 5; while (bits >= 8) { bits -= 8; out.push((acc >> bits) & 255); } }
+  if (out.length !== 20) throw new Error('adresse invalide');
+  return new Uint8Array(out);
+}
+const addressOf = pk => { const t = new Uint8Array(33); t.set(pk, 1); return b32enc(window.vinxBlake3(t).slice(0, 20)); };
+
+// ─── Réseau ───────────────────────────────────────────────────────────────────
+const net = { height: 0, chainId: 42, blockTime: 12, tipTs: 0, baseFee: 100000n, ok: false };
+async function pollHealth() {
+  try {
+    const h = await get('/health');
+    const newBlock = h.height !== net.height;
+    Object.assign(net, { height: h.height, chainId: h.chain_id, blockTime: h.block_time_secs || 12, tipTs: h.tip_timestamp || 0, ok: true, mempool: h.mempool_pending });
+    $('net-dot').className = 'dot ok';
+    $('net-txt').textContent = `Bloc #${h.height.toLocaleString('fr-FR')} · ${net.blockTime} s`;
+    if (newBlock) onNewBlock();
+  } catch { net.ok = false; $('net-dot').className = 'dot'; $('net-txt').textContent = 'Nœud injoignable'; }
+}
+function tickPulse() {
+  if (!net.tipTs) return;
+  const p = Math.min(1, (Date.now() / 1000 - net.tipTs) / net.blockTime);
+  $('net-pulse').style.width = (p * 100) + '%';
+}
+async function refreshFee() { try { net.baseFee = BigInt((await get('/network/stats')).base_fee_atoms); } catch {} }
+function onNewBlock() {
+  if (wallet) refreshWallet();
+  if (view === 'explorer') loadBlocks();
+  if (view === 'network') loadNetwork();
+  refreshFee();
+}
+
+// ─── Navigation ───────────────────────────────────────────────────────────────
+let view = 'wallet';
+function show(v) {
+  view = v;
+  document.querySelectorAll('nav a').forEach(a => a.classList.toggle('on', a.dataset.view === v));
+  document.querySelectorAll('.view').forEach(s => s.classList.toggle('on', s.id === 'v-' + v));
+  if (v === 'explorer') loadBlocks();
+  if (v === 'network') loadNetwork();
+}
+document.querySelectorAll('nav a').forEach(a => a.onclick = () => show(a.dataset.view));
+document.querySelectorAll('[data-copy]').forEach(b => b.onclick = () => { navigator.clipboard?.writeText($(b.dataset.copy).textContent); toast('Adresse copiée'); });
+document.querySelectorAll('.seg a').forEach(a => a.onclick = () => {
+  document.querySelectorAll('.seg a').forEach(x => x.classList.toggle('on', x === a));
+  ['send', 'receive', 'stake'].forEach(k => $('act-' + k).hidden = k !== a.dataset.act);
+});
+const theme = localStorage.getItem('vinx-theme'); if (theme) document.documentElement.dataset.theme = theme;
+$('theme').onclick = () => { const t = document.documentElement.dataset.theme === 'light' ? 'dark' : 'light';
+  document.documentElement.dataset.theme = t; try { localStorage.setItem('vinx-theme', t); } catch {} };
+
+// ─── Portefeuille ─────────────────────────────────────────────────────────────
+// La clé secrète ne vit qu'en mémoire : jamais stockée par la page, jamais envoyée.
+let wallet = null;
+function openWallet(seed, address) {
+  const kp = nacl.sign.keyPair.fromSeed(seed);
+  const derived = addressOf(kp.publicKey);
+  if (address && address !== derived) throw new Error("le fichier ne correspond pas à sa clé");
+  wallet = { address: derived, sk: kp.secretKey, pk: kp.publicKey, balance: 0n, nonce: 0 };
+  $('w-welcome').hidden = true; $('w-main').hidden = false;
+  $('w-addr').textContent = $('r-addr').textContent = derived;
+  refreshWallet();
+}
+$('btn-new').onclick = () => {
+  try {
+    const seed = nacl.randomBytes(32);
+    openWallet(seed);
+    const a = document.createElement('a');
+    a.href = URL.createObjectURL(new Blob([JSON.stringify({ address: wallet.address, secret_key_hex: hex(seed) }, null, 2)], { type: 'application/json' }));
+    a.download = `vinx-wallet-${wallet.address.slice(5, 13)}.json`; a.click();
+    toast('Portefeuille créé — fichier de sauvegarde téléchargé');
+  } catch (e) { showErr(e); }
+};
+$('btn-import').onclick = () => $('file').click();
+$('file').onchange = e => {
+  const f = e.target.files[0]; if (!f) return;
+  f.text().then(t => { const j = JSON.parse(t); const seed = unhex(j.secret_key_hex || '');
+    if (seed.length !== 32) throw new Error('clé invalide'); openWallet(seed, j.address); })
+   .catch(showErr).finally(() => e.target.value = '');
+};
+function showErr(e) { const m = $('w-err'); m.hidden = false; m.textContent = 'Erreur : ' + e.message; }
+$('btn-lock').onclick = () => { wallet = null; $('w-main').hidden = true; $('w-welcome').hidden = false; resetSend(); };
+
+async function refreshWallet() {
+  if (!wallet) return;
+  try {
+    const a = await get('/account/' + wallet.address);
+    wallet.balance = BigInt(a.balance_atoms); wallet.nonce = a.nonce;
+    $('w-bal').innerHTML = `${fmt(a.balance_atoms)} <small>VINX</small>`;
+    $('w-staked').textContent = BigInt(a.staked_atoms) > 0n ? `+ ${fmt(a.staked_atoms)} VINX verrouillés` : '';
+  } catch { wallet.balance = 0n; wallet.nonce = 0; $('w-bal').innerHTML = '0,00 <small>VINX</small>'; $('w-staked').textContent = ''; }
+  loadHistory();
+}
+async function loadHistory() {
+  try {
+    const r = await get(`/account/${wallet.address}/txs?limit=25&offset=0`);
+    const txs = r.txs; // déjà du plus récent au plus ancien
+    $('w-hist').innerHTML = txs.length ? txs.map(t => {
+      const out = t.from === wallet.address && t.to !== wallet.address;
+      const label = t.tx_type === 'Transfer' ? (out ? 'Envoyé' : 'Reçu') : ({ Stake: 'Verrouillé', Unstake: 'Retrait', SetMemoRequired: 'Option de compte' }[t.tx_type] || t.tx_type);
+      const who = t.tx_type === 'Transfer' ? (out ? 'à ' + short(t.to) : 'de ' + short(t.from)) : '';
+      return `<div class="item" data-tx="${esc(t.hash)}">
+        <div class="ico ${out ? 'out' : 'in'}">${out ? '↑' : '↓'}</div>
+        <div class="grow"><div class="t">${label}${t.memo ? `<span class="memo">${esc(t.memo)}</span>` : ''}</div>
+        <div class="s mono">${esc(who)} · bloc #${t.block_height}</div></div>
+        <div class="val ${out ? '' : 'in'}">${out ? '−' : '+'}${fmt(t.amount_atoms)}</div></div>`;
+    }).join('') : '<div class="empty">Aucune transaction pour l\'instant.</div>';
+    $('w-hist').querySelectorAll('[data-tx]').forEach(e => e.onclick = () => { show('explorer'); showTx(e.dataset.tx); });
+  } catch {}
+}
+$('btn-faucet').onclick = async () => {
+  const m = $('faucet-msg'); m.hidden = false; m.className = 'msg wait'; m.textContent = 'Demande envoyée…';
+  try {
+    const r = await fetch(API + '/faucet/request', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ address: wallet.address }) });
+    const j = await r.json(); if (!r.ok) throw new Error(j.error || 'refusé');
+    m.className = 'msg ok'; m.textContent = `${fmt(j.amount_atoms)} VINX en route — arrivée au prochain bloc.`;
+    setTimeout(() => m.hidden = true, 3 * net.blockTime * 1000);
+  } catch (e) { m.className = 'msg err'; m.textContent = e.message.includes('not enabled') ? "Pas de faucet sur ce nœud." : e.message; }
+};
+
+// ─── Signature (identique à vinx-core Transaction::signing_bytes) ─────────────
+// disc ‖ 0x00 (Ed25519) ‖ clé publique ‖ to ‖ amount(16) ‖ fee(16) ‖ nonce(8) ‖ chain_id(4)
+// ‖ expiry 0x00 ‖ payload_len(4) ‖ payload ‖ sponsor 0x00
+const DISC = { Transfer: 1, Stake: 2, Unstake: 3 };
+async function submit(type, to, amount, fee, payload) {
+  const parts = [[DISC[type]], [0], wallet.pk, b32dec(to), be(amount, 16), be(fee, 16), be(wallet.nonce, 8), be(net.chainId, 4), [0], be(payload.length, 4), payload, [0]];
+  const msg = new Uint8Array(parts.reduce((n, p) => n + p.length, 0)); let o = 0;
+  for (const p of parts) { msg.set(p, o); o += p.length; }
+  const sig = nacl.sign.detached(msg, wallet.sk);
+  const body = `{"tx_type":"${type}","to":"${to}","amount":${amount},"fee":${fee},"nonce":${wallet.nonce},"chain_id":${net.chainId},"payload":[${Array.from(payload).join(',')}],"pub_key":[${Array.from(wallet.pk).join(',')}],"signature":"${hex(sig)}"}`;
+  const r = await fetch(API + '/tx/submit', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body });
+  const j = await r.json(); if (!r.ok) throw new Error(j.error || 'refusé par le nœud');
+  wallet.nonce++;
+  return j.tx_hash;
+}
+
+// ─── Envoyer ──────────────────────────────────────────────────────────────────
+let pending = null;
+function updateFee() { $('s-fee').textContent = `Frais du réseau : ${fmt(net.baseFee, 4)} VINX`; }
+$('s-max').onclick = () => { const m = wallet.balance - net.baseFee; $('s-amount').value = m > 0n ? fmt(m, 9).replace(/\s/g, '').replace(',', '.') : '0'; };
+async function resolveTo(to) {
+  to = to.trim();
+  const m = /^([a-z0-9._-]{1,64})@([a-zA-Z0-9.-]+(?::\d+)?)$/.exec(to);
+  if (!m) { b32dec(to); return { address: to.toLowerCase() }; }
+  const local = /^(localhost|127\.0\.0\.1)/.test(m[2]);
+  const r = await fetch(`${local ? 'http' : 'https'}://${m[2]}/.well-known/vinx.json?name=${m[1]}`, { redirect: 'error' });
+  const doc = await r.json(); const a = doc.names && doc.names[m[1]];
+  if (typeof a !== 'string') throw new Error(`${to} est inconnu de ${m[2]}`);
+  b32dec(a); return { address: a, name: to };
+}
+function resetSend() { pending = null; $('s-confirm').hidden = true; $('s-review').hidden = false; }
+['s-to', 's-amount', 's-memo'].forEach(id => $(id).oninput = resetSend);
+$('s-review').onclick = async () => {
+  const st = $('s-status'); st.innerHTML = '';
+  try {
+    const dest = await resolveTo($('s-to').value);
+    const amount = parseAmount($('s-amount').value); if (amount <= 0n) throw new Error('montant nul');
+    const memo = new TextEncoder().encode($('s-memo').value);
+    if (memo.length > 32) throw new Error(`mémo trop long (${memo.length} octets, 32 max)`);
+    if (amount + net.baseFee > wallet.balance) throw new Error('solde insuffisant');
+    if (dest.address === wallet.address) throw new Error("c'est votre propre adresse");
+    try { const acc = await get('/account/' + dest.address); if (acc.memo_required && !memo.length) throw new Error('ce destinataire exige un mémo (référence de dépôt)'); } catch (e) { if (e.message.includes('mémo')) throw e; }
+    pending = { to: dest.address, amount, memo };
+    $('s-summary').innerHTML = `
+      <div><span>À</span><span class="mono">${dest.name ? esc(dest.name) + '<br>' : ''}${esc(dest.address)}</span></div>
+      <div><span>Montant</span><span><b>${fmt(amount, 4)} VINX</b></span></div>
+      <div><span>Frais</span><span>${fmt(net.baseFee, 4)} VINX</span></div>
+      ${memo.length ? `<div><span>Mémo (public)</span><span>${esc($('s-memo').value)}</span></div>` : ''}
+      <div><span>Total</span><span><b>${fmt(amount + net.baseFee, 4)} VINX</b></span></div>`;
+    $('s-confirm').hidden = false; $('s-review').hidden = true;
+  } catch (e) { st.innerHTML = `<div class="msg err">${esc(e.message)}</div>`; }
+};
+$('s-cancel').onclick = resetSend;
+$('s-send').onclick = async () => {
+  const st = $('s-status'), p = pending; if (!p) return;
+  $('s-send').disabled = true;
+  try {
+    await refreshWallet();
+    const hash = await submit('Transfer', p.to, p.amount, net.baseFee, p.memo);
+    resetSend(); $('s-amount').value = $('s-memo').value = '';
+    st.innerHTML = `<div class="msg wait">Envoyé — en attente du prochain bloc…</div>`;
+    track(hash, st);
+  } catch (e) { st.innerHTML = `<div class="msg err">${esc(e.message)}</div>`; }
+  finally { $('s-send').disabled = false; }
+};
+async function track(hash, box) {
+  for (let i = 0; i < 40; i++) {
+    await new Promise(r => setTimeout(r, 1500));
+    try {
+      const t = await get('/tx/' + hash);
+      if (t.block_height) {
+        box.innerHTML = `<div class="msg ok">✓ Paiement définitif — bloc #${t.block_height}.
+          <a data-receipt="${esc(hash)}">Télécharger le reçu</a> · <a data-open="${esc(hash)}">Détails</a></div>`;
+        box.querySelector('[data-receipt]').onclick = () => saveReceipt(hash);
+        box.querySelector('[data-open]').onclick = () => { show('explorer'); showTx(hash); };
+        refreshWallet(); return;
+      }
+    } catch {}
+  }
+  box.innerHTML = `<div class="msg err">Pas encore inclus. Vérifiez plus tard dans l'explorateur.</div>`;
+}
+async function saveReceipt(hash) {
+  try {
+    const r = await get(`/tx/${hash}/proof`);
+    const a = document.createElement('a');
+    a.href = URL.createObjectURL(new Blob([JSON.stringify(r, null, 2)], { type: 'application/json' }));
+    a.download = `recu-vinx-${hash.slice(0, 12)}.json`; a.click();
+    toast('Reçu enregistré — il prouve le paiement même après élagage');
+  } catch (e) { toast('Reçu indisponible : ' + e.message); }
+}
+
+// ─── Staking ──────────────────────────────────────────────────────────────────
+async function stakeAction(type) {
+  const st = $('k-status');
+  try {
+    const amount = parseAmount($('k-amount').value); if (amount <= 0n) throw new Error('montant nul');
+    await refreshWallet();
+    const hash = await submit(type, wallet.address, amount, 0n, new Uint8Array(0));
+    st.innerHTML = `<div class="msg wait">Envoyé — en attente du prochain bloc…</div>`;
+    track(hash, st);
+  } catch (e) { st.innerHTML = `<div class="msg err">${esc(e.message)}</div>`; }
+}
+$('k-stake').onclick = () => stakeAction('Stake');
+$('k-unstake').onclick = () => stakeAction('Unstake');
+
+// ─── Explorateur ──────────────────────────────────────────────────────────────
+async function loadBlocks() {
+  const top = net.height; if (!top) return;
+  const hs = []; for (let h = top; h > Math.max(0, top - 12); h--) hs.push(h);
+  const blocks = await Promise.all(hs.map(h => get('/block/' + h).catch(() => null)));
+  $('x-blocks').innerHTML = blocks.filter(Boolean).map(b => `
+    <div class="item" data-h="${b.height}">
+      <div class="ico blk">#</div>
+      <div class="grow"><div class="t">Bloc #${b.height.toLocaleString('fr-FR')}</div>
+      <div class="s mono">proposé par ${esc(short(b.validator))} · ${b.signatures_count} signature(s)${b.round ? ' · round ' + b.round : ''}</div></div>
+      <div class="val" style="font-weight:500;color:var(--muted)">${b.tx_count} tx · ${ago(b.timestamp)}</div>
+    </div>`).join('') || '<div class="empty">Aucun bloc.</div>';
+  $('x-blocks').querySelectorAll('[data-h]').forEach(e => e.onclick = () => showBlock(+e.dataset.h));
+}
+function detail(title, html) {
+  $('x-detail').innerHTML = `<div class="card" style="margin-bottom:20px"><div style="display:flex;justify-content:space-between;align-items:center"><h2>${title}</h2><button class="ghost small" id="x-close">Fermer</button></div><div style="margin-top:14px">${html}</div></div>`;
+  $('x-close').onclick = () => $('x-detail').innerHTML = '';
+  $('x-detail').querySelectorAll('[data-h]').forEach(e => e.onclick = () => showBlock(+e.dataset.h));
+  $('x-detail').querySelectorAll('[data-a]').forEach(e => e.onclick = () => showAccount(e.dataset.a));
+  $('x-detail').querySelectorAll('[data-tx]').forEach(e => e.onclick = () => showTx(e.dataset.tx));
+  window.scrollTo({ top: 0, behavior: 'smooth' });
+}
+const A = a => `<a class="mono" data-a="${esc(a)}">${esc(a)}</a>`;
+async function showBlock(h) {
+  try {
+    const b = await get('/block/' + h);
+    detail(`Bloc #${b.height.toLocaleString('fr-FR')} <span class="tag ok">définitif</span>`, `<div class="kv">
+      <div>Hash</div><div class="mono">${esc(b.hash)}</div>
+      <div>Date</div><div>${new Date(b.timestamp * 1000).toLocaleString('fr-FR')} (${ago(b.timestamp)})</div>
+      <div>Proposé par</div><div>${A(b.validator)}</div>
+      <div>Signatures</div><div>${b.signatures_count} validateur(s) · round ${b.round}</div>
+      <div>Bloc précédent</div><div>${b.height > 0 ? `<a data-h="${b.height - 1}">#${b.height - 1}</a>` : '—'}</div>
+      <div>Frais de base</div><div>${fmt(b.base_fee, 4)} VINX</div>
+      <div>Racine d'état</div><div class="mono">${esc(b.state_root)}</div>
+      <div>Transactions</div><div>${b.tx_count ? b.transactions.map(t => `<div><a class="mono" data-tx="${esc(t.hash)}">${esc(short(t.hash, 10))}</a> · ${fmt(t.amount_atoms)} VINX${t.memo ? `<span class="memo">${esc(t.memo)}</span>` : ''}</div>`).join('') : 'aucune'}</div></div>`);
+  } catch (e) { detail('Bloc introuvable', `<div class="msg err">${esc(e.message)} — les blocs de plus de 30 jours sont élagués (sauf nœud --archive).</div>`); }
+}
+async function showTx(hash) {
+  try {
+    const t = await get('/tx/' + hash);
+    detail(`Transaction <span class="tag ok">définitive</span>`, `<div class="kv">
+      <div>Hash</div><div class="mono">${esc(t.hash)}</div>
+      <div>Type</div><div>${esc(t.tx_type)}</div>
+      <div>De</div><div>${A(t.from)}</div>
+      <div>À</div><div>${A(t.to)}</div>
+      <div>Montant</div><div><b>${fmt(t.amount_atoms, 4)} VINX</b></div>
+      <div>Frais</div><div>${fmt(t.fee_atoms, 4)} VINX</div>
+      ${t.memo ? `<div>Mémo</div><div>${esc(t.memo)}</div>` : t.memo_hex ? `<div>Mémo (hex)</div><div class="mono">${esc(t.memo_hex)}</div>` : ''}
+      <div>Bloc</div><div><a data-h="${t.block_height}">#${t.block_height}</a></div>
+      <div>Reçu</div><div><a id="x-rcpt">Télécharger la preuve de paiement</a></div></div>`);
+    $('x-rcpt').onclick = () => saveReceipt(t.hash);
+  } catch (e) { detail('Transaction introuvable', `<div class="msg err">${esc(e.message)}</div>`); }
+}
+async function showAccount(addr) {
+  try {
+    const a = await get('/account/' + addr);
+    const r = await get(`/account/${addr}/txs?limit=20&offset=0`).catch(() => ({ txs: [], total: 0 }));
+    detail('Compte', `<div class="kv">
+      <div>Adresse</div><div class="mono">${esc(a.address)}</div>
+      <div>Solde</div><div><b>${fmt(a.balance_atoms, 4)} VINX</b></div>
+      <div>Verrouillé</div><div>${fmt(a.staked_atoms, 4)} VINX</div>
+      <div>Transactions</div><div>${r.total}${a.memo_required ? ' · <span class="tag">mémo obligatoire</span>' : ''}</div></div>
+      <div class="list" style="margin-top:14px">${r.txs.map(t => `<div class="item" data-tx="${esc(t.hash)}"><div class="grow"><div class="t">${esc(t.tx_type)} · ${fmt(t.amount_atoms)} VINX${t.memo ? `<span class="memo">${esc(t.memo)}</span>` : ''}</div><div class="s mono">${esc(short(t.from))} → ${esc(short(t.to))} · bloc #${t.block_height}</div></div></div>`).join('')}</div>`);
+  } catch { detail('Compte', `<div class="kv"><div>Adresse</div><div class="mono">${esc(addr)}</div><div>Solde</div><div>0 VINX — compte jamais utilisé</div></div>`); }
+}
+$('q-go').onclick = () => {
+  const q = $('q').value.trim(); if (!q) return;
+  if (/^\d+$/.test(q)) showBlock(+q);
+  else if (/^[0-9a-f]{64}$/i.test(q)) showTx(q.toLowerCase());
+  else if (q.toLowerCase().startsWith('vinx1')) showAccount(q.toLowerCase());
+  else detail('Recherche', '<div class="msg err">Entrez une hauteur de bloc, un hash de transaction (64 caractères) ou une adresse vinx1…</div>');
+};
+$('q').onkeydown = e => { if (e.key === 'Enter') $('q-go').click(); };
+
+// ─── Réseau ───────────────────────────────────────────────────────────────────
+async function loadNetwork() {
+  try {
+    const [s, v] = await Promise.all([get('/network/stats'), get('/validators')]);
+    const tile = (k, val) => `<div class="tile"><div class="k">${k}</div><div class="v">${val}</div></div>`;
+    $('n-tiles').innerHTML = tile('Hauteur', '#' + net.height.toLocaleString('fr-FR')) + tile('Temps de bloc', net.blockTime + ' s')
+      + tile('Validateurs', v.count) + tile('En circulation', esc(String(s.circulating_supply).replace(/\.\d+/, '').replace(/\B(?=(\d{3})+(?!\d))/g, ' ')))
+      + tile('Frais de base', fmt(s.base_fee_atoms, 4)) + tile('En attente', net.mempool ?? 0);
+    $('n-sub').textContent = `Un bloc est définitif quand plus des 2/3 de la puissance le signent (${v.quorum} sur ${v.total_power}). Puissance plafonnée à 10 % par validateur.`;
+    $('n-vals').innerHTML = `<tr><th>Validateur</th><th>Puissance</th><th>État</th><th></th></tr>` + v.validators.map(x => {
+      const pct = v.total_power ? x.power * 100 / v.total_power : 0;
+      const state = x.suspended ? '<span class="tag bad">écarté</span>' : x.online ? '<span class="tag ok">actif</span>' : `<span class="tag">${x.missed_proposals} tour(s) manqué(s)</span>`;
+      return `<tr><td><a class="mono" data-acc="${esc(x.address)}">${esc(short(x.address))}</a></td>
+        <td><div style="display:flex;align-items:center;gap:8px"><div class="bar-p"><i style="width:${pct.toFixed(1)}%"></i></div>${pct.toFixed(1)} %</div></td>
+        <td>${state}</td><td>${x.is_next_leader ? '<span class="tag ok">prochain proposeur</span>' : ''}</td></tr>`;
+    }).join('');
+    $('n-vals').querySelectorAll('[data-acc]').forEach(e => e.onclick = () => { show('explorer'); showAccount(e.dataset.acc); });
+  } catch {}
+}
+
+// ─── Démarrage ────────────────────────────────────────────────────────────────
+pollHealth(); refreshFee().then(updateFee);
+setInterval(pollHealth, 2000); setInterval(tickPulse, 500); setInterval(() => refreshFee().then(updateFee), 15000);
+if (!window.nacl || !window.vinxBlake3) showErr(new Error('bibliothèques cryptographiques non chargées'));
+</script>
+</body>
+</html>
