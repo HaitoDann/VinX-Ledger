@@ -19,6 +19,9 @@ pub const MAX_DECODED_BYTES: usize = 16 * 1024 * 1024; // 16 MiB
 /// complements the byte budget below.
 pub const MAX_SYNC_RESPONSE_BLOCKS: u32 = 512;
 
+/// Maximum transactions in one `NewTransactions` gossip message.
+pub const MAX_TXS_PER_MESSAGE: usize = 1_000;
+
 /// Cumulative serialized-byte budget for a `SyncResponse`. The server stops adding blocks
 /// once the next one would push the batch past this — while always sending at least one
 /// block, so sync always makes progress even if a single block is unusually large.
@@ -45,8 +48,10 @@ pub fn sync_batch_len(sizes: &[usize], budget: usize, max_count: usize) -> usize
 /// Wire format: Borsh (deterministic, compact, no schema needed), zstd above a threshold.
 #[derive(Clone, Debug, BorshSerialize, BorshDeserialize)]
 pub enum P2pMessage {
-    /// A new transaction submitted by a user.
-    NewTransaction(Transaction),
+    /// Transactions submitted by users, relayed in batches (at most
+    /// `MAX_TXS_PER_MESSAGE`): one gossip message per batch rather than per transaction,
+    /// so a legitimate burst of payments never trips the per-peer flood guard.
+    NewTransactions(Vec<Transaction>),
     /// A signed block proposal for `(height, round)`.
     Proposal(Proposal),
     /// A signed prevote or precommit.
@@ -92,13 +97,19 @@ impl P2pMessage {
             FLAG_ZSTD => decompress_bounded(payload, MAX_DECODED_BYTES)?,
             _ => return None,
         };
-        borsh::from_slice(&raw).ok()
+        let msg: Self = borsh::from_slice(&raw).ok()?;
+        if let P2pMessage::NewTransactions(txs) = &msg {
+            if txs.is_empty() || txs.len() > MAX_TXS_PER_MESSAGE {
+                return None;
+            }
+        }
+        Some(msg)
     }
 
     /// GossipSub topic name for this message type.
     pub fn topic(&self) -> &'static str {
         match self {
-            P2pMessage::NewTransaction(_) => "vinx/txs/1",
+            P2pMessage::NewTransactions(_) => "vinx/txs/1",
             P2pMessage::Proposal(_) | P2pMessage::Vote(_) => "vinx/consensus/1",
             P2pMessage::Committed { .. } => "vinx/blocks/1",
             P2pMessage::SyncRequest { .. } | P2pMessage::SyncResponse { .. } => "vinx/sync/1",
@@ -234,13 +245,13 @@ mod tests {
     #[test]
     fn test_topic_names() {
         assert_eq!(
-            P2pMessage::NewTransaction(Transaction::new_transfer(
+            P2pMessage::NewTransactions(vec![Transaction::new_transfer(
                 &KeyPair::generate(),
                 dummy_addr(),
                 vinx_core::Amount::from_vinx(1),
                 vinx_core::Amount::from_vinx(1),
                 0
-            ))
+            )])
             .topic(),
             "vinx/txs/1"
         );

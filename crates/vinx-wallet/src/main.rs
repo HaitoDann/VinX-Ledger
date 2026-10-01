@@ -2,6 +2,7 @@ mod amount;
 mod client;
 mod error;
 mod keystore;
+mod loadtest;
 mod names;
 mod receipt;
 
@@ -195,6 +196,17 @@ enum Commands {
         #[arg(long, default_value = "http://127.0.0.1:8545")]
         node: String,
     },
+    /// Load test: send COUNT real transfers and measure inclusion and throughput
+    LoadTest {
+        /// Number of transfers
+        #[arg(long, default_value = "500")]
+        count: usize,
+        /// Funding wallet (needs about 0.0101 VINX per transfer)
+        #[arg(short, long, default_value = "wallet.json")]
+        wallet: PathBuf,
+        #[arg(long, default_value = "http://127.0.0.1:8545")]
+        node: String,
+    },
     /// Verify a saved payment receipt offline
     VerifyReceipt {
         /// Receipt file (<hash>.json)
@@ -292,6 +304,15 @@ async fn run(cmd: Commands) -> Result<(), WalletError> {
         Commands::Block { height, node } => cmd_block(height, &node).await,
         Commands::Status { node } => cmd_status(&node).await,
         Commands::Tx { hash, node } => cmd_tx(&hash, &node).await,
+        Commands::LoadTest {
+            count,
+            wallet,
+            node,
+        } => {
+            let ks = KeyStore::load(&wallet)?;
+            let kp = ks.to_keypair()?;
+            loadtest::run(&RpcClient::new(&node), &kp, ks.address(), count).await
+        }
         Commands::Receipt { hash, out, node } => cmd_receipt(&hash, &out, &node).await,
         Commands::VerifyReceipt { file } => cmd_verify_receipt(&file),
         Commands::AnnounceUpgrade {
@@ -404,6 +425,7 @@ async fn cmd_transfer(
     println!("Fee     : {}", fee);
     println!("Nonce   : {}", nonce);
 
+    let tx = client.for_chain(tx, &kp).await?;
     let resp = client.submit_tx(&tx).await?;
     if resp.accepted {
         println!("Status  : accepted");
@@ -469,6 +491,7 @@ async fn cmd_stake(
     println!("Stake   : {}", amount);
     println!("Nonce   : {}", nonce);
 
+    let tx = client.for_chain(tx, &kp).await?;
     let resp = client.submit_tx(&tx).await?;
     if resp.accepted {
         println!("Status  : accepted");
@@ -491,6 +514,7 @@ async fn cmd_memo_required(state: &str, wallet: &Path, node: &str) -> Result<(),
     let nonce = client.get_account(ks.address()).await?.nonce;
     let fee = Amount::from_atoms(DEFAULT_FEE_FLOOR_ATOMS);
     let tx = Transaction::new_set_memo_required(&kp, required, fee, nonce);
+    let tx = client.for_chain(tx, &kp).await?;
     let resp = client.submit_tx(&tx).await?;
     println!(
         "Memo required = {state} for {}: {}",
@@ -511,6 +535,7 @@ async fn cmd_set_validator_keys(keys: &Path, wallet: &Path, node: &str) -> Resul
     let client = RpcClient::new(node);
     let nonce = client.get_account(ks.address()).await?.nonce;
     let tx = Transaction::new_register_bls_key(&kp, &payload, nonce);
+    let tx = client.for_chain(tx, &kp).await?;
     let resp = client.submit_tx(&tx).await?;
     println!("Validator : {}", ks.address());
     if let Some(op) = payload.operator {
@@ -536,6 +561,7 @@ async fn cmd_unjail(validator: &str, wallet: &Path, node: &str) -> Result<(), Wa
     let client = RpcClient::new(node);
     let nonce = client.get_account(ks.address()).await?.nonce;
     let tx = Transaction::new_unjail_for(&kp, target, nonce);
+    let tx = client.for_chain(tx, &kp).await?;
     let resp = client.submit_tx(&tx).await?;
     println!(
         "Unjail {target}: {}",
@@ -563,6 +589,7 @@ async fn cmd_unstake(amount_str: &str, wallet: &Path, node: &str) -> Result<(), 
     println!("Unstake : {}", amount);
     println!("Nonce   : {}", nonce);
 
+    let tx = client.for_chain(tx, &kp).await?;
     let resp = client.submit_tx(&tx).await?;
     if resp.accepted {
         println!("Status  : accepted");
@@ -668,6 +695,7 @@ async fn cmd_announce_upgrade(
     println!("Activation (unix) : {}", activation_ts);
     println!("Nonce             : {}", nonce);
 
+    let tx = client.for_chain(tx, &kp).await?;
     let resp = client.submit_tx(&tx).await?;
     if resp.accepted {
         println!("Status  : accepted");
@@ -701,6 +729,7 @@ async fn cmd_add_validator(
     println!("Action    : add-validator");
     println!("Nonce     : {}", nonce);
 
+    let tx = client.for_chain(tx, &kp).await?;
     let resp = client.submit_tx(&tx).await?;
     if resp.accepted {
         println!("Status  : accepted");
@@ -736,6 +765,7 @@ async fn cmd_remove_validator(
     println!("Action    : remove-validator");
     println!("Nonce     : {}", nonce);
 
+    let tx = client.for_chain(tx, &kp).await?;
     let resp = client.submit_tx(&tx).await?;
     if resp.accepted {
         println!("Status  : accepted");
@@ -889,6 +919,7 @@ async fn cmd_admin_action(action_json: &str, wallet: &Path, node: &str) -> Resul
     println!("Admin  : {}", ks.address());
     println!("Nonce  : {}", nonce);
 
+    let tx = client.for_chain(tx, &kp).await?;
     let resp = client.submit_tx(&tx).await?;
     if resp.accepted {
         println!("Status : accepted");
