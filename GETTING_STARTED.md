@@ -21,7 +21,10 @@ Ouvrir **http://127.0.0.1:8545/** puis :
 | `./vinx start --lan` | accessible depuis les autres appareils du réseau local (téléphone…) |
 | `./vinx wallet balance vinx1…` | le wallet en ligne de commande, branché sur le réseau local |
 | `./vinx logs 2` | journal du nœud 2 |
+| `./vinx load 1000` | test de charge : 1 000 transferts réels, débit mesuré |
 | `./vinx stop` / `./vinx reset` | arrêter (données gardées) / tout effacer |
+
+> Testnet public (serveur, services systemd, admission des validateurs) : voir **[TESTNET.md](TESTNET.md)**.
 
 ### Deux PC à la maison
 

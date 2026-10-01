@@ -194,6 +194,53 @@ impl RpcClient {
             .map_err(|e| WalletError::NodeError(e.to_string()))
     }
 
+    /// Binds `tx` to the node's chain (devnet, testnet, mainnet) and re-signs it: a
+    /// transaction signed for another chain id is refused (replay protection).
+    pub async fn for_chain(
+        &self,
+        mut tx: Transaction,
+        kp: &vinx_crypto::KeyPair,
+    ) -> Result<Transaction, WalletError> {
+        let h = self.get_json("/health").await?;
+        if let Some(id) = h["chain_id"].as_u64() {
+            tx.chain_id = id as u32;
+            tx.sign(kp);
+        }
+        Ok(tx)
+    }
+
+    /// `POST /tx/batch` (≤ 100 transactions), raw JSON answer.
+    pub async fn submit_batch(
+        &self,
+        txs: &[Transaction],
+    ) -> Result<serde_json::Value, WalletError> {
+        let url = format!("{}/tx/batch", self.base_url);
+        let mut waited = 0;
+        let resp = loop {
+            let resp =
+                self.client.post(&url).json(txs).send().await.map_err(|e| {
+                    WalletError::NodeUnreachable(self.base_url.clone(), e.to_string())
+                })?;
+            // The node rate-limits submissions per client (anti-spam): wait for a token
+            // instead of failing (≈ 20 batches per minute).
+            if resp.status() == reqwest::StatusCode::TOO_MANY_REQUESTS && waited < 120 {
+                tokio::time::sleep(std::time::Duration::from_secs(3)).await;
+                waited += 3;
+                continue;
+            }
+            break resp;
+        };
+        if !resp.status().is_success() {
+            let body: ErrorBody = resp.json().await.unwrap_or(ErrorBody {
+                error: "unknown error".to_string(),
+            });
+            return Err(WalletError::NodeError(body.error));
+        }
+        resp.json()
+            .await
+            .map_err(|e| WalletError::NodeError(e.to_string()))
+    }
+
     async fn get<T: for<'de> serde::Deserialize<'de>>(&self, path: &str) -> Result<T, WalletError> {
         let url = format!("{}{}", self.base_url, path);
         let resp = self

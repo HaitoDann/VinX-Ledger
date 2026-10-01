@@ -11,12 +11,15 @@
 #   ./vinx revive 3         le relance
 #   ./vinx logs [i]         journal du nœud i (1 par défaut)
 #   ./vinx wallet <cmd>     vinx-wallet branché sur le nœud local
+#   ./vinx load [N]         test de charge : N transferts réels (défaut 500), débit mesuré
 #   ./vinx reset            efface le réseau local (nouvelle genèse)
 #
 # Deux machines (réseau domestique) :
-#   PC hôte    : ./vinx start --lan        puis, quand l'autre PC le demande :
+#   PC hôte    : ./vinx start --lan        (--testnet : chaîne de test publique)
+#                ./vinx pending            demandes d'admission reçues
 #                ./vinx accept <adresse>   finance et admet le nouveau validateur
 #   Second PC  : ./vinx join <ip-hôte>     rejoint la chaîne et devient validateur
+#   Serveur    : sudo ./vinx service       installe le(s) nœud(s) comme service systemd
 #
 # Options de start : -n <validateurs> (1–9), -t <temps de bloc en s> (défaut 12, le paramètre du protocole),
 #                    --lan (écoute sur le réseau local, pour d'autres machines/téléphones)
@@ -28,7 +31,10 @@ ROOT="$(cd "$(dirname "$0")" && pwd)"
 HOME_DIR="${VINX_HOME:-$ROOT/.vinx-local}"
 NODE="$ROOT/target/release/vinx-node"
 WALLET="$ROOT/target/release/vinx-wallet"
-CHAIN_ID=42
+CHAIN_ID=42   # devnet ; 7 avec --testnet (chaîne de test publique)
+[[ -f "${VINX_HOME:-$(cd "$(dirname "$0")" && pwd)/.vinx-local}/genesis.json" ]] && \
+    CHAIN_ID=$(python3 -c "import json,sys;print(json.load(open(sys.argv[1]))['chain_id'])" \
+        "${VINX_HOME:-$(cd "$(dirname "$0")" && pwd)/.vinx-local}/genesis.json" 2>/dev/null || echo 42)
 
 c_ok=$'\e[32m'; c_dim=$'\e[2m'; c_b=$'\e[1m'; c_r=$'\e[31m'; c_0=$'\e[0m'
 say()  { echo "${c_b}▸${c_0} $*"; }
@@ -44,7 +50,11 @@ try: print(json.load(sys.stdin)$1)
 except Exception: print('')"; }
 count() { cat "$HOME_DIR/validators" 2>/dev/null || echo 0; }
 pid_of() { cat "$HOME_DIR/node$1.pid" 2>/dev/null || true; }
-alive() { local p; p=$(pid_of "$1"); [[ -n "$p" ]] && kill -0 "$p" 2>/dev/null; }
+alive() {
+    local p; p=$(pid_of "$1")
+    { [[ -n "$p" ]] && kill -0 "$p" 2>/dev/null; } || \
+        { [[ -z "${VINX_PORT_OFFSET:-}" ]] && systemctl is-active --quiet "vinx-node$1" 2>/dev/null; }
+}
 
 build() {
     # rustup installs cargo in ~/.cargo/bin, which a shell opened before the install
@@ -80,12 +90,12 @@ init_network() {
     done
     local admin
     admin=$(python3 -c "import json;print(json.load(open('$HOME_DIR/node1/admin.json'))['address'])")
-    python3 - "$HOME_DIR/genesis.json" "$admin" "$bt" "${entries[@]}" <<'PY'
+    VINX_CHAIN=$CHAIN_ID python3 - "$HOME_DIR/genesis.json" "$admin" "$bt" "${entries[@]}" <<'PY'
 import json, sys, time
 out, admin, bt, *entries = sys.argv[1:]
 e = [json.loads(x) for x in entries]
 json.dump({
-    "chain_id": 42, "genesis_timestamp": int(time.time()) - 60, "admin_address": admin,
+    "chain_id": int(__import__("os").environ["VINX_CHAIN"]), "genesis_timestamp": int(time.time()) - 60, "admin_address": admin,
     "initial_validator": e[0]["address"],
     "initial_validator_bls_pub_key": e[0]["bls_pub_key"],
     "initial_validator_bls_pop": e[0]["bls_pop"],
@@ -96,29 +106,38 @@ PY
     # Faucet: node1's validator account holds the dev prefund and hands it out.
     cat >"$HOME_DIR/node1/config.toml" <<EOF
 faucet_key_file = "$HOME_DIR/node1/validator.json"
-faucet_cooldown_secs = 30
+faucet_cooldown_secs = $([[ $CHAIN_ID == 7 ]] && echo 86400 || echo 30)
+admin_token = "$(head -c 24 /dev/urandom | od -An -tx1 | tr -d ' \n')"
 EOF
     echo "$n" >"$HOME_DIR/validators"
     ok "genèse écrite ($HOME_DIR/genesis.json)"
 }
 
-start_node() {
+# Ligne de commande complète du nœud i (partagée par start_node et le service systemd).
+node_args() {
     local i="$1" host="127.0.0.1" n peers=()
     [[ -f "$HOME_DIR/lan" ]] && host="0.0.0.0"
     n=$(count)
-    alive "$i" && return 0
     for j in $(seq 1 "$n"); do [[ $j != "$i" ]] && peers+=("/ip4/127.0.0.1/tcp/$(p2p_port "$j")"); done
-    local cfg=() sync=()
+    ARGS=()
+    [[ -f "$HOME_DIR/node$i/config.toml" ]] && ARGS+=(--config "$HOME_DIR/node$i/config.toml")
+    ARGS+=(--data-dir "$HOME_DIR/node$i" --chain-id "$CHAIN_ID"
+           --rpc-listen "$host:$(rpc_port "$i")" --p2p-listen "/ip4/$host/tcp/$(p2p_port "$i")")
     if [[ -f "$HOME_DIR/joined" ]]; then    # machine qui a rejoint une chaîne existante
-        local remote rp; read -r remote rp <"$HOME_DIR/joined"
-        peers+=("/ip4/$remote/tcp/$((rp - 8545 + 9001))")
-        sync=(--sync-peer "http://$remote:$rp")
+        local remote rp proto=dns4; read -r remote rp <"$HOME_DIR/joined"
+        [[ "$remote" =~ ^[0-9.]+$ ]] && proto=ip4
+        peers+=("/$proto/$remote/tcp/$((rp - 8545 + 9001))")
+        ARGS+=(--sync-peer "http://$remote:$rp")
     fi
-    [[ -f "$HOME_DIR/node$i/config.toml" ]] && cfg=(--config "$HOME_DIR/node$i/config.toml")
-    VINX_GENESIS_SPEC="$HOME_DIR/genesis.json" nohup "$NODE" "${cfg[@]}" \
-        --data-dir "$HOME_DIR/node$i" --chain-id $CHAIN_ID \
-        --rpc-listen "$host:$(rpc_port "$i")" --p2p-listen "/ip4/$host/tcp/$(p2p_port "$i")" \
-        ${peers[@]+--peers "${peers[@]}"} "${sync[@]}" >>"$HOME_DIR/node$i.log" 2>&1 &
+    (( ${#peers[@]} )) && ARGS+=(--peers "${peers[@]}")
+    return 0
+}
+
+start_node() {
+    local i="$1"
+    alive "$i" && return 0
+    node_args "$i"
+    VINX_GENESIS_SPEC="$HOME_DIR/genesis.json" nohup "$NODE" "${ARGS[@]}" >>"$HOME_DIR/node$i.log" 2>&1 &
     echo $! >"$HOME_DIR/node$i.pid"
 }
 
@@ -137,6 +156,7 @@ cmd_start() {
             -n) n="$2"; shift 2 ;;
             -t) bt="$2"; shift 2 ;;
             --lan) lan=1; shift ;;
+            --testnet) CHAIN_ID=7; lan=1; shift ;;
             *) die "option inconnue : $1" ;;
         esac
     done
@@ -182,14 +202,29 @@ cmd_status() {
             echo "  nœud $i  ${c_r}○ arrêté${c_0}"
         fi
     done
-    local q=$(( n * 2 / 3 + 1 )) up=0
-    for i in $(seq 1 "$n"); do alive "$i" && up=$((up + 1)); done
-    if (( up >= q )); then ok "quorum atteint ($up/$n, il en faut $q) — la chaîne avance"
-    else echo "  ${c_r}✗ quorum perdu ($up/$n, il en faut $q) — la chaîne est à l'arrêt, sans fork${c_0}"; fi
+    # Quorum du RÉSEAU entier (toutes machines), lu sur la chaîne — pas seulement les
+    # nœuds de ce PC : signatures du dernier bloc, taille du set, âge du dernier bloc.
+    local i0=0
+    for i in $(seq 1 "$n"); do alive "$i" && { i0=$i; break; }; done
+    if (( i0 == 0 )); then echo "  ${c_r}✗ aucun nœud local en marche${c_0}"; return 0; fi
+    local h vals sig age bt
+    h=$(rpc "$i0" health)
+    bt=$(echo "$h" | jget "['block_time_secs']")
+    age=$(( $(date +%s) - $(echo "$h" | jget "['tip_timestamp']") ))
+    vals=$(rpc "$i0" validators | jget "['count']")
+    sig=$(rpc "$i0" "block/$(echo "$h" | jget "['height']")" | jget "['signatures_count']")
+    local need=$(( vals * 2 / 3 + 1 ))
+    echo "  réseau : ${c_b}$vals validateur(s)${c_0}, il en faut $need pour valider un bloc · dernier bloc certifié par ${sig:-?} signature(s) · il y a ${age}s"
+    if (( age <= 3 * ${bt:-12} + 5 )); then
+        ok "la chaîne avance"
+    else
+        echo "  ${c_r}✗ aucun bloc depuis ${age}s — quorum probablement perdu ($need validateurs en ligne nécessaires sur $vals)${c_0}"
+    fi
 }
 
 cmd_stop() {
     local n; n=$(count)
+    for i in $(seq 1 "$n"); do systemctl stop "vinx-node$i" 2>/dev/null || true; done
     for i in $(seq 1 "$n"); do
         local p; p=$(pid_of "$i")
         [[ -n "$p" ]] && kill "$p" 2>/dev/null || true
@@ -221,6 +256,7 @@ cmd_join() {
         curl -sf --max-time 5 "http://$host:$port/chain/genesis" -o "$HOME_DIR/genesis.json" \
             || die "hôte injoignable ou pas lancé avec ./vinx start --lan (http://$host:$port/chain/genesis)"
         echo "$host $port" >"$HOME_DIR/joined"; echo 1 >"$HOME_DIR/validators"; touch "$HOME_DIR/lan"
+        CHAIN_ID=$(python3 -c "import json;print(json.load(open('$HOME_DIR/genesis.json'))['chain_id'])")
         "$NODE" --data-dir "$HOME_DIR/node1" --chain-id $CHAIN_ID --genesis-entry 2>/dev/null | grep '^{' >"$HOME_DIR/validator-keys.json"
         ok "genèse récupérée, clés du validateur créées"
     fi
@@ -232,6 +268,10 @@ cmd_join() {
         || die "synchronisation trop lente — voir ./vinx logs 1"
     local me; me=$(python3 -c "import json;print(json.load(open('$HOME_DIR/node1/validator.json'))['address'])")
     if [[ "$(rpc 1 validators)" == *"$me"* ]]; then ok "déjà validateur ($me)"; return 0; fi
+    # Demande d'admission déposée chez l'hôte (visible avec ./vinx pending).
+    curl -s --max-time 5 -X POST -H 'Content-Type: application/json' \
+        -d "{\"address\":\"$me\",\"message\":\"$(hostname) via ./vinx join\"}" \
+        "http://$host:$port/validators/request" >/dev/null || true
     if ! ge "$(atoms "$me" staked_atoms)" "$BOND_ATOMS"; then
         echo
         echo "  ${c_b}Sur le PC hôte, lancez :${c_0}"
@@ -279,7 +319,64 @@ cmd_accept() {
     ok "$addr est validateur — $(rpc 1 validators | jget "['count']") validateurs au total"
 }
 
+cmd_load() {
+    local n="${1:-500}" w="${2:-$HOME_DIR/node1/validator.json}"
+    [[ "$n" =~ ^[0-9]+$ ]] || die "usage : ./vinx load [nombre] [portefeuille.json]"
+    [[ -f "$w" ]] || die "portefeuille introuvable : $w"
+    alive 1 || die "le nœud local n'est pas lancé"
+    build
+    say "Test de charge : $n transferts"
+    wallet_cli load-test --count "$n" --wallet "$w"
+}
+
+cmd_pending() {
+    [[ -f "$HOME_DIR/node1/config.toml" ]] || die "à lancer sur le PC hôte"
+    local tok; tok=$(sed -n 's/^admin_token = "\(.*\)"/\1/p' "$HOME_DIR/node1/config.toml")
+    [[ -n "$tok" ]] || die "pas de jeton admin (réseau créé avant cette version : ./vinx reset)"
+    local vals; vals=$(rpc 1 validators)
+    curl -s -H "Authorization: Bearer $tok" "http://127.0.0.1:$(rpc_port 1)/validators/pending" | VALS="$vals" python3 -c "
+import json,sys,os
+d=json.load(sys.stdin); seen=set()
+known={v['address'] for v in json.loads(os.environ['VALS'] or '{}').get('validators',[])}
+r=[x for x in d.get('requests',[]) if x['address'] not in known and not (x['address'] in seen or seen.add(x['address']))]
+if not r: print('  aucune demande en attente')
+for x in r: print('  ' + x['address'] + '   ' + (x.get('message') or '') + '\n    → ./vinx accept ' + x['address'])"
+}
+
+cmd_service() {
+    [[ $EUID -eq 0 ]] || die "à lancer en root (sudo ./vinx service)"
+    command -v systemctl >/dev/null || die "systemd introuvable"
+    [[ -f "$HOME_DIR/genesis.json" ]] || die "créez ou rejoignez d'abord un réseau (./vinx start / ./vinx join)"
+    build
+    for i in $(seq 1 "$(count)"); do
+        node_args "$i"
+        local p; p=$(pid_of "$i"); [[ -n "$p" ]] && kill "$p" 2>/dev/null; rm -f "$HOME_DIR/node$i.pid"
+        cat >"/etc/systemd/system/vinx-node$i.service" <<EOF
+[Unit]
+Description=VinX validateur $i
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Environment=VINX_GENESIS_SPEC=$HOME_DIR/genesis.json
+ExecStart=$NODE ${ARGS[*]}
+Restart=always
+RestartSec=5
+LimitNOFILE=65536
+
+[Install]
+WantedBy=multi-user.target
+EOF
+        systemctl daemon-reload
+        systemctl enable --now "vinx-node$i" >/dev/null 2>&1 && ok "service vinx-node$i actif (redémarre tout seul, démarre au boot)"
+    done
+    echo "  ${c_dim}journal : journalctl -u vinx-node1 -f   ·   arrêt : systemctl stop vinx-node1${c_0}"
+}
+
 case "${1:-help}" in
+    pending) cmd_pending ;;
+    service) cmd_service ;;
+    load)   shift; cmd_load "$@" ;;
     join)   shift; cmd_join "$@" ;;
     accept) shift; cmd_accept "$@" ;;
     start)  shift; cmd_start "$@" ;;

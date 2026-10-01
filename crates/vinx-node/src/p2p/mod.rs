@@ -36,6 +36,8 @@ pub enum NetEvent {
 #[allow(clippy::large_enum_variant)]
 pub enum P2pCommand {
     Broadcast(P2pMessage),
+    /// A transaction to relay; batched by the event loop.
+    RelayTx(Transaction),
     Shutdown,
 }
 
@@ -50,7 +52,7 @@ impl P2pHandle {
         let _ = self.cmd_tx.send(P2pCommand::Broadcast(msg));
     }
     pub fn broadcast_tx(&self, tx: &Transaction) {
-        self.broadcast(P2pMessage::NewTransaction(tx.clone()));
+        let _ = self.cmd_tx.send(P2pCommand::RelayTx(tx.clone()));
     }
     pub fn shutdown(&self) {
         let _ = self.cmd_tx.send(P2pCommand::Shutdown);
@@ -200,6 +202,18 @@ pub async fn start(
     })
 }
 
+/// Publishes the buffered transactions as `NewTransactions` batches.
+fn flush_txs(swarm: &mut libp2p::Swarm<VinxBehaviour>, buf: &mut Vec<Transaction>) {
+    while !buf.is_empty() {
+        let n = buf.len().min(messages::MAX_TXS_PER_MESSAGE);
+        let msg = P2pMessage::NewTransactions(buf.drain(..n).collect());
+        let topic = IdentTopic::new(msg.topic());
+        if let Err(e) = swarm.behaviour_mut().gossipsub.publish(topic, msg.encode()) {
+            debug!(error = %e, "Transaction batch publish failed");
+        }
+    }
+}
+
 /// Dials `peer` only if it is neither connected nor already being dialed, trying its
 /// known addresses within a single attempt.
 fn dial_once(swarm: &mut libp2p::Swarm<VinxBehaviour>, peer: PeerId, addrs: Vec<Multiaddr>) {
@@ -224,14 +238,27 @@ async fn run_event_loop(
     consensus_tx: mpsc::UnboundedSender<NetEvent>,
 ) {
     let mut guard = guard::PeerGuard::new();
+    // Transactions to relay are grouped and flushed every 250 ms (or when a batch is
+    // full): one gossip message per batch.
+    let mut tx_buf: Vec<Transaction> = Vec::new();
+    let mut flush = tokio::time::interval(Duration::from_millis(250));
     loop {
         tokio::select! {
+            _ = flush.tick() => {
+                flush_txs(&mut swarm, &mut tx_buf);
+            }
             cmd = cmd_rx.recv() => {
                 match cmd {
                     Some(P2pCommand::Broadcast(msg)) => {
                         let topic = IdentTopic::new(msg.topic());
                         if let Err(e) = swarm.behaviour_mut().gossipsub.publish(topic, msg.encode()) {
                             debug!(error = %e, "Gossip publish failed");
+                        }
+                    }
+                    Some(P2pCommand::RelayTx(tx)) => {
+                        tx_buf.push(tx);
+                        if tx_buf.len() >= messages::MAX_TXS_PER_MESSAGE {
+                            flush_txs(&mut swarm, &mut tx_buf);
                         }
                     }
                     Some(P2pCommand::Shutdown) | None => {
@@ -323,14 +350,27 @@ async fn dispatch(
     consensus_tx: &mpsc::UnboundedSender<NetEvent>,
 ) -> Option<P2pMessage> {
     match msg {
-        P2pMessage::NewTransaction(tx) => {
-            metrics.p2p_tx_recv.fetch_add(1, Ordering::Relaxed);
+        P2pMessage::NewTransactions(txs) => {
+            metrics
+                .p2p_tx_recv
+                .fetch_add(txs.len() as u64, Ordering::Relaxed);
             // Stateful admission before staging (anti-spam): same gate as the RPC path.
-            if let Err(e) = state.read().await.admission_check(&tx) {
-                debug!(error = %e, "P2P transaction rejected at admission");
-                return None;
+            let state = state.read().await;
+            let admitted: Vec<Transaction> = txs
+                .into_iter()
+                .filter(|tx| match state.admission_check(tx) {
+                    Ok(()) => true,
+                    Err(e) => {
+                        debug!(error = %e, "P2P transaction rejected at admission");
+                        false
+                    }
+                })
+                .collect();
+            drop(state);
+            let mut mempool = mempool.write().await;
+            for tx in admitted {
+                mempool.stage(tx);
             }
-            mempool.write().await.stage(tx);
             None
         }
         P2pMessage::Proposal(p) => {

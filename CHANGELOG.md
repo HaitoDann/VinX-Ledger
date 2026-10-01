@@ -5,6 +5,14 @@ Format : `MAJEUR.MINEUR.CORRECTIF` — les versions `0.x.y` sont des versions de
 
 ---
 
+## [Non publié] — Test de charge et préparation du testnet public
+
+- **`./vinx load N`** (`vinx-wallet load-test`) : N transferts réels signés, répartis sur des expéditeurs temporaires ; mesure l'inclusion et le débit. Mesuré : 2 000 transferts dans un seul bloc, inclus en 5 s.
+- **Bug corrigé — un pic de paiements pouvait écarter un validateur** : chaque transaction était relayée en un message P2P ; au-delà de 200 messages, le garde anti-inondation des pairs bannissait l'émetteur (y compris ses votes), qui finissait jailé. Les transactions sont désormais relayées par lots (`NewTransactions`, 1 000 max, toutes les 250 ms).
+- **Bug corrigé** : le wallet CLI signait toujours pour la chaîne de développement (42) ; il lit maintenant l'identifiant de chaîne du nœud.
+- **`./vinx status`** affiche le quorum du réseau entier (validateurs, signatures du dernier bloc, âge du dernier bloc) et non plus des seuls nœuds de la machine.
+- **Testnet** : `./vinx start --testnet` (chaîne 7, faucet 1×/jour, jeton admin), demandes d'admission envoyées par `join` et listées par `./vinx pending`, `sudo ./vinx service` (systemd), adresses DNS acceptées par `join`. Guide **TESTNET.md**.
+
 ## [Non publié] — Deux PC à la maison (`./vinx join`)
 
 - `./vinx join <ip>` (second PC) : récupère la genèse de l'hôte (`GET /chain/genesis`), se synchronise, dépose sa garantie avec sa clé BLS et devient validateur ; `./vinx accept <adresse>` (hôte) : finance, attend le dépôt, ajoute au set.
