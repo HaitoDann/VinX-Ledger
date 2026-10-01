@@ -17,6 +17,47 @@ pub async fn blake3_js() -> impl axum::response::IntoResponse {
 }
 
 /// Wallet, explorer and network views (single page, no external resource).
+/// Logo and fonts (IBM Plex, SIL OFL — see assets/fonts/OFL-IBM-Plex.txt), served by the
+/// node so the interface works offline.
+pub async fn static_asset(
+    axum::extract::Path(name): axum::extract::Path<String>,
+) -> axum::response::Response {
+    use axum::response::IntoResponse;
+    let (ct, body): (&str, &'static [u8]) = match name.as_str() {
+        "logo-64.png" => ("image/png", include_bytes!("../../assets/logo-64.png")),
+        "logo-256.png" => ("image/png", include_bytes!("../../assets/logo-256.png")),
+        "ibm-plex-sans-latin-400-normal.woff2" => (
+            "font/woff2",
+            include_bytes!("../../assets/fonts/ibm-plex-sans-latin-400-normal.woff2"),
+        ),
+        "ibm-plex-sans-latin-500-normal.woff2" => (
+            "font/woff2",
+            include_bytes!("../../assets/fonts/ibm-plex-sans-latin-500-normal.woff2"),
+        ),
+        "ibm-plex-sans-latin-600-normal.woff2" => (
+            "font/woff2",
+            include_bytes!("../../assets/fonts/ibm-plex-sans-latin-600-normal.woff2"),
+        ),
+        "ibm-plex-mono-latin-400-normal.woff2" => (
+            "font/woff2",
+            include_bytes!("../../assets/fonts/ibm-plex-mono-latin-400-normal.woff2"),
+        ),
+        "ibm-plex-mono-latin-500-normal.woff2" => (
+            "font/woff2",
+            include_bytes!("../../assets/fonts/ibm-plex-mono-latin-500-normal.woff2"),
+        ),
+        _ => return axum::http::StatusCode::NOT_FOUND.into_response(),
+    };
+    (
+        [
+            (axum::http::header::CONTENT_TYPE, ct),
+            (axum::http::header::CACHE_CONTROL, "public, max-age=86400"),
+        ],
+        body,
+    )
+        .into_response()
+}
+
 pub async fn index() -> Html<&'static str> {
     Html(include_str!("../../assets/index.html"))
 }

@@ -19,6 +19,8 @@ pub fn router(node: Arc<Node>) -> Router {
         .route("/", get(ui::index))
         .route("/assets/nacl.min.js", get(ui::nacl_js))
         .route("/assets/blake3.min.js", get(ui::blake3_js))
+        .route("/assets/fonts/:name", get(ui::static_asset))
+        .route("/assets/:name", get(ui::static_asset))
         .route("/admin", get(ui::admin))
         .route("/health", get(handlers::health))
         .route("/chain/height", get(handlers::get_height))
