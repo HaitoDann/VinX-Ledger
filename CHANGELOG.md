@@ -5,6 +5,11 @@ Format : `MAJEUR.MINEUR.CORRECTIF` — les versions `0.x.y` sont des versions de
 
 ---
 
+## [Non publié] — Interface au design d'ARCHI
+
+- Interface alignée sur le design system d'ARCHI (PlaZma, « PRO v4 ») : IBM Plex Sans / Mono, neutres froids, un seul accent (vert du logo désaturé), surfaces à plat à filet fin, sans ombre ni dégradé ni flou, icônes SVG ligne, aucun emoji d'interface.
+- Logo officiel VinX (`assets/vinx-logo.png`, décliné en 64 et 256 px) ; polices et logo servis par le nœud (hors ligne).
+
 ## [Non publié] — Nouvelle interface web
 
 - Interface refaite (`crates/vinx-node/assets/index.html`), aux couleurs du logo, thème clair/sombre, adaptée au mobile : **Portefeuille** (solde, envoyer avec vérification avant envoi, recevoir, staking, activité, reçu téléchargeable), **Explorateur** (recherche bloc / transaction / adresse, derniers blocs en direct), **Réseau** (statistiques, validateurs et leur puissance).

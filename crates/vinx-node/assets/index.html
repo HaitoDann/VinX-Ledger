@@ -4,137 +4,161 @@
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>VinX</title>
-<link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Ccircle cx='16' cy='16' r='15' fill='%230b0f0e' stroke='%231de9b6' stroke-width='2'/%3E%3Cpath d='M8 9l8 13 8-13' fill='none' stroke='%231de9b6' stroke-width='3' stroke-linejoin='round'/%3E%3C/svg%3E">
+<link rel="icon" type="image/png" href="/assets/logo-64.png">
 <script src="/assets/nacl.min.js"></script>
 <script src="/assets/blake3.min.js"></script>
 <style>
-:root {
-  --bg: #07090a; --panel: #0f1413; --panel2: #151c1a; --line: #1f2a27;
-  --text: #e8f1ee; --muted: #8a9b96; --mint: #1de9b6; --mint-d: #12b48b;
-  --mint-bg: rgba(29,233,182,.08); --red: #ff6b6b; --amber: #ffc857;
-  --radius: 16px; --shadow: 0 8px 30px rgba(0,0,0,.35);
-  color-scheme: dark;
+/* VinX — design repris d'ARCHI (PlaZma, DESIGN.md « PRO v4 ») :
+   neutres froids, un seul accent, surfaces à plat avec filet fin, aucune ombre décorative,
+   aucun dégradé ni flou, typo IBM Plex, icônes SVG ligne, pas d'emoji d'interface. */
+@font-face{font-family:'IBM Plex Sans';font-weight:400;font-display:swap;src:url(/assets/fonts/ibm-plex-sans-latin-400-normal.woff2) format('woff2')}
+@font-face{font-family:'IBM Plex Sans';font-weight:500;font-display:swap;src:url(/assets/fonts/ibm-plex-sans-latin-500-normal.woff2) format('woff2')}
+@font-face{font-family:'IBM Plex Sans';font-weight:600;font-display:swap;src:url(/assets/fonts/ibm-plex-sans-latin-600-normal.woff2) format('woff2')}
+@font-face{font-family:'IBM Plex Mono';font-weight:400;font-display:swap;src:url(/assets/fonts/ibm-plex-mono-latin-400-normal.woff2) format('woff2')}
+@font-face{font-family:'IBM Plex Mono';font-weight:500;font-display:swap;src:url(/assets/fonts/ibm-plex-mono-latin-500-normal.woff2) format('woff2')}
+:root{
+  --bg:#0e1013; --surface:#15181c; --surface-2:#1a1e23; --elevated:#20252b;
+  --border:#262b32; --border-2:#323841;
+  --text:#e7e9ec; --dim:#a4abb4; --muted:#6e7681;
+  --accent:#3dbf8c; --accent-2:#2f9e73; --on-accent:#06140e;
+  --accent-soft:rgba(61,191,140,.10); --accent-line:rgba(61,191,140,.28);
+  --ok:#3fa66b; --warn:#c9912e; --err:#d0534f;
+  --r:6px; --r-sm:4px; --r-lg:8px;
+  --font:'IBM Plex Sans',system-ui,-apple-system,'Segoe UI',sans-serif;
+  --mono:'IBM Plex Mono',ui-monospace,'SFMono-Regular',monospace;
+  color-scheme:dark;
 }
-:root[data-theme="light"] {
-  --bg: #f4f7f6; --panel: #ffffff; --panel2: #f0f4f3; --line: #dfe7e4;
-  --text: #0c1412; --muted: #5d6e69; --mint: #0fa982; --mint-d: #0b8a6a;
-  --mint-bg: rgba(15,169,130,.08); --shadow: 0 6px 24px rgba(20,40,35,.08);
-  color-scheme: light;
+:root[data-theme="light"]{
+  --bg:#f6f7f8; --surface:#ffffff; --surface-2:#f1f3f5; --elevated:#e9ecef;
+  --border:#e1e4e8; --border-2:#cfd4da;
+  --text:#16191d; --dim:#4a525c; --muted:#7a828c;
+  --accent:#17845c; --accent-2:#11694a; --on-accent:#ffffff;
+  --accent-soft:rgba(23,132,92,.08); --accent-line:rgba(23,132,92,.25);
+  color-scheme:light;
 }
-* { box-sizing: border-box; }
-body { margin: 0; background: var(--bg); color: var(--text);
-  font: 15px/1.5 Inter, system-ui, -apple-system, "Segoe UI", Roboto, sans-serif; }
-.mono { font-family: ui-monospace, "SF Mono", Menlo, Consolas, monospace; }
-a { color: var(--mint); text-decoration: none; cursor: pointer; }
-button { font: inherit; cursor: pointer; border: 0; border-radius: 12px; padding: 11px 18px;
-  background: var(--mint); color: #04130e; font-weight: 600; transition: .15s; }
-button:hover { filter: brightness(1.08); }
-button:disabled { opacity: .45; cursor: not-allowed; }
-button.ghost { background: transparent; color: var(--text); border: 1px solid var(--line); }
-button.ghost:hover { border-color: var(--mint); color: var(--mint); }
-button.small { padding: 6px 12px; font-size: 13px; border-radius: 9px; }
-input { font: inherit; width: 100%; padding: 12px 14px; border-radius: 12px;
-  border: 1px solid var(--line); background: var(--panel2); color: var(--text); outline: none; }
-input:focus { border-color: var(--mint); box-shadow: 0 0 0 3px var(--mint-bg); }
-label { display: block; font-size: 13px; color: var(--muted); margin: 14px 0 6px; }
+*{box-sizing:border-box}
+body{margin:0;background:var(--bg);color:var(--text);font:14px/1.5 var(--font);-webkit-font-smoothing:antialiased}
+h1,h2,h3{font-weight:600;letter-spacing:-.005em;margin:0}
+.mono{font-family:var(--mono);font-variant-numeric:tabular-nums}
+a{color:var(--accent);text-decoration:none;cursor:pointer} a:hover{color:var(--accent-2)}
+:focus-visible{outline:2px solid var(--accent);outline-offset:2px}
+svg.i{width:16px;height:16px;fill:none;stroke:currentColor;stroke-width:1.8;stroke-linecap:round;stroke-linejoin:round;flex:none}
 
-/* ── Layout ── */
-header { position: sticky; top: 0; z-index: 10; backdrop-filter: blur(12px);
-  background: color-mix(in srgb, var(--bg) 85%, transparent); border-bottom: 1px solid var(--line); }
-.bar { max-width: 1080px; margin: 0 auto; padding: 12px 20px; display: flex; align-items: center; gap: 22px; }
-.brand { display: flex; align-items: center; gap: 10px; font-weight: 800; font-size: 19px; letter-spacing: .3px; }
-nav { display: flex; gap: 4px; background: var(--panel); border: 1px solid var(--line); border-radius: 12px; padding: 4px; }
-nav a { color: var(--muted); padding: 7px 14px; border-radius: 9px; font-weight: 500; font-size: 14px; }
-nav a.on { background: var(--panel2); color: var(--text); }
-.net { margin-left: auto; display: flex; align-items: center; gap: 12px; font-size: 13px; color: var(--muted); }
-.dot { width: 8px; height: 8px; border-radius: 50%; background: var(--red); display: inline-block; }
-.dot.ok { background: var(--mint); box-shadow: 0 0 0 4px var(--mint-bg); }
-.pulse { width: 64px; height: 4px; border-radius: 4px; background: var(--line); overflow: hidden; }
-.pulse i { display: block; height: 100%; width: 0; background: var(--mint); transition: width .5s linear; }
-.theme { background: transparent; color: var(--muted); padding: 6px 8px; font-size: 16px; }
-main { max-width: 1080px; margin: 0 auto; padding: 28px 20px 60px; }
-.view { display: none; } .view.on { display: block; animation: fade .2s; }
-@keyframes fade { from { opacity: 0; transform: translateY(4px); } }
-.grid { display: grid; grid-template-columns: minmax(0, 1.15fr) minmax(0, 1fr); gap: 20px; }
-.grid > *, .stack > * { min-width: 0; } input { min-width: 0; }
-@media (max-width: 860px) { .grid { grid-template-columns: minmax(0, 1fr); } }
-@media (max-width: 640px) {
-  .bar { flex-wrap: wrap; gap: 10px; padding: 10px 14px; }
-  nav { order: 3; width: 100%; } nav a { flex: 1; text-align: center; padding: 7px 4px; }
-  .pulse { display: none; } main { padding: 18px 14px 50px; } .amount { font-size: 34px; }
+/* Boutons et champs */
+button{font:inherit;font-weight:500;cursor:pointer;border:1px solid var(--accent);border-radius:var(--r);padding:9px 16px;
+  background:var(--accent);color:var(--on-accent);display:inline-flex;align-items:center;justify-content:center;gap:7px}
+button:hover{background:var(--accent-2);border-color:var(--accent-2)}
+button:disabled{opacity:.5;cursor:not-allowed}
+button.ghost{background:transparent;color:var(--text);border-color:var(--border-2)}
+button.ghost:hover{background:var(--surface-2);border-color:var(--border-2)}
+button.small{padding:5px 10px;font-size:13px}
+button.icon{padding:6px;background:transparent;border-color:transparent;color:var(--dim)}
+button.icon:hover{background:var(--surface-2);color:var(--text)}
+input{font:inherit;width:100%;min-width:0;padding:9px 12px;border-radius:var(--r);border:1px solid var(--border-2);
+  background:var(--surface);color:var(--text);outline:none}
+input:focus{border-color:var(--accent);box-shadow:0 0 0 2px var(--accent-soft)}
+input::placeholder{color:var(--muted)}
+label{display:block;font-size:12.5px;font-weight:500;color:var(--dim);margin:14px 0 5px}
+
+/* Barre supérieure */
+header{position:sticky;top:0;z-index:10;background:var(--surface);border-bottom:1px solid var(--border)}
+.bar{max-width:1080px;margin:0 auto;padding:10px 20px;display:flex;align-items:center;gap:22px}
+.brand{display:flex;align-items:center;gap:9px;font-weight:600;font-size:15px;letter-spacing:.01em}
+.brand img{height:26px;width:auto;display:block}
+nav{display:flex;gap:2px}
+nav a{color:var(--dim);padding:6px 11px;border-radius:var(--r);font-weight:500;font-size:13px}
+nav a:hover{color:var(--text);background:var(--surface-2)}
+nav a.on{color:var(--accent);background:var(--accent-soft)}
+.net{margin-left:auto;display:flex;align-items:center;gap:10px;font-size:12.5px;color:var(--dim)}
+.dot{width:7px;height:7px;border-radius:50%;background:var(--err);display:inline-block}
+.dot.ok{background:var(--ok)}
+.pulse{width:56px;height:3px;border-radius:2px;background:var(--border);overflow:hidden}
+.pulse i{display:block;height:100%;width:100%;background:var(--accent);transform-origin:left;transform:scaleX(0);transition:transform .5s linear}
+
+main{max-width:1080px;margin:0 auto;padding:24px 20px 56px}
+.view{display:none}.view.on{display:block}
+.grid{display:grid;grid-template-columns:minmax(0,1.15fr) minmax(0,1fr);gap:16px;align-items:start}
+.stack{display:flex;flex-direction:column;gap:16px;min-width:0}
+.card{background:var(--surface);border:1px solid var(--border);border-radius:var(--r-lg);padding:20px;min-width:0}
+.card h2{font-size:15px}.sub{color:var(--muted);font-size:12.5px;margin:2px 0 14px}
+.eyebrow{font-size:12px;font-weight:500;color:var(--muted)}
+
+/* Portefeuille */
+.hero{max-width:520px;margin:48px auto;text-align:center;padding:36px 28px}
+.hero img{height:56px;width:auto}
+.hero h1{font-size:1.45rem;margin:18px 0 6px}
+.hero p{color:var(--dim);margin:0 0 22px}
+.hero .btns{display:flex;gap:10px;justify-content:center;flex-wrap:wrap}
+.amount{font-family:var(--mono);font-size:30px;font-weight:500;letter-spacing:-.01em;margin:4px 0 0}
+.amount small{font-family:var(--font);font-size:14px;color:var(--muted);font-weight:500;margin-left:4px}
+.addr{display:flex;align-items:center;gap:8px;background:var(--surface-2);border-radius:var(--r);padding:7px 7px 7px 11px;
+  font-size:12px;margin-top:14px;word-break:break-all}
+.addr span{flex:1}
+.row{display:flex;gap:8px;flex-wrap:wrap;margin-top:14px}
+.tabs{display:flex;gap:2px;border-bottom:1px solid var(--border);margin:-4px 0 4px}
+.tabs a{padding:8px 12px;color:var(--dim);font-weight:500;font-size:13px;border-bottom:2px solid transparent;margin-bottom:-1px}
+.tabs a:hover{color:var(--text)}
+.tabs a.on{color:var(--text);border-bottom-color:var(--accent)}
+.hint{font-size:12px;color:var(--muted);margin-top:5px;font-weight:400}
+.inline{display:flex;gap:8px}.inline input{flex:1}
+.summary{border:1px solid var(--border);border-radius:var(--r);margin-top:14px;font-size:13.5px}
+.summary div{display:flex;justify-content:space-between;gap:12px;padding:8px 12px;border-bottom:1px solid var(--border)}
+.summary div:last-child{border-bottom:0;font-weight:600}
+.summary div span:first-child{color:var(--dim);font-weight:400}
+.summary .mono{word-break:break-all;text-align:right;font-size:12.5px}
+.msg{border-radius:var(--r);padding:9px 12px;margin-top:12px;font-size:13px;border:1px solid}
+.msg.ok{background:var(--accent-soft);border-color:var(--accent-line);color:var(--text)}
+.msg.err{background:color-mix(in srgb,var(--err) 10%,transparent);border-color:color-mix(in srgb,var(--err) 35%,transparent);color:var(--text)}
+.msg.wait{background:var(--surface-2);border-color:var(--border);color:var(--dim)}
+
+/* Listes */
+.list{display:flex;flex-direction:column}
+.item{display:flex;align-items:center;gap:12px;padding:10px 4px;border-bottom:1px solid var(--border);cursor:pointer}
+.item:last-child{border-bottom:0}.item:hover{background:var(--surface-2)}
+.ico{width:30px;height:30px;border-radius:var(--r);display:grid;place-items:center;flex:none;background:var(--surface-2);color:var(--dim)}
+.ico.in{color:var(--ok)}.ico.out{color:var(--dim)}
+.grow{flex:1;min-width:0}.grow .t{font-weight:500;font-size:13.5px}
+.grow .s{color:var(--muted);font-size:12px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.val{text-align:right;font-family:var(--mono);font-size:13px;white-space:nowrap}
+.val.in{color:var(--ok)}
+.empty{color:var(--muted);text-align:center;padding:24px 0;font-size:13px}
+.memo{display:inline-block;background:var(--surface-2);border-radius:var(--r-sm);padding:0 6px;font-size:11.5px;
+  margin-left:6px;color:var(--dim);font-family:var(--mono);font-weight:400}
+.tag{display:inline-block;font-size:11.5px;font-weight:500;padding:1px 7px;border-radius:var(--r-sm);background:var(--surface-2);color:var(--dim)}
+.tag.ok{background:var(--accent-soft);color:var(--accent)}
+.tag.bad{background:color-mix(in srgb,var(--err) 12%,transparent);color:var(--err)}
+
+/* Explorateur & réseau */
+.search{display:flex;gap:8px;margin-bottom:16px}
+.tiles{display:grid;grid-template-columns:repeat(auto-fit,minmax(150px,1fr));gap:12px;margin-bottom:16px}
+.tile{background:var(--surface);border:1px solid var(--border);border-radius:var(--r-lg);padding:14px 16px}
+.tile .k{font-size:12px;color:var(--muted)}.tile .v{font-family:var(--mono);font-size:19px;font-weight:500;margin-top:3px}
+.kv{display:grid;grid-template-columns:150px minmax(0,1fr);gap:7px 16px;font-size:13.5px}
+.kv>div:nth-child(odd){color:var(--dim)}.kv .mono{word-break:break-all;font-size:12.5px}
+.bar-p{height:4px;background:var(--surface-2);border-radius:2px;overflow:hidden;min-width:72px}
+.bar-p i{display:block;height:100%;background:var(--accent)}
+table{width:100%;border-collapse:collapse;font-size:13.5px}
+th{text-align:left;color:var(--muted);font-weight:500;font-size:12px;padding:7px 6px;border-bottom:1px solid var(--border)}
+td{padding:10px 6px;border-bottom:1px solid var(--border);vertical-align:middle}
+tr:last-child td{border-bottom:0}
+.toast{position:fixed;bottom:20px;left:50%;transform:translateX(-50%);background:var(--elevated);border:1px solid var(--border-2);
+  padding:9px 14px;border-radius:var(--r);font-size:13px;box-shadow:0 8px 24px rgba(0,0,0,.35);opacity:0;pointer-events:none;
+  transition:opacity .15s;z-index:50}
+.toast.on{opacity:1}
+footer{text-align:center;color:var(--muted);font-size:12px;padding:20px}
+@media(prefers-reduced-motion:reduce){*{transition:none!important}}
+@media(max-width:860px){.grid{grid-template-columns:minmax(0,1fr)}}
+@media(max-width:640px){
+  .bar{flex-wrap:wrap;gap:10px;padding:9px 14px}
+  nav{order:3;width:100%}nav a{flex:1;text-align:center}
+  .pulse{display:none}main{padding:16px 14px 48px}
+  .kv{grid-template-columns:minmax(0,1fr)}.kv>div:nth-child(odd){margin-top:6px}
 }
-.card { background: var(--panel); border: 1px solid var(--line); border-radius: var(--radius); padding: 22px; box-shadow: var(--shadow); }
-.card h2 { margin: 0 0 4px; font-size: 17px; } .card .sub { color: var(--muted); font-size: 13px; margin: 0 0 16px; }
-.stack > * + * { margin-top: 20px; }
-
-/* ── Wallet ── */
-.hero { text-align: center; padding: 48px 24px; }
-.hero h1 { font-size: 30px; margin: 18px 0 8px; } .hero p { color: var(--muted); max-width: 460px; margin: 0 auto 26px; }
-.hero .btns { display: flex; gap: 12px; justify-content: center; flex-wrap: wrap; }
-.balance { background: radial-gradient(120% 140% at 0% 0%, rgba(29,233,182,.18), transparent 55%), var(--panel); }
-.amount { font-size: 40px; font-weight: 800; letter-spacing: -.5px; margin: 6px 0 2px; }
-.amount small { font-size: 18px; color: var(--muted); font-weight: 600; }
-.addr { display: flex; align-items: center; gap: 8px; background: var(--panel2); border: 1px solid var(--line);
-  border-radius: 10px; padding: 8px 10px; font-size: 12.5px; margin-top: 14px; word-break: break-all; }
-.addr span { flex: 1; }
-.row { display: flex; gap: 10px; flex-wrap: wrap; margin-top: 16px; }
-.seg { display: flex; background: var(--panel2); border-radius: 12px; padding: 4px; margin-bottom: 6px; }
-.seg a { flex: 1; text-align: center; padding: 8px; border-radius: 9px; color: var(--muted); font-weight: 600; font-size: 14px; }
-.seg a.on { background: var(--panel); color: var(--text); box-shadow: 0 1px 4px rgba(0,0,0,.25); }
-.hint { font-size: 12.5px; color: var(--muted); margin-top: 6px; }
-.inline { display: flex; gap: 8px; } .inline input { flex: 1; }
-.summary { background: var(--panel2); border-radius: 12px; padding: 14px 16px; margin-top: 16px; font-size: 14px; }
-.summary div { display: flex; justify-content: space-between; gap: 10px; padding: 3px 0; }
-.summary div span:first-child { color: var(--muted); }
-.summary .mono { word-break: break-all; text-align: right; }
-.msg { border-radius: 12px; padding: 12px 14px; margin-top: 14px; font-size: 14px; }
-.msg.ok { background: var(--mint-bg); color: var(--mint); } .msg.err { background: rgba(255,107,107,.1); color: var(--red); }
-.msg.wait { background: var(--panel2); color: var(--muted); }
-
-/* ── Lists ── */
-.list { display: flex; flex-direction: column; }
-.item { display: flex; align-items: center; gap: 12px; padding: 12px 6px; border-bottom: 1px solid var(--line); cursor: pointer; border-radius: 8px; }
-.item:last-child { border-bottom: 0; } .item:hover { background: var(--panel2); }
-.ico { width: 36px; height: 36px; border-radius: 50%; display: grid; place-items: center; flex: none; font-weight: 700; }
-.ico.in { background: var(--mint-bg); color: var(--mint); } .ico.out { background: rgba(255,107,107,.1); color: var(--red); }
-.ico.blk { background: var(--panel2); color: var(--muted); font-size: 12px; }
-.grow { flex: 1; min-width: 0; } .grow .t { font-weight: 600; font-size: 14px; }
-.grow .s { color: var(--muted); font-size: 12.5px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-.val { text-align: right; font-weight: 700; font-size: 14px; white-space: nowrap; }
-.val.in { color: var(--mint); }
-.empty { color: var(--muted); text-align: center; padding: 26px 0; font-size: 14px; }
-.memo { display: inline-block; background: var(--panel2); border: 1px solid var(--line); border-radius: 6px; padding: 0 6px; font-size: 12px; margin-left: 4px; color: var(--text); }
-.tag { display: inline-block; font-size: 11.5px; font-weight: 600; padding: 2px 8px; border-radius: 20px; background: var(--panel2); color: var(--muted); }
-.tag.ok { background: var(--mint-bg); color: var(--mint); } .tag.bad { background: rgba(255,107,107,.1); color: var(--red); }
-
-/* ── Explorer / Network ── */
-.search { display: flex; gap: 10px; margin-bottom: 20px; } .search input { font-size: 15px; }
-.tiles { display: grid; grid-template-columns: repeat(auto-fit, minmax(170px, 1fr)); gap: 14px; margin-bottom: 20px; }
-.tile { background: var(--panel); border: 1px solid var(--line); border-radius: 14px; padding: 16px 18px; }
-.tile .k { font-size: 12.5px; color: var(--muted); } .tile .v { font-size: 22px; font-weight: 800; margin-top: 2px; }
-.kv { display: grid; grid-template-columns: 160px 1fr; gap: 8px 16px; font-size: 14px; }
-.kv > div:nth-child(odd) { color: var(--muted); } .kv .mono { word-break: break-all; font-size: 13px; }
-@media (max-width: 600px) { .kv { grid-template-columns: 1fr; } .kv > div:nth-child(odd) { margin-top: 8px; } }
-.bar-p { height: 6px; background: var(--panel2); border-radius: 6px; overflow: hidden; min-width: 80px; }
-.bar-p i { display: block; height: 100%; background: var(--mint); }
-table { width: 100%; border-collapse: collapse; font-size: 14px; }
-th { text-align: left; color: var(--muted); font-weight: 500; font-size: 12.5px; padding: 8px 6px; border-bottom: 1px solid var(--line); }
-td { padding: 11px 6px; border-bottom: 1px solid var(--line); vertical-align: middle; }
-tr:last-child td { border-bottom: 0; }
-.toast { position: fixed; bottom: 22px; left: 50%; transform: translateX(-50%) translateY(20px); opacity: 0;
-  background: var(--panel); border: 1px solid var(--line); box-shadow: var(--shadow); padding: 10px 16px;
-  border-radius: 12px; font-size: 14px; transition: .25s; pointer-events: none; z-index: 50; }
-.toast.on { opacity: 1; transform: translateX(-50%); }
-.warn { background: rgba(255,200,87,.08); color: var(--amber); border-radius: 12px; padding: 12px 14px; font-size: 13px; margin-top: 14px; }
-footer { text-align: center; color: var(--muted); font-size: 12.5px; padding: 20px; }
 </style>
 </head>
 <body>
 <header><div class="bar">
-  <div class="brand">
-    <svg width="30" height="30" viewBox="0 0 32 32" aria-hidden="true"><circle cx="16" cy="16" r="14.5" fill="none" stroke="var(--mint)" stroke-width="2"/><path d="M8.5 9.5l7.5 12.5 7.5-12.5" fill="none" stroke="var(--mint)" stroke-width="3" stroke-linejoin="round" stroke-linecap="round"/><path d="M16 9.5l-2 3h4z" fill="var(--mint)"/></svg>
-    VinX
-  </div>
+  <div class="brand"><img src="/assets/logo-64.png" alt="VinX">VinX</div>
   <nav>
     <a data-view="wallet" class="on">Portefeuille</a>
     <a data-view="explorer">Explorateur</a>
@@ -144,7 +168,7 @@ footer { text-align: center; color: var(--muted); font-size: 12.5px; padding: 20
     <span class="dot" id="net-dot"></span>
     <span class="txt" id="net-txt">Connexion…</span>
     <div class="pulse" title="Prochain bloc"><i id="net-pulse"></i></div>
-    <button class="theme" id="theme" title="Thème clair / sombre">◐</button>
+    <button class="icon" id="theme" title="Thème clair / sombre"><svg class="i" viewBox="0 0 24 24"><path d="M20 14.5A8 8 0 0 1 9.5 4a8 8 0 1 0 10.5 10.5z"/></svg></button>
   </div>
 </div></header>
 
@@ -152,7 +176,7 @@ footer { text-align: center; color: var(--muted); font-size: 12.5px; padding: 20
 <!-- ═══════════ Portefeuille ═══════════ -->
 <section class="view on" id="v-wallet">
   <div class="card hero" id="w-welcome">
-    <svg width="72" height="72" viewBox="0 0 32 32" aria-hidden="true"><circle cx="16" cy="16" r="14.5" fill="var(--mint-bg)" stroke="var(--mint)" stroke-width="1.5"/><path d="M8.5 9.5l7.5 12.5 7.5-12.5" fill="none" stroke="var(--mint)" stroke-width="2.6" stroke-linejoin="round" stroke-linecap="round"/></svg>
+    <img src="/assets/logo-256.png" alt="VinX">
     <h1>Payer en VINX, simplement.</h1>
     <p>Paiements définitifs en un bloc, frais minuscules. Votre clé est créée et reste dans ce navigateur — rien n'est envoyé au serveur.</p>
     <div class="btns">
@@ -167,10 +191,10 @@ footer { text-align: center; color: var(--muted); font-size: 12.5px; padding: 20
     <div class="grid">
       <div class="stack">
         <div class="card balance">
-          <div class="sub" style="margin:0">Solde disponible</div>
+          <div class="eyebrow">Solde disponible</div>
           <div class="amount" id="w-bal">—</div>
           <div class="hint" id="w-staked"></div>
-          <div class="addr mono"><span id="w-addr"></span><button class="ghost small" data-copy="w-addr">Copier</button></div>
+          <div class="addr mono"><span id="w-addr"></span><button class="icon" data-copy="w-addr" title="Copier"><svg class="i" viewBox="0 0 24 24"><rect x="9" y="9" width="11" height="11" rx="2"/><path d="M5 15V6a2 2 0 0 1 2-2h8"/></svg></button></div>
           <div class="row">
             <button class="ghost small" id="btn-faucet">Recevoir 100 VINX de test</button>
             <button class="ghost small" id="btn-lock">Verrouiller</button>
@@ -179,7 +203,7 @@ footer { text-align: center; color: var(--muted); font-size: 12.5px; padding: 20
         </div>
 
         <div class="card">
-          <div class="seg">
+          <div class="tabs">
             <a data-act="send" class="on">Envoyer</a><a data-act="receive">Recevoir</a><a data-act="stake">Staking</a>
           </div>
 
@@ -201,7 +225,7 @@ footer { text-align: center; color: var(--muted); font-size: 12.5px; padding: 20
 
           <div id="act-receive" hidden>
             <p class="sub">Partagez cette adresse pour recevoir des VINX. Un paiement est définitif dès qu'il est inclus dans un bloc.</p>
-            <div class="addr mono" style="font-size:14px;padding:14px"><span id="r-addr"></span><button class="small" data-copy="r-addr">Copier</button></div>
+            <div class="addr mono" style="font-size:14px;padding:14px"><span id="r-addr"></span><button class="ghost small" data-copy="r-addr"><svg class="i" viewBox="0 0 24 24"><rect x="9" y="9" width="11" height="11" rx="2"/><path d="M5 15V6a2 2 0 0 1 2-2h8"/></svg>Copier</button></div>
           </div>
 
           <div id="act-stake" hidden>
@@ -227,7 +251,7 @@ footer { text-align: center; color: var(--muted); font-size: 12.5px; padding: 20
 <section class="view" id="v-explorer">
   <div class="search">
     <input id="q" class="mono" placeholder="Hauteur de bloc, hash de transaction ou adresse vinx1…">
-    <button id="q-go">Rechercher</button>
+    <button id="q-go"><svg class="i" viewBox="0 0 24 24"><circle cx="11" cy="11" r="7"/><path d="m20 20-3.5-3.5"/></svg>Rechercher</button>
   </div>
   <div id="x-detail"></div>
   <div class="card">
@@ -252,6 +276,9 @@ footer { text-align: center; color: var(--muted); font-size: 12.5px; padding: 20
 
 <script>
 'use strict';
+const IC_OUT = '<svg class="i" viewBox="0 0 24 24"><path d="M7 17 17 7M9 7h8v8"/></svg>';
+const IC_IN = '<svg class="i" viewBox="0 0 24 24"><path d="M17 7 7 17M15 17H7V9"/></svg>';
+const IC_BLK = '<svg class="i" viewBox="0 0 24 24"><rect x="4" y="4" width="16" height="16" rx="2"/><path d="M4 10h16M10 4v16"/></svg>';
 // ─── Utilitaires ──────────────────────────────────────────────────────────────
 const API = window.location.origin;
 const DEC = 1_000_000_000n;                     // 9 décimales (ADR 0081)
@@ -318,7 +345,7 @@ async function pollHealth() {
 function tickPulse() {
   if (!net.tipTs) return;
   const p = Math.min(1, (Date.now() / 1000 - net.tipTs) / net.blockTime);
-  $('net-pulse').style.width = (p * 100) + '%';
+  $('net-pulse').style.transform = `scaleX(${p})`;
 }
 async function refreshFee() { try { net.baseFee = BigInt((await get('/network/stats')).base_fee_atoms); } catch {} }
 function onNewBlock() {
@@ -339,8 +366,8 @@ function show(v) {
 }
 document.querySelectorAll('nav a').forEach(a => a.onclick = () => show(a.dataset.view));
 document.querySelectorAll('[data-copy]').forEach(b => b.onclick = () => { navigator.clipboard?.writeText($(b.dataset.copy).textContent); toast('Adresse copiée'); });
-document.querySelectorAll('.seg a').forEach(a => a.onclick = () => {
-  document.querySelectorAll('.seg a').forEach(x => x.classList.toggle('on', x === a));
+document.querySelectorAll('.tabs a').forEach(a => a.onclick = () => {
+  document.querySelectorAll('.tabs a').forEach(x => x.classList.toggle('on', x === a));
   ['send', 'receive', 'stake'].forEach(k => $('act-' + k).hidden = k !== a.dataset.act);
 });
 const theme = localStorage.getItem('vinx-theme'); if (theme) document.documentElement.dataset.theme = theme;
@@ -398,7 +425,7 @@ async function loadHistory() {
       const label = t.tx_type === 'Transfer' ? (out ? 'Envoyé' : 'Reçu') : ({ Stake: 'Verrouillé', Unstake: 'Retrait', SetMemoRequired: 'Option de compte' }[t.tx_type] || t.tx_type);
       const who = t.tx_type === 'Transfer' ? (out ? 'à ' + short(t.to) : 'de ' + short(t.from)) : '';
       return `<div class="item" data-tx="${esc(t.hash)}">
-        <div class="ico ${out ? 'out' : 'in'}">${out ? '↑' : '↓'}</div>
+        <div class="ico ${out ? 'out' : 'in'}">${out ? IC_OUT : IC_IN}</div>
         <div class="grow"><div class="t">${label}${t.memo ? `<span class="memo">${esc(t.memo)}</span>` : ''}</div>
         <div class="s mono">${esc(who)} · bloc #${t.block_height}</div></div>
         <div class="val ${out ? '' : 'in'}">${out ? '−' : '+'}${fmt(t.amount_atoms)}</div></div>`;
@@ -487,7 +514,7 @@ async function track(hash, box) {
     try {
       const t = await get('/tx/' + hash);
       if (t.block_height) {
-        box.innerHTML = `<div class="msg ok">✓ Paiement définitif — bloc #${t.block_height}.
+        box.innerHTML = `<div class="msg ok">Paiement définitif — bloc #${t.block_height}.
           <a data-receipt="${esc(hash)}">Télécharger le reçu</a> · <a data-open="${esc(hash)}">Détails</a></div>`;
         box.querySelector('[data-receipt]').onclick = () => saveReceipt(hash);
         box.querySelector('[data-open]').onclick = () => { show('explorer'); showTx(hash); };
@@ -528,7 +555,7 @@ async function loadBlocks() {
   const blocks = await Promise.all(hs.map(h => get('/block/' + h).catch(() => null)));
   $('x-blocks').innerHTML = blocks.filter(Boolean).map(b => `
     <div class="item" data-h="${b.height}">
-      <div class="ico blk">#</div>
+      <div class="ico">${IC_BLK}</div>
       <div class="grow"><div class="t">Bloc #${b.height.toLocaleString('fr-FR')}</div>
       <div class="s mono">proposé par ${esc(short(b.validator))} · ${b.signatures_count} signature(s)${b.round ? ' · round ' + b.round : ''}</div></div>
       <div class="val" style="font-weight:500;color:var(--muted)">${b.tx_count} tx · ${ago(b.timestamp)}</div>
@@ -601,7 +628,7 @@ async function loadNetwork() {
     const [s, v] = await Promise.all([get('/network/stats'), get('/validators')]);
     const tile = (k, val) => `<div class="tile"><div class="k">${k}</div><div class="v">${val}</div></div>`;
     $('n-tiles').innerHTML = tile('Hauteur', '#' + net.height.toLocaleString('fr-FR')) + tile('Temps de bloc', net.blockTime + ' s')
-      + tile('Validateurs', v.count) + tile('En circulation', esc(String(s.circulating_supply).replace(/\.\d+/, '').replace(/\B(?=(\d{3})+(?!\d))/g, ' ')))
+      + tile('Validateurs', v.count) + tile('En circulation', esc(String(s.circulating_supply).replace(/\s*VINX/i, '').replace(/\.\d+/, '').replace(/\B(?=(\d{3})+(?!\d))/g, ' ')))
       + tile('Frais de base', fmt(s.base_fee_atoms, 4)) + tile('En attente', net.mempool ?? 0);
     $('n-sub').textContent = `Un bloc est définitif quand plus des 2/3 de la puissance le signent (${v.quorum} sur ${v.total_power}). Puissance plafonnée à 10 % par validateur.`;
     $('n-vals').innerHTML = `<tr><th>Validateur</th><th>Puissance</th><th>État</th><th></th></tr>` + v.validators.map(x => {
