@@ -5,6 +5,13 @@ Format : `MAJEUR.MINEUR.CORRECTIF` — les versions `0.x.y` sont des versions de
 
 ---
 
+## [Non publié] — Nouvelle interface web
+
+- Interface refaite (`crates/vinx-node/assets/index.html`), aux couleurs du logo, thème clair/sombre, adaptée au mobile : **Portefeuille** (solde, envoyer avec vérification avant envoi, recevoir, staking, activité, reçu téléchargeable), **Explorateur** (recherche bloc / transaction / adresse, derniers blocs en direct), **Réseau** (statistiques, validateurs et leur puissance).
+- Frais affichés = frais de base réels du réseau (l'ancienne page surpayait 0,05 % du montant) ; suivi du paiement jusqu'à son bloc.
+- `/health` expose `block_time_secs` et `tip_timestamp` (indicateur « prochain bloc »).
+- `./vinx` : temps de bloc par défaut 12 s, comme le protocole (`-t` pour accélérer les tests).
+
 ## [Non publié] — Tester à la maison
 
 - **`./vinx`** : réseau local en une commande (`start [-n 4] [--lan]`, `status`, `kill`/`revive`, `logs`, `wallet`, `stop`, `reset`) avec faucet ; remplace `scripts/devnet.sh`.

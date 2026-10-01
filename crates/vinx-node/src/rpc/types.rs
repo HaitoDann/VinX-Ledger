@@ -18,6 +18,10 @@ pub struct HealthResponse {
     pub mempool_pending: usize,
     /// Chain ID this node validates — clients must sign transactions with it.
     pub chain_id: u32,
+    /// Protocol block time (genesis parameter, ADR 0082 C6).
+    pub block_time_secs: u64,
+    /// Timestamp of the tip block (unix seconds).
+    pub tip_timestamp: u64,
 }
 
 #[derive(Serialize)]
