@@ -41,11 +41,25 @@ pid_of() { cat "$HOME_DIR/node$1.pid" 2>/dev/null || true; }
 alive() { local p; p=$(pid_of "$1"); [[ -n "$p" ]] && kill -0 "$p" 2>/dev/null; }
 
 build() {
+    # rustup installs cargo in ~/.cargo/bin, which a shell opened before the install
+    # does not have in its PATH yet.
+    [[ -f "$HOME/.cargo/env" ]] && . "$HOME/.cargo/env"
     if [[ ! -x "$NODE" || ! -x "$WALLET" || -n "$(find "$ROOT/crates" -newer "$NODE" -name '*.rs' -print -quit 2>/dev/null)" ]]; then
+        command -v cargo >/dev/null || die "Rust n'est pas installé : curl https://sh.rustup.rs -sSf | sh   puis ouvrir un nouveau terminal"
+        if ! command -v cc >/dev/null; then
+            echo "  ${c_r}✗ compilateur C absent (nécessaire à la cryptographie).${c_0}"
+            echo "    Debian/Ubuntu : sudo apt install build-essential"
+            echo "    Fedora        : sudo dnf install gcc"
+            echo "    macOS         : xcode-select --install"
+            exit 1
+        fi
         say "Compilation (la première fois prend quelques minutes)…"
-        cargo build --release -p vinx-node -p vinx-wallet --manifest-path "$ROOT/Cargo.toml" 2>&1 \
-            | grep -E "^(error|warning: unused)" || true
-        [[ -x "$NODE" ]] || die "la compilation a échoué (cargo build --release -p vinx-node)"
+        local log="$ROOT/.vinx-build.log"
+        if ! cargo build --release -p vinx-node -p vinx-wallet --manifest-path "$ROOT/Cargo.toml" >"$log" 2>&1; then
+            echo "  ${c_r}✗ la compilation a échoué — fin du journal ($log) :${c_0}"
+            grep -E "^error|error:|warning: unused" -A6 "$log" | head -40 || tail -30 "$log"
+            exit 1
+        fi
     fi
 }
 
@@ -130,7 +144,10 @@ cmd_start() {
     wait_up
     ok "$(count) validateur(s) en marche"
     local ip=127.0.0.1
-    [[ -f "$HOME_DIR/lan" ]] && ip=$(hostname -I 2>/dev/null | awk '{print $1}')
+    if [[ -f "$HOME_DIR/lan" ]]; then
+        ip=$(hostname -I 2>/dev/null | awk '{print $1}')
+        [[ -z "$ip" ]] && ip=$(ipconfig getifaddr en0 2>/dev/null || echo 127.0.0.1) # macOS
+    fi
     echo
     echo "  ${c_b}Interface web :${c_0}  http://$ip:8545/"
     echo "  ${c_dim}→ « Nouveau portefeuille », puis « Faucet » pour recevoir 100 VINX de test.${c_0}"

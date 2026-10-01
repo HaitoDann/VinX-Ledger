@@ -27,7 +27,7 @@ futures = "0.3"
 toml = "0.8"
 clap = { version = "4", features = ["derive"] }
 url = "2"
-reqwest = { version = "0.12", features = ["json"] }
+reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls"] }
 tokio-stream = { version = "0.1", features = ["sync"] }
 redb = "2"
 bloomfilter = "1"
@@ -36,5 +36,5 @@ lru = "0.12"
 ahash = { version = "0.8", features = ["serde"] }
 
 [dev-dependencies]
-reqwest = { version = "0.12", features = ["json"] }
+reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls"] }
 tokio = { workspace = true }

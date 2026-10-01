@@ -1,3 +1,4 @@
 /target/
 /devnet/
 .vinx-local/
+.vinx-build.log
