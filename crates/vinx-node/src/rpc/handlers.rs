@@ -97,6 +97,10 @@ pub async fn health(State(node): State<Arc<Node>>) -> ApiResult<HealthResponse> 
         chain_id,
         block_time_secs,
         tip_timestamp,
+        peers: node
+            .metrics
+            .peer_count
+            .load(std::sync::atomic::Ordering::Relaxed),
     }))
 }
 

@@ -74,8 +74,14 @@ apt install -y build-essential git curl python3
 curl https://sh.rustup.rs -sSf | sh -s -- -y
 git clone https://github.com/HaitoDann/vinx-ledger && cd vinx-ledger
 
-./vinx join seed.vinx.example      # récupère la genèse, synchronise, envoie la demande
+./vinx join                        # essaie les points d'entrée de seeds/testnet.txt
+./vinx join seed.vinx.example      # ou un (ou plusieurs) point(s) d'entrée précis
 ```
+
+Le nœud n'a besoin du point d'entrée que pour arriver. Ensuite il découvre les autres
+nœuds (Kademlia), s'y connecte directement (jusqu'à 25 pairs) et les mémorise dans
+`peers.json` : si le point d'entrée disparaît, il continue et se reconnecte au
+redémarrage sans lui. `./vinx status` affiche le nombre de pairs.
 
 Le nœud se synchronise, puis attend. Prévenez l'opérateur (Discord, etc.) : quand il
 lance `./vinx accept`, votre nœud reçoit les fonds de test, dépose sa garantie avec sa
@@ -90,6 +96,15 @@ sudo ./vinx service                # le nœud tourne en service et survit aux re
 Ouvrez le port **9001 TCP/UDP**. Restez en ligne : un validateur absent manque ses tours
 de proposition et finit écarté (jailing, sans perte d'argent). Le double vote, lui, est
 sanctionné : ne lancez jamais deux fois le même validateur.
+
+---
+
+### Ajouter un point d'entrée
+
+Tout nœud joignable (port 9001 ouvert, IP ou nom DNS stable) peut servir de point
+d'entrée. Ajoutez une ligne à `seeds/testnet.txt` (le binaire l'embarque à la
+compilation). Plusieurs points d'entrée tenus par des personnes différentes : le
+réseau ne dépend plus d'aucun d'eux.
 
 ---
 

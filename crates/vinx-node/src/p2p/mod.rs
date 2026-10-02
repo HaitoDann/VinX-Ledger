@@ -1,3 +1,4 @@
+pub mod discovery;
 pub mod guard;
 pub mod messages;
 
@@ -7,7 +8,7 @@ use std::time::Duration;
 use futures::StreamExt;
 use libp2p::{
     gossipsub::{self, IdentTopic, TopicHash},
-    identify, mdns, noise,
+    identify, kad, mdns, noise,
     swarm::{NetworkBehaviour, SwarmEvent},
     tcp, yamux, Multiaddr, PeerId, SwarmBuilder,
 };
@@ -63,8 +64,11 @@ impl P2pHandle {
 struct VinxBehaviour {
     gossipsub: gossipsub::Behaviour,
     identify: identify::Behaviour,
-    mdns: mdns::tokio::Behaviour,
+    mdns: libp2p::swarm::behaviour::toggle::Toggle<mdns::tokio::Behaviour>,
+    kad: kad::Behaviour<kad::store::MemoryStore>,
 }
+
+const IDENTIFY_PROTOCOL: &str = "/vinx/1.0.0";
 
 const TOPICS: &[&str] = &[
     "vinx/txs/1",
@@ -114,6 +118,8 @@ pub async fn start(
         )
         .map_err(|e| NodeError::Config(format!("P2P TCP setup failed: {e}")))?
         .with_quic()
+        .with_dns()
+        .map_err(|e| NodeError::Config(format!("P2P DNS setup failed: {e}")))?
         .with_behaviour(|key| {
             let gossipsub_config = gossipsub::ConfigBuilder::default()
                 .heartbeat_interval(Duration::from_secs(1))
@@ -130,16 +136,34 @@ pub async fn start(
             )
             .expect("valid gossipsub behaviour");
             let identify = identify::Behaviour::new(identify::Config::new(
-                "/vinx/1.0.0".to_string(),
+                IDENTIFY_PROTOCOL.to_string(),
                 key.public(),
             ));
-            let mdns =
-                mdns::tokio::Behaviour::new(mdns::Config::default(), key.public().to_peer_id())
-                    .expect("valid mDNS behaviour");
+            // LAN discovery; VINX_NO_MDNS=1 turns it off (tests of wide-area discovery).
+            let mdns = std::env::var_os("VINX_NO_MDNS")
+                .is_none()
+                .then(|| {
+                    mdns::tokio::Behaviour::new(mdns::Config::default(), key.public().to_peer_id())
+                        .expect("valid mDNS behaviour")
+                })
+                .into();
+            // Peer discovery (Kademlia), scoped to this chain so nodes of another
+            // VinX network never end up in our routing table.
+            let peer_id = key.public().to_peer_id();
+            let kad_proto =
+                libp2p::StreamProtocol::try_from_owned(format!("/vinx/{}/kad/1", config.chain_id))
+                    .expect("valid protocol name");
+            let mut kad = kad::Behaviour::with_config(
+                peer_id,
+                kad::store::MemoryStore::new(peer_id),
+                kad::Config::new(kad_proto),
+            );
+            kad.set_mode(Some(kad::Mode::Server));
             Ok(VinxBehaviour {
                 gossipsub,
                 identify,
                 mdns,
+                kad,
             })
         })
         .map_err(|e| NodeError::Config(format!("P2P behaviour setup failed: {e}")))?
@@ -173,27 +197,59 @@ pub async fn start(
         let _ = swarm.listen_on(addr);
     }
 
-    // Dial explicitly configured peers (e.g. from config file)
-    for peer_addr in &config.peer_addrs {
-        if let Ok(addr) = peer_addr.parse::<Multiaddr>() {
-            let _ = swarm.dial(addr);
+    // Entry points: configured peers, bootstrap peers (CLI + the seeds built into the
+    // binary for this chain) and the peers remembered from previous runs. Any one of
+    // them being reachable is enough to rejoin the network.
+    let mut entry: Vec<Multiaddr> = Vec::new();
+    for a in config
+        .peer_addrs
+        .iter()
+        .chain(config.bootstrap_peers.iter())
+        .cloned()
+        .chain(discovery::builtin_seeds(config.chain_id))
+    {
+        match a.parse::<Multiaddr>() {
+            Ok(addr) => entry.push(addr),
+            Err(e) => warn!(addr = %a, error = %e, "Invalid peer address"),
         }
     }
-    // Dial hardcoded bootstrap peers for initial network discovery
-    for peer_addr in &config.bootstrap_peers {
-        match peer_addr.parse::<Multiaddr>() {
-            Ok(addr) => {
-                info!(addr = %addr, "Dialing bootstrap peer");
-                let _ = swarm.dial(addr);
-            }
-            Err(e) => warn!(addr = %peer_addr, error = %e, "Invalid bootstrap peer address"),
+    for addr in &entry {
+        info!(addr = %addr, "Dialing entry peer");
+        let _ = swarm.dial(addr.clone());
+    }
+    let store_path = config.data_dir.as_ref().map(|d| d.join("peers.json"));
+    let known = store_path
+        .as_deref()
+        .map(discovery::load_peers)
+        .unwrap_or_default();
+    if !known.is_empty() {
+        info!(count = known.len(), "Reconnecting to remembered peers");
+    }
+    for (peer, addrs) in known {
+        if peer == local_peer_id {
+            continue;
         }
+        for a in &addrs {
+            swarm.behaviour_mut().kad.add_address(&peer, a.clone());
+        }
+        dial_once(&mut swarm, peer, addrs);
     }
 
     info!(peer_id = %local_peer_id, listen = %listen_addr, "P2P service started");
 
     tokio::spawn(async move {
-        run_event_loop(swarm, cmd_rx, chain, mempool, state, metrics, consensus_tx).await;
+        let disc = Discovery { entry, store_path };
+        run_event_loop(
+            swarm,
+            cmd_rx,
+            chain,
+            mempool,
+            state,
+            metrics,
+            consensus_tx,
+            disc,
+        )
+        .await;
     });
 
     Ok(P2pHandle {
@@ -228,6 +284,27 @@ fn dial_once(swarm: &mut libp2p::Swarm<VinxBehaviour>, peer: PeerId, addrs: Vec<
     let _ = swarm.dial(opts);
 }
 
+/// What the event loop needs to keep the node connected without any fixed server.
+struct Discovery {
+    entry: Vec<Multiaddr>,
+    store_path: Option<std::path::PathBuf>,
+}
+
+/// Saves the routing table so the next start reconnects without the entry points.
+fn save_peers(swarm: &mut libp2p::Swarm<VinxBehaviour>, path: &std::path::Path) {
+    let mut peers: Vec<(PeerId, Vec<Multiaddr>)> = Vec::new();
+    for bucket in swarm.behaviour_mut().kad.kbuckets() {
+        for e in bucket.iter() {
+            peers.push((
+                *e.node.key.preimage(),
+                e.node.value.iter().cloned().collect(),
+            ));
+        }
+    }
+    discovery::save_peers(path, &peers);
+}
+
+#[allow(clippy::too_many_arguments)]
 async fn run_event_loop(
     mut swarm: libp2p::Swarm<VinxBehaviour>,
     mut cmd_rx: mpsc::UnboundedReceiver<P2pCommand>,
@@ -236,7 +313,10 @@ async fn run_event_loop(
     state: Arc<RwLock<WorldState>>,
     metrics: NodeMetrics,
     consensus_tx: mpsc::UnboundedSender<NetEvent>,
+    disc: Discovery,
 ) {
+    let mut discover = tokio::time::interval(Duration::from_secs(30));
+    let mut ticks: u64 = 0;
     let mut guard = guard::PeerGuard::new();
     // Transactions to relay are grouped and flushed every 250 ms (or when a batch is
     // full): one gossip message per batch.
@@ -246,6 +326,30 @@ async fn run_event_loop(
         tokio::select! {
             _ = flush.tick() => {
                 flush_txs(&mut swarm, &mut tx_buf);
+            }
+            _ = discover.tick() => {
+                ticks += 1;
+                let connected = swarm.connected_peers().count();
+                metrics.peer_count.store(connected as u64, Ordering::Relaxed);
+                if connected == 0 {
+                    // Isolated: retry every entry point (a seed may be back online).
+                    for addr in &disc.entry {
+                        let _ = swarm.dial(addr.clone());
+                    }
+                }
+                if connected < discovery::TARGET_PEERS {
+                    // Random walk: asks the network for peers close to a random id;
+                    // the answers land in the routing table and get dialed below.
+                    swarm.behaviour_mut().kad.get_closest_peers(PeerId::random());
+                }
+                if ticks % 10 == 1 {
+                    let _ = swarm.behaviour_mut().kad.bootstrap();
+                }
+                if ticks.is_multiple_of(2) {
+                    if let Some(path) = &disc.store_path {
+                        save_peers(&mut swarm, path);
+                    }
+                }
             }
             cmd = cmd_rx.recv() => {
                 match cmd {
@@ -273,12 +377,30 @@ async fn run_event_loop(
                     SwarmEvent::NewListenAddr { address, .. } => {
                         info!(address = %address, "P2P listening");
                     }
-                    SwarmEvent::ConnectionEstablished { peer_id, .. } => {
-                        info!(peer = %peer_id, "Peer connected");
+                    SwarmEvent::ConnectionEstablished { peer_id, num_established, .. } => {
+                        if num_established.get() == 1
+                            && swarm.connected_peers().count() > discovery::MAX_PEERS
+                        {
+                            debug!(peer = %peer_id, "Peer limit reached, closing");
+                            let _ = swarm.disconnect_peer_id(peer_id);
+                        } else {
+                            info!(peer = %peer_id, "Peer connected");
+                        }
+                        metrics.peer_count.store(swarm.connected_peers().count() as u64, Ordering::Relaxed);
+                    }
+                    SwarmEvent::Behaviour(VinxBehaviourEvent::Kad(kad::Event::RoutingUpdated {
+                        peer,
+                        addresses,
+                        ..
+                    })) => {
+                        if swarm.connected_peers().count() < discovery::TARGET_PEERS {
+                            dial_once(&mut swarm, peer, addresses.into_vec());
+                        }
                     }
                     SwarmEvent::ConnectionClosed { peer_id, .. } => {
                         debug!(peer = %peer_id, "Peer disconnected");
                         guard.forget(&peer_id);
+                        metrics.peer_count.store(swarm.connected_peers().count() as u64, Ordering::Relaxed);
                     }
                     SwarmEvent::Behaviour(VinxBehaviourEvent::Mdns(mdns::Event::Discovered(peers))) => {
                         for (peer_id, addr) in peers {
@@ -301,8 +423,22 @@ async fn run_event_loop(
                         // connection re-triggered identify, and two nodes listening on several
                         // interfaces (LAN mode: TCP + QUIC × loopback + LAN) entered an
                         // exponential connection storm until they ran out of file descriptors.
+                        if info.protocol_version != IDENTIFY_PROTOCOL {
+                            continue;
+                        }
+                        // Feed the routing table with the addresses other nodes can reach
+                        // (no loopback unless we are a loopback-only test network).
+                        let local_only = swarm.listeners().all(discovery::is_loopback);
+                        let addrs: Vec<Multiaddr> = info
+                            .listen_addrs
+                            .into_iter()
+                            .filter(|a| local_only || !discovery::is_loopback(a))
+                            .collect();
+                        for a in &addrs {
+                            swarm.behaviour_mut().kad.add_address(&peer_id, a.clone());
+                        }
                         swarm.behaviour_mut().gossipsub.add_explicit_peer(&peer_id);
-                        dial_once(&mut swarm, peer_id, info.listen_addrs);
+                        dial_once(&mut swarm, peer_id, addrs);
                     }
                     SwarmEvent::Behaviour(VinxBehaviourEvent::Gossipsub(gossipsub::Event::Message {
                         message,

@@ -848,7 +848,10 @@ impl WorldState {
         let elapsed = block_ts.saturating_sub(self.emission_epoch_ts);
         let target = cumulative_emission_atoms(elapsed);
         let to_emit = target
-            .saturating_sub(self.emitted_atoms.saturating_sub(self.genesis_prefund_atoms))
+            .saturating_sub(
+                self.emitted_atoms
+                    .saturating_sub(self.genesis_prefund_atoms),
+            )
             .min(vinx_core::amount::MAX_SUPPLY_ATOMS.saturating_sub(self.emitted_atoms));
         if to_emit == 0 {
             return Amount::ZERO;
@@ -2710,7 +2713,12 @@ mod tests {
         // Bonded but no BLS key → it could not vote: rejected.
         assert!(state.apply_transaction(&add(0)).is_err());
         let mut e = vinx_core::ValidatorPoolEntry::new(MIN_VALIDATOR_BOND_ATOMS, 0); // warming up
-        e.bls_pub_key = Some(vinx_crypto::BlsSecretKey::generate().public_key().0.to_vec());
+        e.bls_pub_key = Some(
+            vinx_crypto::BlsSecretKey::generate()
+                .public_key()
+                .0
+                .to_vec(),
+        );
         state.validator_pool.insert(candidate, e);
         state.apply_transaction(&add(0)).unwrap();
         assert!(state.validator_set.contains(&candidate));

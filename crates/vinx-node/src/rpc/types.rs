@@ -22,6 +22,8 @@ pub struct HealthResponse {
     pub block_time_secs: u64,
     /// Timestamp of the tip block (unix seconds).
     pub tip_timestamp: u64,
+    /// Peers currently connected over P2P.
+    pub peers: u64,
 }
 
 #[derive(Serialize)]

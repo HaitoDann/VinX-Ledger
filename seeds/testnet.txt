@@ -1,0 +1,5 @@
+# Points d'entrée du testnet public (chaîne 7), un par ligne : nom DNS ou IP.
+# Ce sont des nœuds ordinaires que des volontaires gardent en ligne ; il suffit
+# qu'un seul soit joignable pour rejoindre le réseau. Le binaire les embarque.
+# Exemple :
+# seed1.vinx.example
