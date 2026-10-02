@@ -265,6 +265,47 @@ pub async fn get_validators(State(node): State<Arc<Node>>) -> ApiResult<Validato
     )))
 }
 
+/// `GET /validator/:address` — where an address stands on the way to validating:
+/// `none` (no bond), `warmup` (with epochs left), `benched`, `active` or `unbonding`,
+/// plus its bond, rewards-relevant counters and when the next epoch closes.
+pub async fn get_validator_status(
+    State(node): State<Arc<Node>>,
+    Path(address): Path<String>,
+) -> ApiResult<serde_json::Value> {
+    use vinx_core::validator_pool::PoolStatus;
+    let addr = node.parse_address(&address).await?;
+    let state = node.state.read().await;
+    let epoch = vinx_core::amount::EPOCH_DURATION_SECS;
+    let last = if state.last_epoch_close_ts == 0 {
+        state.emission_epoch_ts
+    } else {
+        state.last_epoch_close_ts
+    };
+    let mut v = serde_json::json!({
+        "address": addr.to_string(),
+        "status": "none",
+        "min_bond_atoms": state.min_validator_bond_atoms.to_string(),
+        "next_epoch_ts": last.saturating_add(epoch),
+        "epoch_secs": epoch,
+        "in_set": state.validator_set.contains(&addr),
+    });
+    if let Some(e) = state.validator_pool.get(&addr) {
+        let (status, left) = match e.status {
+            PoolStatus::Warmup { epochs_remaining } => ("warmup", epochs_remaining),
+            PoolStatus::Active => ("active", 0),
+            PoolStatus::Benched => ("benched", 0),
+            PoolStatus::Unbonding { .. } => ("unbonding", 0),
+        };
+        v["status"] = status.into();
+        v["warmup_epochs_left"] = left.into();
+        v["bond_atoms"] = e.bond_atoms.to_string().into();
+        v["cosigned_in_window"] = e.cosign_count_in_window.into();
+        v["eligible_in_window"] = e.eligible_blocks_in_window.into();
+        v["has_bls_key"] = e.bls_pub_key.is_some().into();
+    }
+    Ok(Json(v))
+}
+
 pub async fn post_validator_request(
     State(node): State<Arc<Node>>,
     Json(body): Json<ValidatorJoinRequestBody>,
@@ -711,6 +752,7 @@ pub async fn get_network_stats(State(node): State<Arc<Node>>) -> ApiResult<Netwo
         destroyed_atoms: state.destroyed_atoms.to_string(),
         circulating_supply: state.circulating_supply.to_string(),
         admin_address: state.admin_address.as_ref().map(|a| a.to_string()),
+        min_validator_bond_atoms: state.min_validator_bond_atoms.to_string(),
     }))
 }
 

@@ -101,6 +101,8 @@ json.dump({
     "initial_validator_bls_pop": e[0]["bls_pop"],
     "validators": e[1:], "block_time_secs": int(bt),
     "prefund_initial_validator_vinx": 1000000,
+    # Test network: the faucet (100 VINX) is enough to become a validator.
+    "min_validator_bond_vinx": 50,
 }, open(out, "w"), indent=2)
 PY
     # Faucet: node1's validator account holds the dev prefund and hands it out.
@@ -210,6 +212,17 @@ cmd_status() {
     local n; n=$(count)
     echo "${c_b}Réseau local${c_0} — $n validateur(s) sur ce PC, chaîne $CHAIN_ID"
     if [[ -f "$HOME_DIR/joined" ]]; then local r; read -r r _ <"$HOME_DIR/joined"; echo "  ${c_dim}a rejoint la chaîne de l'hôte $r — set complet : $(rpc 1 validators | jget "['count']") validateur(s)${c_0}"; fi
+    if [[ -f "$HOME_DIR/joined" && -f "$HOME_DIR/node1/validator.json" ]]; then
+        local me st; me=$(python3 -c "import json;print(json.load(open('$HOME_DIR/node1/validator.json'))['address'])")
+        st=$(rpc 1 "validator/$me")
+        case "$(echo "$st" | jget "['status']")" in
+            warmup) echo "  ce validateur : ${c_b}échauffement${c_0} — encore $(echo "$st" | jget "['warmup_epochs_left']") fin(s) d'époque (une par heure)" ;;
+            active) echo "  ce validateur : ${c_ok}actif${c_0}" ;;
+            benched) echo "  ce validateur : en réserve (set complet, il remonte selon sa présence)" ;;
+            unbonding) echo "  ce validateur : en sortie (garantie en cours de déblocage)" ;;
+            *) echo "  ce validateur : ${c_dim}pas de garantie déposée${c_0}" ;;
+        esac
+    fi
     for i in $(seq 1 "$n"); do
         if alive "$i"; then
             local hj h pe; hj=$(rpc "$i" health); h=$(echo "$hj" | jget "['height']"); pe=$(echo "$hj" | jget "['peers']")
@@ -298,25 +311,41 @@ cmd_join() {
         || die "synchronisation trop lente — voir ./vinx logs 1"
     local me; me=$(python3 -c "import json;print(json.load(open('$HOME_DIR/node1/validator.json'))['address'])")
     if [[ "$(rpc 1 validators)" == *"$me"* ]]; then ok "déjà validateur ($me)"; return 0; fi
-    # Demande d'admission déposée chez l'hôte (visible avec ./vinx pending).
-    curl -s --max-time 5 -X POST -H 'Content-Type: application/json' \
-        -d "{\"address\":\"$me\",\"message\":\"$(hostname) via ./vinx join\"}" \
-        "http://$host:$port/validators/request" >/dev/null || true
-    if ! ge "$(atoms "$me" staked_atoms)" "$BOND_ATOMS"; then
-        echo
-        echo "  ${c_b}Sur le PC hôte, lancez :${c_0}"
-        echo "      ./vinx accept $me"
-        echo
-        printf "  attente des fonds (%s VINX)" "$((BOND + 1))"
-        until ge "$(atoms "$me" balance_atoms)" "$((BOND_ATOMS + 1000000000))"; do printf "."; sleep 2; done
-        echo " ${c_ok}✓${c_0}"
-        say "Dépôt de la garantie ($BOND VINX) avec la clé de vote BLS"
-        (cd "$HOME_DIR" && wallet_cli stake --amount "$BOND" --validator-keys "$HOME_DIR/validator-keys.json" --wallet "$HOME_DIR/node1/validator.json") >/dev/null \
+    # Entrée libre : la garantie minimale se lit sur la chaîne ; sur un réseau de test,
+    # le faucet de l'hôte la fournit. Aucune action de l'opérateur n'est nécessaire.
+    local min_atoms bond fee_margin=1000000000
+    min_atoms=$(rpc 1 "validator/$me" | jget "['min_bond_atoms']")
+    bond=$(python3 -c "print(int('${min_atoms:-0}') // 10**9)")
+    if ! ge "$(atoms "$me" staked_atoms)" "$min_atoms"; then
+        if ! ge "$(atoms "$me" balance_atoms)" "$(python3 -c "print(int('$min_atoms') + $fee_margin)")"; then
+            say "Demande de VINX de test au faucet de $host"
+            curl -s --max-time 10 -X POST -H 'Content-Type: application/json' \
+                -d "{\"address\":\"$me\"}" "http://$host:$port/faucet/request" >/dev/null || true
+            printf "  attente des fonds (%s VINX + frais)" "$bond"
+            local tries=0
+            until ge "$(atoms "$me" balance_atoms)" "$(python3 -c "print(int('$min_atoms') + $fee_margin)")"; do
+                printf "."; sleep 2; tries=$((tries + 1))
+                if (( tries == 60 )); then
+                    echo; echo "  ${c_dim}Pas encore de fonds : envoyez au moins $((bond + 1)) VINX à $me${c_0}"
+                    echo "  ${c_dim}depuis n'importe quel portefeuille ; j'attends.${c_0}"
+                fi
+            done
+            echo " ${c_ok}✓${c_0}"
+        fi
+        say "Dépôt de la garantie ($bond VINX) avec la clé de vote BLS"
+        (cd "$HOME_DIR" && wallet_cli stake --amount "$bond" --validator-keys "$HOME_DIR/validator-keys.json" --wallet "$HOME_DIR/node1/validator.json") >/dev/null \
             || die "le dépôt a échoué"
-        until ge "$(atoms "$me" staked_atoms)" "$BOND_ATOMS"; do sleep 2; done
+        until ge "$(atoms "$me" staked_atoms)" "$min_atoms"; do sleep 2; done
         ok "garantie déposée"
     fi
-    until [[ "$(rpc 1 validators)" == *"$me"* ]]; do sleep 2; done
+    local st; st=$(rpc 1 "validator/$me")
+    if [[ "$(echo "$st" | jget "['status']")" == "warmup" ]]; then
+        local left next; left=$(echo "$st" | jget "['warmup_epochs_left']"); next=$(echo "$st" | jget "['next_epoch_ts']")
+        echo "  ${c_dim}Échauffement : $left fin(s) d'époque à attendre (une par heure, prochaine à $(date -d "@$next" +%H:%M 2>/dev/null || echo '?')).${c_0}"
+        echo "  ${c_dim}Le nœud reste en ligne pendant ce temps ; ./vinx status montre l'avancement.${c_0}"
+    fi
+    say "Attente de l'entrée dans le set de validateurs"
+    until [[ "$(rpc 1 validators)" == *"$me"* ]]; do sleep 10; done
     ok "ce PC est maintenant validateur : $me"
     echo "  ${c_dim}La chaîne a besoin de plus des 2/3 des validateurs en ligne : gardez ce PC allumé,${c_0}"
     echo "  ${c_dim}ou l'hôte s'arrêtera aussi. Interface : http://127.0.0.1:$(rpc_port 1)/${c_0}"

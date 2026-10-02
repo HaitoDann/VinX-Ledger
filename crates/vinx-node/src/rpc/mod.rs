@@ -40,6 +40,7 @@ pub fn router(node: Arc<Node>) -> Router {
         .route("/block/:height", get(handlers::get_block))
         .route("/mempool/size", get(handlers::get_mempool))
         .route("/validators", get(handlers::get_validators))
+        .route("/validator/:address", get(handlers::get_validator_status))
         .route(
             "/validators/request",
             post(handlers::post_validator_request),

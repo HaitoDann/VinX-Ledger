@@ -4035,8 +4035,12 @@ dependencies = [
 name = "vinx-desktop-core"
 version = "0.1.0-alpha.1"
 dependencies = [
+ "aes-gcm",
+ "argon2",
+ "bip39",
  "borsh",
  "hex",
+ "rand 0.8.6",
  "serde",
  "serde_json",
  "thiserror 1.0.69",

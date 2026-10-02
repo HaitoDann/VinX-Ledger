@@ -231,6 +231,10 @@ struct GenesisSpec {
     initial_validator: String,
     #[serde(default)]
     prefund_initial_validator_vinx: u128,
+    /// Minimum validator bond in VINX (test networks only — mainnet keeps the
+    /// protocol value). Lets anyone become a validator with faucet funds.
+    #[serde(default)]
+    min_validator_bond_vinx: Option<u128>,
     /// Protocol block time (ADR 0081 C6). Defaults to `DEFAULT_BLOCK_TIME_SECS` (12 s).
     #[serde(default)]
     block_time_secs: Option<u64>,
@@ -460,6 +464,12 @@ async fn main() {
                         if let Some(e) = state.validator_pool.get_mut(&addr) {
                             e.operator = Some(op);
                         }
+                    }
+                }
+                if let Some(b) = spec.min_validator_bond_vinx {
+                    if spec.chain_id != vinx_core::chain_id::CHAIN_ID_MAINNET && b > 0 {
+                        state.min_validator_bond_atoms =
+                            b.saturating_mul(vinx_core::amount::DECIMAL_FACTOR);
                     }
                 }
                 state.block_time_secs = checked_block_time(
