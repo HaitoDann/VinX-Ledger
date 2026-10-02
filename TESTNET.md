@@ -48,16 +48,16 @@ L'interface publique (portefeuille, explorateur et page **Réseau**) est servie 
 `http://<serveur>:8545/`. Pour la proposer en HTTPS, placez-la derrière un proxy
 (le `Caddyfile` fourni sert d'exemple).
 
-### Admettre des validateurs
+### Entrée des validateurs : libre
 
-```bash
-./vinx pending                     # demandes envoyées par ./vinx join
-./vinx accept vinx1…               # envoie 10 001 VINX de test, attend le dépôt, ajoute au set
-```
+Personne n'a besoin de l'opérateur pour devenir validateur. `./vinx join` demande des
+VINX de test au faucet, dépose la garantie minimale (50 VINX sur le testnet, 10 000 sur
+le mainnet) avec la clé de vote BLS, puis le nœud fait son **échauffement** : 3 fins
+d'époque (environ 3 h) avant d'entrer dans le set. L'échauffement empêche d'entrer et
+sortir en boucle pour perturber la chaîne.
 
-Pendant le testnet, l'admission passe par l'opérateur (action d'administration). Cette
-clé d'administration s'éteint d'elle-même au bout de 365 jours (ADR 0081). Sur le
-mainnet, il suffira de bonder.
+`./vinx accept vinx1…` existe encore pour l'opérateur : il fait entrer un validateur
+immédiatement, sans échauffement (pratique pour un test). Ce n'est plus nécessaire.
 
 ### Sauvegarde
 
@@ -83,9 +83,8 @@ nœuds (Kademlia), s'y connecte directement (jusqu'à 25 pairs) et les mémorise
 `peers.json` : si le point d'entrée disparaît, il continue et se reconnecte au
 redémarrage sans lui. `./vinx status` affiche le nombre de pairs.
 
-Le nœud se synchronise, puis attend. Prévenez l'opérateur (Discord, etc.) : quand il
-lance `./vinx accept`, votre nœud reçoit les fonds de test, dépose sa garantie avec sa
-clé de vote BLS et entre dans le set automatiquement.
+Le nœud se synchronise, reçoit des VINX de test du faucet, dépose sa garantie et entre
+dans le set après son échauffement (environ 3 h), sans intervention de l'opérateur.
 
 Ensuite :
 ```bash
@@ -125,8 +124,6 @@ Remontez tout comportement anormal en joignant la sortie de `./vinx status` et d
 
 ## 4. Limites connues du testnet
 
-- **L'admission des validateurs passe par l'opérateur.** C'est volontaire pour le
-  testnet.
 - **Les clés de test sont stockées en clair** dans `.vinx-local/`. Il ne faut jamais y
   mettre de valeur réelle.
 - **Pas de checkpoints configurés.** Un nouveau nœud fait confiance à la genèse que lui

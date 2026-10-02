@@ -334,6 +334,8 @@ pub struct NetworkStatsResponse {
     /// signs governance transactions visible on-chain. Used by the admin console
     /// to confirm a loaded key is the current admin before enabling actions.
     pub admin_address: Option<String>,
+    /// Bond needed to enter the validator pool (atoms).
+    pub min_validator_bond_atoms: String,
 }
 
 #[derive(Serialize)]
