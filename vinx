@@ -170,6 +170,14 @@ cmd_start() {
     else
         init_network "$n" "$bt"
     fi
+    # Switching between local and --lan changes the listen address: a node already
+    # running must be restarted, or it keeps listening on the old one.
+    local was=0; [[ -f "$HOME_DIR/lan" ]] && was=1
+    if [[ $lan != "$was" ]] && alive 1; then
+        say "Redémarrage pour changer l'adresse d'écoute"
+        cmd_stop >/dev/null
+        for _ in $(seq 1 20); do alive 1 || break; sleep 0.5; done
+    fi
     if [[ $lan == 1 ]]; then touch "$HOME_DIR/lan"; else rm -f "$HOME_DIR/lan"; fi
     for i in $(seq 1 "$(count)"); do start_node "$i"; done
     wait_up
