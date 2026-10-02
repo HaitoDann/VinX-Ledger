@@ -440,6 +440,7 @@ impl Node {
             .checked_sub(Duration::from_secs(60))
             .unwrap_or_else(Instant::now);
         let mut rebroadcast = tokio::time::interval(Duration::from_secs(5));
+        let mut last_tip_resend = last_sync_request;
 
         loop {
             // ── wait for the cadence, collecting late precommits ──
@@ -523,6 +524,11 @@ impl Node {
                                 if let Some(p) = prev.as_mut() {
                                     p.handle(Input::Vote(v), &mut NullHost);
                                 }
+                                // A peer still voting on our tip missed its commit: resend it.
+                                if last_tip_resend.elapsed() > Duration::from_secs(5) {
+                                    last_tip_resend = Instant::now();
+                                    self.resend_tip().await;
+                                }
                             }
                             NetEvent::Committed { block, cert } if block.header.height == height => {
                                 let input = Input::Committed { block, cert };
@@ -561,6 +567,20 @@ impl Node {
                     _ = rebroadcast.tick() => {
                         let outs = engine.rebroadcast();
                         self.route(height, outs, &timer_tx).await;
+                        // Stuck on this height well past its cadence: peers may have moved
+                        // on without us (missed commit). Ask for the blocks we lack.
+                        let bt = self.state.read().await.block_time_secs.max(1);
+                        if now_secs() > start_at.saturating_add(4 * bt)
+                            && last_sync_request.elapsed() > Duration::from_secs(10)
+                        {
+                            last_sync_request = Instant::now();
+                            if let Some(p2p) = &self.p2p {
+                                p2p.broadcast(P2pMessage::SyncRequest {
+                                    from_height: height,
+                                    limit: 64,
+                                });
+                            }
+                        }
                     }
                 }
             }
@@ -580,6 +600,19 @@ impl Node {
                 }
             }
             prev = Some(engine);
+        }
+    }
+
+    /// Re-broadcasts our tip block with its certificate, for a peer stuck one height behind.
+    async fn resend_tip(&self) {
+        let Some(p2p) = &self.p2p else { return };
+        let chain = self.chain.read().await;
+        let h = chain.tip_height();
+        if let (Some(block), Some(cert)) = (chain.get_block(h), chain.tip_commit()) {
+            p2p.broadcast(P2pMessage::Committed {
+                block: block.clone(),
+                cert: cert.clone(),
+            });
         }
     }
 

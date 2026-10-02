@@ -177,7 +177,12 @@ struct Net {
 
 impl Net {
     fn new(n: usize) -> Self {
+        Self::new_with(n, |_, _| {})
+    }
+
+    fn new_with(n: usize, tweak: impl FnOnce(&mut WorldState, &[Val])) -> Self {
         let (mut state, vals) = genesis(n);
+        tweak(&mut state, &vals);
         let reporter = KeyPair::generate();
         state.credit_emit_for_test(
             Address::from_public_key(&reporter.public_key()),
@@ -504,4 +509,30 @@ fn equivocation_is_slashed_identically_by_every_node() {
         assert!(n.state.banned_validator_keys.contains(&v3), "banned");
         assert_eq!(n.state.slash_history.len(), 1);
     }
+}
+
+/// Regression (testnet, 2026-10-02): the validator set changes at epoch closes — here
+/// two bonded validators finish their warm-up and join a chain run by the genesis
+/// validator alone (the set grows 1 → 3). The chain must keep committing through the
+/// change, and through the following rotations.
+#[test]
+fn chain_survives_validator_set_growth_at_epoch_close() {
+    let mut net = Net::new_with(3, |s, vals| {
+        s.block_time_secs = 60; // one epoch = 60 blocks
+        for v in &vals[1..] {
+            s.validator_pool.get_mut(&v.addr).unwrap().status =
+                vinx_core::PoolStatus::Warmup { epochs_remaining: 3 };
+        }
+        s.validator_set = s.weighted_validator_set(vec![vals[0].addr]);
+    });
+    net.start();
+    for target in [70u64, 130, 200, 260, 330] {
+        net.run_until(target, 50_000_000);
+        let sizes: Vec<usize> = net.nodes.iter().map(|n| n.state.validator_set.len()).collect();
+        let heights: Vec<u64> = net.nodes.iter().map(|n| n.chain.tip_height()).collect();
+        println!("target {target}: heights {heights:?} set sizes {sizes:?}");
+        assert!(net.all_online_at(target), "chain stalled before {target}: {heights:?}");
+        net.assert_agreement();
+    }
+    assert!(net.nodes.iter().all(|n| n.state.validator_set.len() == 3));
 }

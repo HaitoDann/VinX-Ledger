@@ -2103,6 +2103,23 @@ impl WorldState {
                         "candidate validator has not posted the minimum bond".to_string(),
                     ));
                 }
+                // It must vote from its first block, so its BLS key must be registered.
+                let entry = self.validator_pool.get_mut(&addr).ok_or_else(|| {
+                    CoreError::InvalidTransaction(
+                        "candidate has no pool entry (bond with its BLS key first)".to_string(),
+                    )
+                })?;
+                if entry.bls_pub_key.is_none() {
+                    return Err(CoreError::InvalidTransaction(
+                        "candidate has no registered BLS key".to_string(),
+                    ));
+                }
+                // An explicit admission skips the warm-up: the validator is in the set now,
+                // so its pool entry must say so. Left in `Warmup`, the next epoch rotation
+                // (which rebuilds the set from Active/Benched entries) dropped it again —
+                // the testnet ran on the genesis validator alone for three epochs, then
+                // stalled when the warmed-up validators came back.
+                entry.status = PoolStatus::Active;
                 let mut addrs = self.validator_set.validators().to_vec();
                 addrs.push(addr);
                 self.validator_set = self.weighted_validator_set(addrs);
@@ -2666,8 +2683,20 @@ mod tests {
         assert!(state.apply_transaction(&add(0)).is_err());
         // Post the minimum bond, then admission succeeds.
         state.set_staked_for_test(&candidate, Amount::from_atoms(MIN_VALIDATOR_BOND_ATOMS));
+        // Bonded but no BLS key → it could not vote: rejected.
+        assert!(state.apply_transaction(&add(0)).is_err());
+        let mut e = vinx_core::ValidatorPoolEntry::new(MIN_VALIDATOR_BOND_ATOMS, 0); // warming up
+        e.bls_pub_key = Some(vinx_crypto::BlsSecretKey::generate().public_key().0.to_vec());
+        state.validator_pool.insert(candidate, e);
         state.apply_transaction(&add(0)).unwrap();
         assert!(state.validator_set.contains(&candidate));
+        // Explicit admission skips the warm-up, so the next epoch rotation keeps it.
+        assert_eq!(state.validator_pool[&candidate].status, PoolStatus::Active);
+        state.tick_epoch_close();
+        assert!(
+            state.validator_set.contains(&candidate),
+            "an admitted validator must survive the epoch rotation"
+        );
         // Adding the same validator again is now a hard error (strict semantics).
         assert!(state.apply_transaction(&add(1)).is_err());
     }
