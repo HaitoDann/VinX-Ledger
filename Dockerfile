@@ -23,6 +23,7 @@ RUN for crate in vinx-core vinx-crypto vinx-state vinx-node vinx-wallet vinx-des
 
 # Now copy the real source.
 COPY crates/ crates/
+COPY seeds/ seeds/
 
 # Build the node binary in release mode.
 RUN cargo build --release -p vinx-node

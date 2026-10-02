@@ -65,6 +65,8 @@ pub struct NodeMetricsInner {
     pub last_block_secs: AtomicU64,
     /// Consensus round of the height in progress (ADR 0082).
     pub consensus_round: AtomicU64,
+    /// Peers currently connected over P2P.
+    pub peer_count: AtomicU64,
 }
 
 impl NodeMetrics {
@@ -80,6 +82,7 @@ impl NodeMetrics {
                 ratelimit_hit: AtomicU64::new(0),
                 last_block_secs: AtomicU64::new(0),
                 consensus_round: AtomicU64::new(0),
+                peer_count: AtomicU64::new(0),
             }),
         }
     }
