@@ -49,6 +49,11 @@ pub struct WorldState {
     /// each block forges exactly `curve(now) - emitted` and never double-emits.
     #[serde(default)]
     pub emitted_atoms: u128,
+    /// Test-network genesis prefund, counted in `emitted_atoms` but outside the work
+    /// emission curve: the curve is measured without it, so a prefund never delays
+    /// validator rewards. Always 0 on mainnet.
+    #[serde(default)]
+    pub genesis_prefund_atoms: u128,
     /// Bonds in their unbonding delay: `(address, amount, unlock_ts)`. The amount left
     /// `staked` at unstake time and returns to the balance once `unlock_ts` is reached.
     /// It stays slashable until then. Part of circulation the whole time.
@@ -309,6 +314,7 @@ impl WorldState {
             emission_epoch_ts: 0,
             emission_started: false,
             emitted_atoms: 0,
+            genesis_prefund_atoms: 0,
             pending_unbonds: Vec::new(),
             current_block_ts: 0,
             block_fees: Amount::ZERO,
@@ -842,7 +848,7 @@ impl WorldState {
         let elapsed = block_ts.saturating_sub(self.emission_epoch_ts);
         let target = cumulative_emission_atoms(elapsed);
         let to_emit = target
-            .saturating_sub(self.emitted_atoms)
+            .saturating_sub(self.emitted_atoms.saturating_sub(self.genesis_prefund_atoms))
             .min(vinx_core::amount::MAX_SUPPLY_ATOMS.saturating_sub(self.emitted_atoms));
         if to_emit == 0 {
             return Amount::ZERO;
@@ -1700,6 +1706,7 @@ impl WorldState {
             slash_history: &'a [SlashRecord],
             memo_required: &'a std::collections::BTreeSet<Address>,
             emission_started: bool,
+            genesis_prefund_atoms: u128,
         }
 
         let commitment = ConsensusCommitment {
@@ -1735,6 +1742,7 @@ impl WorldState {
             // qui en divergent émettent différemment. Il n'était engagé qu'indirectement,
             // via `emission_epoch_ts` — donc invisible quand celui-ci vaut 0.
             emission_started: self.emission_started,
+            genesis_prefund_atoms: self.genesis_prefund_atoms,
             // Dormant depuis ADR 0040, mais persisté et désérialisé : l'engager coûte
             // 16 octets et supprime la question « est-il vraiment mort ? ».
         };
@@ -2564,6 +2572,22 @@ mod tests {
         assert_eq!(emission, Amount::ZERO);
         assert_eq!(s.emission_epoch_ts, 1_000);
         assert_eq!(s.emitted_atoms, 0);
+    }
+
+    #[test]
+    fn test_genesis_prefund_does_not_delay_emission() {
+        let mut s = WorldState::new();
+        let (_, producer) = kp_addr();
+        let prefund = 1_000_000 * vinx_core::amount::DECIMAL_FACTOR;
+        s.credit(&producer, Amount::from_atoms(prefund));
+        s.circulating_supply = Amount::from_atoms(prefund);
+        s.emitted_atoms = prefund;
+        s.genesis_prefund_atoms = prefund;
+        s.settle_block(&producer, 0);
+        let (_, emission) = s.settle_block(&producer, 3_600);
+        assert_eq!(emission.atoms(), cumulative_emission_atoms(3_600));
+        assert!(emission.atoms() > 0);
+        assert!(s.supply_invariant_holds());
     }
 
     #[test]
