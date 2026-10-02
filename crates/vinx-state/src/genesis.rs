@@ -117,6 +117,7 @@ pub fn create_genesis_state_with_dev_prefund(
         Account::new_with_balance(config.validator_address, amount),
     );
     state.emitted_atoms = prefund_atoms;
+    state.genesis_prefund_atoms = prefund_atoms;
     state.circulating_supply = amount;
     state
 }
