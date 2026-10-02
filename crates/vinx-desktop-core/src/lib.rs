@@ -13,6 +13,7 @@ use vinx_core::{GovernanceAction, Transaction, TransactionType};
 use vinx_crypto::{Address, KeyPair};
 
 pub mod dto;
+pub mod secure;
 
 #[derive(Debug, thiserror::Error)]
 pub enum CoreError {
@@ -279,6 +280,68 @@ pub fn build_announce_upgrade(
         chain_id,
         payload,
     )
+}
+
+/// Transfer with an optional memo (ADR 0085), signed for `chain_id`.
+pub fn build_transfer_memo(
+    kp: &KeyPair,
+    to: &str,
+    amount: Amount,
+    fee: Amount,
+    nonce: u64,
+    chain_id: u32,
+    memo: &str,
+) -> Result<Transaction, CoreError> {
+    let to = parse_address(to)?;
+    if memo.len() > vinx_core::amount::MAX_MEMO_BYTES {
+        return Err(CoreError::Address(format!(
+            "memo too long ({} bytes, max {})",
+            memo.len(),
+            vinx_core::amount::MAX_MEMO_BYTES
+        )));
+    }
+    let mut tx = Transaction::new_transfer_with_memo(kp, to, amount, fee, nonce, memo.as_bytes());
+    tx.chain_id = chain_id;
+    tx.sign(kp);
+    Ok(tx)
+}
+
+/// Bond that registers a validator run by a separate operator node (ADR 0084 S5):
+/// `entry` is the JSON printed by `vinx-node --genesis-entry --validator-owner <owner>`
+/// (BLS key, its proof of possession bound to the owner, operator address).
+pub fn build_validator_stake(
+    kp: &KeyPair,
+    amount: Amount,
+    fee: Amount,
+    nonce: u64,
+    chain_id: u32,
+    entry: &serde_json::Value,
+) -> Result<Transaction, CoreError> {
+    let owner = Address::from_public_key(&kp.public_key()).to_string();
+    let bad = |m: &str| CoreError::Keystore(format!("validator keys: {m}"));
+    if entry["address"].as_str() != Some(owner.as_str()) {
+        return Err(bad("made for another wallet"));
+    }
+    let hexf = |k: &str| {
+        entry[k]
+            .as_str()
+            .and_then(|s| hex::decode(s).ok())
+            .ok_or_else(|| bad(&format!("missing {k}")))
+    };
+    let operator = match entry["operator"].as_str() {
+        Some(s) => Some(parse_address(s)?),
+        None => None,
+    };
+    let payload = vinx_core::RegisterBlsKeyPayload {
+        bls_pub_key: hexf("bls_pub_key")?,
+        bls_pop: hexf("bls_pop")?,
+        operator,
+    };
+    let mut tx = Transaction::new_stake(kp, amount, fee, nonce);
+    tx.chain_id = chain_id;
+    tx.payload = borsh::to_vec(&payload).expect("payload serialization");
+    tx.sign(kp);
+    Ok(tx)
 }
 
 #[cfg(test)]

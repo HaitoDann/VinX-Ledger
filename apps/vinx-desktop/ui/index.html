@@ -1,150 +1,210 @@
-<!doctype html>
+<!DOCTYPE html>
 <html lang="fr">
-  <head>
-    <meta charset="UTF-8" />
-    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-    <title>VinX Wallet</title>
-    <link rel="stylesheet" href="styles.css" />
-  </head>
-  <body>
-    <header class="topbar">
-      <div class="brand"><span class="logo">V</span> VinX Wallet</div>
-      <div class="node">
-        <input id="node-url" type="text" value="http://127.0.0.1:8545" spellcheck="false" />
-        <button id="btn-connect" class="ghost">Connecter</button>
-        <span id="node-pill" class="pill off">hors ligne</span>
-      </div>
-    </header>
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>VinX</title>
+<link rel="stylesheet" href="styles.css">
+</head>
+<body>
+<svg width="0" height="0" style="position:absolute">
+  <symbol id="i-home" viewBox="0 0 24 24"><path d="M3 11l9-7 9 7v9a1 1 0 0 1-1 1h-5v-6h-6v6H4a1 1 0 0 1-1-1z"/></symbol>
+  <symbol id="i-send" viewBox="0 0 24 24"><path d="M7 17 17 7M8 7h9v9"/></symbol>
+  <symbol id="i-recv" viewBox="0 0 24 24"><path d="M17 7 7 17M16 17H7V8"/></symbol>
+  <symbol id="i-shield" viewBox="0 0 24 24"><path d="M12 3l8 3v6c0 4.5-3.4 8.3-8 9-4.6-.7-8-4.5-8-9V6z"/><path d="m9 12 2 2 4-4"/></symbol>
+  <symbol id="i-gear" viewBox="0 0 24 24"><circle cx="12" cy="12" r="3"/><path d="M19.4 15a1.7 1.7 0 0 0 .3 1.8l.1.1a2 2 0 1 1-2.8 2.8l-.1-.1a1.7 1.7 0 0 0-1.8-.3 1.7 1.7 0 0 0-1 1.5V21a2 2 0 1 1-4 0v-.1a1.7 1.7 0 0 0-1.1-1.5 1.7 1.7 0 0 0-1.8.3l-.1.1a2 2 0 1 1-2.8-2.8l.1-.1a1.7 1.7 0 0 0 .3-1.8 1.7 1.7 0 0 0-1.5-1H3a2 2 0 1 1 0-4h.1a1.7 1.7 0 0 0 1.5-1.1 1.7 1.7 0 0 0-.3-1.8l-.1-.1a2 2 0 1 1 2.8-2.8l.1.1a1.7 1.7 0 0 0 1.8.3H9a1.7 1.7 0 0 0 1-1.5V3a2 2 0 1 1 4 0v.1a1.7 1.7 0 0 0 1 1.5 1.7 1.7 0 0 0 1.8-.3l.1-.1a2 2 0 1 1 2.8 2.8l-.1.1a1.7 1.7 0 0 0-.3 1.8V9a1.7 1.7 0 0 0 1.5 1H21a2 2 0 1 1 0 4h-.1a1.7 1.7 0 0 0-1.5 1z"/></symbol>
+  <symbol id="i-copy" viewBox="0 0 24 24"><rect x="9" y="9" width="11" height="11" rx="2"/><path d="M5 15V6a2 2 0 0 1 2-2h8"/></symbol>
+  <symbol id="i-drop" viewBox="0 0 24 24"><path d="M12 3s6 6.5 6 11a6 6 0 0 1-12 0c0-4.5 6-11 6-11z"/></symbol>
+  <symbol id="i-warn" viewBox="0 0 24 24"><path d="M12 4 2.5 20h19z"/><path d="M12 10v4M12 17.5v.01"/></symbol>
+  <symbol id="i-lock" viewBox="0 0 24 24"><rect x="5" y="11" width="14" height="10" rx="2"/><path d="M8 11V8a4 4 0 0 1 8 0v3"/></symbol>
+  <symbol id="i-stake" viewBox="0 0 24 24"><path d="M12 3v18M5 8l7-5 7 5"/></symbol>
+</svg>
 
-    <nav class="tabs">
-      <button class="tab active" data-tab="wallet">Portefeuille</button>
-      <button class="tab" data-tab="admin">Admin</button>
+<!-- ── Bienvenue ─────────────────────────────────────────────────────────── -->
+<section class="center" id="s-welcome" hidden>
+  <div class="panel">
+    <img class="logo" src="assets/logo.png" alt="">
+    <h1>Bienvenue sur VinX</h1>
+    <p class="lead">Payez, recevez et aidez à faire tourner le réseau, depuis cet ordinateur.</p>
+    <div class="stack">
+      <button class="big" data-go="s-create">Créer un portefeuille</button>
+      <button class="big ghost" data-go="s-restore">J'ai déjà une phrase de récupération</button>
+    </div>
+  </div>
+</section>
+
+<!-- ── Création : phrase ─────────────────────────────────────────────────── -->
+<section class="center" id="s-create" hidden>
+  <div class="panel wide">
+    <div class="steps"><i class="on"></i><i></i></div>
+    <h1>Votre phrase de récupération</h1>
+    <p class="lead">Ces 12 mots sont la seule façon de récupérer votre argent si cet ordinateur est perdu.</p>
+    <div class="words" id="c-words"></div>
+    <div class="note warn"><svg class="i"><use href="#i-warn"/></svg><div>Notez-les sur papier, dans l'ordre. Ne les prenez pas en photo, ne les envoyez à personne : quiconque les connaît peut prendre vos fonds.</div></div>
+    <label class="check"><input type="checkbox" id="c-ok"> J'ai noté mes 12 mots et je les garde en lieu sûr.</label>
+    <button class="big" id="c-next" disabled>Continuer</button>
+    <p style="text-align:center;margin:14px 0 0"><button class="link" data-go="s-welcome">Retour</button></p>
+  </div>
+</section>
+
+<!-- ── Création / restauration : mot de passe ────────────────────────────── -->
+<section class="center" id="s-password" hidden>
+  <div class="panel">
+    <div class="steps"><i class="on"></i><i class="on"></i></div>
+    <h1>Choisissez un mot de passe</h1>
+    <p class="lead">Il protège le portefeuille sur cet ordinateur. Il vous sera demandé à chaque ouverture.</p>
+    <label for="p-1">Mot de passe (8 caractères minimum)</label>
+    <input type="password" id="p-1" autocomplete="new-password">
+    <label for="p-2">Confirmez</label>
+    <input type="password" id="p-2" autocomplete="new-password">
+    <div id="p-msg"></div>
+    <button class="big" id="p-go" style="margin-top:20px">Créer mon portefeuille</button>
+  </div>
+</section>
+
+<!-- ── Restauration ─────────────────────────────────────────────────────── -->
+<section class="center" id="s-restore" hidden>
+  <div class="panel wide">
+    <h1>Restaurer un portefeuille</h1>
+    <p class="lead">Saisissez vos 12 mots, séparés par des espaces.</p>
+    <textarea id="r-phrase" rows="3" spellcheck="false" placeholder="mot1 mot2 mot3 …"></textarea>
+    <label for="r-1">Nouveau mot de passe pour cet ordinateur</label>
+    <input type="password" id="r-1" autocomplete="new-password">
+    <label for="r-2">Confirmez</label>
+    <input type="password" id="r-2" autocomplete="new-password">
+    <div id="r-msg"></div>
+    <button class="big" id="r-go" style="margin-top:20px">Restaurer</button>
+    <p style="text-align:center;margin:14px 0 0"><button class="link" data-go="s-welcome">Retour</button></p>
+  </div>
+</section>
+
+<!-- ── Déverrouillage ───────────────────────────────────────────────────── -->
+<section class="center" id="s-unlock" hidden>
+  <div class="panel">
+    <img class="logo" src="assets/logo.png" alt="">
+    <h1>Bon retour</h1>
+    <p class="lead mono" id="u-addr" style="font-size:12px;word-break:break-all"></p>
+    <label for="u-pass">Mot de passe</label>
+    <input type="password" id="u-pass" autocomplete="current-password">
+    <div id="u-msg"></div>
+    <button class="big" id="u-go" style="margin-top:20px">Ouvrir</button>
+    <p class="hint" id="u-val" style="text-align:center" hidden>Votre validateur continue de tourner, même verrouillé.</p>
+  </div>
+</section>
+
+<!-- ── Application ──────────────────────────────────────────────────────── -->
+<div class="app" id="s-app" hidden>
+  <aside>
+    <div class="brand"><img src="assets/logo.png" alt="">VinX</div>
+    <nav>
+      <a data-page="home" class="on"><svg class="i"><use href="#i-home"/></svg>Accueil</a>
+      <a data-page="send"><svg class="i"><use href="#i-send"/></svg>Envoyer</a>
+      <a data-page="recv"><svg class="i"><use href="#i-recv"/></svg>Recevoir</a>
+      <a data-page="val"><svg class="i"><use href="#i-shield"/></svg>Valider<span class="badge" id="n-val" hidden>actif</span></a>
+      <a data-page="set"><svg class="i"><use href="#i-gear"/></svg>Réglages</a>
     </nav>
+    <div class="netbox">
+      <div class="l"><span class="dot" id="n-dot"></span><span id="n-txt">Connexion…</span></div>
+      <div class="s" id="n-sub"></div>
+    </div>
+  </aside>
 
-    <main>
-      <!-- ─── WALLET ─────────────────────────────────────────────── -->
-      <section id="tab-wallet" class="tabpane active">
-        <div class="grid">
-          <div class="card">
-            <h2>Mon portefeuille</h2>
-            <div id="wallet-none">
-              <p class="muted">Ouvrez un fichier <code>.json</code> existant ou créez-en un nouveau. La clé privée reste sur cette machine et ne quitte jamais l'application.</p>
-              <label>Chemin du fichier wallet</label>
-              <input id="wallet-path" type="text" spellcheck="false" placeholder="/chemin/vers/vinx-wallet.json" />
-              <div class="row">
-                <button id="btn-open">Ouvrir</button>
-                <button id="btn-create" class="ghost">Créer un nouveau</button>
-              </div>
-            </div>
-            <div id="wallet-open" class="hidden">
-              <label>Adresse</label>
-              <div class="addr-row">
-                <code id="my-address" class="addr"></code>
-                <button id="btn-copy" class="ghost small">Copier</button>
-              </div>
-              <div class="balances">
-                <div><span class="muted">Solde</span><strong id="my-balance">—</strong></div>
-                <div><span class="muted">Staké (bond)</span><strong id="my-staked">—</strong></div>
-                <div><span class="muted">Nonce</span><strong id="my-nonce">—</strong></div>
-              </div>
-              <div class="row">
-                <button id="btn-refresh" class="ghost small">Rafraîchir</button>
-                <button id="btn-lock" class="ghost small">Verrouiller</button>
-              </div>
-            </div>
-          </div>
-
-          <div class="card">
-            <h2>Envoyer des VINX</h2>
-            <label>Destinataire (vinx1…)</label>
-            <input id="send-to" type="text" spellcheck="false" placeholder="vinx1…" />
-            <label>Montant (VINX)</label>
-            <input id="send-amount" type="text" inputmode="decimal" placeholder="0.00" />
-            <button id="btn-send">Envoyer</button>
-            <p class="hint">Frais forfaitaires, prélevés automatiquement au taux courant du réseau.</p>
-          </div>
-
-          <div class="card">
-            <h2>Staking (bond de validateur)</h2>
-            <p class="muted">Le stake est une caution de validateur — aucun rendement. Le retrait passe par une déliaison de 3 jours.</p>
-            <label>Montant (VINX)</label>
-            <input id="stake-amount" type="text" inputmode="decimal" placeholder="0.00" />
-            <div class="row">
-              <button id="btn-stake">Staker</button>
-              <button id="btn-unstake" class="ghost">Déstaker</button>
-            </div>
-          </div>
-
-          <div class="card">
-            <h2>Réseau</h2>
-            <div class="kv">
-              <div><span>Hauteur</span><b id="net-height">—</b></div>
-              <div><span>Mempool</span><b id="net-mempool">—</b></div>
-              <div><span>Frais de base</span><b id="net-fee">—</b></div>
-              <div><span>Circulation</span><b id="net-circ">—</b></div>
-              <div><span>La Fonderie</span><b id="net-foundry">—</b></div>
-              <div><span>Chain ID</span><b id="net-chain">—</b></div>
-            </div>
-          </div>
+  <div class="content">
+    <!-- Accueil -->
+    <div class="page" id="p-home">
+      <div class="card">
+        <div class="eyebrow">Solde disponible</div>
+        <div class="balance" id="h-bal">—<small>VINX</small></div>
+        <div class="kv" id="h-kv"></div>
+        <div class="row">
+          <button data-page="send"><svg class="i"><use href="#i-send"/></svg>Envoyer</button>
+          <button class="ghost" data-page="recv"><svg class="i"><use href="#i-recv"/></svg>Recevoir</button>
+          <button class="ghost" id="h-faucet"><svg class="i"><use href="#i-drop"/></svg>VINX de test</button>
         </div>
+        <div id="h-msg"></div>
+      </div>
+      <div class="card">
+        <h2>Historique</h2>
+        <div class="list" id="h-txs"><div class="empty">Aucune opération pour l'instant.</div></div>
+      </div>
+    </div>
 
-        <div class="card">
-          <h2>Historique</h2>
-          <table id="history">
-            <thead><tr><th>Bloc</th><th>Type</th><th>De</th><th>Vers</th><th>Montant</th><th>Frais</th></tr></thead>
-            <tbody><tr><td colspan="6" class="muted">Ouvrez un wallet et rafraîchissez.</td></tr></tbody>
-          </table>
+    <!-- Envoyer -->
+    <div class="page" id="p-send" hidden>
+      <h1>Envoyer</h1><p class="sub">Le paiement est définitif dès qu'il est inclus dans un bloc, en quelques secondes.</p>
+      <div class="card">
+        <label for="s-to" style="margin-top:0">Destinataire</label>
+        <input id="s-to" class="mono" placeholder="vinx1…" spellcheck="false">
+        <label for="s-amt">Montant</label>
+        <div style="display:flex;gap:8px"><input id="s-amt" inputmode="decimal" placeholder="0,00"><button class="ghost" id="s-max">Max</button></div>
+        <div class="hint" id="s-avail"></div>
+        <label for="s-memo">Référence (facultatif)</label>
+        <input id="s-memo" maxlength="32" placeholder="ex. FAC-2026-0412">
+        <div class="hint">Visible par le destinataire, 32 caractères maximum. Certains commerçants l'exigent.</div>
+        <div class="summary" id="s-sum" hidden></div>
+        <div id="s-msg"></div>
+        <div class="row"><button id="s-go">Vérifier</button></div>
+      </div>
+    </div>
+
+    <!-- Recevoir -->
+    <div class="page" id="p-recv" hidden>
+      <h1>Recevoir</h1><p class="sub">Partagez cette adresse ou faites scanner le code.</p>
+      <div class="card" style="text-align:center">
+        <div class="qr" id="q-code"></div>
+        <div class="addr mono"><span id="q-addr"></span><button class="ghost" data-copy="q-addr"><svg class="i"><use href="#i-copy"/></svg>Copier</button></div>
+      </div>
+    </div>
+
+    <!-- Valider -->
+    <div class="page" id="p-val" hidden>
+      <h1>Valider</h1><p class="sub">Faites tourner le réseau depuis cet ordinateur et recevez une part des récompenses.</p>
+      <div class="card">
+        <div class="vhead">
+          <div class="ico" style="width:44px;height:44px"><svg class="i" style="width:22px;height:22px"><use href="#i-shield"/></svg></div>
+          <div class="grow"><h2 id="v-title">Validateur arrêté</h2><div class="s" id="v-sub" style="white-space:normal">Activez pour commencer.</div></div>
+          <button class="switch" id="v-switch" aria-label="Activer le validateur"></button>
         </div>
-      </section>
-
-      <!-- ─── ADMIN ──────────────────────────────────────────────── -->
-      <section id="tab-admin" class="tabpane">
-        <div class="card warn">
-          <strong>Console d'administration.</strong> Les actions ci-dessous doivent être signées par la <em>clé admin on-chain</em>. Ouvrez le wallet admin dans l'onglet Portefeuille. <span id="admin-check" class="muted"></span>
+        <div id="v-msg"></div>
+        <div class="track" id="v-track"></div>
+      </div>
+      <div class="card" id="v-stats" hidden>
+        <h2>Activité</h2><div class="sub">Sur les 7 derniers jours.</div>
+        <div class="stats">
+          <div class="stat"><div class="eyebrow">Blocs signés</div><div class="v" id="v-cos">—</div></div>
+          <div class="stat"><div class="eyebrow">Présence</div><div class="v" id="v-pres">—</div></div>
+          <div class="stat"><div class="eyebrow">Pairs connectés</div><div class="v" id="v-peers">—</div></div>
         </div>
-        <div class="grid">
-          <div class="card">
-            <h2>Validateurs</h2>
-            <div class="kv small">
-              <div><span>Actifs</span><b id="v-count">—</b></div>
-              <div><span>Quorum</span><b id="v-quorum">—</b></div>
-            </div>
-            <ul id="v-list" class="vlist"></ul>
-            <button id="btn-refresh-admin" class="ghost small">Rafraîchir</button>
-          </div>
-
-          <div class="card">
-            <h2>Gérer les validateurs</h2>
-            <label>Adresse du validateur (vinx1…)</label>
-            <input id="adm-validator" type="text" spellcheck="false" placeholder="vinx1…" />
-            <div class="row">
-              <button id="btn-add-val">Ajouter</button>
-              <button id="btn-rm-val" class="ghost">Retirer</button>
-            </div>
-            <p class="hint">Un nouveau validateur doit avoir posé le bond minimum avant d'être ajouté.</p>
-          </div>
-
-          <div class="card">
-            <h2>Planifier une mise à jour</h2>
-            <label>Version (x.y.z)</label>
-            <input id="adm-version" type="text" spellcheck="false" placeholder="1.1.0" />
-            <label>Hauteur d'activation</label>
-            <input id="adm-height" type="number" min="1" placeholder="300000" />
-            <button id="btn-announce">Annoncer</button>
-          </div>
-
-          <div class="card">
-            <h2>Protocole</h2>
-            <div class="kv small">
-              <div><span>Version</span><b id="p-version">—</b></div>
-              <div><span>Upgrade planifié</span><b id="p-pending">—</b></div>
-            </div>
-          </div>
+      </div>
+      <div class="card">
+        <h2>Ce qu'il faut savoir</h2>
+        <div class="list">
+          <div class="item"><div class="ico"><svg class="i"><use href="#i-stake"/></svg></div><div class="grow"><div class="t">Une garantie est bloquée</div><div class="s" style="white-space:normal" id="v-bond-txt">Le minimum demandé par le réseau. Elle reste à vous et vous la récupérez quand vous arrêtez (21 jours de délai).</div></div></div>
+          <div class="item"><div class="ico"><svg class="i"><use href="#i-warn"/></svg></div><div class="grow"><div class="t">Laissez l'ordinateur allumé</div><div class="s" style="white-space:normal">Un validateur absent est mis en pause, sans perte d'argent, mais ne gagne plus rien.</div></div></div>
+          <div class="item"><div class="ico"><svg class="i"><use href="#i-lock"/></svg></div><div class="grow"><div class="t">Vos fonds restent protégés</div><div class="s" style="white-space:normal">Le validateur a ses propres clés : votre portefeuille reste chiffré et n'est jamais confié au nœud.</div></div></div>
+          <div class="item"><div class="ico"><svg class="i"><use href="#i-gear"/></svg></div><div class="grow"><div class="t">Facultatif : ouvrez le port 9001</div><div class="s" style="white-space:normal">Sur votre box (TCP et UDP), pour que d'autres nœuds puissent vous joindre. Le validateur fonctionne sans.</div></div></div>
         </div>
-      </section>
-    </main>
+      </div>
+    </div>
 
-    <div id="toast" class="toast hidden"></div>
-    <script src="app.js"></script>
-  </body>
+    <!-- Réglages -->
+    <div class="page" id="p-set" hidden>
+      <h1>Réglages</h1><p class="sub">&nbsp;</p>
+      <div class="card">
+        <h2>Réseau</h2><div class="sub">Un nœud du réseau par lequel entrer : nom ou adresse IP. Un seul suffit, le reste se découvre tout seul.</div>
+        <div style="display:flex;gap:8px"><input id="t-entry" placeholder="seed.vinx.example ou 192.168.1.231"><button class="ghost" id="t-save">Enregistrer</button></div>
+        <div id="t-msg"></div>
+      </div>
+      <div class="card">
+        <h2>Portefeuille</h2><div class="sub">Votre adresse publique.</div>
+        <div class="addr mono"><span id="t-addr"></span><button class="ghost" data-copy="t-addr"><svg class="i"><use href="#i-copy"/></svg>Copier</button></div>
+        <div class="row"><button class="ghost" id="t-lock"><svg class="i"><use href="#i-lock"/></svg>Verrouiller</button><button class="ghost" id="t-theme">Thème clair / sombre</button></div>
+      </div>
+      <p class="hint" style="text-align:center" id="t-ver"></p>
+    </div>
+  </div>
+</div>
+<div class="toast" id="toast" hidden></div>
+<script src="app.js"></script>
+</body>
 </html>

@@ -2,3 +2,7 @@
 /target
 # Tauri v2 generated schemas/bindings
 /gen
+# vinx-node copied here for bundling (see .github/workflows/desktop.yml)
+/binaries
+# Mobile icons (not shipped)
+/icons/android

@@ -2,7 +2,7 @@
 name = "vinx-desktop"
 version = "0.1.0"
 edition = "2021"
-description = "VinX Wallet — desktop wallet & admin console (Tauri)"
+description = "VinX — portefeuille et validateur de bureau (Tauri)"
 authors = ["VinX Labs"]
 
 # Standalone workspace on purpose: Tauri pulls heavy GUI/system deps that must
@@ -16,7 +16,9 @@ tauri-build = { version = "2", features = [] }
 tauri = { version = "2", features = [] }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
-reqwest = { version = "0.12", features = ["json"] }
+reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls"] }
+qrcode = { version = "0.14", default-features = false, features = ["svg"] }
+hex = "0.4"
 vinx-desktop-core = { path = "../../../crates/vinx-desktop-core" }
 vinx-core = { path = "../../../crates/vinx-core" }
 vinx-crypto = { path = "../../../crates/vinx-crypto" }
