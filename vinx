@@ -227,6 +227,10 @@ cmd_status() {
         if alive "$i"; then
             local hj h pe; hj=$(rpc "$i" health); h=$(echo "$hj" | jget "['height']"); pe=$(echo "$hj" | jget "['peers']")
             echo "  nœud $i  ${c_ok}● en marche${c_0}  hauteur ${h:-?}  ${pe:-?} pair(s)   http://127.0.0.1:$(rpc_port "$i")/"
+            case "$(echo "$hj" | jget "['reachable']")" in
+                public)  [[ -f "$HOME_DIR/lan" ]] && echo "          ${c_dim}joignable par les autres nœuds${c_0}" ;;
+                private) echo "          ${c_dim}derrière une box : joignable via $(echo "$hj" | jget "['relays']") relais (ouvrir le port 9001 est facultatif)${c_0}" ;;
+            esac
         else
             echo "  nœud $i  ${c_r}○ arrêté${c_0}"
         fi

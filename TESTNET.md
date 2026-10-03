@@ -92,7 +92,12 @@ sudo ./vinx service                # le nœud tourne en service et survit aux re
 ./vinx status
 ```
 
-Ouvrez le port **9001 TCP/UDP**. Restez en ligne : un validateur absent manque ses tours
+Le port **9001 TCP/UDP** n'est pas obligatoire : le nœud essaie de l'ouvrir lui-même sur
+la box (UPnP). Sinon, les autres nœuds le signalent comme injoignable (AutoNAT) et il
+passe par deux relais, des nœuds joignables qui transmettent ses connexions, puis tente
+de percer la box pour une liaison directe (DCUtR). `./vinx status` affiche « derrière une
+box » dans ce cas. L'ouvrir reste utile : plus il y a de nœuds joignables, plus le réseau
+est solide. Restez en ligne : un validateur absent manque ses tours
 de proposition et finit écarté (jailing, sans perte d'argent). Le double vote, lui, est
 sanctionné : ne lancez jamais deux fois le même validateur.
 
