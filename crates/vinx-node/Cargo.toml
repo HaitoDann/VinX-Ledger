@@ -20,7 +20,7 @@ thiserror = { workspace = true }
 hex = { workspace = true }
 tracing = { workspace = true }
 tracing-subscriber = { workspace = true }
-libp2p = { version = "0.54", features = ["gossipsub", "noise", "tcp", "yamux", "tokio", "identify", "mdns", "macros", "quic", "kad", "dns"] }
+libp2p = { version = "0.54", features = ["gossipsub", "noise", "tcp", "yamux", "tokio", "identify", "mdns", "macros", "quic", "kad", "dns", "upnp", "autonat", "relay", "dcutr"] }
 borsh = { workspace = true }
 rayon = { workspace = true }
 futures = "0.3"

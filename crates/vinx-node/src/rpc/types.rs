@@ -24,6 +24,10 @@ pub struct HealthResponse {
     pub tip_timestamp: u64,
     /// Peers currently connected over P2P.
     pub peers: u64,
+    /// `public`, `private` (behind a NAT, reached through relays) or `unknown`.
+    pub reachable: &'static str,
+    /// Relays carrying this node's inbound connections.
+    pub relays: u64,
 }
 
 #[derive(Serialize)]

@@ -7,10 +7,11 @@ use std::time::Duration;
 
 use futures::StreamExt;
 use libp2p::{
+    autonat, dcutr,
     gossipsub::{self, IdentTopic, TopicHash},
-    identify, kad, mdns, noise,
+    identify, kad, mdns, noise, relay,
     swarm::{NetworkBehaviour, SwarmEvent},
-    tcp, yamux, Multiaddr, PeerId, SwarmBuilder,
+    tcp, upnp, yamux, Multiaddr, PeerId, SwarmBuilder,
 };
 use tokio::sync::{mpsc, RwLock};
 use tracing::{debug, info, warn};
@@ -66,6 +67,14 @@ struct VinxBehaviour {
     identify: identify::Behaviour,
     mdns: libp2p::swarm::behaviour::toggle::Toggle<mdns::tokio::Behaviour>,
     kad: kad::Behaviour<kad::store::MemoryStore>,
+    // Getting through home routers (NAT): UPnP asks the box to open the port, AutoNAT
+    // has peers check we are reachable, unreachable nodes reserve a slot on a reachable
+    // peer's relay, and DCUtR then upgrades relayed connections to direct ones.
+    upnp: upnp::tokio::Behaviour,
+    autonat: autonat::Behaviour,
+    relay: relay::Behaviour,
+    relay_client: relay::client::Behaviour,
+    dcutr: dcutr::Behaviour,
 }
 
 const IDENTIFY_PROTOCOL: &str = "/vinx/1.0.0";
@@ -120,7 +129,9 @@ pub async fn start(
         .with_quic()
         .with_dns()
         .map_err(|e| NodeError::Config(format!("P2P DNS setup failed: {e}")))?
-        .with_behaviour(|key| {
+        .with_relay_client(noise::Config::new, yamux::Config::default)
+        .map_err(|e| NodeError::Config(format!("P2P relay setup failed: {e}")))?
+        .with_behaviour(|key, relay_client| {
             let gossipsub_config = gossipsub::ConfigBuilder::default()
                 .heartbeat_interval(Duration::from_secs(1))
                 .validation_mode(gossipsub::ValidationMode::Strict)
@@ -159,11 +170,37 @@ pub async fn start(
                 kad::Config::new(kad_proto),
             );
             kad.set_mode(Some(kad::Mode::Server));
+            let autonat = autonat::Behaviour::new(
+                peer_id,
+                autonat::Config {
+                    // Test networks run on private LANs: a LAN address that peers can
+                    // dial counts as reachable there.
+                    only_global_ips: false,
+                    boot_delay: Duration::from_secs(10),
+                    ..Default::default()
+                },
+            );
+            // Relayed traffic is consensus traffic until DCUtR makes it direct: give
+            // circuits room for it (libp2p's defaults cut them after 2 min / 128 KiB).
+            let relay = relay::Behaviour::new(
+                peer_id,
+                relay::Config {
+                    max_circuits: 32,
+                    max_circuit_duration: Duration::from_secs(30 * 60),
+                    max_circuit_bytes: 64 << 20,
+                    ..Default::default()
+                },
+            );
             Ok(VinxBehaviour {
                 gossipsub,
                 identify,
                 mdns,
                 kad,
+                upnp: upnp::tokio::Behaviour::default(),
+                autonat,
+                relay,
+                relay_client,
+                dcutr: dcutr::Behaviour::new(peer_id),
             })
         })
         .map_err(|e| NodeError::Config(format!("P2P behaviour setup failed: {e}")))?
@@ -284,6 +321,30 @@ fn dial_once(swarm: &mut libp2p::Swarm<VinxBehaviour>, peer: PeerId, addrs: Vec<
     let _ = swarm.dial(opts);
 }
 
+/// Behind a NAT: asks reachable relay-capable peers for a reservation, so others can
+/// reach this node through `<relay>/p2p-circuit` (and DCUtR then tries a direct path).
+fn reserve_relays(
+    swarm: &mut libp2p::Swarm<VinxBehaviour>,
+    nat: &mut discovery::Nat,
+    metrics: &NodeMetrics,
+) {
+    for (peer, addr) in nat.next_relays() {
+        let circuit = addr
+            .with(libp2p::multiaddr::Protocol::P2p(peer))
+            .with(libp2p::multiaddr::Protocol::P2pCircuit);
+        match swarm.listen_on(circuit.clone()) {
+            Ok(_) => {
+                debug!(relay = %circuit, "Requesting a relay reservation");
+                nat.reserved.insert(peer);
+            }
+            Err(e) => debug!(relay = %circuit, error = %e, "Relay listen failed"),
+        }
+    }
+    metrics
+        .relays
+        .store(nat.reserved.len() as u64, Ordering::Relaxed);
+}
+
 /// What the event loop needs to keep the node connected without any fixed server.
 struct Discovery {
     entry: Vec<Multiaddr>,
@@ -316,6 +377,7 @@ async fn run_event_loop(
     disc: Discovery,
 ) {
     let mut discover = tokio::time::interval(Duration::from_secs(30));
+    let mut nat = discovery::Nat::default();
     let mut ticks: u64 = 0;
     let mut guard = guard::PeerGuard::new();
     // Transactions to relay are grouped and flushed every 250 ms (or when a batch is
@@ -340,6 +402,9 @@ async fn run_event_loop(
                     for addr in &disc.entry {
                         let _ = swarm.dial(addr.clone());
                     }
+                }
+                if nat.private {
+                    reserve_relays(&mut swarm, &mut nat, &metrics);
                 }
                 if connected < discovery::TARGET_PEERS {
                     // Random walk: asks the network for peers close to a random id;
@@ -381,7 +446,12 @@ async fn run_event_loop(
                     SwarmEvent::NewListenAddr { address, .. } => {
                         info!(address = %address, "P2P listening");
                     }
-                    SwarmEvent::ConnectionEstablished { peer_id, num_established, .. } => {
+                    SwarmEvent::ConnectionEstablished { peer_id, num_established, endpoint, .. } => {
+                        // A peer we dialed directly is reachable: a usable relay if it
+                        // also speaks the relay protocol (learned from identify).
+                        if endpoint.is_dialer() && !discovery::is_relayed(endpoint.get_remote_address()) {
+                            nat.reachable_at(peer_id, endpoint.get_remote_address().clone());
+                        }
                         if num_established.get() == 1
                             && swarm.connected_peers().count() > discovery::MAX_PEERS
                         {
@@ -392,6 +462,43 @@ async fn run_event_loop(
                         }
                         metrics.peer_count.store(swarm.connected_peers().count() as u64, Ordering::Relaxed);
                     }
+                    SwarmEvent::Behaviour(VinxBehaviourEvent::Autonat(autonat::Event::StatusChanged { new, .. })) => {
+                        let (code, private) = match &new {
+                            autonat::NatStatus::Public(addr) => {
+                                info!(address = %addr, "Reachable from the network");
+                                (1, false)
+                            }
+                            autonat::NatStatus::Private => {
+                                info!("Behind a NAT: reaching peers through relays");
+                                (2, true)
+                            }
+                            autonat::NatStatus::Unknown => (0, false),
+                        };
+                        metrics.reachability.store(code, Ordering::Relaxed);
+                        nat.private = private;
+                        if private {
+                            reserve_relays(&mut swarm, &mut nat, &metrics);
+                        }
+                    }
+                    SwarmEvent::Behaviour(VinxBehaviourEvent::Upnp(ev)) => match ev {
+                        upnp::Event::NewExternalAddr(addr) => info!(address = %addr, "Port opened on the router (UPnP)"),
+                        upnp::Event::ExpiredExternalAddr(addr) => debug!(address = %addr, "UPnP mapping expired"),
+                        upnp::Event::GatewayNotFound => debug!("No UPnP router found"),
+                        upnp::Event::NonRoutableGateway => debug!("UPnP router is not on the public internet"),
+                    },
+                    SwarmEvent::Behaviour(VinxBehaviourEvent::RelayClient(
+                        relay::client::Event::ReservationReqAccepted { relay_peer_id, renewal, .. },
+                    )) => {
+                        if !renewal {
+                            info!(relay = %relay_peer_id, "Reachable through relay");
+                        }
+                    }
+                    SwarmEvent::Behaviour(VinxBehaviourEvent::Dcutr(ev)) => {
+                        match ev.result {
+                            Ok(_) => info!(peer = %ev.remote_peer_id, "Direct connection through the NAT"),
+                            Err(e) => debug!(peer = %ev.remote_peer_id, error = %e, "Hole punching failed, staying relayed"),
+                        }
+                    }
                     SwarmEvent::Behaviour(VinxBehaviourEvent::Kad(kad::Event::RoutingUpdated {
                         peer,
                         addresses,
@@ -400,6 +507,12 @@ async fn run_event_loop(
                         if swarm.connected_peers().count() < discovery::TARGET_PEERS {
                             dial_once(&mut swarm, peer, addresses.into_vec());
                         }
+                    }
+                    SwarmEvent::ConnectionClosed { peer_id, num_established: 0, .. } if nat.drop_relay(&peer_id) => {
+                        warn!(peer = %peer_id, "Relay lost");
+                        metrics.relays.store(nat.reserved.len() as u64, Ordering::Relaxed);
+                        guard.forget(&peer_id);
+                        metrics.peer_count.store(swarm.connected_peers().count() as u64, Ordering::Relaxed);
                     }
                     SwarmEvent::ConnectionClosed { peer_id, .. } => {
                         debug!(peer = %peer_id, "Peer disconnected");
@@ -429,6 +542,12 @@ async fn run_event_loop(
                         // exponential connection storm until they ran out of file descriptors.
                         if info.protocol_version != IDENTIFY_PROTOCOL {
                             continue;
+                        }
+                        if info.protocols.contains(&relay::HOP_PROTOCOL_NAME) {
+                            nat.relay_capable(peer_id);
+                            if nat.private {
+                                reserve_relays(&mut swarm, &mut nat, &metrics);
+                            }
                         }
                         // Feed the routing table with the addresses other nodes can reach
                         // (no loopback unless we are a loopback-only test network).

@@ -46,6 +46,59 @@ pub fn parse_seeds(list: &str) -> Vec<String> {
         .collect()
 }
 
+/// Relays a node behind a NAT keeps a reservation on.
+pub const WANTED_RELAYS: usize = 2;
+
+/// NAT traversal state: which peers can relay for us, and which do.
+#[derive(Default)]
+pub struct Nat {
+    /// AutoNAT says other nodes cannot dial us.
+    pub private: bool,
+    /// Peers we reached by dialing them directly, with that address.
+    direct: std::collections::HashMap<PeerId, Multiaddr>,
+    /// Peers that announced the relay (hop) protocol.
+    hop: std::collections::HashSet<PeerId>,
+    /// Relays we asked for a reservation.
+    pub reserved: std::collections::HashSet<PeerId>,
+}
+
+impl Nat {
+    pub fn reachable_at(&mut self, peer: PeerId, addr: Multiaddr) {
+        // Keep the transport part only: the circuit address appends `/p2p/<relay>`.
+        let addr: Multiaddr = addr
+            .iter()
+            .filter(|p| !matches!(p, Protocol::P2p(_)))
+            .collect();
+        self.direct.insert(peer, addr);
+    }
+    pub fn relay_capable(&mut self, peer: PeerId) {
+        self.hop.insert(peer);
+    }
+    /// Forgets a relay whose connection closed. True if it was one of ours.
+    pub fn drop_relay(&mut self, peer: &PeerId) -> bool {
+        self.direct.remove(peer);
+        self.reserved.remove(peer)
+    }
+    /// Reachable relays to ask, up to [`WANTED_RELAYS`] reservations in total.
+    pub fn next_relays(&self) -> Vec<(PeerId, Multiaddr)> {
+        let want = WANTED_RELAYS.saturating_sub(self.reserved.len());
+        let mut c: Vec<(PeerId, Multiaddr)> = self
+            .direct
+            .iter()
+            .filter(|(p, _)| self.hop.contains(*p) && !self.reserved.contains(*p))
+            .map(|(p, a)| (*p, a.clone()))
+            .collect();
+        c.sort_by_key(|(p, _)| p.to_bytes());
+        c.truncate(want);
+        c
+    }
+}
+
+/// An address that goes through a relay.
+pub fn is_relayed(a: &Multiaddr) -> bool {
+    a.iter().any(|p| matches!(p, Protocol::P2pCircuit))
+}
+
 pub fn is_loopback(a: &Multiaddr) -> bool {
     a.iter().any(|p| match p {
         Protocol::Ip4(ip) => ip.is_loopback() || ip.is_unspecified(),
@@ -116,6 +169,44 @@ mod tests {
         save_peers(&path, &[]);
         assert_eq!(load_peers(&path).len(), 1);
         let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn relays_are_reachable_hop_peers_up_to_two() {
+        let mut nat = Nat::default();
+        let addr: Multiaddr = "/ip4/203.0.113.1/tcp/9001".parse().unwrap();
+        let (a, b, c, d) = (
+            PeerId::random(),
+            PeerId::random(),
+            PeerId::random(),
+            PeerId::random(),
+        );
+        for p in [a, b, c] {
+            nat.reachable_at(p, addr.clone());
+        }
+        for p in [a, b, c, d] {
+            nat.relay_capable(p); // d speaks the protocol but was never reached directly
+        }
+        nat.reachable_at(a, format!("/ip4/203.0.113.1/tcp/9001/p2p/{a}").parse().unwrap());
+        let first = nat.next_relays();
+        assert!(first.iter().all(|(_, ad)| !ad.iter().any(|p| matches!(p, Protocol::P2p(_)))));
+        assert_eq!(first.len(), 2);
+        assert!(first.iter().all(|(p, _)| *p != d));
+        nat.reserved.extend(first.iter().map(|(p, _)| *p));
+        assert!(nat.next_relays().is_empty(), "two reservations are enough");
+        let lost = first[0].0;
+        assert!(nat.drop_relay(&lost));
+        let refill = nat.next_relays();
+        assert_eq!(refill.len(), 1);
+        assert_ne!(
+            refill[0].0, lost,
+            "a lost relay is not retried until reached again"
+        );
+        let circuit: Multiaddr = format!("/ip4/1.2.3.4/tcp/1/p2p/{a}/p2p-circuit")
+            .parse()
+            .unwrap();
+        assert!(is_relayed(&circuit));
+        assert!(!is_relayed(&addr));
     }
 
     #[test]

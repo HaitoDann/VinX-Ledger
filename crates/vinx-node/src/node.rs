@@ -67,6 +67,10 @@ pub struct NodeMetricsInner {
     pub consensus_round: AtomicU64,
     /// Peers currently connected over P2P.
     pub peer_count: AtomicU64,
+    /// Reachability seen by peers (AutoNAT): 0 unknown, 1 reachable, 2 behind a NAT.
+    pub reachability: AtomicU64,
+    /// Relays holding a reservation for this node (when behind a NAT).
+    pub relays: AtomicU64,
 }
 
 impl NodeMetrics {
@@ -83,6 +87,8 @@ impl NodeMetrics {
                 last_block_secs: AtomicU64::new(0),
                 consensus_round: AtomicU64::new(0),
                 peer_count: AtomicU64::new(0),
+                reachability: AtomicU64::new(0),
+                relays: AtomicU64::new(0),
             }),
         }
     }

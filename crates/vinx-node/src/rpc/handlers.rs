@@ -101,6 +101,19 @@ pub async fn health(State(node): State<Arc<Node>>) -> ApiResult<HealthResponse> 
             .metrics
             .peer_count
             .load(std::sync::atomic::Ordering::Relaxed),
+        reachable: match node
+            .metrics
+            .reachability
+            .load(std::sync::atomic::Ordering::Relaxed)
+        {
+            1 => "public",
+            2 => "private",
+            _ => "unknown",
+        },
+        relays: node
+            .metrics
+            .relays
+            .load(std::sync::atomic::Ordering::Relaxed),
     }))
 }
 

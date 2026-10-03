@@ -218,6 +218,8 @@ function renderVal() {
   $('v-cos').textContent = pool.cosigned_in_window ?? '—';
   $('v-pres').textContent = pool.eligible_in_window ? Math.round(100 * pool.cosigned_in_window / pool.eligible_in_window) + ' %' : '—';
   $('v-peers').textContent = local?.peers ?? '—';
+  const reach = local?.reachable;
+  $('n-sub').textContent = local ? `Validateur en marche · ${local.peers ?? 0} pair(s)` + (reach === 'private' ? ' · via relais' : reach === 'public' ? ' · joignable' : '') : $('n-sub').textContent;
 }
 
 $('v-switch').onclick = () => {
