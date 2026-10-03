@@ -443,6 +443,11 @@ impl Node {
             .checked_sub(Duration::from_secs(60))
             .unwrap_or_else(Instant::now);
         let mut rebroadcast = tokio::time::interval(Duration::from_secs(5));
+        // Ticks missed while the loop waits elsewhere must not be replayed: a validator
+        // that ran alone for hours (deciding instantly, never polling this timer) would
+        // otherwise fire thousands of rebroadcasts at once when it first has to wait for
+        // peers, and get banned by them for flooding — halting the chain.
+        rebroadcast.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
         let mut last_tip_resend = last_sync_request;
 
         loop {
@@ -509,6 +514,7 @@ impl Node {
             }
             let mut decided = self.route(height, outs, &timer_tx).await;
             let mut synced = false;
+            rebroadcast.reset();
 
             while decided.is_none() && !synced {
                 tokio::select! {
