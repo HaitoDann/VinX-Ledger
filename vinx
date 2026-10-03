@@ -432,7 +432,31 @@ EOF
     echo "  ${c_dim}journal : journalctl -u vinx-node1 -f   ·   arrêt : systemctl stop vinx-node1${c_0}"
 }
 
+# Rassemble ce qu'il faut pour diagnostiquer un blocage, dans un fichier à partager.
+cmd_diag() {
+    local out="$ROOT/vinx-diag-$(hostname)-$(date +%Y%m%d-%H%M).txt" me=""
+    [[ -f "$HOME_DIR/node1/validator.json" ]] && me=$(python3 -c "import json;print(json.load(open('$HOME_DIR/node1/validator.json'))['address'])")
+    {
+        echo "== $(hostname) · $(date -Is) · version $(git -C "$ROOT" rev-parse --short HEAD 2>/dev/null)"
+        echo "== joined: $(cat "$HOME_DIR/joined" 2>/dev/null || echo non)"
+        echo "== health"; rpc 1 health; echo
+        echo "== validators"; rpc 1 validators; echo
+        [[ -n "$me" ]] && { echo "== validator $me"; rpc 1 "validator/$me"; echo; }
+        local h; h=$(rpc 1 health | jget "['height']")
+        for b in $((h - 1)) "$h"; do echo "== block $b"; rpc 1 "block/$b" | python3 -c "import sys,json
+b=json.load(sys.stdin); b.pop('transactions',None); print(json.dumps(b))" 2>/dev/null; done
+        echo "== journal (avertissements et erreurs)"
+        { grep -aE "WARN|ERROR" "$HOME_DIR/node1.log" 2>/dev/null | tail -n 80; } || true
+        { journalctl -u vinx-node1 --no-pager 2>/dev/null | grep -aE "WARN|ERROR" | tail -n 80; } || true
+        echo "== journal (fin)"
+        tail -n 60 "$HOME_DIR/node1.log" 2>/dev/null || true
+    } >"$out" 2>&1
+    ok "diagnostic écrit : $out"
+    echo "  ${c_dim}Envoyez ce fichier (ou son contenu) : il ne contient aucune clé secrète.${c_0}"
+}
+
 case "${1:-help}" in
+    diag) cmd_diag ;;
     pending) cmd_pending ;;
     service) cmd_service ;;
     load)   shift; cmd_load "$@" ;;

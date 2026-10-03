@@ -2,3 +2,4 @@
 /devnet/
 .vinx-local/
 .vinx-build.log
+vinx-diag-*.txt
