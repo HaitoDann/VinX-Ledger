@@ -455,7 +455,95 @@ b=json.load(sys.stdin); b.pop('transactions',None); print(json.dumps(b))" 2>/dev
     echo "  ${c_dim}Envoyez ce fichier (ou son contenu) : il ne contient aucune clé secrète.${c_0}"
 }
 
+# ── Alertes sur téléphone (ntfy) ─────────────────────────────────────────────
+# ./vinx alert <sujet>  : active les alertes (app ntfy, abonnement à <sujet>)
+# ./vinx check          : un contrôle ; n'envoie qu'un message par changement d'état
+ntfy() { # titre message priorité
+    local topic; topic=$(cat "$HOME_DIR/alert" 2>/dev/null) || return 0
+    curl -s --max-time 10 -H "Title: $1" -H "Priority: ${3:-default}" -H "Tags: vinx" \
+        -d "$2" "https://ntfy.sh/$topic" >/dev/null || true
+}
+
+cmd_check() {
+    [[ -f "$HOME_DIR/alert" ]] || die "alertes non configurées — ./vinx alert <sujet>"
+    local state="ok" detail="" h bt age peers me
+    local health; health=$(rpc 1 health)
+    if [[ -z "$health" ]]; then
+        state="down"; detail="Le nœud de $(hostname) ne répond plus."
+    else
+        h=$(echo "$health" | jget "['height']"); bt=$(echo "$health" | jget "['block_time_secs']")
+        peers=$(echo "$health" | jget "['peers']")
+        age=$(( $(date +%s) - $(echo "$health" | jget "['tip_timestamp']") ))
+        if (( age > 6 * ${bt:-12} )); then
+            state="stalled"; detail="Aucun bloc depuis ${age}s (hauteur $h) — vu de $(hostname)."
+        elif [[ "${peers:-0}" == 0 && ( -f "$HOME_DIR/joined" || "$(rpc 1 validators | jget "['count']")" -gt "$(count)" ) ]]; then
+            state="isolated"; detail="$(hostname) n'a plus aucun pair (hauteur $h)."
+        elif [[ -f "$HOME_DIR/node1/validator.json" ]]; then
+            me=$(python3 -c "import json;print(json.load(open('$HOME_DIR/node1/validator.json'))['address'])")
+            if rpc 1 validators | python3 -c "import sys,json
+v=[x for x in json.load(sys.stdin)['validators'] if x['address']=='$me']
+sys.exit(0 if v and v[0]['suspended'] else 1)" 2>/dev/null; then
+                state="jailed"; detail="Le validateur de $(hostname) est suspendu (blocs manqués)."
+            fi
+        fi
+    fi
+    local prev; prev=$(cat "$HOME_DIR/alert.state" 2>/dev/null || echo ok)
+    [[ "$state" == "$prev" ]] && return 0
+    echo "$state" >"$HOME_DIR/alert.state"
+    if [[ "$state" == "ok" ]]; then
+        ntfy "VinX : rétabli" "$(hostname) : tout va bien de nouveau (hauteur $h)." default
+    else
+        ntfy "VinX : problème" "$detail" urgent
+    fi
+}
+
+cmd_alert() {
+    local topic="${1:-}"
+    if [[ -z "$topic" ]]; then
+        topic="vinx-$(head -c 9 /dev/urandom | od -An -tx1 | tr -d ' \n')"
+        echo "  ${c_dim}Sujet généré (gardez-le secret : qui le connaît reçoit vos alertes) :${c_0}"
+    fi
+    [[ "$topic" =~ ^[A-Za-z0-9_-]{6,64}$ ]] || die "sujet invalide (lettres, chiffres, - et _, 6 à 64 caractères)"
+    echo "$topic" >"$HOME_DIR/alert"; echo ok >"$HOME_DIR/alert.state"
+    echo "      ${c_b}$topic${c_0}"
+    ntfy "VinX : alertes activées" "$(hostname) vous préviendra si la chaîne s'arrête, si le nœud tombe ou s'il est isolé." default
+    if [[ $EUID -eq 0 ]] && command -v systemctl >/dev/null; then
+        cat >/etc/systemd/system/vinx-check.service <<EOF
+[Unit]
+Description=VinX — contrôle de santé et alertes
+[Service]
+Type=oneshot
+Environment=VINX_HOME=$HOME_DIR
+ExecStart=$ROOT/vinx check
+EOF
+        cat >/etc/systemd/system/vinx-check.timer <<EOF
+[Unit]
+Description=VinX — contrôle toutes les minutes
+[Timer]
+OnBootSec=2min
+OnUnitActiveSec=1min
+[Install]
+WantedBy=timers.target
+EOF
+        if systemctl daemon-reload >/dev/null 2>&1 && systemctl enable --now vinx-check.timer >/dev/null 2>&1; then
+            ok "contrôle automatique toutes les minutes (systemctl status vinx-check.timer)"
+        else
+            rm -f /etc/systemd/system/vinx-check.service /etc/systemd/system/vinx-check.timer
+            echo "  ${c_dim}systemd indisponible — ajoutez ce contrôle à crontab -e :${c_0}"
+            echo "      * * * * * VINX_HOME=$HOME_DIR $ROOT/vinx check"
+        fi
+    else
+        echo "  ${c_dim}Ajoutez ce contrôle à crontab -e :${c_0}"
+        echo "      * * * * * VINX_HOME=$HOME_DIR $ROOT/vinx check"
+    fi
+    echo
+    echo "  Sur le téléphone : installez l'app ${c_b}ntfy${c_0} (Android / iOS), « + », sujet ${c_b}$topic${c_0}."
+    echo "  Une notification de test vient d'être envoyée."
+}
+
 case "${1:-help}" in
+    alert) shift; cmd_alert "$@" ;;
+    check) cmd_check ;;
     diag) cmd_diag ;;
     pending) cmd_pending ;;
     service) cmd_service ;;
