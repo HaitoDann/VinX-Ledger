@@ -329,6 +329,10 @@ async fn run_event_loop(
             }
             _ = discover.tick() => {
                 ticks += 1;
+                for peer in guard.expired_bans(std::time::Instant::now()) {
+                    info!(peer = %peer, "Ban lifted");
+                    swarm.behaviour_mut().gossipsub.remove_blacklisted_peer(&peer);
+                }
                 let connected = swarm.connected_peers().count();
                 metrics.peer_count.store(connected as u64, Ordering::Relaxed);
                 if connected == 0 {
@@ -450,14 +454,16 @@ async fn run_event_loop(
                             guard.admit(propagation_source, std::time::Instant::now())
                         {
                             if ban {
-                                warn!(peer = %propagation_source, "Banning peer for flooding");
+                                warn!(peer = %propagation_source, "Banning peer for flooding (5 min)");
+                                guard.ban(propagation_source, std::time::Instant::now());
                                 swarm.behaviour_mut().gossipsub.blacklist_peer(&propagation_source);
                             }
                             continue;
                         }
                         let Some(msg) = P2pMessage::decode(&message.data) else {
                             if guard.penalize(propagation_source, guard::BAD_MESSAGE_PENALTY) {
-                                warn!(peer = %propagation_source, "Banning peer for invalid messages");
+                                warn!(peer = %propagation_source, "Banning peer for invalid messages (5 min)");
+                                guard.ban(propagation_source, std::time::Instant::now());
                                 swarm.behaviour_mut().gossipsub.blacklist_peer(&propagation_source);
                             }
                             continue;

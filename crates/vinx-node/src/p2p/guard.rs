@@ -20,6 +20,10 @@ use libp2p::PeerId;
 /// Reputation at or below which a peer is banned (blacklisted at the gossip layer).
 pub const BAN_THRESHOLD: i32 = -5;
 
+/// How long a ban lasts. Never permanent: on a small validator set, cutting a validator
+/// off for good halts the chain, and an honest node can burst (restart, catch-up).
+pub const BAN_DURATION: std::time::Duration = std::time::Duration::from_secs(300);
+
 /// Sustained inbound message budget per peer, in messages per second. Comfortably above
 /// any honest steady-state (blocks, co-signatures, the occasional transaction) but far
 /// below what a flooding peer would sustain.
@@ -84,6 +88,7 @@ pub enum Admit {
 pub struct PeerGuard {
     reputation: HashMap<PeerId, i32>,
     buckets: HashMap<PeerId, TokenBucket>,
+    banned: HashMap<PeerId, Instant>,
 }
 
 impl PeerGuard {
@@ -113,6 +118,27 @@ impl PeerGuard {
         let score = self.reputation.entry(peer).or_insert(0);
         *score -= points;
         *score <= BAN_THRESHOLD
+    }
+
+    /// Records a ban of `peer` from `now`; [`PeerGuard::expired_bans`] lifts it later.
+    pub fn ban(&mut self, peer: PeerId, now: Instant) {
+        self.banned.insert(peer, now + BAN_DURATION);
+    }
+
+    /// Peers whose ban is over: their reputation and rate budget start afresh.
+    pub fn expired_bans(&mut self, now: Instant) -> Vec<PeerId> {
+        let done: Vec<PeerId> = self
+            .banned
+            .iter()
+            .filter(|(_, until)| **until <= now)
+            .map(|(p, _)| *p)
+            .collect();
+        for p in &done {
+            self.banned.remove(p);
+            self.reputation.remove(p);
+            self.buckets.remove(p);
+        }
+        done
     }
 
     /// Drops all per-peer state for a disconnected peer, bounding memory against churn.
@@ -210,6 +236,23 @@ mod tests {
             assert!(!g.penalize(p, 1));
         }
         assert!(g.penalize(p, 1)); // fifth strike → banned
+    }
+
+    #[test]
+    fn bans_are_lifted_after_their_duration() {
+        let mut g = PeerGuard::new();
+        let p = peer();
+        let t0 = Instant::now();
+        g.penalize(p, 10);
+        g.ban(p, t0);
+        assert!(g.expired_bans(t0 + BAN_DURATION / 2).is_empty());
+        assert_eq!(g.expired_bans(t0 + BAN_DURATION), vec![p]);
+        assert_eq!(
+            g.score(&p),
+            0,
+            "a lifted ban starts from a clean reputation"
+        );
+        assert!(g.expired_bans(t0 + BAN_DURATION * 2).is_empty());
     }
 
     #[test]
