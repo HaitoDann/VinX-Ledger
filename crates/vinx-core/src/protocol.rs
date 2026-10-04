@@ -2,6 +2,15 @@ use borsh::{BorshDeserialize, BorshSerialize};
 use serde::{Deserialize, Serialize};
 use std::fmt;
 
+/// The protocol version this build of the software implements (ADR 0086). A node whose
+/// chain has activated a later version stops instead of applying rules it does not know.
+/// Bump it with every consensus-rule change, gated by `WorldState::protocol_at_least`.
+pub const NODE_PROTOCOL_VERSION: ProtocolVersion = ProtocolVersion {
+    major: 1,
+    minor: 0,
+    patch: 0,
+};
+
 /// Semantic version of the VinX protocol running on-chain.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, BorshSerialize, BorshDeserialize)]
 pub struct ProtocolVersion {
@@ -16,6 +25,19 @@ impl ProtocolVersion {
         minor: 0,
         patch: 0,
     };
+
+    /// Compact form carried in block headers: `major·10⁶ + minor·10³ + patch`.
+    pub const fn as_u32(&self) -> u32 {
+        self.major as u32 * 1_000_000 + self.minor as u32 * 1_000 + self.patch as u32
+    }
+
+    pub const fn from_u32(v: u32) -> Self {
+        Self {
+            major: (v / 1_000_000) as u16,
+            minor: (v / 1_000 % 1_000) as u16,
+            patch: (v % 1_000) as u16,
+        }
+    }
 
     pub fn new(major: u16, minor: u16, patch: u16) -> Self {
         Self {

@@ -4104,7 +4104,7 @@ checksum = "0b928f33d975fc6ad9f86c8f283853ad26bdd5b10b7f1542aa2fa15e2289105a"
 
 [[package]]
 name = "vinx-core"
-version = "0.1.0-alpha.1"
+version = "0.2.0"
 dependencies = [
  "borsh",
  "hex",
@@ -4116,7 +4116,7 @@ dependencies = [
 
 [[package]]
 name = "vinx-crypto"
-version = "0.1.0-alpha.1"
+version = "0.2.0"
 dependencies = [
  "bech32",
  "blake3",
@@ -4133,7 +4133,7 @@ dependencies = [
 
 [[package]]
 name = "vinx-desktop-core"
-version = "0.1.0-alpha.1"
+version = "0.2.0"
 dependencies = [
  "aes-gcm",
  "argon2",
@@ -4150,7 +4150,7 @@ dependencies = [
 
 [[package]]
 name = "vinx-node"
-version = "0.1.0-alpha.1"
+version = "0.2.0"
 dependencies = [
  "ahash",
  "axum",
@@ -4181,7 +4181,7 @@ dependencies = [
 
 [[package]]
 name = "vinx-state"
-version = "0.1.0-alpha.1"
+version = "0.2.0"
 dependencies = [
  "borsh",
  "hex",
@@ -4197,7 +4197,7 @@ dependencies = [
 
 [[package]]
 name = "vinx-wallet"
-version = "0.1.0-alpha.1"
+version = "0.2.0"
 dependencies = [
  "aes-gcm",
  "argon2",

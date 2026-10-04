@@ -1,11 +1,9 @@
 #!/usr/bin/env bash
 # ─────────────────────────────────────────────────────────────────────────────
-# VinX — Passage des box : nœuds derrière un NAT (simulé par iptables).
+# VinX — Mise à jour sans redémarrage (ADR 0086).
 #
-# node1 et node4 sont joignables ; node2 et node3 refusent toute connexion entrante
-# (comme derrière une box sans port ouvert). Ils doivent le détecter (AutoNAT),
-# réserver un relais, et la chaîne doit survivre à l'arrêt de node1.
-# Nécessite root (iptables).
+# NODE = version actuelle, NEW_NODE = version suivante (NODE_PROTOCOL_VERSION + 1), les
+# deux construites avec un préavis d'annonce court (UPGRADE_NOTICE_PATCH_SECS = 60).
 #
 # Lance 4 vrais nœuds (P2P libp2p, RPC HTTP) sur une genèse partagée à 4 validateurs,
 # puis vérifie :
@@ -20,8 +18,9 @@ set -euo pipefail
 
 NODE="${NODE:-./target/release/vinx-node}"
 WALLET="${WALLET:-./target/release/vinx-wallet}"
-BASE="${BENCH_DIR:-/tmp/vinx-bench-nat}"
-export VINX_NO_MDNS=1   # pas de découverte locale : seul Kademlia peut relier les nœuds
+BASE="${BENCH_DIR:-/tmp/vinx-bench-upgrade}"
+NEW_NODE="${NEW_NODE:?NEW_NODE=<binaire de la nouvelle version>}"
+declare -A BIN
 BLOCK_TIME="${BLOCK_TIME:-2}"
 CHAIN_ID=42
 GENESIS_TS=$(( $(date +%s) - 60 ))
@@ -33,19 +32,7 @@ done
 
 rm -rf "$BASE"; mkdir -p "$BASE"/node{1,2,3,4}
 declare -A PID
-nat_on() {  # refuse les connexions entrantes vers les ports P2P de node2 et node3
-    for port in 9002 9003; do
-        iptables -I INPUT -p tcp --dport "$port" --syn -j DROP
-        iptables -I INPUT -p udp --dport "$port" -m conntrack --ctstate NEW -j DROP
-    done
-}
-nat_off() {
-    for port in 9002 9003; do
-        iptables -D INPUT -p tcp --dport "$port" --syn -j DROP 2>/dev/null || true
-        iptables -D INPUT -p udp --dport "$port" -m conntrack --ctstate NEW -j DROP 2>/dev/null || true
-    done
-}
-cleanup() { for p in "${PID[@]:-}"; do kill "$p" 2>/dev/null || true; done; nat_off; }
+cleanup() { for p in "${PID[@]:-}"; do kill "$p" 2>/dev/null || true; done; }
 trap cleanup EXIT
 
 rpc()    { curl -s --max-time 2 "http://127.0.0.1:$1/$2" 2>/dev/null || true; }
@@ -59,11 +46,11 @@ ko()     { echo "  ✗ $*"; FAIL=1; }
 
 start() { # id
     local i="$1" peers=()
-    [[ $i != 1 ]] && peers+=("/ip4/127.0.0.1/tcp/9001")   # seul point d'entrée : node1
+    for j in 1 2 3 4; do [[ $j != "$i" ]] && peers+=("/ip4/127.0.0.1/tcp/$((9000 + j))"); done
     # shellcheck disable=SC2046
-    VINX_GENESIS_SPEC="$BASE/genesis.json" "$NODE" --data-dir "$BASE/node$i" $(owner_args "$i") \
+    VINX_GENESIS_SPEC="$BASE/genesis.json" "${BIN[$i]:-$NODE}" --data-dir "$BASE/node$i" $(owner_args "$i") \
         --rpc-listen "127.0.0.1:$((8544 + i))" --p2p-listen "/ip4/127.0.0.1/tcp/$((9000 + i))" \
-        ${peers[@]:+--peers "${peers[@]}"} >>"$BASE/node$i.log" 2>&1 &
+        --peers "${peers[@]}" >>"$BASE/node$i.log" 2>&1 &
     PID[$i]=$!
 }
 stop() { kill "${PID[$1]}" 2>/dev/null || true; wait "${PID[$1]}" 2>/dev/null || true; unset "PID[$1]"; }
@@ -84,7 +71,7 @@ agree() { # upto nodes...
     for h in $(seq 1 "$upto"); do
         local ref; ref=$(bhash "$1" "$h")
         for i in "$@"; do
-            [[ "$(bhash "$i" "$h")" == "$ref" && -n "$ref" ]] || { ko "désaccord à la hauteur $h (node$1=${ref:-vide}, node$i=$(bhash "$i" "$h"))"; return 1; }
+            [[ "$(bhash "$i" "$h")" == "$ref" && -n "$ref" ]] || { ko "désaccord à la hauteur $h"; return 1; }
         done
     done
     ok "même chaîne sur les nœuds $* jusqu'à $upto"
@@ -120,41 +107,33 @@ PY
 echo "  spec : $BASE/genesis.json"
 
 field() { rpc "$((8544 + $1))" health | jfield "['$2']"; }
-
-echo "=== Phase 1 : node2 et node3 derrière une « box » ==="
-nat_on
+echo "=== Phase 1 : 4 nœuds en version actuelle ==="
 for i in 1 2 3 4; do start "$i"; done
-if wait_height 5 120 1 2 3 4; then ok "les 4 nœuds avancent"; else ko "pas de progression"; fi
-deadline=$(( $(date +%s) + 240 ))
-while (( $(date +%s) < deadline )); do
-    [[ "$(field 2 reachable)" == private && "$(field 3 reachable)" == private \
-       && "$(field 2 relays)" -ge 1 && "$(field 3 relays)" -ge 1 ]] && break
-    sleep 5
-done
-for i in 2 3; do
-    r=$(field $i reachable); n=$(field $i relays)
-    [[ "$r" == private ]] && ok "node$i se sait derrière une box (AutoNAT)" || ko "node$i : joignabilité $r"
-    [[ "${n:-0}" -ge 1 ]] && ok "node$i a $n relais" || ko "node$i sans relais"
-done
-for i in 1 4; do
-    r=$(field $i reachable)
-    [[ "$r" != private ]] && ok "node$i joignable ($r)" || ko "node$i se croit derrière une box"
-done
-grep -h "Direct connection through the NAT" "$BASE"/node[23].log | head -1 | grep -q . \
-    && ok "connexion directe percée entre nœuds derrière des box (DCUtR)" \
-    || echo "  · pas de perçage direct observé (relais utilisé)"
-
-echo "=== Phase 2 : node1 (le point d'entrée) est coupé ==="
-stop 1
-H=$(height 2)
-if wait_height $((H + 4)) 180 2 3 4; then ok "la chaîne continue sans node1 ($H → $(height 2))"; else ko "bloquée sans node1 à $(height 2)"; fi
-agree "$(height 2)" 2 3 4 || true
-
-echo "=== Phase 3 : node3 redémarre derrière sa box, sans point d'entrée ==="
-stop 3; start 3
-H=$(height 2)
-if wait_height $((H + 3)) 240 2 3 4; then ok "node3 a retrouvé le réseau ($(field 3 peers) pairs)"; else ko "node3 isolé"; fi
-
+if wait_height 5 120 1 2 3 4; then ok "les 4 nœuds avancent (protocole $(field 1 protocol))"; else ko "pas de progression"; fi
+OLD=$(field 1 software_protocol)
+echo "=== Phase 2 : annonce de la nouvelle version ==="
+ACT=$(( $(date +%s) + 75 ))
+TARGET=$(python3 -c "v='$OLD'.split('.');v[2]=str(int(v[2])+1);print('.'.join(v))")
+"$WALLET" announce-upgrade --version "$TARGET" --activation-ts "$ACT" --wallet "$BASE/node1/admin.json" \
+    --node http://127.0.0.1:8545 >"$BASE/announce.log" 2>&1 && grep -q accepted "$BASE/announce.log" && ok "mise à jour $TARGET annoncée pour dans 75 s" || ko "annonce refusée : $(tail -1 "$BASE/announce.log")"
+while (( $(date +%s) < ACT + 20 )); do sleep 5; done
+[[ "$(field 1 protocol)" == "$OLD" ]] && ok "échéance passée, personne ne l'a installée : reste en attente ($OLD)" \
+    || ko "activée sans signal : $(field 1 protocol)"
+echo "=== Phase 3 : 3 validateurs sur 4 installent la nouvelle version ==="
+for i in 1 2 3; do stop "$i"; BIN[$i]="$NEW_NODE"; start "$i"; done
+deadline=$(( $(date +%s) + 300 ))
+until [[ "$(field 1 protocol)" == "$TARGET" ]] || (( $(date +%s) > deadline )); do sleep 3; done
+[[ "$(field 1 protocol)" == "$TARGET" ]] && ok "activée quand plus des 2/3 l'ont signalée ($TARGET)" || ko "pas activée"
+sleep 10
+[[ "$(field 4 upgrade_required)" == True ]] && ok "node4 (ancienne version) s'arrête proprement : upgrade_required" \
+    || ko "node4 : upgrade_required=$(field 4 upgrade_required)"
+H=$(height 1)
+if wait_height $((H + 4)) 180 1 2 3; then ok "la chaîne continue avec les nœuds à jour"; else ko "bloquée après l'activation"; fi
+echo "=== Phase 4 : node4 se met à jour ==="
+stop 4; BIN[4]="$NEW_NODE"; start 4
+H=$(height 1)
+if wait_height $((H + 3)) 240 1 2 3 4; then ok "node4 à jour rattrape la chaîne, sans redémarrage depuis la genèse"; else ko "node4 bloqué"; fi
+agree "$(height 4)" 1 2 3 4 || true
 echo
 if (( FAIL )); then echo "=== ÉCHEC — logs : $BASE/node*.log ==="; exit 1; fi
-echo "=== Passage des box : réussi — logs : $BASE/node*.log ==="
+echo "=== Mise à jour sans redémarrage : réussi ==="

@@ -7,10 +7,10 @@ use vinx_core::{
         cumulative_emission_atoms, Amount, ADMIN_TENURE_SECS, BOND_COOLDOWN_SECS, BOND_STEP_BPS,
         BPS_DENOM, DEFAULT_FEE_FLOOR_ATOMS, EPOCH_DURATION_SECS, EVIDENCE_MAX_AGE_SECS,
         EXISTENTIAL_DEPOSIT_ATOMS, FEE_PRODUCER_SHARE_BPS, MAX_ACTIVE_SET_SIZE, MAX_BOND_HARD_CAP,
-        MAX_MEMO_BYTES, MAX_NONCE_AHEAD, MAX_TX_PAYLOAD_BYTES, MAX_VALIDATOR_EXITS_PER_EPOCH,
-        MIN_ACTIVE_SET_SIZE, MIN_BOND_HARD_FLOOR, MIN_STAKE_ATOMS, MIN_VALIDATOR_BOND_ATOMS,
-        PROPOSER_SHARE_BPS, SLASH_BASE_BPS, SLASH_BOUNTY_BPS, SLASH_CORRELATION_FACTOR,
-        UNBONDING_SECS, VALIDATOR_SCORE_WINDOW_SECS,
+        MAX_MEMO_BYTES, MAX_NONCE_AHEAD, MAX_SET_ENTRIES_PER_EPOCH_BPS, MAX_TX_PAYLOAD_BYTES,
+        MAX_VALIDATOR_EXITS_PER_EPOCH, MIN_ACTIVE_SET_SIZE, MIN_BOND_HARD_FLOOR, MIN_STAKE_ATOMS,
+        MIN_VALIDATOR_BOND_ATOMS, PROPOSER_SHARE_BPS, SLASH_BASE_BPS, SLASH_BOUNTY_BPS,
+        SLASH_CORRELATION_FACTOR, UNBONDING_SECS, VALIDATOR_SCORE_WINDOW_SECS,
     },
     chain_id::CHAIN_ID_DEVNET,
     consensus::VoteEquivocation,
@@ -83,6 +83,11 @@ pub struct WorldState {
     pub current_version: ProtocolVersion,
     /// Upgrade scheduled but not yet activated.
     pub pending_upgrade: Option<ScheduledUpgrade>,
+    /// Latest protocol version each validator signaled in a block it proposed
+    /// (ADR 0086, `BlockHeader::version`). An upgrade activates only once validators
+    /// holding more than 2/3 of the voting power run it.
+    #[serde(default)]
+    pub version_signals: BTreeMap<Address, u32>,
     /// Active PoA validator set. Admin can add/remove validators via governance txs.
     pub validator_set: ValidatorSet,
     /// Chain ID for replay protection — transactions must match this value.
@@ -323,6 +328,7 @@ impl WorldState {
             admin_address: None,
             current_version: ProtocolVersion::GENESIS,
             pending_upgrade: None,
+            version_signals: BTreeMap::new(),
             // Placeholder — always overwritten by create_genesis_state before use.
             validator_set: ValidatorSet::single(Address::zero()),
             chain_id: CHAIN_ID_DEVNET,
@@ -513,6 +519,10 @@ impl WorldState {
             }
         };
         // ── validated: mutate ──
+        if header.version != 0 {
+            self.version_signals
+                .insert(header.validator, header.version);
+        }
         if !cosigners.is_empty() {
             self.record_block_cosigns(&cosigners);
         }
@@ -534,6 +544,39 @@ impl WorldState {
             .into_iter()
             .map(|k| k.map(|k| k.to_vec()))
             .collect();
+        // Absent validators leave the voting set at once (not at the epoch close): the
+        // quorum then no longer counts them, so a second wave of absences does not add up
+        // to the 1/3 that would halt the chain. They come back after `Unjail` and the next
+        // epoch close. Done after recording this height's voters, which still include them.
+        let jailed: Vec<Address> = self
+            .validator_set
+            .validators()
+            .iter()
+            .copied()
+            .filter(|a| !reliability::is_eligible(&self.reliability, a))
+            .collect();
+        if !jailed.is_empty() && jailed.len() < self.validator_set.len() {
+            let keep: Vec<Address> = self
+                .validator_set
+                .validators()
+                .iter()
+                .copied()
+                .filter(|a| !jailed.contains(a))
+                .collect();
+            for a in &jailed {
+                if let Some(e) = self.validator_pool.get_mut(a) {
+                    if e.status == PoolStatus::Active {
+                        e.status = PoolStatus::Benched;
+                    }
+                }
+            }
+            self.validator_set = self.weighted_validator_set(keep);
+            tracing::warn!(
+                height,
+                removed = jailed.len(),
+                "jailed validators left the voting set"
+            );
+        }
         let rel = &self.reliability;
         self.validator_set
             .advance_proposer_priority(|a| reliability::is_eligible(rel, a));
@@ -703,7 +746,7 @@ impl WorldState {
         let mut eligible: Vec<(Address, u32)> = self
             .validator_pool
             .iter()
-            .filter(|(_, e)| e.is_eligible())
+            .filter(|(a, e)| e.is_eligible() && reliability::is_eligible(&self.reliability, a))
             .map(|(a, e)| (*a, e.score_bps()))
             .collect();
 
@@ -713,7 +756,26 @@ impl WorldState {
             })
         });
 
-        let new_active: HashSet<Address> = eligible.iter().take(n).map(|(a, _)| *a).collect();
+        // Churn cap: at most MAX_SET_ENTRIES_PER_EPOCH_BPS of the current set (min. 1)
+        // newcomers per epoch, best ranked first; the others stay Benched and enter at the
+        // next closes. A rush of new validators cannot reshape the set in one go.
+        let incumbents: HashSet<Address> =
+            self.validator_set.validators().iter().copied().collect();
+        let entry_cap =
+            ((incumbents.len() * MAX_SET_ENTRIES_PER_EPOCH_BPS as usize).div_ceil(10_000)).max(1);
+        let mut entrants = 0usize;
+        let new_active: HashSet<Address> = eligible
+            .iter()
+            .filter(|(a, _)| {
+                if incumbents.is_empty() || incumbents.contains(a) {
+                    return true;
+                }
+                entrants += 1;
+                entrants <= entry_cap
+            })
+            .take(n)
+            .map(|(a, _)| *a)
+            .collect();
 
         // 4. Update pool statuses to match selection.
         for (addr, entry) in self.validator_pool.iter_mut() {
@@ -726,8 +788,11 @@ impl WorldState {
             }
         }
 
-        // 5. Distribute epoch pot proportionally by co-signature participation (ADR 0028).
-        // Weight = cosign_count_in_window; equal fallback for validators with zero count.
+        // 5. Distribute the epoch pot (proof of stake): each active validator's share is
+        //    stake (capped at 10 % of the active stake in sets of 10 or more) times its
+        //    participation (blocks co-signed / blocks it could co-sign). Staking more pays
+        //    more; being absent pays less, down to nothing. A validator with no window yet
+        //    counts as fully present. Equal split only if every weight is zero.
         if !new_active.is_empty() {
             let pot = self.epoch_dist_emission_pot;
             if pot > Amount::ZERO {
@@ -735,18 +800,45 @@ impl WorldState {
                 let mut sorted: Vec<Address> = new_active.iter().copied().collect();
                 sorted.sort();
 
-                let weights: Vec<(Address, u64)> = sorted
+                const FULL: u128 = 1_000_000;
+                // Stake in whole VINX; capped at 10 % of the active stake once the set is
+                // large enough for the cap to mean something (as for voting power).
+                let stakes: Vec<u128> = sorted
                     .iter()
                     .map(|a| {
-                        let w = self
-                            .validator_pool
+                        self.validator_pool
                             .get(a)
-                            .map(|e| e.cosign_count_in_window)
-                            .unwrap_or(0);
-                        (*a, w)
+                            // The genesis validators hold no bond: count every active
+                            // validator at least at the minimum bond.
+                            .map(|e| {
+                                e.bond_atoms.max(self.min_validator_bond_atoms)
+                                    / vinx_core::amount::DECIMAL_FACTOR
+                            })
+                            .unwrap_or(0)
                     })
                     .collect();
-                let total_weight: u64 = weights.iter().map(|(_, w)| *w).sum();
+                let total_stake: u128 = stakes.iter().sum();
+                let cap = if sorted.len() >= 10 {
+                    (total_stake / 10).max(1)
+                } else {
+                    u128::MAX
+                };
+                let weights: Vec<(Address, u128)> = sorted
+                    .iter()
+                    .zip(&stakes)
+                    .map(|(a, stake)| {
+                        let participation = match self.validator_pool.get(a) {
+                            Some(e) if e.eligible_blocks_in_window > 0 => {
+                                (e.cosign_count_in_window as u128 * FULL
+                                    / e.eligible_blocks_in_window as u128)
+                                    .min(FULL)
+                            }
+                            _ => FULL,
+                        };
+                        (*a, (*stake).min(cap) * participation)
+                    })
+                    .collect();
+                let total_weight: u128 = weights.iter().map(|(_, w)| *w).sum();
 
                 if total_weight == 0 {
                     // No participation data yet — equal split.
@@ -765,11 +857,11 @@ impl WorldState {
                         );
                     }
                 } else {
-                    let total_w = total_weight as u128;
+                    let total_w = total_weight;
                     let mut distributed = 0u128;
                     for (i, (addr, weight)) in weights.iter().enumerate() {
                         let share_atoms = if i + 1 < weights.len() {
-                            pot.atoms() * (*weight as u128) / total_w
+                            pot.atoms() * *weight / total_w
                         } else {
                             // Last recipient gets the remainder to avoid rounding loss.
                             pot.atoms() - distributed
@@ -1061,6 +1153,21 @@ impl WorldState {
             )));
         }
 
+        // A validator's operator key may hold no funds (ADR 0084 S5): its free `Unjail`
+        // for a jailed validator it operates is admitted from a fresh account.
+        if tx.tx_type == TransactionType::Unjail
+            && !self.accounts.contains_key(&tx.sender())
+            && self.may_unjail(&tx.sender(), &tx.to)
+        {
+            return if tx.nonce == 0 {
+                Ok(())
+            } else {
+                Err(CoreError::InvalidNonce {
+                    expected: 0,
+                    got: tx.nonce,
+                })
+            };
+        }
         let Some(account) = self.accounts.get(&tx.sender()) else {
             return Err(CoreError::InvalidTransaction(
                 "sender account does not exist (zero balance)".to_string(),
@@ -1620,11 +1727,12 @@ impl WorldState {
     /// Checks whether a pending upgrade should activate at the current block time
     /// (ADR 0006) and applies the version change if so.
     pub fn check_upgrade_activation(&mut self) {
-        let should_activate = self
-            .pending_upgrade
-            .as_ref()
-            .map(|u| self.current_block_ts >= u.activation_ts)
-            .unwrap_or(false);
+        // Due, and ready: validators holding > 2/3 of the voting power signaled a
+        // software version that implements it (ADR 0086). Until then it stays pending —
+        // nobody is cut off by an upgrade most of the network has not installed.
+        let should_activate = self.pending_upgrade.as_ref().is_some_and(|u| {
+            self.current_block_ts >= u.activation_ts && self.upgrade_ready(&u.version)
+        });
 
         if should_activate {
             let upgrade = self.pending_upgrade.take().unwrap();
@@ -1637,6 +1745,27 @@ impl WorldState {
                 "Protocol upgrade activated"
             );
         }
+    }
+
+    /// True when validators holding more than 2/3 of the voting power signaled a
+    /// version at least `target`.
+    pub fn upgrade_ready(&self, target: &ProtocolVersion) -> bool {
+        let need = target.as_u32();
+        let vs = &self.validator_set;
+        let ready: u64 = vs
+            .validators()
+            .iter()
+            .filter(|a| self.version_signals.get(*a).is_some_and(|v| *v >= need))
+            .map(|a| vs.power_of(a))
+            .sum();
+        let total: u64 = vs.validators().iter().map(|a| vs.power_of(a)).sum();
+        total > 0 && ready * 3 > total * 2
+    }
+
+    /// Consensus rules introduced by an upgrade are gated on the active version, so a
+    /// node replays old blocks with the old rules (ADR 0086): no restart from genesis.
+    pub fn protocol_at_least(&self, major: u16, minor: u16, patch: u16) -> bool {
+        self.current_version.as_u32() >= ProtocolVersion::new(major, minor, patch).as_u32()
     }
 
     // Staking rewards no longer exist: validators are paid for *work* (block
@@ -1710,6 +1839,7 @@ impl WorldState {
             memo_required: &'a std::collections::BTreeSet<Address>,
             emission_started: bool,
             genesis_prefund_atoms: u128,
+            version_signals: &'a BTreeMap<Address, u32>,
         }
 
         let commitment = ConsensusCommitment {
@@ -1746,6 +1876,7 @@ impl WorldState {
             // via `emission_epoch_ts` — donc invisible quand celui-ci vaut 0.
             emission_started: self.emission_started,
             genesis_prefund_atoms: self.genesis_prefund_atoms,
+            version_signals: &self.version_signals,
             // Dormant depuis ADR 0040, mais persisté et désérialisé : l'engager coûte
             // 16 octets et supprime la question « est-il vraiment mort ? ».
         };
@@ -2381,22 +2512,30 @@ impl WorldState {
         Ok(())
     }
 
+    /// The owner of `validator`, or its registered operator (ADR 0084 S5).
+    fn may_unjail(&self, signer: &Address, validator: &Address) -> bool {
+        signer == validator
+            || self.validator_pool.get(validator).and_then(|e| e.operator) == Some(*signer)
+    }
+
     fn apply_unjail(&mut self, tx: &Transaction) -> Result<(), CoreError> {
-        let account = self
-            .accounts
-            .get(&tx.sender())
-            .ok_or(CoreError::InsufficientBalance)?;
-        if account.nonce != tx.nonce {
-            return Err(CoreError::InvalidNonce {
-                expected: account.nonce,
-                got: tx.nonce,
-            });
-        }
         // ADR 0084 S5: `to` is the validator; the owner or its registered operator signs.
         let target = tx.to;
-        let operator = self.validator_pool.get(&target).and_then(|e| e.operator);
-        if tx.sender() != target && Some(tx.sender()) != operator {
+        if !self.may_unjail(&tx.sender(), &target) {
             return Err(CoreError::Unauthorized);
+        }
+        // An operator key may hold no funds: its first transaction opens the account
+        // (nonce only, zero balance) — bounded to one per jailing.
+        let nonce = self
+            .accounts
+            .get(&tx.sender())
+            .map(|a| a.nonce)
+            .unwrap_or(0);
+        if nonce != tx.nonce {
+            return Err(CoreError::InvalidNonce {
+                expected: nonce,
+                got: tx.nonce,
+            });
         }
         let height = self.block_height;
         if !reliability::try_unjail(&mut self.reliability, &target, height) {
@@ -2404,11 +2543,12 @@ impl WorldState {
                 "unjail failed: validator is not jailed or cooldown has not elapsed".to_string(),
             ));
         }
+        let sender = tx.sender();
         self.accounts
-            .get_mut(&tx.sender())
-            .expect("existence checked above")
+            .entry(sender)
+            .or_insert_with(|| Account::new(sender))
             .nonce += 1;
-        self.mark_dirty(&tx.sender());
+        self.mark_dirty(&sender);
         tracing::info!(validator = %target, height, "ADR 0027: validator unjailed");
         Ok(())
     }
@@ -2691,6 +2831,127 @@ mod tests {
             )),
             Err(CoreError::Unauthorized)
         );
+    }
+
+    #[test]
+    fn test_epoch_rewards_follow_stake_and_presence() {
+        // ADR 0086: share = voting power (stake, capped) × participation.
+        let mut state = WorldState::new();
+        let unit = vinx_core::amount::DECIMAL_FACTOR;
+        let (_, small) = kp_addr();
+        let (_, big) = kp_addr();
+        let (_, absent) = kp_addr();
+        for (addr, vinx, cosigned) in [
+            (small, 1_000u128, 100u64),
+            (big, 3_000, 100),
+            (absent, 3_000, 50),
+        ] {
+            let mut e = vinx_core::ValidatorPoolEntry::new(vinx * unit, 0);
+            e.status = PoolStatus::Active;
+            e.cosign_count_in_window = cosigned;
+            e.eligible_blocks_in_window = 100;
+            state.validator_pool.insert(addr, e);
+        }
+        let mut addrs = vec![small, big, absent];
+        addrs.sort();
+        state.validator_set = state.weighted_validator_set(addrs);
+        // A pot already minted into `emitted_atoms` (as the emission path does).
+        let pot = 7_000 * unit;
+        state.epoch_dist_emission_pot = Amount::from_atoms(pot);
+        state.emitted_atoms = pot;
+        state.tick_epoch_close();
+        let got = |a: &Address| {
+            state
+                .accounts
+                .get(a)
+                .map(|x| x.balance.atoms())
+                .unwrap_or(0)
+        };
+        let (s, b, a) = (got(&small), got(&big), got(&absent));
+        assert_eq!(s + b + a, pot, "the whole pot is paid out");
+        // Window decay at the close may scale counters, not their ratios.
+        assert!(
+            b > 2 * s && b < 4 * s,
+            "3× the stake earns ~3× ({s} vs {b})"
+        );
+        assert!(
+            a < b && a > b / 3,
+            "half the presence earns about half ({a} vs {b})"
+        );
+        assert!(state.supply_invariant_holds());
+    }
+
+    #[test]
+    fn test_set_entries_are_capped_per_epoch() {
+        // ADR 0086: at most 10 % of the set (min. 1) newcomers per epoch.
+        let mut state = WorldState::new();
+        let unit = vinx_core::amount::DECIMAL_FACTOR;
+        let (_, incumbent) = kp_addr();
+        let mut e = vinx_core::ValidatorPoolEntry::new(1_000 * unit, 0);
+        e.status = PoolStatus::Active;
+        state.validator_pool.insert(incumbent, e);
+        state.validator_set = state.weighted_validator_set(vec![incumbent]);
+        for _ in 0..3 {
+            let (_, a) = kp_addr();
+            let mut e = vinx_core::ValidatorPoolEntry::new(1_000 * unit, 0);
+            e.status = PoolStatus::Benched; // warm-up done, waiting for a seat
+            state.validator_pool.insert(a, e);
+        }
+        state.tick_epoch_close();
+        assert_eq!(
+            state.validator_set.len(),
+            2,
+            "one newcomer per epoch on a 1-validator set"
+        );
+        state.tick_epoch_close();
+        assert_eq!(state.validator_set.len(), 3);
+        state.tick_epoch_close();
+        assert_eq!(state.validator_set.len(), 4, "everyone gets in, gradually");
+    }
+
+    #[test]
+    fn test_upgrade_waits_for_two_thirds_of_validators() {
+        // ADR 0086: a due upgrade activates only once > 2/3 of the power runs it.
+        let mut state = WorldState::new();
+        let unit = vinx_core::amount::DECIMAL_FACTOR;
+        let vals: Vec<Address> = (0..3).map(|_| kp_addr().1).collect();
+        for a in &vals {
+            state
+                .validator_pool
+                .insert(*a, vinx_core::ValidatorPoolEntry::new(1_000 * unit, 0));
+        }
+        let mut sorted = vals.clone();
+        sorted.sort();
+        state.validator_set = state.weighted_validator_set(sorted);
+        let next = ProtocolVersion::new(1, 1, 0);
+        state.pending_upgrade = Some(ScheduledUpgrade {
+            version: next.clone(),
+            activation_ts: 100,
+            announced_at: 0,
+        });
+        state.current_block_ts = 200; // due
+        state.version_signals.insert(vals[0], next.as_u32());
+        state.version_signals.insert(vals[1], next.as_u32());
+        state.check_upgrade_activation();
+        assert_eq!(
+            state.current_version,
+            ProtocolVersion::GENESIS,
+            "2 of 3 is not > 2/3"
+        );
+        assert!(
+            state.pending_upgrade.is_some(),
+            "still pending, not dropped"
+        );
+        state
+            .version_signals
+            .insert(vals[2], ProtocolVersion::new(1, 2, 0).as_u32());
+        state.check_upgrade_activation();
+        assert_eq!(
+            state.current_version, next,
+            "a later version counts as ready"
+        );
+        assert!(state.protocol_at_least(1, 1, 0) && !state.protocol_at_least(1, 2, 0));
+        assert_eq!(ProtocolVersion::from_u32(next.as_u32()), next);
     }
 
     #[test]
@@ -3364,6 +3625,27 @@ mod tests {
     }
 
     #[test]
+    fn test_unfunded_operator_unjails_its_validator() {
+        // The node's operator key often holds nothing: its Unjail must still go through.
+        let (_, owner) = kp_addr();
+        let (op_kp, op) = kp_addr();
+        let (x_kp, _) = kp_addr();
+        let mut s = WorldState::new();
+        let mut e = vinx_core::ValidatorPoolEntry::new(MIN_VALIDATOR_BOND_ATOMS, 0);
+        e.operator = Some(op);
+        s.validator_pool.insert(owner, e);
+        s.reliability.entry(owner).or_default().jailed_until = Some(0);
+        s.block_height = 10;
+        let stranger = Transaction::new_unjail_for(&x_kp, owner, 0);
+        assert!(s.admission_check(&stranger).is_err(), "strangers stay out");
+        let tx = Transaction::new_unjail_for(&op_kp, owner, 0);
+        s.admission_check(&tx).expect("admitted without an account");
+        s.apply_transaction(&tx).expect("operator unjails");
+        assert!(!s.reliability[&owner].is_jailed());
+        assert!(s.supply_invariant_holds());
+    }
+
+    #[test]
     fn test_certificate_survives_key_rotation_in_its_block() {
         // Block 1 is voted with the old key; a key change applied *in* block 1 must not
         // make its certificate unverifiable at block 2.
@@ -3385,6 +3667,7 @@ mod tests {
             base_fee: 0,
             receipts_root: [0; 32],
             last_commit_hash: [0; 32],
+            version: 0,
         };
         let h1 = header(1, [0; 32]);
         s.begin_block(&h1, None).unwrap();
@@ -3499,8 +3782,16 @@ mod tests {
         assert_eq!(state.current_version, ProtocolVersion::GENESIS);
         assert!(state.pending_upgrade.is_some());
 
-        // Activates exactly at activation_ts
+        // Due, but no validator runs it yet: stays pending (ADR 0086).
         state.set_block_context(activation);
+        state.check_upgrade_activation();
+        assert_eq!(state.current_version, ProtocolVersion::GENESIS);
+        // The validators signal the new version: activates.
+        for v in state.validator_set.validators().to_vec() {
+            state
+                .version_signals
+                .insert(v, ProtocolVersion::new(1, 0, 1).as_u32());
+        }
         state.check_upgrade_activation();
         assert_eq!(state.current_version, ProtocolVersion::new(1, 0, 1));
         assert!(state.pending_upgrade.is_none());

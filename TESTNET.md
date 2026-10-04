@@ -1,137 +1,125 @@
-# VinX — Testnet public
+# VinX — Testnet officiel
 
-Ce guide explique comment lancer la chaîne de test publique (chaîne **7**). Il y a deux
-rôles : **l'opérateur**, qui héberge le nœud d'amorçage, et **les validateurs**, qui le
-rejoignent. Les VINX du testnet n'ont aucune valeur.
+La chaîne de test publique porte l'identifiant **7**. Ses VINX n'ont aucune valeur. Elle
+applique les règles du mainnet :
+- garantie minimale de **1 000 VINX** ;
+- récompenses proportionnelles à l'enjeu et à la présence ;
+- entrée libre des validateurs.
+
+Le faucet donne **1 100 VINX par adresse et par jour**, de quoi devenir validateur en une
+seule demande.
+
+Deux rôles :
+- **l'opérateur** lance la genèse et un premier point d'entrée ;
+- **tout le monde** peut ensuite rejoindre le réseau, avec l'application ou en ligne de
+  commande.
 
 ---
 
-## 1. Opérateur : le nœud d'amorçage
+## 1. Opérateur : lancement
 
 ### Serveur
 
-Le serveur doit avoir les caractéristiques suivantes :
-- une IP publique fixe (VPS ou box avec redirection de ports) et un nom DNS conseillé,
-  par exemple `seed.vinx.example` ;
-- 2 vCPU, 2 Go de RAM, 20 Go de disque ;
-- Debian 12 ou Ubuntu 22.04+.
+- une IP publique fixe et, de préférence, un nom DNS (par exemple `seed.vinx.example`) ;
+- 2 vCPU, 2 Go de RAM, 20 Go de disque, sous Debian 12 ou Ubuntu 22.04 et plus récent ;
+- les ports **8545/TCP** (API, interface web, genèse, faucet) et **9001/TCP+UDP** (P2P)
+  ouverts.
 
-Les ports à ouvrir :
-
-| Port | Protocole | Rôle |
-|---|---|---|
-| 8545 | TCP | API, interface web, genèse et synchronisation |
-| 9001 | TCP + UDP | P2P (consensus, transactions) |
-
-### Lancement
+### Étapes
 
 ```bash
 apt install -y build-essential git curl python3
 curl https://sh.rustup.rs -sSf | sh -s -- -y
 git clone https://github.com/HaitoDann/vinx-ledger && cd vinx-ledger
 
-./vinx start --testnet -n 3        # chaîne 7, 3 validateurs sur le serveur
-sudo ./vinx service                # services systemd : redémarrage automatique et au boot
-./vinx status
+./vinx start --testnet           # genèse de la chaîne 7, 1 validateur, faucet
+sudo ./vinx service              # redémarrage automatique et au démarrage
+./vinx alert                     # alertes ntfy sur le téléphone
+./vinx publish seed.vinx.example # genèse officielle + point d'entrée dans le dépôt
+git add genesis-testnet.json seeds/testnet.txt && git commit -m "testnet: genèse officielle" && git push
+git tag v0.2.0 && git push --tags   # Release GitHub : binaires et installateurs
 ```
 
-`--testnet` fait trois choses :
-- la chaîne prend l'identifiant 7 ;
-- le nœud écoute sur toutes les interfaces ;
-- le faucet donne 100 VINX par adresse et par jour.
+`./vinx publish` vérifie que le serveur est joignable de l'extérieur. Il copie ensuite la
+genèse dans `genesis-testnet.json` et ajoute le serveur à `seeds/testnet.txt`. Le logiciel
+et l'application embarquent ces deux fichiers. `./vinx join` refuse une genèse différente
+de la genèse publiée : un faux point d'entrée ne peut pas faire rejoindre une autre chaîne.
 
-Le temps de bloc est de 12 s, c'est le paramètre du protocole. Lancer 3 validateurs sur
-le serveur permet ensuite de tolérer une panne dès qu'un validateur extérieur arrive
-(4 au total).
+Le tag `v…` déclenche la construction des binaires et des installateurs (Windows, macOS,
+Linux) et les attache à la **Release GitHub**, avec des liens directs sans compte.
 
-L'interface publique (portefeuille, explorateur et page **Réseau**) est servie sur
-`http://<serveur>:8545/`. Pour la proposer en HTTPS, placez-la derrière un proxy
-(le `Caddyfile` fourni sert d'exemple).
-
-### Entrée des validateurs : libre
-
-Personne n'a besoin de l'opérateur pour devenir validateur. `./vinx join` demande des
-VINX de test au faucet, dépose la garantie minimale (50 VINX sur le testnet, 10 000 sur
-le mainnet) avec la clé de vote BLS, puis le nœud fait son **échauffement** : 3 fins
-d'époque (environ 3 h) avant d'entrer dans le set. L'échauffement empêche d'entrer et
-sortir en boucle pour perturber la chaîne.
-
-`./vinx accept vinx1…` existe encore pour l'opérateur : il fait entrer un validateur
-immédiatement, sans échauffement (pratique pour un test). Ce n'est plus nécessaire.
-
-### Sauvegarde
-
-Le dossier `.vinx-local/` contient tout l'état du nœud. Les clés qu'il contient sont
-secrètes : `node*/validator.json`, `node*/validator_bls.json` et `node1/admin.json`.
-Sauvegardez-les à part.
+**Décentralisation :** au départ, le serveur est le seul validateur. Faites entrer d'autres
+validateurs, sur d'autres machines et chez d'autres personnes, avant d'annoncer le réseau.
+Tant qu'une seule machine détient plus d'un tiers de la puissance de vote, la chaîne
+dépend d'elle.
 
 ---
 
-## 2. Validateurs : rejoindre le testnet
+## 2. Rejoindre le testnet
+
+### Avec l'application (le plus simple)
+
+1. Téléchargez VinX depuis la page **Releases** du dépôt GitHub, puis installez-le.
+2. Créez un portefeuille : notez les 12 mots, puis choisissez un mot de passe.
+3. **Accueil → VINX de test** : 1 100 VINX arrivent au bloc suivant.
+4. **Valider** : activez l'interrupteur. Le validateur démarre, dépose 1 000 VINX de
+   garantie, fait son échauffement (environ 3 h) et entre dans le set.
+
+### En ligne de commande (serveur, Raspberry Pi, LXC)
 
 ```bash
-apt install -y build-essential git curl python3
-curl https://sh.rustup.rs -sSf | sh -s -- -y
 git clone https://github.com/HaitoDann/vinx-ledger && cd vinx-ledger
-
-./vinx join                        # essaie les points d'entrée de seeds/testnet.txt
-./vinx join seed.vinx.example      # ou un (ou plusieurs) point(s) d'entrée précis
-```
-
-Le nœud n'a besoin du point d'entrée que pour arriver. Ensuite il découvre les autres
-nœuds (Kademlia), s'y connecte directement (jusqu'à 25 pairs) et les mémorise dans
-`peers.json` : si le point d'entrée disparaît, il continue et se reconnecte au
-redémarrage sans lui. `./vinx status` affiche le nombre de pairs.
-
-Le nœud se synchronise, reçoit des VINX de test du faucet, dépose sa garantie et entre
-dans le set après son échauffement (environ 3 h), sans intervention de l'opérateur.
-
-Ensuite :
-```bash
-sudo ./vinx service                # le nœud tourne en service et survit aux redémarrages
+./vinx join            # point d'entrée officiel, faucet, garantie, échauffement
+sudo ./vinx service    # le nœud survit aux redémarrages
+./vinx alert           # alertes ntfy sur le téléphone
 ./vinx status
 ```
 
-Le port **9001 TCP/UDP** n'est pas obligatoire : le nœud essaie de l'ouvrir lui-même sur
-la box (UPnP). Sinon, les autres nœuds le signalent comme injoignable (AutoNAT) et il
-passe par deux relais, des nœuds joignables qui transmettent ses connexions, puis tente
-de percer la box pour une liaison directe (DCUtR). `./vinx status` affiche « derrière une
-box » dans ce cas. L'ouvrir reste utile : plus il y a de nœuds joignables, plus le réseau
-est solide. Restez en ligne : un validateur absent manque ses tours
-de proposition et finit écarté (jailing, sans perte d'argent). Le double vote, lui, est
-sanctionné : ne lancez jamais deux fois le même validateur.
+### Bon à savoir
+
+- **Ports** : le 9001 est facultatif. Le nœud essaie de l'ouvrir lui-même sur la box
+  (UPnP). Sinon, il passe par deux relais et tente de percer la box pour une liaison
+  directe. L'ouvrir rend le réseau plus solide.
+- **Absence** : un validateur qui rate ses blocs est suspendu et sort du vote
+  immédiatement, sans perte d'argent. Une fois de retour en ligne, il se réhabilite tout
+  seul.
+- **Double vote** : il est sanctionné. Ne lancez jamais deux fois le même validateur.
+- **Récompenses** : environ 13 VINX sont émis par bloc. 20 % vont au proposeur, et le
+  reste est partagé à chaque époque selon l'enjeu et la présence.
 
 ---
 
-### Ajouter un point d'entrée
+## 3. Mises à jour
 
-Tout nœud joignable (port 9001 ouvert, IP ou nom DNS stable) peut servir de point
-d'entrée. Ajoutez une ligne à `seeds/testnet.txt` (le binaire l'embarque à la
-compilation). Plusieurs points d'entrée tenus par des personnes différentes : le
-réseau ne dépend plus d'aucun d'eux.
+Plus de redémarrage depuis la genèse (ADR 0086) :
+1. une nouvelle version est publiée (Release GitHub) ;
+2. elle est annoncée sur la chaîne, avec un préavis ;
+3. elle s'active quand plus des 2/3 des validateurs l'ont installée.
+
+Un nœud resté sur une ancienne version s'arrête proprement et l'indique dans
+`./vinx status` et par alerte. Il suffit de faire `git pull` puis de le relancer, ou de
+réinstaller l'application.
 
 ---
 
-## 3. Tests à mener ensemble
+## 4. Tests à mener ensemble
 
-| Test | Commande | Attendu |
+| Test | Comment | Attendu |
 |---|---|---|
-| Charge | `./vinx load 1000` (opérateur) | 1 000 transferts inclus en 1 ou 2 blocs |
-| Panne | arrêter un validateur | la chaîne continue tant que plus des 2/3 sont en ligne |
-| Perte de quorum | arrêter plus d'1/3 | la chaîne s'arrête sans fork, puis repart quand ils reviennent |
-| Paiement et reçu | interface → Envoyer → Télécharger le reçu | reçu vérifiable hors ligne (`vinx-wallet verify-receipt`) |
-| Redémarrage | `systemctl restart vinx-node1` | le nœud rattrape la chaîne |
+| Charge | `./vinx load 1000` | 1 000 transferts inclus en quelques blocs |
+| Panne | arrêter un validateur | la chaîne continue, il est suspendu puis revient seul |
+| Pannes successives | en arrêter plusieurs, l'un après l'autre | la chaîne continue tant que chaque vague reste sous le tiers |
+| Perte de quorum | arrêter plus d'un tiers d'un coup | arrêt sans fork, reprise au retour |
+| Paiement et reçu | application → Envoyer, puis reçu | reçu vérifiable hors ligne |
+| Box | validateur sans port ouvert | `./vinx status` : « via relais », il valide quand même |
 
-Remontez tout comportement anormal en joignant la sortie de `./vinx status` et de
-`journalctl -u vinx-node1 -n 200`.
+Signalez tout comportement anormal en joignant le fichier produit par `./vinx diag`.
 
 ---
 
-## 4. Limites connues du testnet
+## 5. Limites connues
 
-- **Les clés de test sont stockées en clair** dans `.vinx-local/`. Il ne faut jamais y
-  mettre de valeur réelle.
-- **Pas de checkpoints configurés.** Un nouveau nœud fait confiance à la genèse que lui
-  sert l'hôte (ADR 0074). Pour le mainnet, la genèse et les checkpoints seront publiés
-  avec le binaire.
-- **L'audit de sécurité externe reste à faire** avant le mainnet.
+- L'annonce des mises à jour passe par la clé d'administration, qui expire au bout de
+  365 jours. La remplacer par un vote des validateurs est prévu avant le mainnet.
+- Les installateurs ne sont pas signés : Windows et macOS affichent un avertissement.
+- L'audit de sécurité externe reste à faire avant le mainnet.

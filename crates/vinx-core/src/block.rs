@@ -29,6 +29,10 @@ pub struct BlockHeader {
     /// Hash of `Block::last_commit` (all-zero when absent), so the proposer cannot swap
     /// the certificate of the previous block after proposing.
     pub last_commit_hash: Hash32,
+    /// Protocol version the proposer's software runs (ADR 0086): validators signal
+    /// readiness for an upgrade in the blocks they propose. See `ProtocolVersion::as_u32`.
+    #[serde(default)]
+    pub version: u32,
 }
 
 impl BlockHeader {
@@ -44,6 +48,7 @@ impl BlockHeader {
         bytes.extend_from_slice(&self.base_fee.to_be_bytes());
         bytes.extend_from_slice(&self.receipts_root);
         bytes.extend_from_slice(&self.last_commit_hash);
+        bytes.extend_from_slice(&self.version.to_be_bytes());
         hash256(&bytes)
     }
 }
@@ -106,6 +111,7 @@ mod tests {
                 base_fee: 0,
                 receipts_root: [0u8; 32],
                 last_commit_hash: [0u8; 32],
+                version: 0,
             },
             transactions: vec![],
             last_commit: None,
@@ -181,10 +187,11 @@ mod tests {
             base_fee: 100_000,
             receipts_root: [0x44; 32],
             last_commit_hash: [0x55; 32],
+            version: 0,
         };
         assert_eq!(
             hex::encode(h.hash()),
-            "2e247f90a21e292b61cf77122ecc07acd3c1e21881474feb802cbb9a8f6dd22d"
+            "5ff044d27e38f9d22ef2e4ad47bbd08bb5840d7eb7c533667672e433b34eb729"
         );
     }
 }

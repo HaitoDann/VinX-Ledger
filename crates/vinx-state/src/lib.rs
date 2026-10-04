@@ -239,7 +239,7 @@ mod tests {
     fn test_stake_moves_balance_to_staked() {
         let (mut state, sender_kp, sender_addr) = funded_state();
         let initial_balance = state.account_balance(&sender_addr);
-        let stake_amount = Amount::from_vinx(1_000);
+        let stake_amount = Amount::from_vinx(500); // below the validator minimum: a plain stake
 
         let tx = Transaction::new_stake(&sender_kp, stake_amount, Amount::ZERO, 0);
         state.apply_transaction(&tx).unwrap();

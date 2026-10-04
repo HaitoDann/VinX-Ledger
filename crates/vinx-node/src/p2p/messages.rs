@@ -155,6 +155,7 @@ mod tests {
                 base_fee: 0,
                 receipts_root: [0u8; 32],
                 last_commit_hash: [0u8; 32],
+                version: 0,
             },
             transactions: vec![],
             last_commit: None,

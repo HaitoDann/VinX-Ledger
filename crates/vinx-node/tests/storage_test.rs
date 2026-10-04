@@ -110,6 +110,7 @@ fn test_storage_roundtrip_preserves_typed_tx_index() {
             base_fee: 0,
             receipts_root: [0u8; 32],
             last_commit_hash: [0u8; 32],
+            version: 0,
         },
         transactions: vec![tx],
         last_commit: None,

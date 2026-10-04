@@ -85,10 +85,11 @@ pub async fn health(State(node): State<Arc<Node>>) -> ApiResult<HealthResponse> 
         )
     };
     let pending = node.mempool.read().await.size();
-    let (chain_id, block_time_secs) = {
+    let (chain_id, block_time_secs, protocol) = {
         let s = node.state.read().await;
-        (s.chain_id, s.block_time_secs)
+        (s.chain_id, s.block_time_secs, s.current_version.clone())
     };
+    let software = vinx_core::protocol::NODE_PROTOCOL_VERSION;
     Ok(Json(HealthResponse {
         status: "ok",
         height,
@@ -114,6 +115,9 @@ pub async fn health(State(node): State<Arc<Node>>) -> ApiResult<HealthResponse> 
             .metrics
             .relays
             .load(std::sync::atomic::Ordering::Relaxed),
+        upgrade_required: protocol.as_u32() > software.as_u32(),
+        protocol: protocol.to_string(),
+        software_protocol: software.to_string(),
     }))
 }
 
@@ -301,6 +305,7 @@ pub async fn get_validator_status(
         "next_epoch_ts": last.saturating_add(epoch),
         "epoch_secs": epoch,
         "in_set": state.validator_set.contains(&addr),
+        "jailed": state.reliability.get(&addr).is_some_and(|r| r.is_jailed()),
     });
     if let Some(e) = state.validator_pool.get(&addr) {
         let (status, left) = match e.status {
@@ -846,7 +851,11 @@ pub async fn faucet_request(
     let amount = Amount::from_atoms(node.config.faucet_amount_atoms);
     let fee = amount.calculate_fee(node.state.read().await.base_fee);
 
-    let tx = Transaction::new_transfer(faucet_kp, to_addr, amount, fee, nonce);
+    let mut tx = Transaction::new_transfer(faucet_kp, to_addr, amount, fee, nonce);
+    // Signed for this chain: the constructor defaults to the devnet id, and a faucet on
+    // the testnet (chain 7) handed out transfers every node then refused.
+    tx.chain_id = node.state.read().await.chain_id;
+    tx.sign(faucet_kp);
     let tx_hash = hex::encode(tx.hash());
 
     node.mempool

@@ -146,6 +146,8 @@ export interface HeaderJson {
   base_fee: number;
   receipts_root: string;
   last_commit_hash: string;
+  /** Protocol version signaled by the proposer (ADR 0086). */
+  version?: number;
 }
 
 /**
@@ -453,7 +455,8 @@ export function headerHash(h: HeaderJson): string {
     hexToBytes(h.state_root),
     beBytes(BigInt(h.base_fee), 8),
     hexToBytes(h.receipts_root),
-    hexToBytes(h.last_commit_hash)
+    hexToBytes(h.last_commit_hash),
+    beBytes(BigInt(h.version ?? 0), 4)
   );
   return Array.from(blake3(bytes), (b) => b.toString(16).padStart(2, "0")).join("");
 }

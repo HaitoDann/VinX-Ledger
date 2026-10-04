@@ -11,6 +11,9 @@ on:
 env:
   CARGO_TERM_COLOR: always
 
+permissions:
+  contents: write
+
 jobs:
   bundle:
     name: ${{ matrix.name }}
@@ -68,3 +71,16 @@ jobs:
             apps/vinx-desktop/src-tauri/target/release/bundle/**/*-setup.exe
             apps/vinx-desktop/src-tauri/target/release/bundle/**/*.dmg
           if-no-files-found: error
+
+      # On a version tag, the installers go to the GitHub Release: direct download
+      # links, no GitHub account needed.
+      - name: Attach to the release
+        if: startsWith(github.ref, 'refs/tags/')
+        uses: softprops/action-gh-release@v2
+        with:
+          files: |
+            apps/vinx-desktop/src-tauri/target/release/bundle/**/*.deb
+            apps/vinx-desktop/src-tauri/target/release/bundle/**/*.AppImage
+            apps/vinx-desktop/src-tauri/target/release/bundle/**/*.msi
+            apps/vinx-desktop/src-tauri/target/release/bundle/**/*-setup.exe
+            apps/vinx-desktop/src-tauri/target/release/bundle/**/*.dmg
