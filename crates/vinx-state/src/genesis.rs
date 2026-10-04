@@ -112,13 +112,31 @@ pub fn create_genesis_state_with_dev_prefund(
     let amount = Amount::from_atoms(prefund_atoms);
     // Progressive minting (ADR 0040): mint directly into the genesis validator's account.
     // emitted_atoms tracks the total supply minted; circulating_supply matches it here.
+    // The admin's governance transactions (upgrade announcements, admissions) are
+    // fee-free but need an account for their nonce: 1 VINX of the prefund opens it.
+    // On mainnet (no prefund), anyone sending the admin a payment opens it.
+    let admin_atoms = vinx_core::amount::DECIMAL_FACTOR.min(prefund_atoms);
+    let (amount, admin_amount) = if config.admin_address != config.validator_address {
+        (
+            Amount::from_atoms(prefund_atoms - admin_atoms),
+            Amount::from_atoms(admin_atoms),
+        )
+    } else {
+        (amount, Amount::ZERO)
+    };
     state.accounts.insert(
         config.validator_address,
         Account::new_with_balance(config.validator_address, amount),
     );
+    if admin_amount > Amount::ZERO {
+        state.accounts.insert(
+            config.admin_address,
+            Account::new_with_balance(config.admin_address, admin_amount),
+        );
+    }
     state.emitted_atoms = prefund_atoms;
     state.genesis_prefund_atoms = prefund_atoms;
-    state.circulating_supply = amount;
+    state.circulating_supply = Amount::from_atoms(prefund_atoms);
     state
 }
 
@@ -152,6 +170,31 @@ pub fn add_genesis_validators(state: &mut WorldState, extra: &[(Address, Genesis
 
 #[cfg(test)]
 mod tests {
+
+    #[test]
+    fn prefund_opens_the_admin_account_and_keeps_supply_exact() {
+        let sk = vinx_crypto::BlsSecretKey::generate();
+        let val = vinx_crypto::KeyPair::generate();
+        let adm = vinx_crypto::KeyPair::generate();
+        let validator = vinx_crypto::Address::from_public_key(&val.public_key());
+        let admin = vinx_crypto::Address::from_public_key(&adm.public_key());
+        let cfg = GenesisConfig {
+            admin_address: admin,
+            validator_address: validator,
+            chain_id: 7,
+            validator_bls: crate::GenesisBlsKey::from_secret(&sk, &validator, 7),
+        };
+        let prefund = 1_000 * vinx_core::amount::DECIMAL_FACTOR;
+        let s = create_genesis_state_with_dev_prefund(&cfg, prefund);
+        assert_eq!(
+            s.get_account(&admin).map(|a| a.balance.atoms()),
+            Some(vinx_core::amount::DECIMAL_FACTOR)
+        );
+        assert!(
+            s.supply_invariant_holds(),
+            "circulating == emitted at genesis"
+        );
+    }
     use super::*;
     use vinx_core::amount::MAX_SUPPLY_ATOMS;
     use vinx_core::CHAIN_ID_DEVNET;

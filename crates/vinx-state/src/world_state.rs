@@ -808,7 +808,12 @@ impl WorldState {
                     .map(|a| {
                         self.validator_pool
                             .get(a)
-                            .map(|e| e.bond_atoms / vinx_core::amount::DECIMAL_FACTOR)
+                            // The genesis validators hold no bond: count every active
+                            // validator at least at the minimum bond.
+                            .map(|e| {
+                                e.bond_atoms.max(self.min_validator_bond_atoms)
+                                    / vinx_core::amount::DECIMAL_FACTOR
+                            })
                             .unwrap_or(0)
                     })
                     .collect();
