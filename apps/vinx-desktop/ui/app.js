@@ -121,6 +121,12 @@ function renderNet() {
   dot.className = 'dot ' + (late ? 'warn' : 'ok');
   $('n-txt').textContent = (late ? 'Réseau à l\'arrêt' : 'Connecté') + ' · bloc ' + Number(net.height).toLocaleString('fr-FR');
   const local = net.local;
+  if (local && local.upgrade_required) {
+    dot.className = 'dot warn';
+    $('n-txt').textContent = 'Mise à jour requise';
+    $('n-sub').textContent = `Le réseau est passé en ${local.protocol} : installez la nouvelle version de VinX.`;
+    return;
+  }
   $('n-sub').textContent = local ? `Validateur en marche · ${local.peers ?? 0} pair(s)` : (net.chain_id === 7 ? 'Testnet public' : 'Réseau ' + net.chain_id);
 }
 

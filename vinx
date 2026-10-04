@@ -94,21 +94,24 @@ init_network() {
 import json, sys, time
 out, admin, bt, *entries = sys.argv[1:]
 e = [json.loads(x) for x in entries]
+official = int(__import__("os").environ["VINX_CHAIN"]) == 7
 json.dump({
     "chain_id": int(__import__("os").environ["VINX_CHAIN"]), "genesis_timestamp": int(time.time()) - 60, "admin_address": admin,
     "initial_validator": e[0]["address"],
     "initial_validator_bls_pub_key": e[0]["bls_pub_key"],
     "initial_validator_bls_pop": e[0]["bls_pop"],
     "validators": e[1:], "block_time_secs": int(bt),
-    "prefund_initial_validator_vinx": 1000000,
-    # Test network: the faucet (100 VINX) is enough to become a validator.
-    "min_validator_bond_vinx": 50,
+    # Official testnet (chain 7): mainnet economics (1 000 VINX bond), and a faucet that
+    # hands out enough to bond in one request. Local test networks: 50 VINX.
+    "prefund_initial_validator_vinx": 10000000 if official else 1000000,
+    "min_validator_bond_vinx": 1000 if official else 50,
 }, open(out, "w"), indent=2)
 PY
     # Faucet: node1's validator account holds the dev prefund and hands it out.
     cat >"$HOME_DIR/node1/config.toml" <<EOF
 faucet_key_file = "$HOME_DIR/node1/validator.json"
 faucet_cooldown_secs = $([[ $CHAIN_ID == 7 ]] && echo 86400 || echo 30)
+faucet_amount_atoms = $([[ $CHAIN_ID == 7 ]] && echo 1100000000000 || echo 100000000000)
 admin_token = "$(head -c 24 /dev/urandom | od -An -tx1 | tr -d ' \n')"
 EOF
     echo "$n" >"$HOME_DIR/validators"
@@ -227,6 +230,8 @@ cmd_status() {
         if alive "$i"; then
             local hj h pe; hj=$(rpc "$i" health); h=$(echo "$hj" | jget "['height']"); pe=$(echo "$hj" | jget "['peers']")
             echo "  nœud $i  ${c_ok}● en marche${c_0}  hauteur ${h:-?}  ${pe:-?} pair(s)   http://127.0.0.1:$(rpc_port "$i")/"
+            [[ "$(echo "$hj" | jget "['upgrade_required']")" == True ]] && \
+                echo "          ${c_r}✗ mise à jour requise : le réseau est passé en $(echo "$hj" | jget "['protocol']") — git pull puis relancer${c_0}"
             case "$(echo "$hj" | jget "['reachable']")" in
                 public)  [[ -f "$HOME_DIR/lan" ]] && echo "          ${c_dim}joignable par les autres nœuds${c_0}" ;;
                 private) echo "          ${c_dim}derrière une box : joignable via $(echo "$hj" | jget "['relays']") relais (ouvrir le port 9001 est facultatif)${c_0}" ;;
@@ -300,6 +305,15 @@ cmd_join() {
             echo "  ${c_dim}injoignable, point d'entrée suivant…${c_0}"
         done
         [[ -n "$host" ]] || { rm -f "$HOME_DIR/genesis.json"; die "aucun point d'entrée joignable (lancé avec ./vinx start --lan ? ports 8545 et 9001 ouverts ?)"; }
+        # La genèse reçue doit être la genèse officielle publiée dans le dépôt, s'il y en a
+        # une pour cette chaîne : un point d'entrée ne peut pas nous faire rejoindre une autre.
+        if grep -q '"initial_validator_bls_pub_key"' "$ROOT/genesis-testnet.json" 2>/dev/null; then
+            python3 -c 'import json,sys
+a,b=(json.load(open(f)) for f in sys.argv[1:])
+sys.exit(0 if a.get("chain_id")!=b.get("chain_id") or a==b else 1)' "$ROOT/genesis-testnet.json" "$HOME_DIR/genesis.json" \
+                || { rm -f "$HOME_DIR/genesis.json"; die "genèse différente de la genèse officielle (genesis-testnet.json) — mauvais point d'entrée ?"; }
+            ok "genèse conforme à la genèse officielle publiée"
+        fi
         echo "$host $port" >"$HOME_DIR/joined"; echo 1 >"$HOME_DIR/validators"; touch "$HOME_DIR/lan"
         printf '%s\n' "${targets[@]%%:*}" >"$HOME_DIR/seeds"
         CHAIN_ID=$(python3 -c "import json;print(json.load(open('$HOME_DIR/genesis.json'))['chain_id'])")
@@ -478,7 +492,9 @@ cmd_check() {
         h=$(echo "$health" | jget "['height']"); bt=$(echo "$health" | jget "['block_time_secs']")
         peers=$(echo "$health" | jget "['peers']")
         age=$(( $(date +%s) - $(echo "$health" | jget "['tip_timestamp']") ))
-        if (( age > 6 * ${bt:-12} )); then
+        if [[ "$(echo "$health" | jget "['upgrade_required']")" == True ]]; then
+            state="upgrade"; detail="$(hostname) doit être mis à jour : le réseau est passé en $(echo "$health" | jget "['protocol']")."
+        elif (( age > 6 * ${bt:-12} )); then
             state="stalled"; detail="Aucun bloc depuis ${age}s (hauteur $h) — vu de $(hostname)."
         elif [[ "${peers:-0}" == 0 && ( -f "$HOME_DIR/joined" || "$(rpc 1 validators | jget "['count']")" -gt "$(count)" ) ]]; then
             state="isolated"; detail="$(hostname) n'a plus aucun pair (hauteur $h)."
@@ -545,7 +561,23 @@ EOF
     echo "  Une notification de test vient d'être envoyée."
 }
 
+# Opérateur du testnet officiel : publie la genèse et le point d'entrée dans le dépôt.
+cmd_publish() {
+    local host="${1:?usage : ./vinx publish <nom-ou-ip-public-du-serveur>}"
+    [[ -f "$HOME_DIR/genesis.json" ]] || die "aucun réseau ici — ./vinx start --testnet d'abord"
+    [[ "$CHAIN_ID" == 7 ]] || die "ce n'est pas le testnet (chaîne $CHAIN_ID) — ./vinx start --testnet"
+    curl -sf --max-time 5 "http://$host:8545/chain/genesis" >/dev/null \
+        || die "http://$host:8545 injoignable depuis ici : ports 8545 et 9001 ouverts ?"
+    cp "$HOME_DIR/genesis.json" "$ROOT/genesis-testnet.json"
+    grep -qx "$host" "$ROOT/seeds/testnet.txt" || echo "$host" >>"$ROOT/seeds/testnet.txt"
+    ok "genèse officielle → genesis-testnet.json, point d'entrée → seeds/testnet.txt"
+    echo "  Publiez-les (les nœuds et l'application les embarquent) :"
+    echo "      git add genesis-testnet.json seeds/testnet.txt"
+    echo "      git commit -m \"testnet: genèse officielle et point d'entrée $host\" && git push"
+}
+
 case "${1:-help}" in
+    publish) shift; cmd_publish "$@" ;;
     alert) shift; cmd_alert "$@" ;;
     check) cmd_check ;;
     diag) cmd_diag ;;
