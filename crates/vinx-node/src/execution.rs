@@ -39,6 +39,16 @@ fn open_block(
     header: &BlockHeader,
     last_commit: Option<&CommitCert>,
 ) -> Result<(WorldState, u64), String> {
+    // ADR 0086: the chain activated a protocol this software does not implement —
+    // refuse to execute (validate, vote, sync) rather than apply rules it does not know.
+    let supported = vinx_core::protocol::NODE_PROTOCOL_VERSION;
+    if state.current_version.as_u32() > supported.as_u32() {
+        return Err(format!(
+            "protocol upgrade required: the network runs {}, this node implements {} — \
+             install the new version",
+            state.current_version, supported
+        ));
+    }
     let mut s = state.clone();
     let protocol_ts = tip.median_time_past_with(header.timestamp);
     s.set_block_context(protocol_ts);
@@ -100,6 +110,8 @@ pub fn build_block(
         base_fee: 0,
         receipts_root: [0u8; 32],
         last_commit_hash: Block::last_commit_hash_of(last_commit.as_ref()),
+        // ADR 0086: the proposer signals the protocol version its software runs.
+        version: vinx_core::protocol::NODE_PROTOCOL_VERSION.as_u32(),
     };
     let (mut s, protocol_ts) = open_block(state, tip, &header, last_commit.as_ref())?;
     header.base_fee = s.base_fee.atoms() as u64;

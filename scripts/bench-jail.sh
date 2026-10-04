@@ -1,11 +1,6 @@
 #!/usr/bin/env bash
 # ─────────────────────────────────────────────────────────────────────────────
-# VinX — Passage des box : nœuds derrière un NAT (simulé par iptables).
-#
-# node1 et node4 sont joignables ; node2 et node3 refusent toute connexion entrante
-# (comme derrière une box sans port ouvert). Ils doivent le détecter (AutoNAT),
-# réserver un relais, et la chaîne doit survivre à l'arrêt de node1.
-# Nécessite root (iptables).
+# VinX — Un validateur absent quitte le set, puis revient seul (ADR 0086).
 #
 # Lance 4 vrais nœuds (P2P libp2p, RPC HTTP) sur une genèse partagée à 4 validateurs,
 # puis vérifie :
@@ -20,8 +15,7 @@ set -euo pipefail
 
 NODE="${NODE:-./target/release/vinx-node}"
 WALLET="${WALLET:-./target/release/vinx-wallet}"
-BASE="${BENCH_DIR:-/tmp/vinx-bench-nat}"
-export VINX_NO_MDNS=1   # pas de découverte locale : seul Kademlia peut relier les nœuds
+BASE="${BENCH_DIR:-/tmp/vinx-bench-jail}"
 BLOCK_TIME="${BLOCK_TIME:-2}"
 CHAIN_ID=42
 GENESIS_TS=$(( $(date +%s) - 60 ))
@@ -33,19 +27,7 @@ done
 
 rm -rf "$BASE"; mkdir -p "$BASE"/node{1,2,3,4}
 declare -A PID
-nat_on() {  # refuse les connexions entrantes vers les ports P2P de node2 et node3
-    for port in 9002 9003; do
-        iptables -I INPUT -p tcp --dport "$port" --syn -j DROP
-        iptables -I INPUT -p udp --dport "$port" -m conntrack --ctstate NEW -j DROP
-    done
-}
-nat_off() {
-    for port in 9002 9003; do
-        iptables -D INPUT -p tcp --dport "$port" --syn -j DROP 2>/dev/null || true
-        iptables -D INPUT -p udp --dport "$port" -m conntrack --ctstate NEW -j DROP 2>/dev/null || true
-    done
-}
-cleanup() { for p in "${PID[@]:-}"; do kill "$p" 2>/dev/null || true; done; nat_off; }
+cleanup() { for p in "${PID[@]:-}"; do kill "$p" 2>/dev/null || true; done; }
 trap cleanup EXIT
 
 rpc()    { curl -s --max-time 2 "http://127.0.0.1:$1/$2" 2>/dev/null || true; }
@@ -59,11 +41,11 @@ ko()     { echo "  ✗ $*"; FAIL=1; }
 
 start() { # id
     local i="$1" peers=()
-    [[ $i != 1 ]] && peers+=("/ip4/127.0.0.1/tcp/9001")   # seul point d'entrée : node1
+    for j in 1 2 3 4; do [[ $j != "$i" ]] && peers+=("/ip4/127.0.0.1/tcp/$((9000 + j))"); done
     # shellcheck disable=SC2046
     VINX_GENESIS_SPEC="$BASE/genesis.json" "$NODE" --data-dir "$BASE/node$i" $(owner_args "$i") \
         --rpc-listen "127.0.0.1:$((8544 + i))" --p2p-listen "/ip4/127.0.0.1/tcp/$((9000 + i))" \
-        ${peers[@]:+--peers "${peers[@]}"} >>"$BASE/node$i.log" 2>&1 &
+        --peers "${peers[@]}" >>"$BASE/node$i.log" 2>&1 &
     PID[$i]=$!
 }
 stop() { kill "${PID[$1]}" 2>/dev/null || true; wait "${PID[$1]}" 2>/dev/null || true; unset "PID[$1]"; }
@@ -119,42 +101,24 @@ json.dump({
 PY
 echo "  spec : $BASE/genesis.json"
 
-field() { rpc "$((8544 + $1))" health | jfield "['$2']"; }
-
-echo "=== Phase 1 : node2 et node3 derrière une « box » ==="
-nat_on
+vst() { rpc 8545 "validator/$1" | jfield "['$2']"; }
+echo "=== Phase 1 : 4 validateurs ==="
 for i in 1 2 3 4; do start "$i"; done
 if wait_height 5 120 1 2 3 4; then ok "les 4 nœuds avancent"; else ko "pas de progression"; fi
-deadline=$(( $(date +%s) + 240 ))
-while (( $(date +%s) < deadline )); do
-    [[ "$(field 2 reachable)" == private && "$(field 3 reachable)" == private \
-       && "$(field 2 relays)" -ge 1 && "$(field 3 relays)" -ge 1 ]] && break
-    sleep 5
-done
-for i in 2 3; do
-    r=$(field $i reachable); n=$(field $i relays)
-    [[ "$r" == private ]] && ok "node$i se sait derrière une box (AutoNAT)" || ko "node$i : joignabilité $r"
-    [[ "${n:-0}" -ge 1 ]] && ok "node$i a $n relais" || ko "node$i sans relais"
-done
-for i in 1 4; do
-    r=$(field $i reachable)
-    [[ "$r" != private ]] && ok "node$i joignable ($r)" || ko "node$i se croit derrière une box"
-done
-grep -h "Direct connection through the NAT" "$BASE"/node[23].log | head -1 | grep -q . \
-    && ok "connexion directe percée entre nœuds derrière des box (DCUtR)" \
-    || echo "  · pas de perçage direct observé (relais utilisé)"
-
-echo "=== Phase 2 : node1 (le point d'entrée) est coupé ==="
-stop 1
-H=$(height 2)
-if wait_height $((H + 4)) 180 2 3 4; then ok "la chaîne continue sans node1 ($H → $(height 2))"; else ko "bloquée sans node1 à $(height 2)"; fi
-agree "$(height 2)" 2 3 4 || true
-
-echo "=== Phase 3 : node3 redémarre derrière sa box, sans point d'entrée ==="
-stop 3; start 3
-H=$(height 2)
-if wait_height $((H + 3)) 240 2 3 4; then ok "node3 a retrouvé le réseau ($(field 3 peers) pairs)"; else ko "node3 isolé"; fi
-
+V4=$OWNER4
+echo "=== Phase 2 : node4 tombe ==="
+stop 4
+deadline=$(( $(date +%s) + 300 ))
+until [[ "$(vst "$V4" jailed)" == True && "$(vst "$V4" in_set)" == False ]] || (( $(date +%s) > deadline )); do sleep 3; done
+[[ "$(vst "$V4" in_set)" == False ]] && ok "node4 suspendu et retiré du set ($(rpc 8545 validators | jfield "['count']") validateurs votent)" || ko "node4 toujours dans le set"
+H=$(height 1)
+if wait_height $((H + 5)) 120 1 2 3; then ok "la chaîne continue à 3"; else ko "bloquée"; fi
+echo "=== Phase 3 : node4 revient ==="
+start 4
+deadline=$(( $(date +%s) + 600 ))
+until [[ "$(vst "$V4" jailed)" == False ]] || (( $(date +%s) > deadline )); do sleep 5; done
+[[ "$(vst "$V4" jailed)" == False ]] && ok "node4 s'est réhabilité tout seul (Unjail par sa clé d'opérateur)" || ko "node4 toujours suspendu"
+agree "$(height 4)" 1 2 3 4 || true
 echo
 if (( FAIL )); then echo "=== ÉCHEC — logs : $BASE/node*.log ==="; exit 1; fi
-echo "=== Passage des box : réussi — logs : $BASE/node*.log ==="
+echo "=== Absence et retour : réussi ==="

@@ -393,7 +393,40 @@ impl Node {
             p2p.broadcast(P2pMessage::Committed { block, cert });
         }
         tracing::info!(height, "Block committed");
+        self.unjail_self_if_due().await;
         Ok(())
+    }
+
+    /// A validator jailed for missed blocks (and thus out of the voting set) asks to come
+    /// back on its own once it is online again and the cooldown has passed: the node
+    /// holds the operator key, which may sign `Unjail`. No action needed from its owner.
+    async fn unjail_self_if_due(&self) {
+        let owner = self.config.validator_address;
+        let operator = &self.config.validator_keypair;
+        let tx = {
+            let state = self.state.read().await;
+            let due = state
+                .reliability
+                .get(&owner)
+                .is_some_and(|r| r.can_unjail(state.block_height));
+            if !due {
+                return;
+            }
+            let op = vinx_crypto::Address::from_public_key(&operator.public_key());
+            let nonce = state.get_account(&op).map(|a| a.nonce).unwrap_or(0);
+            let mut tx = vinx_core::Transaction::new_unjail_for(operator, owner, nonce);
+            tx.chain_id = state.chain_id;
+            tx.sign(operator);
+            tx
+        };
+        let mut mempool = self.mempool.write().await;
+        if mempool.add(tx.clone()).is_ok() {
+            drop(mempool);
+            tracing::info!(validator = %owner, "Back online: requesting unjail");
+            if let Some(p2p) = &self.p2p {
+                p2p.broadcast_tx(&tx);
+            }
+        }
     }
 
     /// Validates and installs a committed block received from a peer.

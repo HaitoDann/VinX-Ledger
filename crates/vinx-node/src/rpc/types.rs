@@ -28,6 +28,11 @@ pub struct HealthResponse {
     pub reachable: &'static str,
     /// Relays carrying this node's inbound connections.
     pub relays: u64,
+    /// Protocol version active on chain, and the one this software implements.
+    pub protocol: String,
+    pub software_protocol: String,
+    /// The chain activated a version this node does not implement: it stopped.
+    pub upgrade_required: bool,
 }
 
 #[derive(Serialize)]
@@ -392,6 +397,9 @@ pub struct HeaderJson {
     pub base_fee: u64,
     pub receipts_root: String,
     pub last_commit_hash: String,
+    /// Protocol version signaled by the proposer (ADR 0086).
+    #[serde(default)]
+    pub version: u32,
 }
 
 impl From<&vinx_core::BlockHeader> for HeaderJson {
@@ -407,6 +415,7 @@ impl From<&vinx_core::BlockHeader> for HeaderJson {
             base_fee: h.base_fee,
             receipts_root: hex::encode(h.receipts_root),
             last_commit_hash: hex::encode(h.last_commit_hash),
+            version: h.version,
         }
     }
 }

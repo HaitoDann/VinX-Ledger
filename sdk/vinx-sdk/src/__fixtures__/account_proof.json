@@ -12,7 +12,7 @@
       "proof": {
         "accounts_root": "c15a954be5e30a5e2946c5cecf5af49af04d06f0bf5c00a8f2f624068821b9cd",
         "address": "vinx1qvpsxqcrqvpsxqcrqvpsxqcrqvpsxqcrllptkh",
-        "consensus_root": "b3e153a668d3e7562c1c564c1ef4a49e10f97d66d4afba437fffdc69524861ca",
+        "consensus_root": "429563f03188751a9e637ac6535189e258725c88ee683ffd2fccfb4e5f4e7e78",
         "height": 0,
         "key": "5269b8e4e35d89957dc0c0735246592902d41d07a9c5afba8e15d1571f4127e2",
         "leaf_value": "c3399e2a01b31045c3f50a6ec63b79448866b99e0e456b3f2f67493ac66155af",
@@ -26,7 +26,7 @@
           "0000000000000000000000000000000000000000000000000000000000000000",
           "6f3060b284b63bcc3404e483357e0967b2f1929b77f2e5592fd95731aaef39b9"
         ],
-        "state_root": "bd939b082f37ad21c176f785a1277afb1745fce0b0e818722e75aad8d8b04aa1",
+        "state_root": "daa911d3bf3d3000cbdfb097b5df9b6100872d0c8805693ba86f6861d9038831",
         "valid": true
       }
     },
@@ -35,7 +35,7 @@
       "proof": {
         "accounts_root": "c15a954be5e30a5e2946c5cecf5af49af04d06f0bf5c00a8f2f624068821b9cd",
         "address": "vinx1pyysjzgfpyysjzgfpyysjzgfpyysjzgfqrn759",
-        "consensus_root": "b3e153a668d3e7562c1c564c1ef4a49e10f97d66d4afba437fffdc69524861ca",
+        "consensus_root": "429563f03188751a9e637ac6535189e258725c88ee683ffd2fccfb4e5f4e7e78",
         "height": 0,
         "key": "8cef51318e0d81f173f794fe0a1b60463a10f056000b0738efafad3042ff89c1",
         "leaf_value": null,
@@ -46,10 +46,10 @@
         "siblings": [
           "e553a7b7052f3dc8f576d14eeebb21f94c0326808806c7dce0a83a6fa7f8fe47"
         ],
-        "state_root": "bd939b082f37ad21c176f785a1277afb1745fce0b0e818722e75aad8d8b04aa1",
+        "state_root": "daa911d3bf3d3000cbdfb097b5df9b6100872d0c8805693ba86f6861d9038831",
         "valid": true
       }
     }
   ],
-  "state_root": "bd939b082f37ad21c176f785a1277afb1745fce0b0e818722e75aad8d8b04aa1"
+  "state_root": "daa911d3bf3d3000cbdfb097b5df9b6100872d0c8805693ba86f6861d9038831"
 }

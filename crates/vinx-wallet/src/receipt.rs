@@ -42,6 +42,7 @@ pub fn verify(receipt: &Value, tx_hash: &str) -> Result<u64, String> {
         base_fee: uint(&h["base_fee"], "base_fee")?,
         receipts_root: hash32(&h["receipts_root"], "receipts_root")?,
         last_commit_hash: hash32(&h["last_commit_hash"], "last_commit_hash")?,
+        version: h["version"].as_u64().unwrap_or(0) as u32,
     };
     let siblings = receipt["siblings"]
         .as_array()

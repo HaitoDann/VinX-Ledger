@@ -35,7 +35,7 @@ jfield() { python3 -c "import sys,json
 try: print(json.load(sys.stdin)$1)
 except Exception: print('')"; }
 height() { rpc "$((8544 + $1))" health | jfield "['height']"; }
-bhash()  { rpc "$((8544 + $1))" "block/$2" | jfield "['hash']"; }
+bhash()  { local h; for _ in 1 2 3; do h=$(rpc "$((8544 + $1))" "block/$2" | jfield "['hash']"); [[ -n "$h" ]] && break; sleep 1; done; echo "$h"; }
 ok()     { echo "  ✓ $*"; }
 ko()     { echo "  ✗ $*"; FAIL=1; }
 

@@ -108,6 +108,10 @@ pub const MAX_ACTIVE_SET_SIZE: u32 = 100;
 /// the pool size.
 pub const MIN_ACTIVE_SET_SIZE: u32 = 5;
 
+/// Newcomers admitted to the active set per epoch, in basis points of the current set
+/// (at least one). Limits churn: the set cannot be reshaped in one epoch.
+pub const MAX_SET_ENTRIES_PER_EPOCH_BPS: u32 = 1_000;
+
 /// Duration of one epoch in real-time seconds (ADR 0028). With a fixed 12s block cadence
 /// (ADR 0043/0045), each epoch contains exactly EPOCH_DURATION_SECS / block_time_secs = 300
 /// blocks. The epoch close triggers: score rotation, warmup tick, epoch pot distribution.

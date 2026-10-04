@@ -544,3 +544,31 @@ fn chain_survives_validator_set_growth_at_epoch_close() {
     }
     assert!(net.nodes.iter().all(|n| n.state.validator_set.len() == 3));
 }
+
+/// Progressive failures (ADR 0086): absent validators are jailed and leave the voting
+/// set at once, so absences spread over time never add up to the third that halts the
+/// chain. 3 of 7 down at the same time would halt; one after the other, it keeps going.
+#[test]
+fn progressive_absences_do_not_halt_the_chain() {
+    let mut net = Net::new(7);
+    net.start();
+    net.online[6] = false;
+    net.online[5] = false; // 2 of 7: still a quorum
+    net.run_until(40, 36_000_000);
+    assert!(net.all_online_at(40), "5 of 7 keep committing");
+    let set = net.nodes[0].state.validator_set.clone();
+    assert!(
+        !set.contains(&net.vals[6].addr) && !set.contains(&net.vals[5].addr),
+        "absent validators left the voting set (set: {})",
+        set.len()
+    );
+    // A third failure: 3 of the original 7 down, 1 of the current 5.
+    net.online[4] = false;
+    let h = net.nodes[0].chain.tip_height();
+    net.run_until(h + 20, 72_000_000);
+    assert!(
+        net.all_online_at(h + 20),
+        "the chain survives the third absence"
+    );
+    net.assert_agreement();
+}
