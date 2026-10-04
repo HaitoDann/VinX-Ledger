@@ -57,12 +57,12 @@ pub const ERA0_EMISSION_ATOMS: u128 = MAX_SUPPLY_ATOMS / 2;
 
 // ─── Validator bond & slashing ─────────────────────────────────────────────────
 
-/// Minimum bond required to enter the validator pool (10,000 VinX, governable — ADR 0081 D3).
+/// Minimum bond required to enter the validator pool (1,000 VinX on mainnet, governable — ADR 0081 D3).
 /// The genesis validator is grandfathered. The bond is a security deposit slashed
-/// on equivocation — it earns no yield. Governable within [MIN_BOND_HARD_FLOOR,
+/// on equivocation — its rewards are proportional to it (proof of stake, ADR 0086). Governable within [MIN_BOND_HARD_FLOOR,
 /// MAX_BOND_HARD_CAP]. Changes limited to ±BOND_STEP_BPS per modification with
 /// BOND_COOLDOWN_SECS between modifications (ADR 0038).
-pub const MIN_VALIDATOR_BOND_ATOMS: u128 = 10_000 * DECIMAL_FACTOR;
+pub const MIN_VALIDATOR_BOND_ATOMS: u128 = 1_000 * DECIMAL_FACTOR;
 
 /// Hard floor on the validator bond (ADR 0038). Immutable — governance cannot drop
 /// the bond below this even if the governable minimum is set lower.

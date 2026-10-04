@@ -187,9 +187,16 @@ mod tests {
         for p in [a, b, c, d] {
             nat.relay_capable(p); // d speaks the protocol but was never reached directly
         }
-        nat.reachable_at(a, format!("/ip4/203.0.113.1/tcp/9001/p2p/{a}").parse().unwrap());
+        nat.reachable_at(
+            a,
+            format!("/ip4/203.0.113.1/tcp/9001/p2p/{a}")
+                .parse()
+                .unwrap(),
+        );
         let first = nat.next_relays();
-        assert!(first.iter().all(|(_, ad)| !ad.iter().any(|p| matches!(p, Protocol::P2p(_)))));
+        assert!(first
+            .iter()
+            .all(|(_, ad)| !ad.iter().any(|p| matches!(p, Protocol::P2p(_)))));
         assert_eq!(first.len(), 2);
         assert!(first.iter().all(|(p, _)| *p != d));
         nat.reserved.extend(first.iter().map(|(p, _)| *p));

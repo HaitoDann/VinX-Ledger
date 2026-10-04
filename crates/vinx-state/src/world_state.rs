@@ -726,8 +726,11 @@ impl WorldState {
             }
         }
 
-        // 5. Distribute epoch pot proportionally by co-signature participation (ADR 0028).
-        // Weight = cosign_count_in_window; equal fallback for validators with zero count.
+        // 5. Distribute the epoch pot (proof of stake): each active validator's share is
+        //    stake (capped at 10 % of the active stake in sets of 10 or more) times its
+        //    participation (blocks co-signed / blocks it could co-sign). Staking more pays
+        //    more; being absent pays less, down to nothing. A validator with no window yet
+        //    counts as fully present. Equal split only if every weight is zero.
         if !new_active.is_empty() {
             let pot = self.epoch_dist_emission_pot;
             if pot > Amount::ZERO {
@@ -735,18 +738,40 @@ impl WorldState {
                 let mut sorted: Vec<Address> = new_active.iter().copied().collect();
                 sorted.sort();
 
-                let weights: Vec<(Address, u64)> = sorted
+                const FULL: u128 = 1_000_000;
+                // Stake in whole VINX; capped at 10 % of the active stake once the set is
+                // large enough for the cap to mean something (as for voting power).
+                let stakes: Vec<u128> = sorted
                     .iter()
                     .map(|a| {
-                        let w = self
-                            .validator_pool
+                        self.validator_pool
                             .get(a)
-                            .map(|e| e.cosign_count_in_window)
-                            .unwrap_or(0);
-                        (*a, w)
+                            .map(|e| e.bond_atoms / vinx_core::amount::DECIMAL_FACTOR)
+                            .unwrap_or(0)
                     })
                     .collect();
-                let total_weight: u64 = weights.iter().map(|(_, w)| *w).sum();
+                let total_stake: u128 = stakes.iter().sum();
+                let cap = if sorted.len() >= 10 {
+                    (total_stake / 10).max(1)
+                } else {
+                    u128::MAX
+                };
+                let weights: Vec<(Address, u128)> = sorted
+                    .iter()
+                    .zip(&stakes)
+                    .map(|(a, stake)| {
+                        let participation = match self.validator_pool.get(a) {
+                            Some(e) if e.eligible_blocks_in_window > 0 => {
+                                (e.cosign_count_in_window as u128 * FULL
+                                    / e.eligible_blocks_in_window as u128)
+                                    .min(FULL)
+                            }
+                            _ => FULL,
+                        };
+                        (*a, (*stake).min(cap) * participation)
+                    })
+                    .collect();
+                let total_weight: u128 = weights.iter().map(|(_, w)| *w).sum();
 
                 if total_weight == 0 {
                     // No participation data yet — equal split.
@@ -765,11 +790,11 @@ impl WorldState {
                         );
                     }
                 } else {
-                    let total_w = total_weight as u128;
+                    let total_w = total_weight;
                     let mut distributed = 0u128;
                     for (i, (addr, weight)) in weights.iter().enumerate() {
                         let share_atoms = if i + 1 < weights.len() {
-                            pot.atoms() * (*weight as u128) / total_w
+                            pot.atoms() * *weight / total_w
                         } else {
                             // Last recipient gets the remainder to avoid rounding loss.
                             pot.atoms() - distributed
@@ -2691,6 +2716,54 @@ mod tests {
             )),
             Err(CoreError::Unauthorized)
         );
+    }
+
+    #[test]
+    fn test_epoch_rewards_follow_stake_and_presence() {
+        // ADR 0086: share = voting power (stake, capped) × participation.
+        let mut state = WorldState::new();
+        let unit = vinx_core::amount::DECIMAL_FACTOR;
+        let (_, small) = kp_addr();
+        let (_, big) = kp_addr();
+        let (_, absent) = kp_addr();
+        for (addr, vinx, cosigned) in [
+            (small, 1_000u128, 100u64),
+            (big, 3_000, 100),
+            (absent, 3_000, 50),
+        ] {
+            let mut e = vinx_core::ValidatorPoolEntry::new(vinx * unit, 0);
+            e.status = PoolStatus::Active;
+            e.cosign_count_in_window = cosigned;
+            e.eligible_blocks_in_window = 100;
+            state.validator_pool.insert(addr, e);
+        }
+        let mut addrs = vec![small, big, absent];
+        addrs.sort();
+        state.validator_set = state.weighted_validator_set(addrs);
+        // A pot already minted into `emitted_atoms` (as the emission path does).
+        let pot = 7_000 * unit;
+        state.epoch_dist_emission_pot = Amount::from_atoms(pot);
+        state.emitted_atoms = pot;
+        state.tick_epoch_close();
+        let got = |a: &Address| {
+            state
+                .accounts
+                .get(a)
+                .map(|x| x.balance.atoms())
+                .unwrap_or(0)
+        };
+        let (s, b, a) = (got(&small), got(&big), got(&absent));
+        assert_eq!(s + b + a, pot, "the whole pot is paid out");
+        // Window decay at the close may scale counters, not their ratios.
+        assert!(
+            b > 2 * s && b < 4 * s,
+            "3× the stake earns ~3× ({s} vs {b})"
+        );
+        assert!(
+            a < b && a > b / 3,
+            "half the presence earns about half ({a} vs {b})"
+        );
+        assert!(state.supply_invariant_holds());
     }
 
     #[test]
