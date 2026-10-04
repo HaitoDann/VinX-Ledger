@@ -851,7 +851,11 @@ pub async fn faucet_request(
     let amount = Amount::from_atoms(node.config.faucet_amount_atoms);
     let fee = amount.calculate_fee(node.state.read().await.base_fee);
 
-    let tx = Transaction::new_transfer(faucet_kp, to_addr, amount, fee, nonce);
+    let mut tx = Transaction::new_transfer(faucet_kp, to_addr, amount, fee, nonce);
+    // Signed for this chain: the constructor defaults to the devnet id, and a faucet on
+    // the testnet (chain 7) handed out transfers every node then refused.
+    tx.chain_id = node.state.read().await.chain_id;
+    tx.sign(faucet_kp);
     let tx_hash = hex::encode(tx.hash());
 
     node.mempool

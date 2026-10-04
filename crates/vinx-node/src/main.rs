@@ -30,7 +30,8 @@ struct NodeConfigFile {
     /// exist it is generated automatically (the account still needs funding).
     faucet_key_file: Option<PathBuf>,
     /// Atoms to drip per faucet request (default: 100 VinX = 100 × 10¹⁸ atoms).
-    faucet_amount_atoms: Option<u128>,
+    /// u64: the TOML format has no 128-bit integers (u128 failed the whole file).
+    faucet_amount_atoms: Option<u64>,
     /// Cooldown between faucet requests per address in seconds (default: 86 400 = 24 h).
     faucet_cooldown_secs: Option<u64>,
     /// Archive node (same as `--archive`).
@@ -50,8 +51,13 @@ impl NodeConfigFile {
                 cfg
             }
             Err(e) => {
-                tracing::warn!(path = %path.display(), error = %e, "Failed to parse config file, using defaults");
-                Self::default()
+                // Never run on silent defaults: a dropped config file disables the
+                // faucet, the admin token and every other setting without a trace.
+                eprintln!(
+                    "\n❌ Fichier de configuration illisible : {}\n{e}",
+                    path.display()
+                );
+                std::process::exit(1);
             }
         }
     }
@@ -572,6 +578,7 @@ async fn main() {
         let (faucet_kf, faucet_kp) = KeyFile::load_or_generate(faucet_path);
         let amount = file_cfg
             .faucet_amount_atoms
+            .map(u128::from)
             .unwrap_or(100 * vinx_core::amount::DECIMAL_FACTOR);
         let cooldown = file_cfg.faucet_cooldown_secs.unwrap_or(86_400);
         tracing::info!(
