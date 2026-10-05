@@ -25,7 +25,7 @@ jobs:
           - { name: Linux,           os: ubuntu-22.04 }
           - { name: Windows,         os: windows-latest }
           - { name: macOS (Apple),   os: macos-14 }
-          - { name: macOS (Intel),   os: macos-13 }
+          - { name: macOS (Intel),   os: macos-15-intel }
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
