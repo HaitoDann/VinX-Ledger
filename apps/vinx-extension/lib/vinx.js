@@ -102,8 +102,17 @@
     return { pk: kp.publicKey, sk: kp.secretKey, address: addressOf(kp.publicKey) };
   }
 
-  // ── Encrypted vault (PBKDF2-SHA256 600 000 iterations → AES-256-GCM) ────────
-  async function vaultKey(password, salt, iterations) {
+  // ── Encrypted vault (Argon2id → AES-256-GCM, same parameters as the desktop app) ─
+  // v1 vaults (PBKDF2-SHA256) still open; the popup re-seals them as v2 on unlock.
+  const ARGON = { memorySize: 19 * 1024, iterations: 2, parallelism: 1 };
+  async function aesKey(raw) {
+    return subtle.importKey('raw', raw, 'AES-GCM', false, ['encrypt', 'decrypt']);
+  }
+  async function argonKey(password, salt, p) {
+    const raw = await root.hashwasm.argon2id({ password: enc.encode(password), salt, ...p, hashLength: 32, outputType: 'binary' });
+    return aesKey(raw);
+  }
+  async function pbkdf2Key(password, salt, iterations) {
     const base = await subtle.importKey('raw', enc.encode(password), 'PBKDF2', false, ['deriveKey']);
     return subtle.deriveKey({ name: 'PBKDF2', hash: 'SHA-256', salt, iterations }, base, { name: 'AES-GCM', length: 256 }, false, ['encrypt', 'decrypt']);
   }
@@ -111,16 +120,20 @@
     if (String(password).length < 8) throw new Error('short-password');
     const salt = root.crypto.getRandomValues(new Uint8Array(16));
     const iv = root.crypto.getRandomValues(new Uint8Array(12));
-    const iterations = 600000;
-    const ct = await subtle.encrypt({ name: 'AES-GCM', iv }, await vaultKey(password, salt, iterations), seed);
-    return { v: 1, kdf: 'pbkdf2-sha256', iterations, salt: hex(salt), iv: hex(iv), ct: hex(new Uint8Array(ct)), address: keyPair(seed).address };
+    const ct = await subtle.encrypt({ name: 'AES-GCM', iv }, await argonKey(password, salt, ARGON), seed);
+    return { v: 2, kdf: 'argon2id', m: ARGON.memorySize, t: ARGON.iterations, p: ARGON.parallelism, salt: hex(salt), iv: hex(iv), ct: hex(new Uint8Array(ct)), address: keyPair(seed).address };
   }
   async function open(vault, password) {
+    const salt = unhex(vault.salt);
+    const key = vault.kdf === 'argon2id'
+      ? await argonKey(password, salt, { memorySize: vault.m, iterations: vault.t, parallelism: vault.p })
+      : await pbkdf2Key(password, salt, vault.iterations);
     try {
-      const pt = await subtle.decrypt({ name: 'AES-GCM', iv: unhex(vault.iv) }, await vaultKey(password, unhex(vault.salt), vault.iterations), unhex(vault.ct));
+      const pt = await subtle.decrypt({ name: 'AES-GCM', iv: unhex(vault.iv) }, key, unhex(vault.ct));
       return new Uint8Array(pt);
     } catch { throw new Error('bad-password'); }
   }
+  const needsUpgrade = (vault) => vault.kdf !== 'argon2id';
 
   // ── Transactions (vinx-core Transaction::signing_bytes) ─────────────────────
   // disc ‖ 0x00 (Ed25519) ‖ public key ‖ to ‖ amount(16) ‖ fee(16) ‖ nonce(8) ‖ chain_id(4)
@@ -156,5 +169,5 @@
     return { to: addr.toLowerCase(), amount: q.get('amount') || '', memo: q.get('memo') || '' };
   }
 
-  root.VinX = { hex, unhex, addressOf, addressBytes, isAddress, newPhrase, checkPhrase, seedFromPhrase, keyPair, seal, open, signTx, parseAmount, fmt, parseUri, DEC };
+  root.VinX = { hex, unhex, addressOf, addressBytes, isAddress, newPhrase, checkPhrase, seedFromPhrase, keyPair, seal, open, needsUpgrade, signTx, parseAmount, fmt, parseUri, DEC };
 })(typeof window !== 'undefined' ? window : globalThis);
