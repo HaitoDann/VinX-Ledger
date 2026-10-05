@@ -1,3 +1,4 @@
+pub mod cors;
 pub mod handlers;
 pub mod rate_limit;
 pub mod types;
@@ -58,5 +59,6 @@ pub fn router(node: Arc<Node>) -> Router {
         .route("/admin/compact", post(handlers::post_compact))
         .route("/faucet/request", post(handlers::faucet_request))
         .layer(middleware::from_fn_with_state(limiter, rate_limit))
+        .layer(middleware::from_fn(cors::cors))
         .with_state(node)
 }
