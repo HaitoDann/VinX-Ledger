@@ -1,312 +1,328 @@
-# VinX Ledger — Livre Blanc
+# VinX Ledger — Livre blanc
 
-**Version :** 6.0
-**Date :** Septembre 2026
+**Version :** 7.0
+**Date :** Octobre 2026
 **Éditeur :** VinX Labs
 
 ---
 
-## 1. Vision & Philosophie
+## 1. Vision
 
-VinX Ledger est un **rail de paiement L1 minimaliste** : envoyer des VinX rapidement, de façon fiable et vérifiable. Point.
+VinX Ledger est un **rail de paiement** : une blockchain de couche 1 qui ne fait qu'une chose,
+faire circuler de la valeur rapidement, définitivement et de façon vérifiable.
 
-Ce n'est pas une plateforme de contrats intelligents. Ce n'est pas un L1 généraliste. Il n'y a pas de machine virtuelle, pas de modules applicatifs, pas de surcouches — et c'est un choix délibéré, pas un manque.
+Ce n'est pas une plateforme de contrats intelligents. Il n'y a ni machine virtuelle, ni
+stablecoin, ni jetons secondaires. Un seul token, le **VINX**, et une seule fonction, payer.
+C'est un choix de conception (ADR 0064), pas une limite technique : un protocole qui fait une
+chose peut rester assez petit pour être lu, audité et exécuté par n'importe qui.
 
-La valeur de VinX repose sur une promesse simple : un **cash numérique honnête, rapide et souverain**, dont chaque règle peut être lue, comprise et vérifiée par n'importe qui. Un protocole qui fait une chose et la fait bien, plutôt qu'un écosystème qui fait beaucoup et qu'on ne peut pas auditer complètement.
+Trois promesses en découlent :
 
-Construit en solo, sans investisseurs, **sans pre-mine**, sans promesses spéculatives, VinX avance à son rythme.
+- **Définitif tout de suite.** Un paiement inclus dans un bloc est irréversible au bloc
+  suivant. Il n'y a pas de confirmations à attendre ni de réorganisation possible.
+- **Léger.** Un nœud ne garde que 30 jours d'historique et un état compact vérifiable. Un PC
+  ordinaire, un mini-serveur ou un Raspberry Pi suffisent pour valider.
+- **Ouvert.** N'importe qui peut devenir validateur en déposant une garantie. Aucune
+  autorisation n'est nécessaire, et aucun serveur central n'est requis.
 
-> **Ce qui change en v6.0 :** VinX abandonne l'écosystème de subnets / modules / Appchains ZK prévu dans les versions précédentes. L'architecture se recentre entièrement sur le rail de paiement. Les ADRs 0001, 0010, 0024, 0034, 0048, 0049, 0050 qui décrivaient ces fonctionnalités sont gelés hors scope (ADR 0064). La cryptographie de hachage passe de SHA-256 à BLAKE3 avant le genesis (ADR 0069).
+> **Ce qui change en v7.0 :**
+> - Le consensus est désormais **BFT de type Tendermint** (ADR 0082) ; il remplace le PoA à
+>   comité VRF.
+> - Les **récompenses sont proportionnelles à l'enjeu** (preuve d'enjeu, ADR 0086).
+> - Garantie minimale de **1 000 VINX** ; déliaison en **21 jours** ; slashing **corrélé**.
+> - **État léger** (ADR 0083) et **mémo de paiement** (ADR 0085).
+> - Réseau **sans serveur central**, qui fonctionne **derrière les box internet**.
+> - **Mises à jour sans redémarrage**, activées par les validateurs (ADR 0086).
 
 ---
 
-## 2. Architecture Technique
+## 2. Architecture
 
-- **Langage** : Rust, implémentation propriétaire de bout en bout — aucun framework blockchain tiers
-- **Vitesse** : Cadence de bloc fixe à **12 s** — un bloc produit toutes les 12 secondes, même vide. Finalité déterministe **au quorum** via BLS agrégé
-- **Capacité** : jusqu'à **3 000 transactions par bloc** (gouvernable), mempool de **100 000** transactions
-- **Performance** : ~250 TPS (3 000 tx toutes les 12 s) — exécution séquentielle intentionnelle pour l'auditabilité
-- **Précision** : 9 décimales internes, 2 décimales affichées à l'utilisateur
-- **Adresses** : Format Bech32m avec préfixe `vinx1`, dérivées du type de clé et de la clé
-- **Cryptographie** : Ed25519 (signatures de transaction), BLS12-381 (co-signatures agrégées du comité), BLAKE3 (hachage), Bech32m (adresses)
-- **Référence de temps** : le **timestamp des blocs** (temps réel), pas la hauteur — toutes les garanties temporelles (émission, déliaison de bond, préavis d'upgrade) s'expriment en secondes
+| | |
+|---|---|
+| **Implémentation** | Rust, de bout en bout, sans framework blockchain tiers ni machine virtuelle |
+| **Consensus** | BFT Tendermint : proposition, prevote, precommit ; finalité immédiate à plus des 2/3 |
+| **Cadence** | Un bloc toutes les **12 s**, paramètre de genèse |
+| **Capacité** | Jusqu'à **3 000 transactions par bloc** (~250 tx/s) |
+| **Précision** | 9 décimales internes, affichage au centime |
+| **Adresses** | Bech32m, préfixe `vinx1` ; adresses lisibles `nom@domaine` résolues hors chaîne |
+| **Cryptographie** | Ed25519 (transactions), BLS12-381 (votes agrégés), BLAKE3 (hachage) |
+| **État** | Arbre de Merkle creux (SMT) : preuves de solde, reçus vérifiables |
+| **Réseau** | libp2p : gossipsub, Kademlia, UPnP, AutoNAT, relais, perçage de NAT (DCUtR) |
+| **Référence de temps** | Horodatage des blocs (secondes réelles), jamais la hauteur |
 
-### Pourquoi une implémentation custom sans VM
-
-VinX Ledger est implémenté sans framework blockchain tiers et sans machine virtuelle. Ce choix garantit :
-
-- **Auditabilité maximale** — surface de code réduite, aucune dépendance opaque, chaque règle est écrite explicitement
-- **Sécurité prévisible** — sans VM, la surface d'attaque est fixe et bornée ; aucun contrat malveillant ne peut s'exécuter dans le nœud
-- **Maîtrise totale du protocole** — rien n'est hérité par défaut d'un framework
-- **Stabilité à long terme** — aucune dépendance upstream susceptible de casser l'API
-
-Les briques P2P (libp2p Rust), le consensus PoA avec comité VRF et BLS12-381, et les optimisations réseau (compact blocks ADR 0037, parallel sync ADR 0038) sont développées nativement dans le projet.
-
-### Types de transactions
-
-VinX reconnaît exactement cinq types de transactions — ni plus, ni moins :
+### 2.1 Types de transactions
 
 | Type | Usage |
-|------|-------|
-| `Transfer` | Paiement natif VinX (le cas d'usage central) |
-| `Bond` | Déposer le bond pour devenir validateur |
-| `Unbond` | Retirer le bond (déliaison différée 3 jours) |
-| `ValidatorJoin` / `ValidatorExit` | Rejoindre ou quitter le set de validateurs |
-| `FeeAdjust` | Gouvernance des frais de base |
+|---|---|
+| `Transfer` | Paiement en VINX, avec un **mémo** facultatif de 32 octets signé (ADR 0085) |
+| `Stake` / `Unstake` | Déposer ou retirer la garantie de validateur |
+| `RegisterBlsKey` | Enregistrer la clé de vote d'un validateur (avec preuve de possession) |
+| `Unjail` | Réhabiliter un validateur suspendu pour absence |
+| `SlashValidator` | Soumettre la preuve d'un double vote |
+| `SetMemoRequired` | Exiger un mémo sur les paiements reçus (comptes de dépôt, commerçants) |
+| `AnnounceUpgrade` / `AdminAction` | Gouvernance de lancement (§8) |
 
-C'est tout. Il n'y a pas de transaction de contrat, pas de déploiement de code, pas d'appel à une logique applicative. Un nœud VinX n'exécute jamais de code tiers.
+Un nœud VinX n'exécute jamais de code tiers.
+
+### 2.2 État léger (ADR 0083)
+
+- L'état (soldes, garanties, set de validateurs) est permanent et compact. Sa racine de
+  Merkle figure dans chaque bloc.
+- Les blocs et leurs transactions sont **élagués après 30 jours**. Un nœud qui rejoint le
+  réseau démarre depuis un instantané de l'état, signé par le quorum.
+- Les **reçus de paiement** (la transaction et sa preuve d'inclusion) restent vérifiables hors
+  ligne après l'élagage. C'est le payeur et le bénéficiaire qui les conservent, pas le réseau.
+- Un mode `--archive` conserve tout l'historique pour les explorateurs et les auditeurs.
 
 ---
 
-## 3. Tokenomics — Fair launch & émission par le travail
+## 3. Consensus et validateurs
 
-La supply totale est fixée à **1 000 000 000 VinX** (1 milliard), **immuable**. Les tokens ne sont jamais créés au-delà de ce plafond.
+### 3.1 BFT Tendermint (ADR 0082)
 
-### 3.1 Aucun pre-mine, aucune réserve pré-allouée
+À chaque hauteur, un proposeur choisi selon le poids de vote propose un bloc. Les validateurs
+votent en deux temps (prevote, puis precommit). Le bloc est **définitif** dès que plus des 2/3
+de la puissance de vote l'ont precommité : il ne peut plus être remis en cause. Les signatures
+BLS sont agrégées dans un certificat joint au bloc suivant.
 
-À la genèse :
+- **Puissance de vote** : la garantie déposée, plafonnée à **10 % par validateur** pour limiter
+  la centralisation.
+- **Set actif** : jusqu'à **100 validateurs**, classés par présence.
+- **Sûreté avant disponibilité** : si plus d'un tiers de la puissance disparaît en même temps,
+  la chaîne s'arrête plutôt que de risquer un fork. Elle reprend quand les validateurs
+  reviennent.
 
-```
-Tokens émis       = 0 VinX   (0 %)
-Circulation       = 0 VinX   (0 %)
-```
+### 3.2 Entrée libre, set stable (ADR 0086)
 
-Rien n'existe au démarrage. Les VinX n'existent que lorsqu'ils sont mintés par le travail du consensus. Le fondateur lui-même obtient ses premiers tokens en faisant tourner des validateurs — pas autrement.
+- **Entrée** : déposer au moins **1 000 VINX** avec sa clé de vote. Après un **échauffement**
+  de 3 époques (environ 3 h), le validateur entre dans le set.
+- **Rythme** : au plus **10 % de nouveaux validateurs par époque** (au minimum 1) et 2 sorties
+  volontaires par époque. Le set ne peut pas être bouleversé d'un coup.
+- **Absences** : un validateur qui manque 3 de ses tours de proposition est **suspendu** et
+  **sort du vote immédiatement**. Des absences étalées dans le temps ne s'additionnent donc
+  jamais jusqu'au tiers fatal. Revenu en ligne, son nœud le **réhabilite tout seul**.
+- **Clés séparées** (ADR 0084) : le nœud ne détient qu'une clé d'opérateur et une clé de vote.
+  La clé qui détient les fonds reste hors du nœud.
 
-### 3.2 Émission : décroissance exponentielle continue, demi-vie ~20 ans
+### 3.3 Sanctions (ADR 0084)
 
-Les VinX sont mintés progressivement pour rémunérer la production de blocs. Le débit décroît de façon **continue et régulière** depuis le premier bloc :
+- **Absence** : suspension, sans perte d'argent. Le validateur ne touche plus de récompenses
+  tant qu'il est absent.
+- **Double vote (équivocation)**, prouvé cryptographiquement : pénalité de **5 % + 3 × la part
+  de puissance sanctionnée dans la même fenêtre**, plafonnée à 100 %. Une erreur isolée (un
+  nœud lancé deux fois) coûte quelques pour cent ; une attaque coordonnée d'un tiers du réseau
+  coûte tout. 10 % de la pénalité revient au rapporteur, et rien n'est brûlé.
+- **Déliaison** : une garantie retirée est rendue après **21 jours**, et reste sanctionnable
+  pendant ce délai.
 
-```
-R(t) = R₀ · e^(−λt)     avec  λ = ln(2) / T_half
-                               T_half ≈ 20 ans
-                               R₀ ≈ 3,47 milliards VinX / an
-```
+---
 
-L'intégrale sur l'infini vaut exactement 1 milliard. Il n'y a **aucun événement discret** (pas de halving-day) — la courbe décroît en permanence. L'émission est calculée sur les **timestamps réels des blocs** : un réseau au repos ne minte rien.
+## 4. Économie
 
-| Échéance | Cumul émis | Restant |
-|----------|-----------|---------|
+### 4.1 Offre fixe, lancement équitable
+
+L'offre est plafonnée à **1 000 000 000 VINX**, définitivement. Sur le mainnet, **rien n'est
+pré-alloué** : à la genèse, zéro VINX existe. Tous les VINX sont créés au fil du temps et
+versés à ceux qui font tourner le réseau, fondateur compris.
+
+Les réseaux de test pré-financent un faucet. Ce pré-financement n'entre pas dans la courbe
+d'émission et ne retarde pas les récompenses.
+
+### 4.2 Émission décroissante
+
+L'émission suit une série géométrique en temps réel. **La moitié de l'offre (500 M) est émise
+pendant les 20 premières années**, la moitié du reste pendant les 20 suivantes, et ainsi de
+suite. Dans chaque période, le rythme est constant : environ **0,79 VINX par seconde**, soit
+~9,5 VINX par bloc, pendant les 20 premières années.
+
+| Échéance | Émis au total | Restant |
+|---|---|---|
 | Genèse | 0 | 1 Md |
 | 20 ans | 500 M | 500 M |
 | 40 ans | 750 M | 250 M |
-| 66 ans | 900 M | 100 M |
-| ∞ | → 1 Md | → poussière |
+| 60 ans | 875 M | 125 M |
+| ∞ | → 1 Md | → 0 |
 
-### 3.3 Distribution de l'émission
+L'émission dépend de l'horodatage des blocs : un réseau arrêté n'émet rien, et un réseau
+rapide n'émet pas plus.
 
-L'émission accumulée sur une **époque** (fenêtre temporelle) est distribuée entre proposeurs et co-signataires :
-
-- Les **proposeurs** reçoivent une fraction fixe (`PROPOSER_SHARE_BPS`) proportionnelle à leurs blocs dans l'époque.
-- Le reste est réparti proportionnellement aux **co-signatures valides**.
-- **Le montant du bond ne multiplie pas les gains** : seul le travail effectif compte.
-
-### 3.4 Relais automatique vers les frais
-
-Deux flux de revenus pour un validateur : l'**émission** (dominante au début, décroissante) et les **frais de transaction** (croissants avec l'usage). Quand l'émission atteint la poussière, les frais deviennent la source dominante et le réseau bascule en **fees-only** — automatiquement, sans intervention.
-
-### 3.5 Invariant de supply
-
-À chaque bloc, sans exception :
+### 4.3 Répartition (preuve d'enjeu, ADR 0086)
 
 ```
-circulation + pot_époque + poussière_détruite = émis_total ≤ 100 000 000 000 VinX
+Émission, à chaque bloc  ──►  20 % au proposeur du bloc
+                         ──►  80 % à la cagnotte d'époque
+Frais, à chaque bloc     ──►  50 % au proposeur du bloc
+                         ──►  50 % à la cagnotte d'époque
+Cagnotte, chaque heure   ──►  aux validateurs actifs, selon  enjeu × présence
 ```
 
-- `émis_total` croît continûment selon la courbe, jamais au-delà du cap.
-- `pot_époque` = émission + slash redistribué, en attente de distribution à la clôture.
-- `poussière_détruite` = dust des comptes reaped (≤ 0,001 VinX par compte, infime).
+- **Enjeu** : la garantie déposée, plafonnée à 10 % de l'enjeu actif dès 10 validateurs.
+- **Présence** : blocs co-signés divisés par blocs que le validateur pouvait co-signer, sur
+  7 jours glissants.
 
-L'invariant est vérifié à l'exécution (arithmétique *checked*, échec du bloc en cas de rupture).
+Engager plus rapporte plus ; être absent rapporte moins, jusqu'à rien. Rien n'est jamais
+brûlé : émission et frais ne font que changer de main. Quand l'émission devient négligeable,
+les frais prennent naturellement le relais.
+
+### 4.4 Frais
+
+- **Forfaitaires** : un paiement coûte **0,0001 VINX**, quel que soit son montant.
+- **Congestion** : le prix de base monte quand les blocs se remplissent et redescend ensuite.
+- **Garantie, retrait, réhabilitation** : sans frais.
+
+### 4.5 Invariant
+
+À chaque bloc, et vérifié par chaque nœud :
+
+```
+circulation + cagnotte d'époque + poussière détruite = total émis ≤ 1 000 000 000 VINX
+```
+
+Un bloc qui violerait cet invariant est rejeté.
 
 ---
 
-## 4. Frais
+## 5. Paiements
 
-### 4.1 Frais forfaitaires
-
-Chaque transfert paie un frais **fixe en valeur absolue**, indépendant du montant transféré :
-
-```
-frais = FRAIS_BASE × poids(type) × multiplicateur_congestion
-```
-
-- **`FRAIS_BASE = 0,0001 VinX`** (gouvernable) — envoyer 1 VinX ou 1 million coûte la même chose. C'est le comportement attendu d'un vrai cash.
-- **`poids(type)`** : transfert = `1` ; bond/unbond = `0` (exempté) ; actions de gouvernance = `0`.
-- **`multiplicateur_congestion`** : `×1` jusqu'à 80 % de remplissage du mempool, montée linéaire jusqu'à `×3` à saturation.
-
-### 4.2 Frais partagés : producteur et co-signataires
-
-Produire un bloc et le valider sont deux travaux, tous deux rémunérés (ADR 0081). La moitié des frais d'un bloc est créditée immédiatement au producteur ; l'autre moitié rejoint la cagnotte d'époque et revient aux co-signataires, au prorata de leur participation. Aucun frais n'est jamais brûlé.
-
-```
-[Émission — par époque]           ──► 20 % proposeur · 80 % co-signataires
-[Frais forfaitaires — par bloc]   ──► 50 % producteur  · 50 % co-signataires (à la clôture d'époque)
-```
-
-Ni les frais ni l'émission ne quittent jamais la circulation — ils changent simplement de main.
+- **Mémo** : 32 octets signés avec le paiement, pour une référence de facture ou un numéro de
+  commande. Un compte peut exiger un mémo (`SetMemoRequired`), ce qui évite les dépôts
+  impossibles à attribuer.
+- **Adresses lisibles** : `nom@domaine` est résolu par un fichier publié sur le site du
+  domaine, sans registre sur la chaîne.
+- **Reçus** : la transaction, l'en-tête du bloc et la preuve d'inclusion. N'importe qui peut
+  les vérifier sans nœud, même après l'élagage.
+- **Finalité** : un paiement inclus est définitif ; le commerçant peut livrer au bloc suivant.
 
 ---
 
-## 5. Staking — un bond de validateur, pas un rendement
+## 6. Réseau sans centre
 
-Le staking dans VinX a une seule fonction : **poser une caution**. Ce n'est pas un mécanisme de rendement pour les détenteurs passifs.
-
-- **Pas de staking retail.** Un utilisateur lambda garde du VinX pour l'utiliser comme cash.
-- **Bond minimum : `10 000 VinX`** (gouvernable) — requis pour rejoindre le set des validateurs. Le validateur du genesis est dispensé (il accumule son bond via l'émission).
-- **Le bond ne rapporte aucun rendement** — c'est une garantie de sécurité. Le seul revenu d'un validateur vient de son travail (émission + frais).
-- **Déliaison différée : 3 jours réels.** Les fonds retirés restent saisissables pendant la période de déliaison — sans ce délai, un validateur pourrait tricher puis retirer sa caution avant que la preuve ne soit traitée.
-
-### Slashing
-
-- **Équivocation (double-signature)** : preuve cryptographiquement vérifiée — deux en-têtes distincts, à la même hauteur, signés par le même validateur. Sanction : **100 % du bond**, exclusion du set.
-  - **10 %** → prime au rapporteur (incite la vigilance).
-  - **90 %** → versés dans le pot d'époque, distribués aux validateurs honnêtes.
-  - **Aucun token détruit** — le slash est une redistribution.
-- **Downtime** : exclusion du set actif à la prochaine rotation d'époque, **sans slash économique** — l'absence n'est pas prouvablement malveillante.
+- **Découverte** : les nœuds se trouvent par Kademlia et mémorisent leurs pairs. Les points
+  d'entrée (seeds), embarqués dans le logiciel, ne servent qu'à arriver ; le réseau survit à
+  leur disparition.
+- **Box internet** : un nœud tente d'ouvrir son port (UPnP). S'il reste injoignable, il le
+  détecte (AutoNAT), passe par deux relais et tente une liaison directe (DCUtR). Valider ne
+  demande aucune configuration réseau.
+- **Résistance** : messages bornés, limitation de débit par pair et bannissement **temporaire**
+  (5 minutes) : un pair bruyant est mis à l'écart sans jamais être coupé définitivement.
+- **Genèse vérifiée** : la genèse officielle est publiée avec le logiciel ; un nœud refuse d'en
+  rejoindre une autre.
 
 ---
 
-## 6. Infrastructure : Validateurs & Full Nodes
+## 7. Accessibilité
 
-### 6.1 Validateurs (consensus BFT Tendermint, ADR 0082)
-
-Jusqu'à 100 validateurs actifs, sélectionnés automatiquement par leur bond, votent sur chaque
-bloc en trois étapes (proposition, prevote, precommit). Un bloc est définitif dès que plus de
-2/3 de la puissance de vote l'a precommité : il n'y a jamais de réorganisation. La puissance
-suit le stake, plafonnée à 10 % par validateur pour limiter la centralisation. Le proposeur
-tourne selon le stake. Le temps de bloc (12 s au départ) est un paramètre de genèse qui
-pourra baisser progressivement. Les frais sont partagés 50/50 entre le producteur et les
-co-signataires du certificat de commit.
-
-### 6.2 Full Nodes Communautaires
-
-N'importe qui peut faire tourner un nœud complet sans permission et sans rémunération directe.
-
-**Motivations :** souveraineté financière, point d'accès RPC privé, auditabilité indépendante du réseau. Les full nodes sont la couche de redondance : si VinX Labs disparaissait, ils conservent l'intégralité de la blockchain.
-
-**Synchronisation :** trois modes selon le retard — snapshot sync (ADR 0038, gap > 500 blocs), parallel sync (8 fetches concurrents, ADR 0038), puis sync séquentielle pour la queue finale.
+- **Application de bureau** (Windows, macOS, Linux) : portefeuille chiffré, phrase de
+  récupération de 12 mots, envoi avec référence, réception par QR code, et un **interrupteur
+  « Valider »** qui lance le nœud intégré, dépose la garantie et suit l'échauffement.
+- **Ligne de commande** : `./vinx join` rejoint le réseau, demande des VINX de test, dépose la
+  garantie et lance l'échauffement, en une seule commande.
+- **Alertes** sur le téléphone en cas d'arrêt, d'isolement ou de suspension.
+- **SDK TypeScript** et API HTTP pour les intégrations marchandes.
 
 ---
 
-## 7. Le temps dans VinX : timestamps, pas hauteur de bloc
+## 8. Gouvernance et évolution
 
-Toutes les garanties qui s'expriment en temps réel reposent sur le **timestamp des en-têtes de blocs**, jamais sur la hauteur :
+VinX suit le modèle de Linux (ADR 0081) : le mainteneur publie le **logiciel**, chaque
+validateur choisit la version qu'il exécute. Le mainteneur ne dirige pas la **chaîne**.
 
-- L'**émission** décroît selon le temps réel écoulé (§3.2).
-- La **déliaison de bond** mûrit après 3 jours réels (§5).
-- Les **préavis d'upgrade** visent des jours réels (§8).
+### 8.1 Mises à jour sans redémarrage (ADR 0086)
 
-Pour empêcher un producteur malhonnête de gonfler le temps, chaque bloc est validé contre des bornes de timestamp : monotonie non-décroissante et plafond (horloge locale + tolérance).
+1. Une nouvelle version est publiée. Chaque nouvelle règle y est conditionnée à la version
+   active du protocole.
+2. La mise à jour est annoncée sur la chaîne avec un préavis : **7 jours** pour un correctif,
+   **30 jours** pour une version mineure, **90 jours** pour une version majeure.
+3. Chaque bloc indique la version que fait tourner son proposeur.
+4. À l'échéance, la mise à jour s'active **seulement si plus des 2/3 de la puissance de vote
+   l'a installée**. Sinon, elle reste en attente : les validateurs ont un droit de veto de fait.
+5. Un nœud resté sur une ancienne version s'arrête proprement et le signale. Il n'applique
+   jamais des règles qu'il ne connaît pas.
 
----
+Les anciens blocs restent valides avec les anciennes règles : **la chaîne ne repart jamais de
+zéro**.
 
-## 8. Gouvernance & Évolution
+### 8.2 Clé de lancement
 
-VinX suit le modèle de gouvernance de Linux (ADR 0081). Le mainteneur décide de ce qui entre dans le code et publie les versions ; chaque validateur choisit librement la version qu'il exécute. Le mainteneur dirige le **logiciel**, pas la **chaîne**.
+Pendant les **365 premiers jours** seulement, une clé d'administration peut annoncer les mises
+à jour et ajuster les paramètres gouvernables (frais de base, garantie minimale dans ses
+bornes). Ce pouvoir s'éteint définitivement à l'échéance : c'est une constante du protocole.
+Son remplacement par une annonce votée par les validateurs est prévu avant le mainnet.
 
-Pendant les **365 premiers jours** seulement, une clé admin on-chain (rotatable, ou comité K-of-M) peut gérer le set de validateurs, ajuster les paramètres gouvernables (frais de base, bond minimum) et planifier les mises à jour, afin de corriger une urgence de lancement. Passé ce délai, ce pouvoir s'éteint définitivement : c'est une constante du protocole, qu'aucune transaction ne peut prolonger.
-
-Il n'y a **pas de gel de compte** : la propriété des tokens est inconditionnelle.
-
-
-### Mises à jour du protocole
-
-Les mises à jour sont déployées via un **versioning on-chain avec activation planifiée** :
-
-- **Patch** (correctif) : 7 jours d'annonce
-- **Minor** (nouvelle fonctionnalité) : 30 jours d'annonce
-- **Major** (changement structurel) : 90 jours d'annonce
-
-Ces préavis visent des **jours réels** pour que tous les opérateurs aient le temps de mettre à jour leurs nœuds.
+Il n'existe **aucun gel de compte** : la propriété des VINX est inconditionnelle.
 
 ---
 
-## 9. Règles Immuables
+## 9. Règles immuables
 
-Les piliers de conception de VinX, que nulle gouvernance ne peut modifier :
-
-1. **Cap de 1 milliard** de VinX — jamais augmenté.
-2. **Quasi-absence de burn** — le slash redistribue aux validateurs honnêtes, ne détruit pas. Seule la poussière des comptes reaped est détruite (≤ 0,001 VinX par compte).
-3. **Aucun pre-mine, aucune réserve pré-allouée** — à la genèse, émis = 0. 100 % de la supply mintée par le travail.
-4. **Invariant** : `circulation + pot_époque + poussière_détruite = émis ≤ 1 Md` à chaque bloc.
-5. **Émission décroissante continue puis relais aux frais** — jamais un robinet discrétionnaire, jamais un événement discret.
-6. **Le bond sécurise, le travail rémunère** — le stake ne produit aucun rendement ; le slash punit et récompense collectivement les honnêtes.
-7. **Finalité BFT déterministe** — comité VRF, BLS agrégé, ≥ 67 % pour finaliser. Un bloc finalisé ne peut pas être réorganisé.
-8. **Propriété inconditionnelle** — aucun compte ne peut être gelé.
-9. **Aucune logique applicative dans le nœud** — VinX est un rail de paiement. Il n'exécute jamais de code tiers. Il n'y a pas de VM, pas de modules, pas de smart contracts. Ce périmètre est une décision de conception (ADR 0064), pas une limitation technique.
-10. **Courbe d'émission immuable après la genèse** — le total (1 Md), la demi-vie (~20 ans) et la forme exponentielle continue ne sont gouvernables par personne.
+1. **1 milliard de VINX au maximum**, jamais augmenté.
+2. **Aucune pré-allocation sur le mainnet** : tout est émis par le fonctionnement du réseau.
+3. **Courbe d'émission fixée à la genèse** : demi-vie de 20 ans, en temps réel.
+4. **Rien n'est brûlé** (hors poussière des comptes vidés, au plus 0,001 VINX par compte).
+5. **Invariant d'offre** vérifié à chaque bloc.
+6. **Finalité immédiate** : un bloc certifié par plus des 2/3 ne peut pas être annulé.
+7. **Propriété inconditionnelle** : aucun compte ne peut être gelé.
+8. **Rail de paiement** : pas de VM, pas de contrats intelligents, pas d'exécution de code tiers.
 
 ---
 
 ## 10. Positionnement
 
-VinX Ledger est un **projet artisanal** : une monnaie souveraine, construite en solo, sans investisseurs ni pré-vente.
+**VinX est :**
+- un rail de paiement : de la valeur qui circule vite, définitivement et de façon vérifiable ;
+- un protocole assez petit pour être audité par une personne attentive ;
+- un réseau que chacun peut faire tourner chez soi.
 
-**Ce que VinX est :**
-- Un rail de paiement L1 — envoyer de la valeur vite, sûrement, de façon vérifiable.
-- Un protocole minimaliste — auditable par une seule personne attentive.
-- Un cash numérique — forfait de frais, précision au centime, finalité immédiate.
-
-**Ce que VinX n'est pas :**
-- Une plateforme de DeFi ou de smart contracts.
-- Un concurrent d'Ethereum ou de Solana.
-- Un système de rendement passif.
-
-L'avantage de ce positionnement : VinX n'entre pas en compétition directe avec les L1 généralistes. Il résout un problème précis — le paiement — mieux qu'eux, parce qu'il ne fait que ça.
+**VinX n'est pas :**
+- une plateforme de DeFi ou de contrats intelligents ;
+- un concurrent des chaînes généralistes ;
+- un produit spéculatif : pas de prévente, pas de promesse de rendement.
 
 ---
 
-## 11. Roadmap
+## 11. Feuille de route
 
-Sans calendrier engagé, par étapes :
+**Fait**
+- Consensus BFT, finalité immédiate, état léger, reçus vérifiables
+- Preuve d'enjeu, entrée libre, set stable, suspension et réhabilitation automatiques
+- Réseau sans serveur central, passage des box (UPnP, relais, DCUtR)
+- Mises à jour sans redémarrage, activées par les validateurs
+- Application de bureau avec validateur en un clic, alertes, kit de lancement du testnet
 
-**✅ Fait**
-- Protocole core complet : consensus PoA + BLS, ECVRF RFC 9381, compact blocks (ADR 0037), snapshot sync + parallel sync (ADR 0038), storage persistant, RPC REST
-- Modèle fair launch implémenté : émission par le travail, bond validateur, slashing prouvable, frais au producteur
-- Consensus multi-validateur éprouvé (banc n=3 + banc adversarial multi-nœuds : finalité au quorum, tolérance à 1 panne, sûreté à 1/3)
-- **BLAKE3** intégré avant toute genèse publique (ADR 0069) — remplace SHA-256, breaking assumé en pré-mainnet
-- **Durcissement post-audit (ADRs 0069–0080)** : auth proposeur + registre BLS (0070), verrou de vote persistant (0071), `consensus_root` complet (0072), `signing_bytes` injectif (0073), checkpoints de subjectivité faible (0074), clé BLS + PoP liée à l'identité au bonding (0075)
-- Infrastructure testnet : Dockerfile, docker-compose, genesis-testnet.json
+**En cours**
+- Testnet public (chaîne 7), premiers validateurs indépendants, tests d'endurance
+- Page de paiement commerçant et portefeuille mobile
 
-**🔜 Prochaines étapes (dans l'ordre)**
-1. **Genesis testnet** — fixer les adresses réelles, timestamp coordonné, lancer le nœud public
-2. **HTTPS** sur le RPC public (nginx + Let's Encrypt)
-3. **3+ validateurs indépendants** — cérémonie de genèse documentée (ADR 0075 §1), vérification du genesis hash, recoupement multi-pairs des checkpoints (ADR 0074)
-4. **Contre-audits externes** + publication SECURITY.md (ADR 0078)
+**Avant le mainnet**
+- Audit de sécurité externe
+- Annonce des mises à jour par vote des validateurs, en remplacement de la clé d'administration
+- Applications signées, genèse et points de contrôle publiés
+- Lancement équitable, sans pré-allocation
 
-**📋 Backlog**
-- Monitoring : Prometheus + Grafana sur `/metrics`
-- Faucet public
-- Wallet web minimaliste (balance, send, historique)
-- Optimisations validées : mimalloc (ADR 0065), hash mémoïsé (ADR 0066), sig cache (ADR 0067), batch verify (ADR 0068)
-
-VinX Ledger n'a pas de pression d'agenda. Le projet avance à son rythme.
+VinX n'a pas de pression d'agenda : chaque étape est franchie quand elle est prête.
 
 ---
 
-## Annexe : Synthèse en une page
+## Annexe : synthèse
 
 | Catégorie | Valeur |
-|-----------|--------|
-| **Type** | Rail de paiement L1 — non-EVM, account-based, sans VM |
-| **Stack** | Rust, implémentation propriétaire |
-| **Cryptographie** | Ed25519 (signatures), BLS12-381 (co-signatures), BLAKE3 (hachage), Bech32 `vinx1` |
-| **Cadence de bloc** | Fixe **12 s** — un bloc toutes les 12 s, même vide |
-| **Référence de temps** | Timestamp des blocs (temps réel), pas la hauteur |
-| **Capacité** | 3 000 tx/bloc · ~250 TPS · mempool 100 000 |
-| **Consensus** | PoA + comité ECVRF, BLS12-381 agrégé, finalité BFT déterministe (≥ 67 %) |
-| **Types de tx** | Transfer, Bond, Unbond, ValidatorJoin, ValidatorExit, FeeAdjust — c'est tout |
-| **Full nodes** | Ouverts à tous |
-| **Supply totale** | 100 milliards VinX — immuable, no burn |
-| **Genèse** | 0 émis, 0 en circulation — aucun pre-mine |
-| **Émission** | Minting progressif · décroissance expo. continue · demi-vie ~20 ans · temps réel |
-| **Relais** | Émission → poussière → **fees-only** automatiquement |
-| **Frais** | Forfait 0,0001 VinX × poids × congestion (×1–3) · 100 % au producteur |
-| **Staking** | Bond validateur (min 100k VinX) · déliaison 3 j · slash équivocation 100 % (10 % rapporteur + 90 % redistribués) · aucun rendement passif |
-| **Gouvernance** | Clé admin rotatable · pas de gel de compte · upgrades planifiés 7/30/90 j réels |
-| **Hors scope** | Smart contracts, VM, modules, Appchains, ZK, DeFi (ADR 0064) |
+|---|---|
+| **Type** | Rail de paiement L1, sans VM, un seul token (VINX) |
+| **Consensus** | BFT Tendermint, BLS12-381 agrégé, finalité immédiate (> 2/3) |
+| **Bloc** | 12 s · jusqu'à 3 000 transactions |
+| **Historique** | 30 jours (état permanent compact, `--archive` en option) |
+| **Offre** | 1 Md VINX, plafond immuable, aucune pré-allocation sur le mainnet |
+| **Émission** | Demi-vie de 20 ans, temps réel · ~9,5 VINX par bloc au départ |
+| **Récompenses** | 20 % au proposeur · 80 % selon enjeu × présence · frais 50/50 |
+| **Validateurs** | Garantie min. 1 000 VINX · échauffement 3 h · set actif ≤ 100 · poids plafonné à 10 % |
+| **Sanctions** | Absence : suspension · double vote : 5 % + 3 × part corrélée · déliaison 21 jours |
+| **Frais** | 0,0001 VINX par paiement, ajustés à la congestion |
+| **Paiements** | Mémo de 32 octets, `nom@domaine`, reçus hors ligne |
+| **Réseau** | Kademlia, UPnP, AutoNAT, relais, DCUtR |
+| **Mises à jour** | Activées à > 2/3 des validateurs, sans redémarrage · préavis 7/30/90 jours |
+| **Gouvernance** | Clé de lancement de 365 jours, puis aucune · aucun gel de compte |
 
 ---
 
-*VinX Labs, septembre 2026 — Document de référence v6.0*
+*VinX Labs, octobre 2026 — document de référence v7.0*
