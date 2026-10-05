@@ -110,7 +110,10 @@ async function unlock() {
   $('u-go').disabled = true;
   msg('u-msg', 'wait', 'Déchiffrement…');
   try {
-    const seed = await V.open(await store.get('local', 'vault'), $('u-pass').value);
+    const vault = await store.get('local', 'vault');
+    const seed = await V.open(vault, $('u-pass').value);
+    // Old PBKDF2 vault: re-encrypt it with Argon2id now that we have the password.
+    if (V.needsUpgrade(vault)) await store.set('local', 'vault', await V.seal(seed, $('u-pass').value));
     $('u-pass').value = '';
     await openSession(seed);
     msg('u-msg');
