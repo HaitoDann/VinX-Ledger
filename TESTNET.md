@@ -84,7 +84,7 @@ sudo ./vinx service    # le nœud survit aux redémarrages
   immédiatement, sans perte d'argent. Une fois de retour en ligne, il se réhabilite tout
   seul.
 - **Double vote** : il est sanctionné. Ne lancez jamais deux fois le même validateur.
-- **Récompenses** : environ 13 VINX sont émis par bloc. 20 % vont au proposeur, et le
+- **Récompenses** : environ 9,5 VINX sont émis par bloc. 20 % vont au proposeur, et le
   reste est partagé à chaque époque selon l'enjeu et la présence.
 
 ---
