@@ -1,0 +1,137 @@
+<!DOCTYPE html>
+<html lang="fr">
+<head>
+<meta charset="utf-8">
+<title>VinX Wallet</title>
+<link rel="stylesheet" href="popup.css">
+</head>
+<body>
+<svg width="0" height="0" style="position:absolute" aria-hidden="true">
+  <symbol id="i-send" viewBox="0 0 24 24"><path d="M7 17 17 7M8 7h9v9"/></symbol>
+  <symbol id="i-recv" viewBox="0 0 24 24"><path d="M17 7 7 17M16 17H7V8"/></symbol>
+  <symbol id="i-drop" viewBox="0 0 24 24"><path d="M12 3s6 6.5 6 11a6 6 0 0 1-12 0c0-4.5 6-11 6-11z"/></symbol>
+  <symbol id="i-copy" viewBox="0 0 24 24"><rect x="9" y="9" width="11" height="11" rx="2"/><path d="M5 15V6a2 2 0 0 1 2-2h8"/></symbol>
+  <symbol id="i-back" viewBox="0 0 24 24"><path d="M15 6l-6 6 6 6"/></symbol>
+  <symbol id="i-gear" viewBox="0 0 24 24"><circle cx="12" cy="12" r="3"/><path d="M12 2v3M12 19v3M4.2 4.2l2.1 2.1M17.7 17.7l2.1 2.1M2 12h3M19 12h3M4.2 19.8l2.1-2.1M17.7 6.3l2.1-2.1"/></symbol>
+  <symbol id="i-lock" viewBox="0 0 24 24"><rect x="5" y="11" width="14" height="10" rx="2"/><path d="M8 11V8a4 4 0 0 1 8 0v3"/></symbol>
+</svg>
+
+<header>
+  <img src="icons/icon-48.png" alt=""><span class="name">VinX</span>
+  <span class="net" id="net"><span class="dot" id="net-dot"></span><span id="net-txt">—</span></span>
+  <button class="icon" id="go-settings" title="Réglages" hidden><svg class="i"><use href="#i-gear"/></svg></button>
+</header>
+
+<main>
+  <!-- Bienvenue -->
+  <section id="v-welcome" hidden class="center">
+    <img class="logo" src="icons/icon-128.png" alt="">
+    <h1 style="font-size:19px">Portefeuille VinX</h1>
+    <p class="lead">Envoyez et recevez des VINX depuis votre navigateur.</p>
+    <div class="stack">
+      <button class="full" id="w-create">Créer un portefeuille</button>
+      <button class="full ghost" id="w-import">J'ai une phrase de récupération</button>
+    </div>
+  </section>
+
+  <!-- Création : phrase -->
+  <section id="v-create" hidden>
+    <div class="back"><button class="icon" data-go="v-welcome"><svg class="i"><use href="#i-back"/></svg></button><h2>Votre phrase de récupération</h2></div>
+    <div class="words" id="c-words"></div>
+    <div class="note">Notez ces 12 mots sur papier, dans l'ordre. Quiconque les connaît peut prendre vos fonds. Ils ouvrent aussi ce portefeuille dans l'application VinX.</div>
+    <label class="check"><input type="checkbox" id="c-ok"> J'ai noté mes 12 mots.</label>
+    <button class="full" id="c-next" disabled>Continuer</button>
+  </section>
+
+  <!-- Import -->
+  <section id="v-import" hidden>
+    <div class="back"><button class="icon" data-go="v-welcome"><svg class="i"><use href="#i-back"/></svg></button><h2>Restaurer</h2></div>
+    <label for="i-phrase">Phrase de récupération</label>
+    <textarea id="i-phrase" rows="3" spellcheck="false" placeholder="mot1 mot2 mot3 …"></textarea>
+    <div id="i-msg"></div>
+    <button class="full" id="i-next" style="margin-top:14px">Continuer</button>
+  </section>
+
+  <!-- Mot de passe -->
+  <section id="v-password" hidden>
+    <div class="back"><button class="icon" data-go="v-welcome"><svg class="i"><use href="#i-back"/></svg></button><h2>Mot de passe</h2></div>
+    <p class="hint" style="margin:0">Il chiffre le portefeuille dans ce navigateur. 8 caractères minimum.</p>
+    <label for="p-1">Mot de passe</label><input type="password" id="p-1" autocomplete="new-password">
+    <label for="p-2">Confirmez</label><input type="password" id="p-2" autocomplete="new-password">
+    <div id="p-msg"></div>
+    <button class="full" id="p-go" style="margin-top:14px">Créer le portefeuille</button>
+  </section>
+
+  <!-- Déverrouillage -->
+  <section id="v-unlock" hidden class="center">
+    <img class="logo" src="icons/icon-128.png" alt="">
+    <p class="mono hint" id="u-addr" style="word-break:break-all"></p>
+    <label for="u-pass" style="text-align:left">Mot de passe</label>
+    <input type="password" id="u-pass" autocomplete="current-password">
+    <div id="u-msg"></div>
+    <button class="full" id="u-go" style="margin-top:14px">Déverrouiller</button>
+  </section>
+
+  <!-- Accueil -->
+  <section id="v-home" hidden>
+    <div class="balance-card">
+      <div class="eyebrow">Solde</div>
+      <div class="balance" id="h-bal">—<small>VINX</small></div>
+      <div class="addr mono"><span id="h-addr"></span><button class="icon" data-copy="h-addr" title="Copier"><svg class="i"><use href="#i-copy"/></svg></button></div>
+      <div class="actions">
+        <button data-go="v-send"><svg class="i"><use href="#i-send"/></svg>Envoyer</button>
+        <button class="ghost" data-go="v-recv"><svg class="i"><use href="#i-recv"/></svg>Recevoir</button>
+        <button class="ghost" id="h-faucet"><svg class="i"><use href="#i-drop"/></svg>Test</button>
+      </div>
+      <div id="h-msg"></div>
+    </div>
+    <h3>Historique</h3>
+    <div id="h-txs"><div class="empty">Aucune opération.</div></div>
+  </section>
+
+  <!-- Envoyer -->
+  <section id="v-send" hidden>
+    <div class="back"><button class="icon" data-go="v-home"><svg class="i"><use href="#i-back"/></svg></button><h2>Envoyer</h2></div>
+    <label for="s-to">Destinataire</label>
+    <input id="s-to" class="mono" placeholder="vinx1… ou vinx:… (QR de paiement)" spellcheck="false">
+    <label for="s-amt">Montant (VINX)</label>
+    <input id="s-amt" inputmode="decimal" placeholder="0,00">
+    <div class="hint" id="s-avail"></div>
+    <label for="s-memo">Référence (facultatif)</label>
+    <input id="s-memo" maxlength="32">
+    <div class="summary" id="s-sum" hidden></div>
+    <div id="s-msg"></div>
+    <button class="full" id="s-go" style="margin-top:14px">Vérifier</button>
+  </section>
+
+  <!-- Recevoir -->
+  <section id="v-recv" hidden class="center">
+    <div class="back"><button class="icon" data-go="v-home"><svg class="i"><use href="#i-back"/></svg></button><h2>Recevoir</h2></div>
+    <div class="qr" id="r-qr"></div>
+    <div class="addr mono"><span id="r-addr"></span><button class="icon" data-copy="r-addr" title="Copier"><svg class="i"><use href="#i-copy"/></svg></button></div>
+  </section>
+
+  <!-- Réglages -->
+  <section id="v-settings" hidden>
+    <div class="back"><button class="icon" data-go="v-home"><svg class="i"><use href="#i-back"/></svg></button><h2>Réglages</h2></div>
+    <label for="t-node">Nœud du réseau</label>
+    <input id="t-node" class="mono" placeholder="http://192.168.1.231:8545">
+    <div class="hint">L'adresse de n'importe quel nœud VinX. Il ne voit jamais votre clé.</div>
+    <div id="t-msg"></div>
+    <div class="stack" style="margin-top:14px">
+      <button id="t-save">Enregistrer</button>
+      <button class="ghost" id="t-lock"><svg class="i"><use href="#i-lock"/></svg>Verrouiller</button>
+      <button class="ghost" id="t-forget" style="color:var(--err)">Supprimer le portefeuille de ce navigateur</button>
+    </div>
+  </section>
+</main>
+<footer id="foot"></footer>
+
+<script src="lib/nacl.min.js"></script>
+<script src="lib/blake3.min.js"></script>
+<script src="lib/bip39-english.js"></script>
+<script src="lib/qrcode.js"></script>
+<script src="lib/vinx.js"></script>
+<script src="popup.js"></script>
+</body>
+</html>
