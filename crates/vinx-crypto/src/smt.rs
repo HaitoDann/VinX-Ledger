@@ -226,7 +226,7 @@ impl SparseMerkleTree {
     /// Builds a tree from `(key, value)` pairs in one pass, O(n · depth) hashing with no
     /// intermediate copies. Duplicate keys keep the last value.
     pub fn from_entries(mut entries: Vec<(Hash32, Hash32)>) -> Self {
-        entries.sort_by(|a, b| a.0.cmp(&b.0));
+        entries.sort_by_key(|e| e.0);
         entries.reverse();
         entries.dedup_by(|a, b| a.0 == b.0); // keeps the first of each run = the last inserted
         entries.reverse();

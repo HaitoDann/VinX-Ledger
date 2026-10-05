@@ -402,11 +402,9 @@ impl WorldState {
     /// Updates the dynamic base fee based on current mempool pressure.
     /// Applies EIP-1559-style surge pricing: 1× at ≤80% load, up to 3× at 100%.
     pub fn update_base_fee(&mut self, mempool_pending: usize, max_block_txs: usize) {
-        let load_bps = if max_block_txs == 0 {
-            0usize
-        } else {
-            (mempool_pending * 10_000) / max_block_txs
-        };
+        let load_bps = (mempool_pending * 10_000)
+            .checked_div(max_block_txs)
+            .unwrap_or(0);
         let multiplier_bps: u128 = if load_bps > 8_000 {
             // 1× + up to 2× extra at full load (linear: 3× at 100%)
             10_000 + (load_bps as u128 - 8_000) * 10
@@ -666,11 +664,10 @@ impl WorldState {
     ///
     /// Called automatically from `settle_block` when `EPOCH_DURATION_SECS` have elapsed.
     pub fn tick_epoch_close(&mut self) {
-        let epoch_number = if EPOCH_DURATION_SECS > 0 {
-            self.last_epoch_close_ts / EPOCH_DURATION_SECS
-        } else {
-            0
-        };
+        let epoch_number = self
+            .last_epoch_close_ts
+            .checked_div(EPOCH_DURATION_SECS)
+            .unwrap_or(0);
 
         // 0. Process exit queue (ADR 0036): promote up to MAX_VALIDATOR_EXITS_PER_EPOCH
         //    validators whose bond dropped below the floor to Unbonding status.

@@ -120,7 +120,9 @@ pub fn merkle_root(leaves: &[Hash32]) -> Hash32 {
                     level.push(*level.last().unwrap());
                 }
                 level = level
-                    .chunks_exact(2)
+                    .as_chunks::<2>()
+                    .0
+                    .iter()
                     .map(|pair| {
                         let mut buf = [0u8; 64];
                         buf[..32].copy_from_slice(&pair[0]);
@@ -168,7 +170,9 @@ pub fn merkle_proof_for(leaves: &[Hash32], index: usize) -> Option<Vec<MerklePro
             sibling_is_right: idx.is_multiple_of(2),
         });
         level = level
-            .chunks_exact(2)
+            .as_chunks::<2>()
+            .0
+            .iter()
             .map(|p| {
                 let mut buf = [0u8; 64];
                 buf[..32].copy_from_slice(&p[0]);

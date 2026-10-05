@@ -91,13 +91,9 @@ impl ValidatorPoolEntry {
     pub fn score_bps(&self) -> u32 {
         match self.status {
             PoolStatus::Warmup { .. } => 5_000,
-            _ => {
-                if self.eligible_blocks_in_window == 0 {
-                    0
-                } else {
-                    ((self.cosign_count_in_window * 10_000) / self.eligible_blocks_in_window) as u32
-                }
-            }
+            _ => (self.cosign_count_in_window * 10_000)
+                .checked_div(self.eligible_blocks_in_window)
+                .unwrap_or(0) as u32,
         }
     }
 
