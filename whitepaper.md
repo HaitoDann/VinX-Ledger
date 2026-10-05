@@ -131,18 +131,24 @@ d'émission et ne retarde pas les récompenses.
 
 ### 4.2 Émission décroissante
 
-L'émission suit une série géométrique en temps réel. **La moitié de l'offre (500 M) est émise
-pendant les 20 premières années**, la moitié du reste pendant les 20 suivantes, et ainsi de
-suite. Dans chaque période, le rythme est constant : environ **0,79 VINX par seconde**, soit
-~9,5 VINX par bloc, pendant les 20 premières années.
+L'émission suit une **courbe exponentielle continue** en temps réel :
+E(t) = 1 Md × (1 − 2^(−t/10 ans)). **La moitié de l'offre (500 M) est émise en 10 ans**, la
+moitié du reste en 10 ans de plus, et ainsi de suite. Il n'y a ni paliers ni « halving » : la
+récompense baisse un tout petit peu à chaque seconde (−6,7 % par an). Au lancement, elle vaut
+environ **2,2 VINX par seconde**, soit ~26,4 VINX par bloc ; ~13,2 au bout de 10 ans.
 
-| Échéance | Émis au total | Restant |
+| Échéance | Émis au total | Récompense par bloc |
 |---|---|---|
-| Genèse | 0 | 1 Md |
-| 20 ans | 500 M | 500 M |
-| 40 ans | 750 M | 250 M |
-| 60 ans | 875 M | 125 M |
+| Genèse | 0 | ~26,4 VINX |
+| 1 an | ~67 M | ~24,6 VINX |
+| 5 ans | ~293 M | ~18,7 VINX |
+| 10 ans | 500 M | ~13,2 VINX |
+| 20 ans | 750 M | ~6,6 VINX |
+| 30 ans | 875 M | ~3,3 VINX |
 | ∞ | → 1 Md | → 0 |
+
+Le calcul se fait en entiers (série de Taylor en virgule fixe 10^18), identique sur toutes les
+machines, comme l'exige le consensus (ADR 0087).
 
 L'émission dépend de l'horodatage des blocs : un réseau arrêté n'émet rien, et un réseau
 rapide n'émet pas plus.
@@ -258,7 +264,7 @@ Il n'existe **aucun gel de compte** : la propriété des VINX est inconditionnel
 
 1. **1 milliard de VINX au maximum**, jamais augmenté.
 2. **Aucune pré-allocation sur le mainnet** : tout est émis par le fonctionnement du réseau.
-3. **Courbe d'émission fixée à la genèse** : demi-vie de 20 ans, en temps réel.
+3. **Courbe d'émission fixée à la genèse** : courbe exponentielle continue, demi-vie de 10 ans, en temps réel.
 4. **Rien n'est brûlé** (hors poussière des comptes vidés, au plus 0,001 VINX par compte).
 5. **Invariant d'offre** vérifié à chaque bloc.
 6. **Finalité immédiate** : un bloc certifié par plus des 2/3 ne peut pas être annulé.
@@ -313,7 +319,7 @@ VinX n'a pas de pression d'agenda : chaque étape est franchie quand elle est pr
 | **Bloc** | 12 s · jusqu'à 3 000 transactions |
 | **Historique** | 30 jours (état permanent compact, `--archive` en option) |
 | **Offre** | 1 Md VINX, plafond immuable, aucune pré-allocation sur le mainnet |
-| **Émission** | Demi-vie de 20 ans, temps réel · ~9,5 VINX par bloc au départ |
+| **Émission** | Exponentielle continue, demi-vie de 10 ans · ~26,4 VINX par bloc au départ |
 | **Récompenses** | 20 % au proposeur · 80 % selon enjeu × présence · frais 50/50 |
 | **Validateurs** | Garantie min. 1 000 VINX · échauffement 3 h · set actif ≤ 100 · poids plafonné à 10 % |
 | **Sanctions** | Absence : suspension · double vote : 5 % + 3 × part corrélée · déliaison 21 jours |

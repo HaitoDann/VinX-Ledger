@@ -38,7 +38,7 @@ Pas d'EVM. Pas de WASM. Pas de logique applicative sur L1. La surface d'attaque 
 │  • Comptes VINX · transferts · bond/slashing · frais forfaitaires │
 │  • Consensus : BFT Tendermint, ≤ 100 validateurs, BLS agrégé      │
 │  • Finalité immédiate (> 2/3 de la puissance, 1 bloc)             │
-│  • Émission progressive fair-launch (T_half ~20 ans)              │
+│  • Émission progressive fair-launch (T_half ~10 ans)              │
 │  • Hachage BLAKE3 · adresses Bech32m vinx1 · anti-replay complet   │
 └──────────────────────────────────────────────────────────────────┘
 ```
@@ -95,7 +95,7 @@ Le nœud expose **http://localhost:8545** :
 
 - **1 milliard de VINX**, supply fixe et immuable, **9 décimales** (ADR 0081).
 - **Aucun pre-mine, aucune réserve.** Les premiers VINX n'existent qu'au moment où le premier bloc est produit.
-- **Émission par le travail** : minting progressif, décroissance exponentielle continue, demi-vie ~20 ans.
+- **Émission par le travail** : minting progressif, décroissance exponentielle continue, demi-vie ~10 ans.
 - **Validateurs rémunérés par l'émission + les frais, sans burn** : le producteur reçoit 20 % de l'émission et 50 % des frais de son bloc ; le reste va aux co-signataires au prorata de leur participation (ADR 0028, ADR 0081).
 - **Gouvernance à la Linux** : la clé admin on-chain s'éteint 365 jours après le premier bloc ; ensuite, le mainteneur dirige le logiciel et les validateurs choisissent la version qu'ils exécutent (ADR 0081).
 - **Invariant** : `circulation + pot_époque + détruits = émis ≤ 1 Md` — garanti à chaque bloc.

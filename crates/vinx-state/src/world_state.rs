@@ -2756,7 +2756,7 @@ mod tests {
         let mut s = WorldState::new();
         let (_, producer) = kp_addr();
         s.settle_block(&producer, 0);
-        let (_, emission) = s.settle_block(&producer, EMISSION_T_HALF_SECS / 20); // ~1 year
+        let (_, emission) = s.settle_block(&producer, EMISSION_T_HALF_SECS / 10); // ~1 year
         assert!(emission > Amount::ZERO);
         // ADR 0028: producer receives PROPOSER_SHARE_BPS (20%) of the emission.
         let expected_balance =

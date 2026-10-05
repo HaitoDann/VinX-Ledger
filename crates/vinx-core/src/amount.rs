@@ -44,16 +44,16 @@ pub const MAX_PENDING_UNBONDS_PER_ACCOUNT: usize = 16;
 
 // ─── Emission by work — fair launch ────────────────────────────────────────────
 
-/// Emission half-life (ADR 0040): the cumulative emission reaches half the supply after
-/// this many real-time **seconds**. ~20 years (20 × 365 × 24 × 3600 = 630 720 000 s).
+/// Emission half-life (ADR 0087): the cumulative emission reaches half the supply after
+/// this many real-time **seconds**. ~10 years (10 × 365 × 24 × 3600 = 315 360 000 s).
 /// Measured in seconds, not block height — the block cadence is fixed at 12 s (ADR 0043).
-/// Immutable after genesis (ADR 0021). Replaces the former `HALVING_PERIOD_SECS` (8 years).
-pub const EMISSION_T_HALF_SECS: u64 = 630_720_000;
+/// Immutable after genesis (ADR 0021).
+pub const EMISSION_T_HALF_SECS: u64 = 315_360_000;
 
-/// Tokens emitted over the first half-life (~20 years): half the supply.
-/// Each subsequent half-life emits half the previous quota; the geometric series
-/// converges to `MAX_SUPPLY_ATOMS` — the entire supply, ever more slowly.
-pub const ERA0_EMISSION_ATOMS: u128 = MAX_SUPPLY_ATOMS / 2;
+/// Fixed-point scale of the emission curve: 10^18 = 1.0.
+const EMISSION_SCALE: u128 = 1_000_000_000_000_000_000;
+/// ln 2 × 10^18, rounded down.
+const LN2_SCALED: u128 = 693_147_180_559_945_309;
 
 // ─── Validator bond & slashing ─────────────────────────────────────────────────
 
@@ -306,27 +306,41 @@ impl Amount {
 /// Cumulative VinX (in atoms) emitted `elapsed_secs` after the emission epoch
 /// (the first block's timestamp).
 ///
-/// Approximates the continuous exponential decay `R(t) = R₀·e^(−λt)` using a
-/// geometric series with linear interpolation within each half-life period.
-/// Over each [`EMISSION_T_HALF_SECS`] window, half the remaining quota is emitted
-/// linearly; the series converges to [`MAX_SUPPLY_ATOMS`]. Pure integer arithmetic —
-/// deterministic across all platforms (no floating point), as consensus requires.
+/// Continuous exponential curve (ADR 0087): `E(t) = S · (1 − 2^(−t/T½))`, i.e. a reward
+/// rate `R(t) = S·λ·e^(−λt)` with `λ = ln 2 / T½` that decays a little every second —
+/// no tranches, no steps. Half the supply after one half-life, ¾ after two, and so on,
+/// converging to [`MAX_SUPPLY_ATOMS`].
+///
+/// Pure integer arithmetic (consensus requires bit-identical results on every
+/// platform): `2^(−t/T½) = 2^(−k) · e^(−x)` with `k` whole half-lives and
+/// `x = ln 2 · (t mod T½) / T½ ∈ [0, ln 2)`, `e^(−x)` by its Taylor series in 10^18
+/// fixed point. The truncation error is a few atoms, far below one block's reward.
 pub fn cumulative_emission_atoms(elapsed_secs: u64) -> u128 {
-    let h = EMISSION_T_HALF_SECS as u128;
-    let full_eras = elapsed_secs / EMISSION_T_HALF_SECS;
-    let rem = (elapsed_secs % EMISSION_T_HALF_SECS) as u128;
-    let mut total: u128 = 0;
-    let mut era_amount = ERA0_EMISSION_ATOMS;
-    for _ in 0..full_eras {
-        total = total.saturating_add(era_amount);
-        era_amount /= 2;
-        if era_amount == 0 {
-            return total; // schedule exhausted (dust) — nothing more to emit, ever
-        }
+    let k = elapsed_secs / EMISSION_T_HALF_SECS;
+    if k >= 120 {
+        return MAX_SUPPLY_ATOMS; // 2^−120 of the supply is far below one atom
     }
-    // Linear share of the current (partial) era. No overflow: era_amount ≤ 5e17,
-    // rem < h ≈ 6.3e8, product ≤ 3.2e26 < u128::MAX.
-    total.saturating_add(era_amount * rem / h)
+    let f = (elapsed_secs % EMISSION_T_HALF_SECS) as u128;
+    // x < ln 2 · 10^18; f · LN2 < 3.2e8 · 7e17 ≈ 2.2e26 — no overflow.
+    let x = f * LN2_SCALED / EMISSION_T_HALF_SECS as u128;
+    // e^(−x) = Σ (−x)ⁿ/n!; terms shrink fast since x < 0.7.
+    let mut term = EMISSION_SCALE;
+    let mut pos = EMISSION_SCALE;
+    let mut neg = 0u128;
+    let mut n = 1u128;
+    while term > 0 {
+        term = term * x / EMISSION_SCALE / n;
+        if n % 2 == 1 {
+            neg += term;
+        } else {
+            pos += term;
+        }
+        n += 1;
+    }
+    let decay = pos - neg; // e^(−x) · 10^18, in (0.5, 1]
+                           // Supply still to come: S · 2^(−k) · e^(−x). S · decay ≤ 1e18 · 1e18 = 1e36 < u128::MAX.
+    let remaining = (MAX_SUPPLY_ATOMS * decay / EMISSION_SCALE) >> k;
+    MAX_SUPPLY_ATOMS - remaining
 }
 
 impl fmt::Display for Amount {
@@ -361,63 +375,87 @@ mod tests {
 
     #[test]
     fn test_emission_first_half_life_is_half_supply() {
-        // After one full ~20-year half-life, exactly half the supply has been emitted.
-        assert_eq!(
-            cumulative_emission_atoms(EMISSION_T_HALF_SECS),
-            ERA0_EMISSION_ATOMS
-        );
+        // After one ~10-year half-life, exactly half the supply has been emitted.
         assert_eq!(
             cumulative_emission_atoms(EMISSION_T_HALF_SECS),
             MAX_SUPPLY_ATOMS / 2
         );
+        assert_eq!(
+            cumulative_emission_atoms(2 * EMISSION_T_HALF_SECS),
+            MAX_SUPPLY_ATOMS / 4 * 3
+        );
     }
 
     #[test]
-    fn test_emission_halves_each_period() {
-        // T₁ → 500 M, T₂ → +250 M (750 M total), T₃ → +125 M (875 M).
-        let one = cumulative_emission_atoms(EMISSION_T_HALF_SECS);
-        let two = cumulative_emission_atoms(2 * EMISSION_T_HALF_SECS);
-        let three = cumulative_emission_atoms(3 * EMISSION_T_HALF_SECS);
-        assert_eq!(two - one, ERA0_EMISSION_ATOMS / 2);
-        assert_eq!(three - two, ERA0_EMISSION_ATOMS / 4);
+    fn test_emission_is_continuous_exponential() {
+        // Matches S·(1 − 2^(−t/T½)) to within a few atoms anywhere on the curve,
+        // including mid half-life (where the old tranches were linear).
+        for t in [
+            1u64,
+            12,
+            3_600,
+            86_400,
+            31_536_000,
+            EMISSION_T_HALF_SECS / 2,
+            157_680_000 * 3,
+            4_000_000_000,
+        ] {
+            let exact = 1e18 * (1.0 - (2f64).powf(-(t as f64) / EMISSION_T_HALF_SECS as f64));
+            let got = cumulative_emission_atoms(t) as f64;
+            assert!(
+                (got - exact).abs() <= exact * 1e-12 + 1_000.0,
+                "t={t}: {got} vs {exact}"
+            );
+        }
+        // Mid half-life: 1 − 1/√2 ≈ 29.29 % of the supply (linear tranches gave 25 %).
+        let mid = cumulative_emission_atoms(EMISSION_T_HALF_SECS / 2);
+        assert_eq!(mid / (10_000_000 * DECIMAL_FACTOR), 29);
+    }
+
+    #[test]
+    fn test_emission_reward_decays_every_block() {
+        // The per-block reward shrinks smoothly — no jump at a half-life boundary.
+        let block = |t: u64| cumulative_emission_atoms(t + 12) - cumulative_emission_atoms(t);
+        // ~26.4 VINX per 12 s block at launch.
+        assert_eq!(block(0) / DECIMAL_FACTOR, 26);
+        let h = EMISSION_T_HALF_SECS;
+        let (before, after) = (block(h - 12), block(h));
+        assert!(before >= after && before - after < DECIMAL_FACTOR / 1_000);
+        assert!(
+            block(h) * 2 > block(0) - DECIMAL_FACTOR / 100
+                && block(h) * 2 < block(0) + DECIMAL_FACTOR / 100
+        );
     }
 
     #[test]
     fn test_emission_schedule_is_constitutional() {
-        // ADR 0021 + ADR 0040: these constants ARE VinX's monetary policy — immutable
+        // ADR 0021 + ADR 0087: these constants ARE VinX's monetary policy — immutable
         // after genesis, not governable by anyone. Changing any of them is a deliberate,
         // breaking act; this tripwire forces it to be conscious.
         assert_eq!(
-            EMISSION_T_HALF_SECS, 630_720_000,
-            "emission half-life is ~20 years — immutable (ADR 0040)"
-        );
-        assert_eq!(
-            ERA0_EMISSION_ATOMS,
-            MAX_SUPPLY_ATOMS / 2,
-            "first half-life emits half the supply"
+            EMISSION_T_HALF_SECS, 315_360_000,
+            "emission half-life is ~10 years — immutable (ADR 0087)"
         );
         assert_eq!(
             MAX_SUPPLY_ATOMS,
             1_000_000_000 * DECIMAL_FACTOR,
             "1 Md cap — immutable (ADR 0081)"
         );
-        // The schedule asymptotically emits the entire supply (minus integer dust).
-        let far_future = cumulative_emission_atoms(u64::MAX / 2);
-        assert!(far_future <= MAX_SUPPLY_ATOMS);
-        assert!(
-            far_future > MAX_SUPPLY_ATOMS - MAX_SUPPLY_ATOMS / 1_000_000,
-            "emission converges to the full supply"
-        );
+        assert_eq!(cumulative_emission_atoms(u64::MAX), MAX_SUPPLY_ATOMS);
     }
 
     #[test]
     fn test_emission_monotonic_and_bounded() {
         let mut prev = 0u128;
-        for years in 0..=200 {
-            // one-year steps using the ~20-year half-life
-            let t = years * (EMISSION_T_HALF_SECS / 20);
+        // Monthly steps over 150 years, plus every block around each half-life boundary.
+        let mut ts: Vec<u64> = (0..=1_800u64).map(|m| m * 2_628_000).collect();
+        for k in 1..=5u64 {
+            ts.extend((0..200u64).map(|i| k * EMISSION_T_HALF_SECS - 1_200 + i * 12));
+        }
+        ts.sort_unstable();
+        for t in ts {
             let e = cumulative_emission_atoms(t);
-            assert!(e >= prev, "emission must be non-decreasing");
+            assert!(e >= prev, "emission must be non-decreasing (t={t})");
             assert!(
                 e <= MAX_SUPPLY_ATOMS,
                 "emission never exceeds the supply cap"
