@@ -53,6 +53,7 @@ jobs:
         run: cargo install cross --locked
 
       - name: Build vinx-node
+        shell: bash  # Windows defaults to PowerShell, which rejects the \ line breaks
         run: |
           ${{ matrix.cross && 'cross' || 'cargo' }} build \
             --release --locked \
@@ -60,6 +61,7 @@ jobs:
             -p vinx-node
 
       - name: Build vinx-wallet
+        shell: bash  # Windows defaults to PowerShell, which rejects the \ line breaks
         run: |
           ${{ matrix.cross && 'cross' || 'cargo' }} build \
             --release --locked \
