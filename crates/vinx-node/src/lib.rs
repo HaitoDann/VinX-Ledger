@@ -9,6 +9,7 @@ pub mod p2p;
 pub mod rpc;
 pub mod storage;
 pub mod sync;
+pub mod upnp;
 
 pub use config::NodeConfig;
 pub use node::Node;

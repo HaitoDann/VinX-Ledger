@@ -80,6 +80,10 @@ sudo ./vinx service    # le nœud survit aux redémarrages
 - **Ports** : le 9001 est facultatif. Le nœud essaie de l'ouvrir lui-même sur la box
   (UPnP). Sinon, il passe par deux relais et tente de percer la box pour une liaison
   directe. L'ouvrir rend le réseau plus solide.
+- **Point d'entrée à la maison** : un nœud lancé avec `--testnet` ou `--lan` demande aussi
+  à la box d'ouvrir le port 8545 (API : genèse, faucet). Si la box accepte l'UPnP,
+  `./vinx status` affiche « API ouverte sur la box » et l'adresse à donner aux nouveaux
+  venus (`./vinx join <adresse>`). Sinon, rediriger 8545/TCP et 9001/TCP à la main.
 - **Absence** : un validateur qui rate ses blocs est suspendu et sort du vote
   immédiatement, sans perte d'argent. Une fois de retour en ligne, il se réhabilite tout
   seul.

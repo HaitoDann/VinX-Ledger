@@ -4159,6 +4159,7 @@ dependencies = [
  "clap",
  "futures",
  "hex",
+ "igd-next",
  "libp2p",
  "lru",
  "rayon",

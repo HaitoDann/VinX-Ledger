@@ -236,6 +236,14 @@ cmd_status() {
                 public)  [[ -f "$HOME_DIR/lan" ]] && echo "          ${c_dim}joignable par les autres nœuds${c_0}" ;;
                 private) echo "          ${c_dim}derrière une box : joignable via $(echo "$hj" | jget "['relays']") relais (ouvrir le port 9001 est facultatif)${c_0}" ;;
             esac
+            if [[ -f "$HOME_DIR/lan" && $i == 1 ]]; then
+                local pa; pa=$(echo "$hj" | jget "['public_api']")
+                if [[ -n "$pa" ]]; then
+                    echo "          ${c_ok}API ouverte sur la box (UPnP)${c_0} : les autres rejoignent avec ${c_b}./vinx join ${pa%:8545}${c_0}"
+                else
+                    echo "          ${c_dim}API non ouverte automatiquement (UPnP refusé par la box ?) : rediriger le port $(rpc_port "$i")/TCP pour accueillir de nouveaux nœuds${c_0}"
+                fi
+            fi
         else
             echo "  nœud $i  ${c_r}○ arrêté${c_0}"
         fi
