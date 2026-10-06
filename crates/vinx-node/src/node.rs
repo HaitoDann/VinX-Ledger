@@ -856,6 +856,9 @@ impl Node {
         let listener = tokio::net::TcpListener::bind(addr)
             .await
             .map_err(|e| NodeError::Rpc(e.to_string()))?;
+        if crate::upnp::wants_mapping(&addr) {
+            tokio::spawn(crate::upnp::keep_open(addr.port()));
+        }
         self.run_rpc_on(listener).await
     }
 

@@ -33,6 +33,9 @@ pub struct HealthResponse {
     pub software_protocol: String,
     /// The chain activated a version this node does not implement: it stopped.
     pub upgrade_required: bool,
+    /// Public `ip:port` of this node's API when the router opened it (UPnP).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub public_api: Option<String>,
 }
 
 #[derive(Serialize)]

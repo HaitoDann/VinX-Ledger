@@ -116,6 +116,7 @@ pub async fn health(State(node): State<Arc<Node>>) -> ApiResult<HealthResponse> 
             .relays
             .load(std::sync::atomic::Ordering::Relaxed),
         upgrade_required: protocol.as_u32() > software.as_u32(),
+        public_api: crate::upnp::public_api(),
         protocol: protocol.to_string(),
         software_protocol: software.to_string(),
     }))
