@@ -45,18 +45,29 @@ fn local_ip_towards(gateway: SocketAddr) -> Option<IpAddr> {
 async fn map_once(port: u16) -> Result<String, String> {
     let gw = search_gateway(SearchOptions::default())
         .await
-        .map_err(|e| e.to_string())?;
+        .map_err(|e| format!("router search: {e}"))?;
     let local = local_ip_towards(gw.addr).ok_or("no route to the router")?;
-    gw.add_port(
-        PortMappingProtocol::TCP,
-        port,
-        SocketAddr::new(local, port),
-        LEASE_SECS,
-        "VinX API",
-    )
-    .await
-    .map_err(|e| e.to_string())?;
-    let ext = gw.get_external_ip().await.map_err(|e| e.to_string())?;
+    let target = SocketAddr::new(local, port);
+    // Some boxes only accept permanent leases (UPnP error 725), and some answer a timed
+    // lease with a malformed reply: fall back to a permanent mapping, still renewed.
+    if let Err(first) = gw
+        .add_port(
+            PortMappingProtocol::TCP,
+            port,
+            target,
+            LEASE_SECS,
+            "VinX API",
+        )
+        .await
+    {
+        gw.add_port(PortMappingProtocol::TCP, port, target, 0, "VinX API")
+            .await
+            .map_err(|e| format!("router {} refused the mapping: {first} / {e}", gw.addr))?;
+    }
+    let ext = gw
+        .get_external_ip()
+        .await
+        .map_err(|e| format!("router {} external address: {e}", gw.addr))?;
     if !is_public(&ext) {
         // Carrier-grade NAT: the box itself sits behind another NAT.
         return Err(format!(
