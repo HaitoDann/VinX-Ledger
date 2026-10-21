@@ -286,8 +286,12 @@ hauteur `H + 2`. `validators_hash` du bloc `H + 1` reflète déjà le nouvel ens
 
 ## 11. Paramètres
 
-Valeurs **proposées**, à valider. Les paramètres « modifiables » peuvent être
-changés par `SetParam` ; les autres ne changent que par mise à jour du protocole.
+Les paramètres « modifiables » peuvent être changés par `SetParam` ; les autres
+ne changent que par mise à jour du protocole.
+
+L'intervalle de bloc et les délais démarrent volontairement haut. Ils ne seront
+réduits par `SetParam` que si plus de 99 % des hauteurs sont finalisées au
+premier round, de façon soutenue, en conditions réelles.
 
 | Paramètre | Valeur proposée | Modifiable |
 |---|---|---|
@@ -296,12 +300,12 @@ changés par `SetParam` ; les autres ne changent que par mise à jour du protoco
 | `max_memo_bytes` | 32 | oui |
 | `max_block_txs` | 5 000 | oui |
 | `max_block_bytes` | 4 Mo | oui |
-| `timeout_propose` / `timeout_delta` | 2 s / 0,5 s | oui |
+| `timeout_propose` / `timeout_delta` | 3 s / 1 s | oui |
 | `timeout_vote` / `timeout_delta` | 1 s / 0,5 s | oui |
-| `min_block_interval` | 2 s | oui |
+| `min_block_interval` | 5 s | oui |
 | `max_clock_drift` | 15 s | non |
 | `block_retention` | 30 jours | non (local au nœud) |
-| `min_upgrade_delay` | 43 200 blocs (≈ 24 h) | non |
+| `min_upgrade_delay` | 17 280 blocs (≈ 24 h à 5 s) | non |
 | `escrow.period` | 2 629 800 s | non |
 
 ## 12. Genèse
