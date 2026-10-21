@@ -23,6 +23,9 @@ action de gouvernance est inscrite on-chain.
   gérée par la multisig admin (§6). Pas de staking, de récompenses, de slashing
   ni de jailing.
 - Finalité au quorum de plus de 2/3 des validateurs, en un bloc.
+- Le certificat de commit est une **liste de signatures Ed25519** des
+  validateurs. Pas de BLS : avec un petit ensemble de validateurs, l'agrégation
+  n'apporte rien et ajoute une seconde cryptographie à sécuriser.
 
 ### 2. Supply et unités
 
@@ -66,17 +69,37 @@ Aucune allocation fondateur séparée.
   - dépenser depuis la trésorerie ;
   - libérer une tranche d'escrow (dans la limite de §4) ou renvoyer des VINX en escrow ;
   - modifier les paramètres non monétaires (montant des frais, réserve minimale,
-    limites de bloc, etc.).
+    limites de bloc, etc.) ;
+  - **remplacer un de ses propres signataires** (rotation de clé), ce qui permet
+    de révoquer une clé compromise ou de remplacer une clé perdue tant que deux
+    clés restent disponibles ;
+  - **programmer une mise à jour du protocole** (§7).
 - Elle **ne peut pas** créer de VINX, relever un plafond, avancer une tranche
   ni déplacer des fonds d'un compte qui n'est pas la trésorerie.
 - Toutes les actions admin sont des transactions on-chain, signées et auditables.
+- Les trois clés de la multisig sont conservées sur des supports distincts,
+  dont au moins un hors ligne.
+- **Pouvoirs assumés.** Parce qu'elle choisit les validateurs, la multisig peut
+  arrêter la chaîne ou faire censurer des transactions. Ce pouvoir est inhérent
+  au PoA ; il est déclaré ici plutôt que dissimulé.
 
-### 7. Réserve minimale
+### 7. Évolution du protocole
+
+- Chaque bloc porte un **numéro de version du protocole**.
+- Une mise à jour est annoncée par une action admin qui fixe la nouvelle
+  version et sa **hauteur d'activation**, laissant aux opérateurs le temps
+  d'installer le logiciel.
+- À la hauteur d'activation, les nœuds appliquent les nouvelles règles ; un bloc
+  portant une version incorrecte est invalide.
+- Les mises à jour peuvent modifier toute règle du protocole, **à l'exception
+  des garanties monétaires** de §2, §4 et de l'invariant §9, qui sont permanentes.
+
+### 8. Réserve minimale
 
 Chaque compte doit conserver un petit solde minimum (valeur fixée par la
 spécification), pour limiter la création de comptes vides.
 
-### 8. Invariant
+### 9. Invariant
 
 À chaque bloc :
 
@@ -86,7 +109,7 @@ somme(soldes de tous les comptes) + somme(tranches en escrow) = 1 000 000 000 VI
 
 Tout bloc qui viole cet invariant est invalide.
 
-### 9. Hors protocole
+### 10. Hors protocole
 
 La politique de distribution (faucet, programmes communautaires, publication de
 la répartition) relève d'un document de politique monétaire séparé. Elle peut
