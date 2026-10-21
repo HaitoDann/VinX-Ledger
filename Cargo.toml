@@ -20,6 +20,13 @@ vinx-crypto = { path = "crates/vinx-crypto" }
 vinx-core = { path = "crates/vinx-core" }
 vinx-state = { path = "crates/vinx-state" }
 vinx-consensus = { path = "crates/vinx-consensus" }
+bech32 = "0.9"
+blake3 = "1"
+borsh = { version = "1", features = ["derive"] }
+ed25519-dalek = { version = "2", features = ["rand_core"] }
+hex = "0.4"
+rand_core = { version = "0.6", features = ["getrandom"] }
+thiserror = "2"
 
 [workspace.lints.rust]
 unsafe_code = "forbid"
