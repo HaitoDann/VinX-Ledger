@@ -17,6 +17,9 @@
 - `H(x)` désigne BLAKE3-256. Tout hachage ou toute signature est précédé d'une
   **étiquette de domaine** (tableau en §10) pour qu'un message d'un type ne puisse
   jamais être rejoué comme un autre.
+- Dans ce document, `"étiquette" ‖ x` se lit `longueur(étiquette) ‖ étiquette ‖ x`,
+  la longueur tenant sur un octet. Sans ce préfixe, `vinx/tx` serait un début
+  possible de `vinx/txid` et deux domaines pourraient produire le même message.
 
 ## 2. Cryptographie
 
@@ -282,7 +285,14 @@ hauteur `H + 2`. `validators_hash` du bloc `H + 1` reflète déjà le nouvel ens
 | Transaction admin signée | `vinx/admin` |
 | En-tête de bloc | `vinx/block` |
 | Vote de consensus | `vinx/vote` |
-| Merkle (feuille / nœud) | `vinx/merkle/leaf`, `vinx/merkle/node` |
+| Merkle (feuille / nœud / liste vide) | `vinx/merkle/leaf`, `vinx/merkle/node`, `vinx/merkle/empty` |
+
+### 10.1 Arbre de Merkle (`tx_root`)
+
+- Feuille : `H("vinx/merkle/leaf" ‖ valeur)` ; nœud : `H("vinx/merkle/node" ‖ gauche ‖ droite)`.
+- Un nœud sans voisin remonte tel quel au niveau supérieur ; il n'est jamais
+  dupliqué (sinon `[a, b, c]` et `[a, b, c, c]` auraient la même racine).
+- Liste vide : `H("vinx/merkle/empty")`.
 
 ## 11. Paramètres
 
