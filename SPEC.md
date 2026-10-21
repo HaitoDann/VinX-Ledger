@@ -163,6 +163,7 @@ SignedAdminTransaction {
 ```
 
 - Message signé : `"vinx/admin" ‖ borsh(tx)`.
+- Identifiant : `admin_tx_id = H("vinx/admin/txid" ‖ borsh(signed_admin_tx))`.
 - Valide si au moins **2 signataires distincts** sur 3 l'ont signée.
 - Pas de frais.
 
@@ -177,6 +178,8 @@ SignedAdminTransaction {
 | `ReplaceSigner` | `index: u8`, `new_key: PublicKey` | Remplace un signataire admin |
 | `ScheduleUpgrade` | `version: u32`, `activation_height: u64` | Voir §9 |
 
+Les actions sont encodées avec les codes `0x01` à `0x08`, dans l'ordre du tableau.
+
 Aucune action ne peut créer d'unités, modifier une tranche existante ni débiter un
 autre compte que la trésorerie.
 
@@ -189,7 +192,7 @@ BlockHeader {
     height:           u64,
     timestamp:        u64,        // millisecondes Unix
     prev_hash:        Hash,
-    tx_root:          Hash,       // Merkle des tx_id, dans l'ordre du bloc
+    tx_root:          Hash,       // Merkle des admin_tx_id puis des tx_id, dans l'ordre du bloc
     state_root:       Hash,       // état après application du bloc
     validators_hash:  Hash,       // ensemble qui valide le bloc suivant
     proposer:         u16,        // indice dans l'ensemble actif
@@ -247,8 +250,8 @@ Algorithme Tendermint :
 - Message de vote signé : `"vinx/vote" ‖ borsh(chain_id, type, height, round, block_hash | nil)`.
 - Un validateur ne signe **jamais** deux votes différents pour le même
   `(height, round, type)`. Ce garde est persisté sur disque **avant** l'envoi.
-- Délais par round (§11) : `timeout_propose + r × timeout_delta`, de même pour
-  les votes.
+- Délais par round (§11) : `timeout_propose + r × timeout_propose_delta`, et
+  `timeout_vote + r × timeout_vote_delta` pour les votes.
 
 ### 7.4 Changements de l'ensemble
 
@@ -283,6 +286,7 @@ hauteur `H + 2`. `validators_hash` du bloc `H + 1` reflète déjà le nouvel ens
 | Transaction signée | `vinx/tx` |
 | Identifiant de transaction | `vinx/txid` |
 | Transaction admin signée | `vinx/admin` |
+| Identifiant de transaction admin | `vinx/admin/txid` |
 | En-tête de bloc | `vinx/block` |
 | Vote de consensus | `vinx/vote` |
 | Merkle (feuille / nœud / liste vide) | `vinx/merkle/leaf`, `vinx/merkle/node`, `vinx/merkle/empty` |
@@ -303,20 +307,27 @@ L'intervalle de bloc et les délais démarrent volontairement haut. Ils ne seron
 réduits par `SetParam` que si plus de 99 % des hauteurs sont finalisées au
 premier round, de façon soutenue, en conditions réelles.
 
-| Paramètre | Valeur proposée | Modifiable |
+| Code `ParamId` | Paramètre | Valeur initiale | Unité |
+|---|---|---|---|
+| `0x01` | `min_fee` | 1 000 000 (0,001 VINX) | unités |
+| `0x02` | `min_reserve` | 100 000 000 (0,1 VINX) | unités |
+| `0x03` | `max_memo_bytes` | 32 | octets |
+| `0x04` | `max_block_txs` | 5 000 | transactions |
+| `0x05` | `max_block_bytes` | 4 194 304 (4 Mio) | octets |
+| `0x06` | `timeout_propose` | 3 000 | ms |
+| `0x07` | `timeout_propose_delta` | 1 000 | ms par round |
+| `0x08` | `timeout_vote` | 1 000 | ms |
+| `0x09` | `timeout_vote_delta` | 500 | ms par round |
+| `0x0A` | `min_block_interval` | 5 000 | ms |
+
+Paramètres non modifiables par `SetParam` :
+
+| Paramètre | Valeur | Remarque |
 |---|---|---|
-| `min_fee` | 0,001 VINX | oui |
-| `min_reserve` | 0,1 VINX | oui |
-| `max_memo_bytes` | 32 | oui |
-| `max_block_txs` | 5 000 | oui |
-| `max_block_bytes` | 4 Mo | oui |
-| `timeout_propose` / `timeout_delta` | 3 s / 1 s | oui |
-| `timeout_vote` / `timeout_delta` | 1 s / 0,5 s | oui |
-| `min_block_interval` | 5 s | oui |
-| `max_clock_drift` | 15 s | non |
-| `block_retention` | 30 jours | non (local au nœud) |
-| `min_upgrade_delay` | 17 280 blocs (≈ 24 h à 5 s) | non |
-| `escrow.period` | 2 629 800 s | non |
+| `max_clock_drift` | 15 000 ms | |
+| `min_upgrade_delay` | 17 280 blocs | ≈ 24 h à 5 s par bloc |
+| `escrow.period` | 2 629 800 s | |
+| `block_retention` | 30 jours | réglage local du nœud, hors consensus |
 
 ## 12. Genèse
 

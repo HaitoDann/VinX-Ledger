@@ -519,6 +519,8 @@ dependencies = [
 name = "vinx-core"
 version = "0.1.0"
 dependencies = [
+ "borsh",
+ "thiserror",
  "vinx-crypto",
 ]
 

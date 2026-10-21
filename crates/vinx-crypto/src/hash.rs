@@ -14,6 +14,7 @@ pub enum Domain {
     Tx,
     TxId,
     Admin,
+    AdminTxId,
     Block,
     Vote,
     MerkleLeaf,
@@ -29,6 +30,7 @@ impl Domain {
             Domain::Tx => "vinx/tx",
             Domain::TxId => "vinx/txid",
             Domain::Admin => "vinx/admin",
+            Domain::AdminTxId => "vinx/admin/txid",
             Domain::Block => "vinx/block",
             Domain::Vote => "vinx/vote",
             Domain::MerkleLeaf => "vinx/merkle/leaf",
@@ -83,12 +85,13 @@ pub fn hash_tagged_parts(domain: Domain, parts: &[&[u8]]) -> Hash {
 mod tests {
     use super::*;
 
-    const ALL: [Domain; 10] = [
+    const ALL: [Domain; 11] = [
         Domain::Address,
         Domain::State,
         Domain::Tx,
         Domain::TxId,
         Domain::Admin,
+        Domain::AdminTxId,
         Domain::Block,
         Domain::Vote,
         Domain::MerkleLeaf,

@@ -12,3 +12,5 @@ workspace = true
 
 [dependencies]
 vinx-crypto.workspace = true
+borsh.workspace = true
+thiserror.workspace = true
