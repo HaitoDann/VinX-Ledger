@@ -1,0 +1,15 @@
+[package]
+name = "vinx-state"
+description = "État, escrow et application des transactions de VinX Ledger (SPEC §4)"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[lints]
+workspace = true
+
+[dependencies]
+vinx-crypto.workspace = true
+vinx-core.workspace = true

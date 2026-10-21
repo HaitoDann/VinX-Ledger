@@ -1,0 +1,39 @@
+[workspace]
+members = [
+    "crates/vinx-crypto",
+    "crates/vinx-core",
+    "crates/vinx-state",
+    "crates/vinx-consensus",
+    "crates/vinx-node",
+]
+resolver = "3"
+
+[workspace.package]
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.85"
+license = "Apache-2.0"
+repository = "https://github.com/HaitoDann/VinX-Ledger"
+
+[workspace.dependencies]
+vinx-crypto = { path = "crates/vinx-crypto" }
+vinx-core = { path = "crates/vinx-core" }
+vinx-state = { path = "crates/vinx-state" }
+vinx-consensus = { path = "crates/vinx-consensus" }
+
+[workspace.lints.rust]
+unsafe_code = "forbid"
+
+# Toute arithmétique doit être explicite (checked_*, saturating_*) : un
+# dépassement silencieux sur un montant ou une hauteur est un bug de consensus.
+# Un panic dans le nœud est un déni de service : pas d'unwrap ni d'expect hors tests.
+[workspace.lints.clippy]
+arithmetic_side_effects = "warn"
+unwrap_used = "warn"
+expect_used = "warn"
+panic = "warn"
+indexing_slicing = "warn"
+
+[profile.release]
+lto = "thin"
+codegen-units = 1
