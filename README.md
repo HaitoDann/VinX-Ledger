@@ -8,5 +8,6 @@ Un protocole de paiement volontairement simple et minimaliste : validateurs auto
 
 > **Statut : expérimental, en reconstruction.** Le token VINX n'a aucune valeur.
 
+- Spécification du protocole : [`SPEC.md`](./SPEC.md)
 - Décisions d'architecture : [`docs/adr/`](./docs/adr/)
 - Ancien projet (archivé) : `VinX-Ledger-Legacy`
