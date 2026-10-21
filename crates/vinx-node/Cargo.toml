@@ -1,0 +1,16 @@
+[package]
+name = "vinx-node"
+description = "Nœud VinX Ledger : réseau, RPC, stockage, élagage (SPEC §8)"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[lints]
+workspace = true
+
+[dependencies]
+vinx-core.workspace = true
+vinx-state.workspace = true
+vinx-consensus.workspace = true

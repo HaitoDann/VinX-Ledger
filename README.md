@@ -11,3 +11,4 @@ Un protocole de paiement volontairement simple et minimaliste : validateurs auto
 - Spécification du protocole : [`SPEC.md`](./SPEC.md)
 - Décisions d'architecture : [`docs/adr/`](./docs/adr/)
 - Ancien projet (archivé) : `VinX-Ledger-Legacy`
+- Licence : [Apache-2.0](./LICENSE)
