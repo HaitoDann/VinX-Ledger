@@ -1,10 +1,12 @@
 //! Boucle principale : exécute les actions du moteur de consensus.
 //!
-//! Dans cette version, le nœud fonctionne seul : il faut être l'unique
-//! validateur. Le réseau P2P (relais et rattrapage) arrive dans une étape suivante.
+//! Le nœud réagit aux actions du moteur, aux messages du réseau, aux délais et
+//! aux blocs reçus par rattrapage. Sans clé de validateur, ou avec une clé
+//! absente de l'ensemble actif, il suit la chaîne en observateur.
 
 use crate::chain::Chain;
 use crate::mempool::Mempool;
+use crate::network::{NetEvent, NetMessage};
 use crate::store::Store;
 use anyhow::{Context, Result, bail};
 use std::collections::{BTreeSet, VecDeque};
@@ -12,10 +14,10 @@ use std::path::Path;
 use std::sync::{Arc, Mutex, MutexGuard};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use tokio::sync::{mpsc, watch};
-use tracing::info;
+use tracing::{info, warn};
 use vinx_consensus::guard::Step;
 use vinx_consensus::{Action, BlockValidator, Engine, SignGuard, SignedVote, Timeout};
-use vinx_core::{Block, SignedAdminTransaction, SignedTransaction};
+use vinx_core::{Block, CommitCertificate, SignedAdminTransaction, SignedTransaction};
 use vinx_crypto::KeyPair;
 use vinx_state::Genesis;
 
@@ -24,6 +26,16 @@ pub struct Shared {
     pub mempool: Mempool,
     pub store: Store,
     pub guard: SignGuard,
+    /// Diffusion sur le réseau, si le nœud est connecté.
+    pub outbound: Option<mpsc::UnboundedSender<NetMessage>>,
+}
+
+impl Shared {
+    pub fn broadcast(&self, msg: NetMessage) {
+        if let Some(out) = &self.outbound {
+            let _ = out.send(msg);
+        }
+    }
 }
 
 pub type SharedRef = Arc<Mutex<Shared>>;
@@ -73,6 +85,7 @@ pub fn open(genesis: Genesis, data_dir: &Path) -> Result<SharedRef> {
         mempool,
         store,
         guard,
+        outbound: None,
     })))
 }
 
@@ -84,145 +97,309 @@ impl BlockValidator for Checker<'_> {
     }
 }
 
-/// Fait tourner le consensus jusqu'à ce que `shutdown` passe à `true`.
-pub async fn run(
-    shared: SharedRef,
-    keypair: KeyPair,
-    mut shutdown: watch::Receiver<bool>,
-) -> Result<()> {
-    let (timeouts_tx, mut timeouts_rx) = mpsc::unbounded_channel::<Timeout>();
-    let me_key = keypair.public_key();
-    loop {
-        // ── Nouvelle hauteur ────────────────────────────────────────────────
-        let (mut engine, me, first) = {
-            let s = lock(&shared);
-            let height = s.chain.next_height();
-            let validators = s.chain.state.validators_at(height);
-            let Some(me) = validators.iter().position(|k| *k == me_key) else {
-                bail!("cette clé n'est pas validatrice à la hauteur {height}");
-            };
-            if validators.len() > 1 {
-                bail!(
-                    "{} validateurs dans la genèse : le fonctionnement à plusieurs \
-                     nœuds nécessite le réseau P2P, pas encore disponible",
-                    validators.len()
-                );
-            }
-            let me = u16::try_from(me).context("indice de validateur trop grand")?;
-            let mut engine = Engine::new(
-                s.chain.state.chain_id.clone(),
-                height,
-                validators,
-                Some(me),
-                s.chain.state.params.clone(),
-            );
-            let first = engine.start(&mut Checker(&s.chain));
-            (engine, me, first)
-        };
-        let mut queue: VecDeque<Action> = first.into();
+/// Messages de consensus reçus pour une hauteur future, au plus.
+const MAX_BUFFERED: usize = 10_000;
 
-        // ── Rounds jusqu'à la décision ──────────────────────────────────────
-        'height: loop {
-            while let Some(action) = queue.pop_front() {
-                match action {
-                    Action::BuildBlock { round, .. } => {
-                        let wait = {
-                            let s = lock(&shared);
-                            s.chain
-                                .parent_time_ms()
-                                .saturating_add(s.chain.state.params.min_block_interval_ms)
-                                .saturating_sub(now_ms())
-                        };
-                        tokio::select! {
-                            _ = tokio::time::sleep(Duration::from_millis(wait)) => {}
-                            _ = shutdown.changed() => return Ok(()),
-                        }
-                        let block = {
-                            let s = lock(&shared);
-                            let timestamp =
-                                now_ms().max(s.chain.parent_time_ms().saturating_add(1));
-                            let max_bytes = usize::try_from(s.chain.state.params.max_block_bytes)
-                                .unwrap_or(usize::MAX);
-                            s.chain.build(
-                                timestamp,
-                                me,
-                                s.mempool.admin_txs(),
-                                s.mempool.txs(),
-                                max_bytes,
-                            )
-                        };
-                        queue.extend(engine.on_block_built(round, block));
+/// Enregistre un bloc finalisé : disque, chaîne, mempool, garde.
+fn commit(
+    s: &mut Shared,
+    block: &Block,
+    cert: &CommitCertificate,
+    next: vinx_state::State,
+) -> Result<()> {
+    s.store.commit_block(block, cert, &next)?;
+    let included: BTreeSet<_> = block
+        .admin_txs
+        .iter()
+        .map(SignedAdminTransaction::id)
+        .chain(block.txs.iter().map(SignedTransaction::id))
+        .collect();
+    s.chain.advance(block, next);
+    s.mempool.reset(&s.chain.state, &included);
+    s.guard.prune_below(block.header.height.saturating_add(1));
+    s.store.save_guard(&s.guard)?;
+    info!(
+        height = block.header.height,
+        txs = included.len(),
+        "bloc finalisé"
+    );
+    Ok(())
+}
+
+/// Vérifie un bloc reçu par rattrapage avec son certificat, puis l'applique.
+fn apply_synced(s: &mut Shared, block: &Block, cert: &CommitCertificate) -> Result<()> {
+    let height = s.chain.next_height();
+    let validators = s.chain.state.validators_at(height);
+    if block.header.height != height || cert.height != height || cert.block_hash != block.hash() {
+        bail!("bloc de rattrapage inattendu");
+    }
+    cert.verify(&s.chain.state.chain_id, &validators)
+        .map_err(|e| anyhow::anyhow!("certificat refusé : {e}"))?;
+    let next = s
+        .chain
+        .check(block, now_ms())
+        .map_err(|e| anyhow::anyhow!("bloc refusé : {e:?}"))?;
+    commit(s, block, cert, next)
+}
+
+struct Runner {
+    shared: SharedRef,
+    key: Option<KeyPair>,
+    engine: Engine,
+    me: Option<u16>,
+    queue: VecDeque<Action>,
+    future: Vec<NetMessage>,
+    /// Round et instant (ms) auxquels construire notre proposition.
+    build: Option<(u32, u64)>,
+    timeouts: mpsc::UnboundedSender<Timeout>,
+}
+
+fn message_height(msg: &NetMessage) -> Option<u64> {
+    match msg {
+        NetMessage::Proposal(p) => Some(p.proposal.height),
+        NetMessage::Vote(v) => Some(v.vote.height),
+        _ => None,
+    }
+}
+
+impl Runner {
+    /// Démarre le moteur pour la hauteur suivante et rejoue les messages en attente.
+    fn new_height(&mut self) {
+        let mut s = lock(&self.shared);
+        let height = s.chain.next_height();
+        let validators = s.chain.state.validators_at(height);
+        self.me = self
+            .key
+            .as_ref()
+            .and_then(|k| validators.iter().position(|v| *v == k.public_key()))
+            .and_then(|i| u16::try_from(i).ok());
+        self.engine = Engine::new(
+            s.chain.state.chain_id.clone(),
+            height,
+            validators,
+            self.me,
+            s.chain.state.params.clone(),
+        );
+        self.build = None;
+        self.queue.clear();
+        self.queue.extend(self.engine.start(&mut Checker(&s.chain)));
+        let (now, later): (Vec<_>, Vec<_>) = std::mem::take(&mut self.future)
+            .into_iter()
+            .filter(|m| message_height(m).is_some_and(|h| h >= height))
+            .partition(|m| message_height(m) == Some(height));
+        self.future = later;
+        let s = &mut *s;
+        for msg in now {
+            let actions = match msg {
+                NetMessage::Proposal(p) => self.engine.on_proposal(p, &mut Checker(&s.chain)),
+                NetMessage::Vote(v) => self.engine.on_vote(v, &mut Checker(&s.chain)),
+                _ => Vec::new(),
+            };
+            self.queue.extend(actions);
+        }
+    }
+
+    /// Exécute les actions en attente.
+    fn drain(&mut self) -> Result<()> {
+        while let Some(action) = self.queue.pop_front() {
+            match action {
+                Action::BuildBlock { round, .. } => {
+                    let s = lock(&self.shared);
+                    let at = s
+                        .chain
+                        .parent_time_ms()
+                        .saturating_add(s.chain.state.params.min_block_interval_ms);
+                    self.build = Some((round, at));
+                }
+                Action::Propose(proposal) => {
+                    let (Some(key), Some(_)) = (&self.key, self.me) else {
+                        continue;
+                    };
+                    let mut guard = lock(&self.shared);
+                    let s = &mut *guard;
+                    let content = Some(proposal.block.hash());
+                    if !s
+                        .guard
+                        .allow(proposal.height, proposal.round, Step::Proposal, content)
+                    {
+                        continue;
                     }
-                    Action::Propose(proposal) => {
-                        let mut guard = lock(&shared);
-                        let s = &mut *guard;
-                        let content = Some(proposal.block.hash());
-                        if !s
-                            .guard
-                            .allow(proposal.height, proposal.round, Step::Proposal, content)
-                        {
-                            continue;
-                        }
-                        s.store.save_guard(&s.guard)?;
-                        let signed = proposal.sign(&keypair);
-                        queue.extend(engine.on_proposal(signed, &mut Checker(&s.chain)));
+                    s.store.save_guard(&s.guard)?;
+                    let signed = proposal.sign(key);
+                    s.broadcast(NetMessage::Proposal(signed.clone()));
+                    self.queue
+                        .extend(self.engine.on_proposal(signed, &mut Checker(&s.chain)));
+                }
+                Action::Vote(vote) => {
+                    let (Some(key), Some(me)) = (&self.key, self.me) else {
+                        continue;
+                    };
+                    let mut guard = lock(&self.shared);
+                    let s = &mut *guard;
+                    if !s
+                        .guard
+                        .allow(vote.height, vote.round, vote.kind.into(), vote.block_hash)
+                    {
+                        continue;
                     }
-                    Action::Vote(vote) => {
-                        let mut guard = lock(&shared);
-                        let s = &mut *guard;
-                        if !s.guard.allow(
-                            vote.height,
-                            vote.round,
-                            vote.kind.into(),
-                            vote.block_hash,
-                        ) {
-                            continue;
-                        }
-                        s.store.save_guard(&s.guard)?;
-                        let signed = SignedVote::new(vote, me, &keypair);
-                        queue.extend(engine.on_vote(signed, &mut Checker(&s.chain)));
-                    }
-                    Action::ScheduleTimeout { timeout, after_ms } => {
-                        let tx = timeouts_tx.clone();
-                        tokio::spawn(async move {
-                            tokio::time::sleep(Duration::from_millis(after_ms)).await;
-                            let _ = tx.send(timeout);
-                        });
-                    }
-                    Action::Decide { block, certificate } => {
-                        let mut guard = lock(&shared);
+                    s.store.save_guard(&s.guard)?;
+                    let signed = SignedVote::new(vote, me, key);
+                    s.broadcast(NetMessage::Vote(signed.clone()));
+                    self.queue
+                        .extend(self.engine.on_vote(signed, &mut Checker(&s.chain)));
+                }
+                Action::ScheduleTimeout { timeout, after_ms } => {
+                    let tx = self.timeouts.clone();
+                    tokio::spawn(async move {
+                        tokio::time::sleep(Duration::from_millis(after_ms)).await;
+                        let _ = tx.send(timeout);
+                    });
+                }
+                Action::Decide { block, certificate } => {
+                    {
+                        let mut guard = lock(&self.shared);
                         let s = &mut *guard;
                         let next = s
                             .chain
                             .check(&block, u64::MAX)
                             .map_err(|e| anyhow::anyhow!("bloc décidé invalide : {e:?}"))?;
-                        s.store.commit_block(&block, &certificate, &next)?;
-                        let included: BTreeSet<_> = block
-                            .admin_txs
-                            .iter()
-                            .map(SignedAdminTransaction::id)
-                            .chain(block.txs.iter().map(SignedTransaction::id))
-                            .collect();
-                        s.chain.advance(&block, next);
-                        s.mempool.reset(&s.chain.state, &included);
-                        s.guard.prune_below(block.header.height.saturating_add(1));
-                        s.store.save_guard(&s.guard)?;
-                        info!(
-                            height = block.header.height,
-                            txs = included.len(),
-                            "bloc finalisé"
-                        );
-                        break 'height;
+                        commit(s, &block, &certificate, next)?;
+                    }
+                    self.new_height();
+                }
+            }
+        }
+        Ok(())
+    }
+
+    fn build_now(&mut self, round: u32) {
+        let block = {
+            let s = lock(&self.shared);
+            let timestamp = now_ms().max(s.chain.parent_time_ms().saturating_add(1));
+            let max_bytes =
+                usize::try_from(s.chain.state.params.max_block_bytes).unwrap_or(usize::MAX);
+            s.chain.build(
+                timestamp,
+                self.me.unwrap_or(0),
+                s.mempool.admin_txs(),
+                s.mempool.txs(),
+                max_bytes,
+            )
+        };
+        self.queue.extend(self.engine.on_block_built(round, block));
+    }
+
+    fn on_net(&mut self, event: NetEvent) {
+        match event {
+            NetEvent::Message(msg) => match *msg {
+                NetMessage::Tx(tx) => {
+                    let _ = lock(&self.shared).mempool.add(tx);
+                }
+                NetMessage::AdminTx(tx) => {
+                    let _ = lock(&self.shared).mempool.add_admin(tx);
+                }
+                consensus => {
+                    let height = message_height(&consensus).unwrap_or(0);
+                    if height > self.engine.height() {
+                        if self.future.len() < MAX_BUFFERED {
+                            self.future.push(consensus);
+                        }
+                        return;
+                    }
+                    if height < self.engine.height() {
+                        return;
+                    }
+                    let s = lock(&self.shared);
+                    let actions = match consensus {
+                        NetMessage::Proposal(p) => {
+                            self.engine.on_proposal(p, &mut Checker(&s.chain))
+                        }
+                        NetMessage::Vote(v) => self.engine.on_vote(v, &mut Checker(&s.chain)),
+                        _ => Vec::new(),
+                    };
+                    self.queue.extend(actions);
+                }
+            },
+            NetEvent::Blocks(mut blocks) => {
+                blocks.sort_by_key(|(b, _)| b.header.height);
+                let mut advanced = false;
+                {
+                    let mut guard = lock(&self.shared);
+                    for (block, cert) in &blocks {
+                        if block.header.height < guard.chain.next_height() {
+                            continue;
+                        }
+                        match apply_synced(&mut guard, block, cert) {
+                            Ok(()) => advanced = true,
+                            Err(e) => {
+                                warn!("rattrapage interrompu : {e}");
+                                break;
+                            }
+                        }
                     }
                 }
-            }
-            tokio::select! {
-                Some(timeout) = timeouts_rx.recv() => {
-                    let s = lock(&shared);
-                    queue.extend(engine.on_timeout(timeout, &mut Checker(&s.chain)));
+                if advanced {
+                    self.new_height();
                 }
-                _ = shutdown.changed() => return Ok(()),
             }
+        }
+    }
+}
+
+/// Fait tourner le consensus jusqu'à ce que `shutdown` passe à `true`.
+///
+/// `key` est la clé de validateur, absente pour un observateur. `inbound`
+/// apporte les messages du réseau.
+pub async fn run(
+    shared: SharedRef,
+    key: Option<KeyPair>,
+    mut inbound: mpsc::UnboundedReceiver<NetEvent>,
+    mut shutdown: watch::Receiver<bool>,
+) -> Result<()> {
+    let (timeouts_tx, mut timeouts_rx) = mpsc::unbounded_channel::<Timeout>();
+    let placeholder = {
+        let s = lock(&shared);
+        Engine::new(
+            s.chain.state.chain_id.clone(),
+            0,
+            Vec::new(),
+            None,
+            s.chain.state.params.clone(),
+        )
+    };
+    let mut r = Runner {
+        shared,
+        key,
+        engine: placeholder,
+        me: None,
+        queue: VecDeque::new(),
+        future: Vec::new(),
+        build: None,
+        timeouts: timeouts_tx,
+    };
+    r.new_height();
+    if r.me.is_none() {
+        info!("mode observateur : ce nœud ne vote pas");
+    }
+    loop {
+        r.drain()?;
+        let build_in = r
+            .build
+            .map(|(_, at)| Duration::from_millis(at.saturating_sub(now_ms())));
+        tokio::select! {
+            _ = tokio::time::sleep(build_in.unwrap_or(Duration::MAX)), if build_in.is_some() => {
+                if let Some((round, _)) = r.build.take() {
+                    r.build_now(round);
+                }
+            }
+            Some(timeout) = timeouts_rx.recv() => {
+                let s = lock(&r.shared);
+                let actions = r.engine.on_timeout(timeout, &mut Checker(&s.chain));
+                drop(s);
+                r.queue.extend(actions);
+            }
+            Some(event) = inbound.recv() => r.on_net(event),
+            _ = shutdown.changed() => return Ok(()),
         }
     }
 }

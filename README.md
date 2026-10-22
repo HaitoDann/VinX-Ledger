@@ -21,7 +21,7 @@ Prérequis : [Rust](https://rustup.rs) stable.
 export VINX_KEY_PASSWORD='un mot de passe solide'
 cargo run --release -p vinx-node -- devnet --dir devnet
 cargo run --release -p vinx-node -- run \
-  --genesis devnet/genesis.json --key devnet/validator.json --data-dir devnet/data
+  --genesis devnet/genesis.json --key devnet/validator-1.json --data-dir devnet/data-1
 ```
 
 `devnet` crée trois clés admin et une clé de validateur, chiffrées par le mot de
@@ -29,6 +29,24 @@ passe, ainsi que la genèse. L'API écoute sur `http://127.0.0.1:8545` :
 `/status`, `/accounts/{adresse}`, `/blocks/{hauteur}`, `/escrow`, et en `POST`
 `/transactions` et `/admin-transactions`.
 
+
+## Plusieurs validateurs
+
+`devnet --validators 4` crée quatre clés de validateur. Chaque nœud a une
+identité réseau, affichée par `vinx-node peer-id --data-dir <dossier>`. Un nœud
+n'accepte que les pairs qu'il joint (`--peer`) ou autorise (`--allow`) :
+
+```bash
+vinx-node run --genesis devnet/genesis.json --key devnet/validator-1.json \
+  --data-dir devnet/data-1 --listen /ip4/0.0.0.0/tcp/26656 \
+  --peer /ip4/10.0.0.2/tcp/26656/p2p/<id du nœud 2> \
+  --peer /ip4/10.0.0.3/tcp/26656/p2p/<id du nœud 3> \
+  --peer /ip4/10.0.0.4/tcp/26656/p2p/<id du nœud 4>
+```
+
+Sans `--key`, le nœud suit la chaîne en observateur et sert l'API. La chaîne
+avance tant que plus des deux tiers des validateurs sont joignables ; un nœud
+qui revient rattrape les blocs manquants automatiquement.
 
 ## Utiliser le wallet
 

@@ -4,6 +4,7 @@ pub mod api;
 pub mod chain;
 pub mod genesis_file;
 pub mod mempool;
+pub mod network;
 pub mod node;
 pub mod store;
 

@@ -44,7 +44,8 @@ fn start_node(admins: &[KeyPair; 3], dir: &std::path::Path) -> String {
                 .send(format!("http://{}", listener.local_addr().unwrap()))
                 .unwrap();
             let (_stop, stop_rx) = tokio::sync::watch::channel(false);
-            tokio::spawn(node::run(shared.clone(), validator, stop_rx));
+            let (_in_tx, in_rx) = tokio::sync::mpsc::unbounded_channel();
+            tokio::spawn(node::run(shared.clone(), Some(validator), in_rx, stop_rx));
             axum::serve(listener, api::router(shared)).await.unwrap();
         });
     });

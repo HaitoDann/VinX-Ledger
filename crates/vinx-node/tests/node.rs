@@ -104,7 +104,12 @@ async fn devnet_produces_blocks_and_processes_payments() {
 
     let shared = node::open(genesis.clone(), &dir.path().join("data")).unwrap();
     let (stop, stop_rx) = tokio::sync::watch::channel(false);
-    let task = tokio::spawn(node::run(shared.clone(), net.validator.clone(), stop_rx));
+    let task = tokio::spawn(node::run(
+        shared.clone(),
+        Some(net.validator.clone()),
+        tokio::sync::mpsc::unbounded_channel().1,
+        stop_rx,
+    ));
     wait_for_height(&shared, 2).await;
 
     // 1. La trésorerie finance Alice (transaction admin 2-sur-3).
@@ -192,7 +197,12 @@ async fn devnet_produces_blocks_and_processes_payments() {
     let reopened = node::open(genesis, &dir.path().join("data")).unwrap();
     assert_eq!(node::lock(&reopened).chain.state, state);
     let (stop, stop_rx) = tokio::sync::watch::channel(false);
-    let task = tokio::spawn(node::run(reopened.clone(), net.validator.clone(), stop_rx));
+    let task = tokio::spawn(node::run(
+        reopened.clone(),
+        Some(net.validator.clone()),
+        tokio::sync::mpsc::unbounded_channel().1,
+        stop_rx,
+    ));
     wait_for_height(&reopened, height + 2).await;
     stop.send(true).unwrap();
     task.await.unwrap().unwrap();
@@ -200,13 +210,23 @@ async fn devnet_produces_blocks_and_processes_payments() {
 }
 
 #[tokio::test]
-async fn a_key_that_is_not_a_validator_cannot_run_the_chain() {
+async fn a_node_without_validator_key_only_observes() {
     let dir = tempfile::tempdir().unwrap();
     let net = devnet();
     let shared = node::open(net.genesis, dir.path()).unwrap();
-    let (_stop, stop_rx) = tokio::sync::watch::channel(false);
-    let result = node::run(shared, KeyPair::generate(), stop_rx).await;
-    assert!(result.is_err());
+    let (stop, stop_rx) = tokio::sync::watch::channel(false);
+    let (_in_tx, in_rx) = tokio::sync::mpsc::unbounded_channel();
+    let task = tokio::spawn(node::run(
+        shared.clone(),
+        Some(KeyPair::generate()),
+        in_rx,
+        stop_rx,
+    ));
+    tokio::time::sleep(Duration::from_millis(400)).await;
+    // Sans validateur joignable, rien n'est produit.
+    assert_eq!(node::lock(&shared).chain.state.height, 0);
+    stop.send(true).unwrap();
+    task.await.unwrap().unwrap();
 }
 
 #[test]
