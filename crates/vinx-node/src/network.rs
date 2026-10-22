@@ -17,10 +17,10 @@ use libp2p::{
     Multiaddr, PeerId, StreamProtocol, Swarm, SwarmBuilder, allow_block_list, gossipsub, identity,
     noise, tcp, yamux,
 };
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
 use std::io;
 use std::path::Path;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 use tokio::sync::mpsc;
 use tracing::{debug, info, warn};
 use vinx_consensus::{SignedProposal, SignedVote};
@@ -37,6 +37,14 @@ pub enum NetMessage {
     AdminTx(SignedAdminTransaction) = 0x04,
 }
 
+/// Enveloppe gossip. Le numéro de séquence rend chaque envoi unique : gossipsub
+/// déduplique par contenu, et un message retransmis doit pouvoir repartir.
+#[derive(Clone, Debug, BorshSerialize, BorshDeserialize)]
+struct Envelope {
+    seq: u64,
+    msg: NetMessage,
+}
+
 #[derive(Clone, Debug, BorshSerialize, BorshDeserialize)]
 pub struct SyncRequest {
     pub from_height: u64,
@@ -51,6 +59,73 @@ pub struct SyncResponse {
 pub const SYNC_BATCH: u64 = 50;
 /// Taille maximale d'un message réseau.
 const MAX_MESSAGE_BYTES: usize = 16 * 1024 * 1024;
+/// Taille visée d'une réponse de rattrapage : nettement sous `MAX_MESSAGE_BYTES`,
+/// car 50 blocs pleins (4 Mio chacun) la dépasseraient.
+const SYNC_RESPONSE_BYTES: usize = 8 * 1024 * 1024;
+
+/// Messages gossip relayés par seconde au plus, par pair.
+const MAX_MESSAGES_PER_SEC: u32 = 1_000;
+/// Poids d'un message invalide dans le quota : un pair qui en envoie est vite coupé.
+const INVALID_WEIGHT: u32 = 100;
+/// Requêtes de rattrapage par seconde au plus, par pair.
+const MAX_SYNC_PER_SEC: u32 = 4;
+/// Durée d'exclusion d'un pair qui dépasse ses quotas.
+const BAN: Duration = Duration::from_secs(60);
+
+/// Compteurs d'un pair sur la fenêtre d'une seconde en cours.
+#[derive(Default)]
+struct Usage {
+    window: Option<Instant>,
+    messages: u32,
+    sync: u32,
+    banned_until: Option<Instant>,
+}
+
+#[derive(Default)]
+struct Quotas {
+    peers: BTreeMap<PeerId, Usage>,
+}
+
+impl Quotas {
+    fn usage(&mut self, peer: PeerId, now: Instant) -> &mut Usage {
+        let u = self.peers.entry(peer).or_default();
+        if u.window
+            .is_none_or(|w| now.duration_since(w) >= Duration::from_secs(1))
+        {
+            u.window = Some(now);
+            u.messages = 0;
+            u.sync = 0;
+        }
+        u
+    }
+
+    fn is_banned(&self, peer: &PeerId, now: Instant) -> bool {
+        self.peers
+            .get(peer)
+            .and_then(|u| u.banned_until)
+            .is_some_and(|t| now < t)
+    }
+
+    /// Compte un message gossip ; renvoie `false` si le pair dépasse son quota.
+    fn charge_message(&mut self, peer: PeerId, valid: bool, now: Instant) -> bool {
+        let u = self.usage(peer, now);
+        u.messages = u
+            .messages
+            .saturating_add(if valid { 1 } else { INVALID_WEIGHT });
+        if u.messages > MAX_MESSAGES_PER_SEC {
+            u.banned_until = now.checked_add(BAN);
+            return false;
+        }
+        true
+    }
+
+    /// Compte une requête de rattrapage ; renvoie `false` au-delà du quota.
+    fn charge_sync(&mut self, peer: PeerId, now: Instant) -> bool {
+        let u = self.usage(peer, now);
+        u.sync = u.sync.saturating_add(1);
+        u.sync <= MAX_SYNC_PER_SEC
+    }
+}
 
 /// Ce que le réseau transmet au nœud.
 #[derive(Debug)]
@@ -206,6 +281,8 @@ pub async fn run(
                     gossipsub::MessageId::from(blake3::hash(&m.data).as_bytes().to_vec())
                 })
                 .max_transmit_size(MAX_MESSAGE_BYTES)
+                // Un message n'est relayé qu'après validation par le nœud.
+                .validate_messages()
                 .build()
                 .map_err(|e| io::Error::other(e.to_string()))?;
             let gossip = gossipsub::Behaviour::new(
@@ -245,13 +322,17 @@ pub async fn run(
     info!(peer_id = %swarm.local_peer_id(), listen = %config.listen, "réseau démarré");
 
     let mut connected: BTreeSet<PeerId> = BTreeSet::new();
+    let mut quotas = Quotas::default();
+    let mut seq: u64 = 0;
     let mut redial = tokio::time::interval(Duration::from_secs(3));
     let mut sync_tick = tokio::time::interval(Duration::from_secs(2));
     loop {
         tokio::select! {
             _ = shutdown.changed() => return Ok(()),
             Some(msg) = outbound.recv() => {
-                if let Err(e) = swarm.behaviour_mut().gossip.publish(topic.clone(), encode(&msg)) {
+                seq = seq.wrapping_add(1);
+                let data = encode(&Envelope { seq, msg });
+                if let Err(e) = swarm.behaviour_mut().gossip.publish(topic.clone(), data) {
                     // Pas encore de pair, ou message déjà diffusé : sans conséquence.
                     debug!("diffusion impossible : {e}");
                 }
@@ -276,23 +357,49 @@ pub async fn run(
             }
             event = swarm.select_next_some() => match event {
                 SwarmEvent::ConnectionEstablished { peer_id, .. } => {
-                    info!(%peer_id, "pair connecté");
-                    connected.insert(peer_id);
+                    if quotas.is_banned(&peer_id, Instant::now()) {
+                        let _ = swarm.disconnect_peer_id(peer_id);
+                    } else {
+                        info!(%peer_id, "pair connecté");
+                        connected.insert(peer_id);
+                    }
                 }
                 SwarmEvent::ConnectionClosed { peer_id, num_established: 0, .. } => {
                     info!(%peer_id, "pair déconnecté");
                     connected.remove(&peer_id);
                 }
-                SwarmEvent::Behaviour(BehaviourEvent::Gossip(gossipsub::Event::Message { message, .. })) => {
-                    match borsh::from_slice::<NetMessage>(&message.data) {
-                        Ok(msg) => { let _ = inbound.send(NetEvent::Message(Box::new(msg))); }
-                        Err(_) => warn!("message réseau mal encodé ignoré"),
-                    }
+                SwarmEvent::Behaviour(BehaviourEvent::Gossip(gossipsub::Event::Message {
+                    propagation_source,
+                    message_id,
+                    message,
+                })) => {
+                    let decoded = borsh::from_slice::<Envelope>(&message.data).ok().map(|e| e.msg);
+                    let within_quota = quotas.charge_message(propagation_source, decoded.is_some(), Instant::now());
+                    let verdict = match (decoded, within_quota) {
+                        (Some(msg), true) => {
+                            let _ = inbound.send(NetEvent::Message(Box::new(msg)));
+                            gossipsub::MessageAcceptance::Accept
+                        }
+                        (None, true) => gossipsub::MessageAcceptance::Reject,
+                        (_, false) => {
+                            warn!(peer_id = %propagation_source, "quota dépassé : pair exclu {} s", BAN.as_secs());
+                            let _ = swarm.disconnect_peer_id(propagation_source);
+                            gossipsub::MessageAcceptance::Ignore
+                        }
+                    };
+                    let _ = swarm
+                        .behaviour_mut()
+                        .gossip
+                        .report_message_validation_result(&message_id, &propagation_source, verdict);
                 }
-                SwarmEvent::Behaviour(BehaviourEvent::Sync(request_response::Event::Message { message, .. })) => {
+                SwarmEvent::Behaviour(BehaviourEvent::Sync(request_response::Event::Message { peer, message, .. })) => {
                     match message {
                         request_response::Message::Request { request, channel, .. } => {
-                            let blocks = serve_blocks(&shared, request.from_height);
+                            let blocks = if quotas.charge_sync(peer, Instant::now()) {
+                                serve_blocks(&shared, request.from_height)
+                            } else {
+                                Vec::new()
+                            };
                             let _ = swarm.behaviour_mut().sync.send_response(channel, SyncResponse { blocks });
                         }
                         request_response::Message::Response { response, .. } => {
@@ -312,12 +419,63 @@ fn serve_blocks(shared: &SharedRef, from: u64) -> Vec<(Block, CommitCertificate)
     let s = lock(shared);
     let mut out = Vec::new();
     let mut h = from;
+    let mut bytes = 0usize;
     while u64::try_from(out.len()).unwrap_or(u64::MAX) < SYNC_BATCH && h <= s.chain.state.height {
         match (s.store.block(h), s.store.certificate(h)) {
-            (Ok(Some(b)), Ok(Some(c))) => out.push((b, c)),
+            (Ok(Some(b)), Ok(Some(c))) => {
+                bytes = bytes.saturating_add(b.encoded_len());
+                // Toujours au moins un bloc, sinon un nœud en retard ne progresserait plus.
+                if !out.is_empty() && bytes > SYNC_RESPONSE_BYTES {
+                    break;
+                }
+                out.push((b, c));
+            }
             _ => break,
         }
         h = h.saturating_add(1);
     }
     out
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn flooding_peer_is_banned_then_released() {
+        let mut q = Quotas::default();
+        let peer = PeerId::random();
+        let t0 = Instant::now();
+        for _ in 0..MAX_MESSAGES_PER_SEC {
+            assert!(q.charge_message(peer, true, t0));
+        }
+        assert!(!q.charge_message(peer, true, t0));
+        assert!(q.is_banned(&peer, t0));
+        assert!(!q.is_banned(&peer, t0 + BAN + Duration::from_millis(1)));
+        // Un autre pair n'est pas affecté.
+        assert!(q.charge_message(PeerId::random(), true, t0));
+    }
+
+    #[test]
+    fn invalid_messages_exhaust_the_quota_quickly() {
+        let mut q = Quotas::default();
+        let peer = PeerId::random();
+        let t0 = Instant::now();
+        let allowed = (0..20)
+            .take_while(|_| q.charge_message(peer, false, t0))
+            .count();
+        assert_eq!(allowed, (MAX_MESSAGES_PER_SEC / INVALID_WEIGHT) as usize);
+    }
+
+    #[test]
+    fn quota_window_resets_every_second() {
+        let mut q = Quotas::default();
+        let peer = PeerId::random();
+        let t0 = Instant::now();
+        for _ in 0..MAX_SYNC_PER_SEC {
+            assert!(q.charge_sync(peer, t0));
+        }
+        assert!(!q.charge_sync(peer, t0));
+        assert!(q.charge_sync(peer, t0 + Duration::from_secs(1)));
+    }
 }

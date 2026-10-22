@@ -1,4 +1,5 @@
-//! Réseau P2P réel en local : 4 validateurs, panne, relais, rattrapage, liste autorisée.
+//! Réseau P2P réel en local : 4 validateurs, démarrage décalé, panne, relais,
+//! rattrapage, liste autorisée.
 
 // Code de test : les lints réservés au code de production ne s'appliquent pas.
 #![allow(
@@ -63,6 +64,16 @@ struct Spec {
 }
 
 fn start(genesis: &Genesis, me: &Spec, others: &[&Spec], key: Option<KeyPair>) -> Running {
+    start_delayed(genesis, me, others, key, 0)
+}
+
+fn start_delayed(
+    genesis: &Genesis,
+    me: &Spec,
+    others: &[&Spec],
+    key: Option<KeyPair>,
+    delay_ms: u64,
+) -> Running {
     let shared = node::open(genesis.clone(), &me.dir).unwrap();
     let identity = network::load_or_create_identity(&me.dir).unwrap();
     let (out_tx, out_rx) = mpsc::unbounded_channel();
@@ -82,14 +93,12 @@ fn start(genesis: &Genesis, me: &Spec, others: &[&Spec], key: Option<KeyPair>) -
         peers,
         allowed: Vec::new(),
     };
-    let net = tokio::spawn(network::run(
-        identity,
-        config,
-        shared.clone(),
-        out_rx,
-        in_tx,
-        stop_rx.clone(),
-    ));
+    let shared2 = shared.clone();
+    let stop2 = stop_rx.clone();
+    let net = tokio::spawn(async move {
+        tokio::time::sleep(Duration::from_millis(delay_ms)).await;
+        network::run(identity, config, shared2, out_rx, in_tx, stop2).await
+    });
     let consensus = tokio::spawn(node::run(shared.clone(), key, in_rx, stop_rx));
     Running {
         shared,
@@ -154,13 +163,16 @@ async fn four_validators_tolerate_a_crash_and_resync() {
             .map(|(_, s)| s)
             .collect()
     };
+    // Les nœuds 3 et 4 rejoignent le réseau 4 s après les autres : leurs premiers
+    // messages sont perdus. Sans retransmission, la chaîne ne démarrait jamais.
     let mut nodes: Vec<Option<Running>> = (0..4)
         .map(|i| {
-            Some(start(
+            Some(start_delayed(
                 &genesis,
                 &specs[i],
                 &others(i),
                 Some(validators[i].clone()),
+                if i >= 2 { 4_000 } else { 0 },
             ))
         })
         .collect();

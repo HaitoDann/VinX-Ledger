@@ -26,7 +26,7 @@ cargo run --release -p vinx-node -- run \
 
 `devnet` crée trois clés admin et une clé de validateur, chiffrées par le mot de
 passe, ainsi que la genèse. L'API écoute sur `http://127.0.0.1:8545` :
-`/status`, `/accounts/{adresse}`, `/blocks/{hauteur}`, `/escrow`, et en `POST`
+`/status`, `/accounts/{adresse}`, `/blocks/{hauteur}`, `/escrow`, `/fees`, et en `POST`
 `/transactions` et `/admin-transactions`.
 
 

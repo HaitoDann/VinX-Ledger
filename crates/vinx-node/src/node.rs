@@ -100,6 +100,16 @@ impl BlockValidator for Checker<'_> {
 /// Messages de consensus reçus pour une hauteur future, au plus.
 const MAX_BUFFERED: usize = 10_000;
 
+/// Intervalle de retransmission de nos propres messages de la hauteur en cours.
+///
+/// Tendermint suppose que tout message finit par arriver. Un message diffusé
+/// avant que les pairs soient connectés est perdu par gossipsub : sans
+/// retransmission, des validateurs démarrés à des moments différents
+/// peuvent attendre indéfiniment des votes qui ne viendront plus.
+const REBROADCAST: Duration = Duration::from_secs(1);
+/// Nos derniers messages retransmis, au plus.
+const MAX_OWN: usize = 8;
+
 /// Enregistre un bloc finalisé : disque, chaîne, mempool, garde.
 fn commit(
     s: &mut Shared,
@@ -149,9 +159,18 @@ struct Runner {
     me: Option<u16>,
     queue: VecDeque<Action>,
     future: Vec<NetMessage>,
+    /// Nos messages signés pour la hauteur en cours, à retransmettre.
+    own: VecDeque<NetMessage>,
     /// Round et instant (ms) auxquels construire notre proposition.
     build: Option<(u32, u64)>,
     timeouts: mpsc::UnboundedSender<Timeout>,
+}
+
+fn remember(own: &mut VecDeque<NetMessage>, msg: NetMessage) {
+    if own.len() >= MAX_OWN {
+        own.pop_front();
+    }
+    own.push_back(msg);
 }
 
 fn message_height(msg: &NetMessage) -> Option<u64> {
@@ -181,6 +200,7 @@ impl Runner {
             s.chain.state.params.clone(),
         );
         self.build = None;
+        self.own.clear();
         self.queue.clear();
         self.queue.extend(self.engine.start(&mut Checker(&s.chain)));
         let (now, later): (Vec<_>, Vec<_>) = std::mem::take(&mut self.future)
@@ -226,7 +246,9 @@ impl Runner {
                     }
                     s.store.save_guard(&s.guard)?;
                     let signed = proposal.sign(key);
-                    s.broadcast(NetMessage::Proposal(signed.clone()));
+                    let msg = NetMessage::Proposal(signed.clone());
+                    s.broadcast(msg.clone());
+                    remember(&mut self.own, msg);
                     self.queue
                         .extend(self.engine.on_proposal(signed, &mut Checker(&s.chain)));
                 }
@@ -244,7 +266,9 @@ impl Runner {
                     }
                     s.store.save_guard(&s.guard)?;
                     let signed = SignedVote::new(vote, me, key);
-                    s.broadcast(NetMessage::Vote(signed.clone()));
+                    let msg = NetMessage::Vote(signed.clone());
+                    s.broadcast(msg.clone());
+                    remember(&mut self.own, msg);
                     self.queue
                         .extend(self.engine.on_vote(signed, &mut Checker(&s.chain)));
                 }
@@ -282,7 +306,7 @@ impl Runner {
                 timestamp,
                 self.me.unwrap_or(0),
                 s.mempool.admin_txs(),
-                s.mempool.txs(),
+                &s.mempool.by_priority(),
                 max_bytes,
             )
         };
@@ -374,6 +398,7 @@ pub async fn run(
         me: None,
         queue: VecDeque::new(),
         future: Vec::new(),
+        own: VecDeque::new(),
         build: None,
         timeouts: timeouts_tx,
     };
@@ -381,6 +406,7 @@ pub async fn run(
     if r.me.is_none() {
         info!("mode observateur : ce nœud ne vote pas");
     }
+    let mut rebroadcast = tokio::time::interval(REBROADCAST);
     loop {
         r.drain()?;
         let build_in = r
@@ -399,6 +425,12 @@ pub async fn run(
                 r.queue.extend(actions);
             }
             Some(event) = inbound.recv() => r.on_net(event),
+            _ = rebroadcast.tick() => {
+                let s = lock(&r.shared);
+                for msg in &r.own {
+                    s.broadcast(msg.clone());
+                }
+            }
             _ = shutdown.changed() => return Ok(()),
         }
     }

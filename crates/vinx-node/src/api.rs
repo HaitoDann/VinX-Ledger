@@ -15,6 +15,11 @@ use serde_json::{Value, json};
 use vinx_core::{SignedAdminTransaction, SignedTransaction, decode};
 use vinx_crypto::Address;
 
+/// Taille maximale d'une requête.
+pub const MAX_BODY_BYTES: usize = 64 * 1024;
+/// Requêtes traitées simultanément au plus.
+pub const MAX_CONCURRENT_REQUESTS: usize = 64;
+
 type ApiResult = Result<Json<Value>, (StatusCode, Json<Value>)>;
 
 fn error(status: StatusCode, message: impl std::fmt::Display) -> (StatusCode, Json<Value>) {
@@ -27,8 +32,15 @@ pub fn router(shared: SharedRef) -> Router {
         .route("/accounts/{address}", get(account))
         .route("/blocks/{height}", get(block))
         .route("/escrow", get(escrow))
+        .route("/fees", get(fees))
         .route("/transactions", post(submit))
         .route("/admin-transactions", post(submit_admin))
+        // Une transaction encodée tient largement en 64 Kio.
+        .layer(axum::extract::DefaultBodyLimit::max(MAX_BODY_BYTES))
+        // Au-delà, les requêtes attendent au lieu d'épuiser le nœud.
+        .layer(tower::limit::ConcurrencyLimitLayer::new(
+            MAX_CONCURRENT_REQUESTS,
+        ))
         .with_state(shared)
 }
 
@@ -106,6 +118,17 @@ async fn escrow(State(shared): State<SharedRef>) -> ApiResult {
             "amount": amount_to_string(t.amount),
             "matures_at": t.matures_at,
         })),
+    })))
+}
+
+async fn fees(State(shared): State<SharedRef>) -> ApiResult {
+    let s = lock(&shared);
+    let p = &s.chain.state.params;
+    Ok(Json(json!({
+        "min_fee": amount_to_string(p.min_fee),
+        "recommended_fee": amount_to_string(s.mempool.recommended_fee(p.min_fee, p.max_block_txs)),
+        "pending_transactions": s.mempool.len(),
+        "max_block_txs": p.max_block_txs,
     })))
 }
 

@@ -92,18 +92,30 @@ impl Chain {
                 .unwrap_or(usize::MAX)
                 .saturating_sub(admin.len());
             let mut bytes = 0usize;
-            for tx in candidates {
-                if txs.len() >= limit {
+            let budget = max_bytes.saturating_sub(64 * 1024); // marge pour l'en-tête et l'admin
+            let mut remaining: Vec<&SignedTransaction> = candidates.iter().collect();
+            // Plusieurs passes : une transaction peut ne devenir applicable qu'après
+            // une autre du même compte placée plus loin (frais plus faibles).
+            loop {
+                let before = txs.len();
+                remaining.retain(|tx| {
+                    if txs.len() >= limit {
+                        return false;
+                    }
+                    let size = vinx_core::encode(*tx).len();
+                    if bytes.saturating_add(size) > budget {
+                        return true;
+                    }
+                    if work.apply_tx(tx).is_ok() {
+                        bytes = bytes.saturating_add(size);
+                        txs.push((*tx).clone());
+                        false
+                    } else {
+                        true
+                    }
+                });
+                if txs.len() == before || remaining.is_empty() {
                     break;
-                }
-                let size = vinx_core::encode(tx).len();
-                // Marge pour l'en-tête et les transactions admin.
-                if bytes.saturating_add(size) > max_bytes.saturating_sub(64 * 1024) {
-                    break;
-                }
-                if work.apply_tx(tx).is_ok() {
-                    bytes = bytes.saturating_add(size);
-                    txs.push(tx.clone());
                 }
             }
         }
