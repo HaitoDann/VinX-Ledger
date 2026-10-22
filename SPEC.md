@@ -289,6 +289,18 @@ hauteur `H + 2`. `validators_hash` du bloc `H + 1` reflète déjà le nouvel ens
 
 `validators_hash = H("vinx/validators" ‖ borsh(liste ordonnée des clés))`.
 
+### 7.5 Preuves d'équivoque
+
+- Deux votes signés par le même validateur pour la même hauteur, le même round
+  et le même type, avec des cibles différentes, ou deux propositions signées par
+  le proposeur d'un round pour des blocs différents, forment une **preuve
+  d'équivoque**. Elle se vérifie avec la seule clé publique du validateur.
+- Un nœud qui en relève une l'enregistre, la journalise en alerte, la diffuse
+  (`NetMessage::Evidence`) et l'expose (`GET /evidence`). Un nœud qui en reçoit
+  une la vérifie avant de l'enregistrer.
+- Aucune sanction automatique : en PoA, la multisig décide de retirer le
+  validateur (`RemoveValidator`).
+
 ## 8. Élagage et synchronisation
 
 - Un nœud conserve **l'état complet** et les blocs des `block_retention`

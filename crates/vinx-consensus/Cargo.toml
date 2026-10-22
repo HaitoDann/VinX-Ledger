@@ -13,6 +13,7 @@ workspace = true
 [dependencies]
 vinx-crypto.workspace = true
 vinx-core.workspace = true
+blake3.workspace = true
 borsh.workspace = true
 thiserror.workspace = true
 
