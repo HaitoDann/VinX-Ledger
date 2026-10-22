@@ -15,6 +15,11 @@ use serde_json::{Value, json};
 use vinx_core::{SignedAdminTransaction, SignedTransaction, decode};
 use vinx_crypto::Address;
 
+/// Taille maximale d'une requête.
+pub const MAX_BODY_BYTES: usize = 64 * 1024;
+/// Requêtes traitées simultanément au plus.
+pub const MAX_CONCURRENT_REQUESTS: usize = 64;
+
 type ApiResult = Result<Json<Value>, (StatusCode, Json<Value>)>;
 
 fn error(status: StatusCode, message: impl std::fmt::Display) -> (StatusCode, Json<Value>) {
@@ -29,6 +34,12 @@ pub fn router(shared: SharedRef) -> Router {
         .route("/escrow", get(escrow))
         .route("/transactions", post(submit))
         .route("/admin-transactions", post(submit_admin))
+        // Une transaction encodée tient largement en 64 Kio.
+        .layer(axum::extract::DefaultBodyLimit::max(MAX_BODY_BYTES))
+        // Au-delà, les requêtes attendent au lieu d'épuiser le nœud.
+        .layer(tower::limit::ConcurrencyLimitLayer::new(
+            MAX_CONCURRENT_REQUESTS,
+        ))
         .with_state(shared)
 }
 

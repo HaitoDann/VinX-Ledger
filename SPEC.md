@@ -311,6 +311,20 @@ hauteur `H + 2`. `validators_hash` du bloc `H + 1` reflète déjà le nouvel ens
   la première hauteur manquante ; la réponse contient au plus 50 blocs finalisés
   avec leurs certificats. Le nœud vérifie chaque certificat contre l'ensemble de
   validateurs de la hauteur, puis exécute le bloc, avant de l'adopter.
+- **Quotas** (politique locale, hors consensus) : un pair qui relaie plus de
+  1 000 messages par seconde, un message invalide comptant pour 100, est exclu
+  60 secondes ; au plus 4 requêtes de rattrapage par seconde et par pair ; une
+  réponse de rattrapage vise 8 Mio au plus. Un message n'est relayé qu'après
+  avoir été décodé avec succès.
+
+### 8.2 Mempool (politique locale)
+
+- Au plus 100 transactions en attente par compte, 20 000 au total.
+- Mempool plein, une transaction n'entre qu'en payant des frais supérieurs à
+  ceux de la transaction évinçable la moins chère, qui est retirée. Seule la
+  dernière transaction en attente d'un compte est évinçable.
+- Le proposeur remplit le bloc par frais décroissants, dans le respect de
+  l'ordre des nonces de chaque compte.
 
 ## 9. Mises à jour du protocole
 

@@ -282,7 +282,7 @@ impl Runner {
                 timestamp,
                 self.me.unwrap_or(0),
                 s.mempool.admin_txs(),
-                s.mempool.txs(),
+                &s.mempool.by_priority(),
                 max_bytes,
             )
         };
