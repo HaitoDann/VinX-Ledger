@@ -8,6 +8,7 @@
 //!   aux nœuds en retard.
 
 use crate::node::{SharedRef, lock};
+use crate::snapshot::SnapshotInfo;
 use anyhow::{Context, Result};
 use borsh::{BorshDeserialize, BorshSerialize};
 use futures::{AsyncReadExt, AsyncWriteExt, StreamExt};
@@ -24,7 +25,10 @@ use std::time::{Duration, Instant};
 use tokio::sync::mpsc;
 use tracing::{debug, info, warn};
 use vinx_consensus::{SignedProposal, SignedVote};
-use vinx_core::{Block, CommitCertificate, SignedAdminTransaction, SignedTransaction, encode};
+use vinx_core::{
+    Account, Block, CommitCertificate, SignedAdminTransaction, SignedTransaction, encode,
+};
+use vinx_crypto::Address;
 
 /// Messages relayés par gossip.
 #[derive(Clone, Debug, PartialEq, Eq, BorshSerialize, BorshDeserialize)]
@@ -45,14 +49,35 @@ struct Envelope {
     msg: NetMessage,
 }
 
-#[derive(Clone, Debug, BorshSerialize, BorshDeserialize)]
-pub struct SyncRequest {
-    pub from_height: u64,
+/// Requêtes du protocole de rattrapage `/vinx/sync/2`.
+#[derive(Clone, Debug, PartialEq, Eq, BorshSerialize, BorshDeserialize)]
+#[borsh(use_discriminant = true)]
+#[repr(u8)]
+pub enum SyncRequest {
+    /// Blocs finalisés à partir de cette hauteur.
+    Blocks { from_height: u64 } = 0x01,
+    /// Description de l'instantané d'état le plus récent.
+    SnapshotInfo = 0x02,
+    /// Comptes de l'instantané de `height`, après `after`.
+    SnapshotChunk { height: u64, after: Option<Address> } = 0x03,
 }
 
-#[derive(Clone, Debug, BorshSerialize, BorshDeserialize)]
-pub struct SyncResponse {
-    pub blocks: Vec<(Block, CommitCertificate)>,
+#[derive(Clone, Debug, PartialEq, Eq, BorshSerialize, BorshDeserialize)]
+#[borsh(use_discriminant = true)]
+#[repr(u8)]
+pub enum SyncResponse {
+    /// `lowest` : plus petite hauteur encore conservée par le pair.
+    Blocks {
+        lowest: u64,
+        blocks: Vec<(Block, CommitCertificate)>,
+    } = 0x01,
+    SnapshotInfo(Option<Box<SnapshotInfo>>) = 0x02,
+    /// `None` si le pair ne sert plus l'instantané de cette hauteur.
+    SnapshotChunk {
+        height: u64,
+        chunk: Option<Vec<(Address, Account)>>,
+        done: bool,
+    } = 0x03,
 }
 
 /// Blocs servis par réponse de rattrapage.
@@ -131,7 +156,8 @@ impl Quotas {
 #[derive(Debug)]
 pub enum NetEvent {
     Message(Box<NetMessage>),
-    Blocks(Vec<(Block, CommitCertificate)>),
+    /// Réponse de rattrapage, avec le pair qui l'a envoyée.
+    Sync(PeerId, Box<SyncResponse>),
 }
 
 #[derive(Clone, Copy, Default)]
@@ -261,6 +287,7 @@ pub async fn run(
     config: NetConfig,
     shared: SharedRef,
     mut outbound: mpsc::UnboundedReceiver<NetMessage>,
+    mut requests: mpsc::UnboundedReceiver<(PeerId, SyncRequest)>,
     inbound: mpsc::UnboundedSender<NetEvent>,
     mut shutdown: tokio::sync::watch::Receiver<bool>,
 ) -> Result<()> {
@@ -292,7 +319,7 @@ pub async fn run(
             .map_err(|e| io::Error::other(e.to_string()))?;
             let sync = request_response::Behaviour::with_codec(
                 SyncCodec,
-                [(StreamProtocol::new("/vinx/sync/1"), ProtocolSupport::Full)],
+                [(StreamProtocol::new("/vinx/sync/2"), ProtocolSupport::Full)],
                 request_response::Config::default().with_request_timeout(Duration::from_secs(10)),
             );
             Ok(Behaviour {
@@ -337,6 +364,9 @@ pub async fn run(
                     debug!("diffusion impossible : {e}");
                 }
             }
+            Some((peer, request)) = requests.recv() => {
+                swarm.behaviour_mut().sync.send_request(&peer, request);
+            }
             _ = redial.tick() => {
                 for (peer, addr) in &dial_targets {
                     if !connected.contains(peer) {
@@ -351,7 +381,7 @@ pub async fn run(
                 if !peers.is_empty() {
                     let pick = usize::try_from(next).unwrap_or(0).checked_rem(peers.len()).unwrap_or(0);
                     if let Some(peer) = peers.get(pick) {
-                        swarm.behaviour_mut().sync.send_request(peer, SyncRequest { from_height: next });
+                        swarm.behaviour_mut().sync.send_request(peer, SyncRequest::Blocks { from_height: next });
                     }
                 }
             }
@@ -395,21 +425,60 @@ pub async fn run(
                 SwarmEvent::Behaviour(BehaviourEvent::Sync(request_response::Event::Message { peer, message, .. })) => {
                     match message {
                         request_response::Message::Request { request, channel, .. } => {
-                            let blocks = if quotas.charge_sync(peer, Instant::now()) {
-                                serve_blocks(&shared, request.from_height)
-                            } else {
-                                Vec::new()
-                            };
-                            let _ = swarm.behaviour_mut().sync.send_response(channel, SyncResponse { blocks });
+                            if quotas.charge_sync(peer, Instant::now()) {
+                                let response = serve(&shared, request);
+                                let _ = swarm.behaviour_mut().sync.send_response(channel, response);
+                            }
                         }
                         request_response::Message::Response { response, .. } => {
-                            if !response.blocks.is_empty() {
-                                let _ = inbound.send(NetEvent::Blocks(response.blocks));
-                            }
+                            let _ = inbound.send(NetEvent::Sync(peer, Box::new(response)));
                         }
                     }
                 }
                 _ => {}
+            }
+        }
+    }
+}
+
+fn serve(shared: &SharedRef, request: SyncRequest) -> SyncResponse {
+    match request {
+        SyncRequest::Blocks { from_height } => {
+            let lowest = lock(shared)
+                .store
+                .lowest_height()
+                .ok()
+                .flatten()
+                .unwrap_or(0);
+            SyncResponse::Blocks {
+                lowest,
+                blocks: serve_blocks(shared, from_height),
+            }
+        }
+        SyncRequest::SnapshotInfo => {
+            let s = lock(shared);
+            SyncResponse::SnapshotInfo(s.snapshot.as_ref().map(|snap| Box::new(snap.info())))
+        }
+        SyncRequest::SnapshotChunk { height, after } => {
+            let s = lock(shared);
+            match s
+                .snapshot
+                .as_ref()
+                .filter(|snap| snap.block.header.height == height)
+            {
+                Some(snap) => {
+                    let (chunk, done) = snap.chunk(after.as_ref());
+                    SyncResponse::SnapshotChunk {
+                        height,
+                        chunk: Some(chunk),
+                        done,
+                    }
+                }
+                None => SyncResponse::SnapshotChunk {
+                    height,
+                    chunk: None,
+                    done: false,
+                },
             }
         }
     }

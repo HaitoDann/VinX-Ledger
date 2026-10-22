@@ -48,6 +48,11 @@ Sans `--key`, le nœud suit la chaîne en observateur et sert l'API. La chaîne
 avance tant que plus des deux tiers des validateurs sont joignables ; un nœud
 qui revient rattrape les blocs manquants automatiquement.
 
+Un nœud ne garde que l'état et les blocs des dernières 24 heures
+(`--block-retention-hours`). Un nouveau nœud télécharge directement l'état,
+vérifié contre un bloc certifié, au lieu de rejouer toute la chaîne. Gardez au
+moins un nœud `--archive`, qui conserve tout l'historique.
+
 ## Utiliser le wallet
 
 ```bash
