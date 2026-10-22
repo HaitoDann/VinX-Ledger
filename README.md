@@ -10,6 +10,7 @@ Un protocole de paiement volontairement simple et minimaliste : validateurs auto
 
 - Spécification du protocole : [`SPEC.md`](./SPEC.md)
 - Déployer, observer et administrer un réseau : [`docs/EXPLOITATION.md`](./docs/EXPLOITATION.md)
+- Monter un testnet sur Proxmox, d'un à quatre validateurs : [`docs/TESTNET-PROXMOX.md`](./docs/TESTNET-PROXMOX.md)
 - Décisions d'architecture : [`docs/adr/`](./docs/adr/)
 - Ancien projet (archivé) : `VinX-Ledger-Legacy`
 - Licence : [Apache-2.0](./LICENSE)

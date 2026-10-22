@@ -253,6 +253,7 @@ async fn status(State(shared): State<SharedRef>) -> ApiResult {
         "admin_nonce": st.admin.nonce,
         "peers": s.metrics.peers,
         "validator_index": s.metrics.validator_index,
+        "validator_key": s.metrics.validator_key.as_ref().map(key_to_hex),
         "first_round_ratio": (s.metrics.blocks > 0).then(|| {
             s.metrics.blocks_first_round as f64 / s.metrics.blocks as f64
         }),

@@ -353,6 +353,7 @@ pub async fn run(
     let mut connected: BTreeSet<PeerId> = BTreeSet::new();
     let mut quotas = Quotas::default();
     let mut seq: u64 = 0;
+    let mut sync_turn: usize = 0;
     let mut redial = tokio::time::interval(Duration::from_secs(3));
     let mut sync_tick = tokio::time::interval(Duration::from_secs(2));
     loop {
@@ -378,10 +379,13 @@ pub async fn run(
             }
             _ = sync_tick.tick() => {
                 // Demande périodique des blocs suivants : sans réponse utile, rien ne change.
+                // Le pair interrogé change à chaque fois : un nœud bloqué ne doit pas
+                // toujours interroger le même pair, qui peut être aussi en retard que lui.
                 let next = lock(&shared).chain.next_height();
                 let peers: Vec<PeerId> = connected.iter().copied().collect();
                 if !peers.is_empty() {
-                    let pick = usize::try_from(next).unwrap_or(0).checked_rem(peers.len()).unwrap_or(0);
+                    sync_turn = sync_turn.wrapping_add(1);
+                    let pick = sync_turn.checked_rem(peers.len()).unwrap_or(0);
                     if let Some(peer) = peers.get(pick) {
                         swarm.behaviour_mut().sync.send_request(peer, SyncRequest::Blocks { from_height: next });
                     }

@@ -28,30 +28,40 @@ pub const GENESIS_TRANCHES: u64 = 120;
 /// Montant d'une tranche à la genèse : 7 500 000 VINX.
 pub const GENESIS_TRANCHE_AMOUNT: Amount = 7_500_000 * vinx_core::UNITS_PER_VINX;
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, thiserror::Error)]
 pub enum EscrowError {
+    #[error("plus aucune tranche")]
     NoTranche,
+    #[error("la prochaine tranche n'est pas encore échue")]
     NotMatured,
+    #[error("montant supérieur à la tranche")]
     AboveCap,
+    #[error("dépassement du calendrier")]
     Overflow,
 }
 
 impl Escrow {
     /// Escrow de la genèse : la tranche `i` échoit à `genesis_time + (i + 1) × period`.
     pub fn genesis(genesis_time: u64) -> Option<Self> {
+        Self::genesis_with_period(genesis_time, GENESIS_PERIOD)
+    }
+
+    /// Comme [`Self::genesis`], avec une autre période : réservé aux réseaux de
+    /// test, pour éprouver les libérations sans attendre un mois.
+    pub fn genesis_with_period(genesis_time: u64, period: u64) -> Option<Self> {
+        if period == 0 {
+            return None;
+        }
         let mut tranches = VecDeque::new();
         let mut matures_at = genesis_time;
         for _ in 0..GENESIS_TRANCHES {
-            matures_at = matures_at.checked_add(GENESIS_PERIOD)?;
+            matures_at = matures_at.checked_add(period)?;
             tranches.push_back(Tranche {
                 amount: GENESIS_TRANCHE_AMOUNT,
                 matures_at,
             });
         }
-        Some(Self {
-            tranches,
-            period: GENESIS_PERIOD,
-        })
+        Some(Self { tranches, period })
     }
 
     pub fn total(&self) -> u128 {
@@ -122,6 +132,16 @@ mod tests {
         assert_eq!(e.tranches[0].matures_at, T0 + GENESIS_PERIOD);
         // 120 périodes = exactement 10 années de 365,25 jours.
         assert_eq!(e.tranches[119].matures_at, T0 + 10 * 36_525 * 864);
+    }
+
+    #[test]
+    fn test_network_period() {
+        let e = Escrow::genesis_with_period(T0, 600).unwrap();
+        assert_eq!(e.tranches.len(), 120);
+        assert_eq!(e.tranches[0].matures_at, T0 + 600);
+        assert_eq!(e.period, 600);
+        assert_eq!(e.total(), Escrow::genesis(T0).unwrap().total());
+        assert!(Escrow::genesis_with_period(T0, 0).is_none());
     }
 
     #[test]
