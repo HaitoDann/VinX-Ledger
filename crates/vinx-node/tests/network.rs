@@ -308,3 +308,102 @@ async fn blocks_are_finalized_in_the_first_round() {
         n.stop().await;
     }
 }
+
+/// Scénario d'un testnet qui grandit : un validateur, puis trois nœuds démarrés
+/// avec leur clé, ajoutés d'un coup par la multisig. Ils doivent se mettre à
+/// voter sans redémarrage, et la chaîne doit ensuite tolérer une panne.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn one_validator_grows_to_four_without_restart() {
+    let root = tempfile::tempdir().unwrap();
+    let admins = [
+        KeyPair::generate(),
+        KeyPair::generate(),
+        KeyPair::generate(),
+    ];
+    let validators: Vec<KeyPair> = (0..4).map(|_| KeyPair::generate()).collect();
+    let mut genesis = Genesis::standard(
+        CHAIN,
+        node::now_ms() / 1000,
+        [
+            admins[0].public_key(),
+            admins[1].public_key(),
+            admins[2].public_key(),
+        ],
+        vec![validators[0].public_key()],
+    )
+    .unwrap();
+    genesis.params.min_block_interval_ms = 300;
+    genesis.params.timeout_propose_ms = 1_500;
+    genesis.params.timeout_vote_ms = 800;
+    let specs: Vec<Spec> = (0..4).map(|i| spec(root.path(), i)).collect();
+    let others = |i: usize| -> Vec<&Spec> {
+        specs
+            .iter()
+            .enumerate()
+            .filter(|(j, _)| *j != i)
+            .map(|(_, s)| s)
+            .collect()
+    };
+    let mut nodes: Vec<Option<Running>> = (0..4)
+        .map(|i| {
+            Some(start(
+                &genesis,
+                &specs[i],
+                &others(i),
+                Some(validators[i].clone()),
+            ))
+        })
+        .collect();
+
+    // Les trois nouveaux suivent la chaîne sans voter.
+    wait_until("nouveaux nœuds à jour", || {
+        nodes.iter().flatten().all(|n| n.height() >= 3)
+    })
+    .await;
+    for n in nodes.iter().flatten().skip(1) {
+        assert!(node::lock(&n.shared).metrics.validator_index.is_none());
+    }
+
+    // La multisig ajoute les trois validateurs d'un coup.
+    {
+        let n0 = nodes[0].as_ref().unwrap();
+        let mut s = node::lock(&n0.shared);
+        for (i, v) in validators.iter().enumerate().skip(1) {
+            let tx = AdminTransaction {
+                chain_id: CHAIN.into(),
+                nonce: i as u64,
+                action: AdminAction::AddValidator {
+                    key: v.public_key(),
+                },
+            };
+            let tx = SignedAdminTransaction {
+                approvals: vec![tx.approve(0, &admins[0]), tx.approve(1, &admins[1])],
+                tx,
+            };
+            s.mempool.add_admin(tx).unwrap();
+        }
+    }
+    wait_until("les quatre votent", || {
+        nodes
+            .iter()
+            .flatten()
+            .all(|n| node::lock(&n.shared).metrics.validator_index.is_some())
+    })
+    .await;
+    let h = nodes[0].as_ref().unwrap().height();
+    wait_until("la chaîne continue à quatre", || {
+        nodes.iter().flatten().all(|n| n.height() >= h + 3)
+    })
+    .await;
+
+    // À quatre, la panne d'un validateur est tolérée.
+    nodes[3].take().unwrap().stop().await;
+    let h = nodes[0].as_ref().unwrap().height();
+    wait_until("progression avec trois validateurs sur quatre", || {
+        nodes.iter().flatten().all(|n| n.height() >= h + 3)
+    })
+    .await;
+    for n in nodes.into_iter().flatten() {
+        n.stop().await;
+    }
+}

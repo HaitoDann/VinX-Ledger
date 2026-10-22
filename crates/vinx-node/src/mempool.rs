@@ -27,7 +27,7 @@ pub enum MempoolError {
     Full,
     AccountLimit,
     Invalid(TxError),
-    InvalidAdmin,
+    InvalidAdmin(String),
 }
 
 impl std::fmt::Display for MempoolError {
@@ -40,7 +40,7 @@ impl std::fmt::Display for MempoolError {
                 "trop de transactions en attente pour ce compte (maximum {MAX_PER_ACCOUNT})"
             ),
             MempoolError::Invalid(e) => write!(f, "transaction refusée : {e}"),
-            MempoolError::InvalidAdmin => write!(f, "transaction admin refusée"),
+            MempoolError::InvalidAdmin(reason) => write!(f, "transaction admin refusée : {reason}"),
         }
     }
 }
@@ -186,11 +186,31 @@ impl Mempool {
         if self.len() >= self.capacity {
             return Err(MempoolError::Full);
         }
-        if tx.tx.chain_id != self.pending.chain_id
-            || tx.tx.nonce <= self.pending.admin.nonce
-            || tx.verify_approvals(&self.pending.admin.signers).is_err()
+        if tx.tx.chain_id != self.pending.chain_id {
+            return Err(MempoolError::InvalidAdmin(
+                "mauvais identifiant de chaîne".into(),
+            ));
+        }
+        if tx.verify_approvals(&self.pending.admin.signers).is_err() {
+            return Err(MempoolError::InvalidAdmin(
+                "approbations insuffisantes ou invalides".into(),
+            ));
+        }
+        // L'action entière est vérifiée tout de suite, à la suite des transactions
+        // admin déjà en attente : une libération d'escrow non échue ou un nonce
+        // faux est refusé dès la soumission, avec la raison.
+        let mut queue = self.admin.clone();
+        queue.push(tx.clone());
+        let height = self.base.height.saturating_add(1);
+        if let Err(e) = self
+            .base
+            .execute(height, crate::node::now_ms(), &queue, &[])
         {
-            return Err(MempoolError::InvalidAdmin);
+            let reason = match e {
+                vinx_state::BlockError::InvalidAdminTx { error, .. } => error.to_string(),
+                other => other.to_string(),
+            };
+            return Err(MempoolError::InvalidAdmin(reason));
         }
         self.ids.insert(id);
         self.admin.push(tx);
@@ -278,6 +298,62 @@ mod tests {
             },
         }
         .sign(from, nonce == 1)
+    }
+
+    #[test]
+    fn admin_actions_are_checked_on_submission() {
+        let admins = [
+            KeyPair::generate(),
+            KeyPair::generate(),
+            KeyPair::generate(),
+        ];
+        let state = Genesis::standard(
+            "vinx-test",
+            1_800_000_000,
+            [
+                admins[0].public_key(),
+                admins[1].public_key(),
+                admins[2].public_key(),
+            ],
+            vec![KeyPair::generate().public_key()],
+        )
+        .unwrap()
+        .into_state()
+        .unwrap();
+        let mut pool = Mempool::new(&state);
+        let signed = |nonce, action| {
+            let tx = AdminTransaction {
+                chain_id: "vinx-test".into(),
+                nonce,
+                action,
+            };
+            SignedAdminTransaction {
+                approvals: vec![tx.approve(0, &admins[0]), tx.approve(1, &admins[1])],
+                tx,
+            }
+        };
+        // Tranche pas encore échue : refusée tout de suite, avec la raison.
+        let early = pool.add_admin(signed(1, AdminAction::EscrowRelease { amount: 1 }));
+        assert!(
+            matches!(&early, Err(MempoolError::InvalidAdmin(r)) if r.contains("escrow")),
+            "{early:?}"
+        );
+        // Deux actions valides à la suite : la seconde est vérifiée après la première.
+        let pay = |nonce| {
+            signed(
+                nonce,
+                AdminAction::TreasuryTransfer {
+                    to: Address::from_bytes([3; 20]),
+                    amount: VINX,
+                    memo: None,
+                },
+            )
+        };
+        pool.add_admin(pay(1)).unwrap();
+        pool.add_admin(pay(2)).unwrap();
+        // Nonce sauté : refusé.
+        assert!(pool.add_admin(pay(4)).is_err());
+        assert_eq!(pool.admin_txs().len(), 2);
     }
 
     #[test]

@@ -56,6 +56,9 @@ pub struct Metrics {
     pub peers: usize,
     /// Indice de ce nœud dans l'ensemble de validateurs, s'il vote.
     pub validator_index: Option<u16>,
+    /// Clé de validateur chargée par ce nœud, qu'elle soit déjà dans
+    /// l'ensemble ou pas encore.
+    pub validator_key: Option<PublicKey>,
     pub snapshots_installed: u64,
     pub started_ms: u64,
 }
@@ -681,6 +684,7 @@ pub async fn run(
             s.chain.state.params.clone(),
         )
     };
+    lock(&shared).metrics.validator_key = key.as_ref().map(KeyPair::public_key);
     let mut r = Runner {
         shared,
         key,

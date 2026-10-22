@@ -26,10 +26,13 @@ pub struct ValidatorSet {
     pub pending: Vec<PendingChange>,
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, thiserror::Error)]
 pub enum ValidatorError {
+    #[error("ce validateur est déjà présent")]
     AlreadyPresent,
+    #[error("ce validateur n'est pas dans l'ensemble")]
     NotPresent,
+    #[error("l'ensemble de validateurs ne peut pas être vide")]
     WouldBeEmpty,
 }
 

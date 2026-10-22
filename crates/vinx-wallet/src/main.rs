@@ -9,7 +9,7 @@ use vinx_keystore::encoding::{key_from_hex, key_to_hex};
 use vinx_keystore::keyfile::{DEFAULT_KDF, KeyFile, password};
 use vinx_wallet::amount::{format_vinx, parse_vinx};
 use vinx_wallet::client::Client;
-use vinx_wallet::{admin, ops};
+use vinx_wallet::{admin, ops, preflight};
 
 #[derive(Parser)]
 #[command(name = "vinx-wallet", version, about = "Wallet VinX Ledger")]
@@ -81,6 +81,14 @@ enum Command {
     /// Transactions admin multisig.
     #[command(subcommand)]
     Admin(AdminCommand),
+    /// Vérifie que de futurs validateurs sont prêts, avant de les ajouter.
+    ///
+    /// `--node` désigne un nœud du réseau actuel (la référence) ; chaque
+    /// `--new-node` est l'API d'un futur validateur, démarré avec sa clé.
+    Preflight {
+        #[arg(long = "new-node", required = true, num_args = 1)]
+        new_nodes: Vec<String>,
+    },
 }
 
 #[derive(Subcommand)]
@@ -289,10 +297,19 @@ fn print_governance(g: &serde_json::Value) {
         at(g, "/escrow/tranches")
     );
     if !at(g, "/escrow/next").is_null() {
+        let due = at(g, "/escrow/next/matures_at").as_u64().unwrap_or(0);
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map_or(0, |d| d.as_secs());
+        let when = match due.checked_sub(now) {
+            None | Some(0) => "libérable maintenant".to_owned(),
+            Some(s) if s < 3_600 => format!("échéance dans {} min", s.div_ceil(60)),
+            Some(s) if s < 172_800 => format!("échéance dans {} h", s.div_ceil(3_600)),
+            Some(s) => format!("échéance dans {} jours", s.div_ceil(86_400)),
+        };
         println!(
-            "  prochaine        {} à l'horodatage {}",
-            units(at(g, "/escrow/next/amount")),
-            at(g, "/escrow/next/matures_at")
+            "  prochaine        {}, {when}",
+            units(at(g, "/escrow/next/amount"))
         );
     }
     println!(
@@ -365,6 +382,52 @@ fn main() -> Result<()> {
                 "transaction {}",
                 ops::rotate_key(&client, &keypair, from, new)?
             );
+        }
+        Command::Preflight { new_nodes } => {
+            let nodes: Vec<Client> = new_nodes.iter().map(Client::new).collect();
+            let (reference, report) = preflight::run(&client, &nodes)?;
+            println!(
+                "référence     {} — chaîne {}, hauteur {}, {} validateur(s)",
+                reference.url,
+                reference.chain_id,
+                reference.height,
+                reference.validators.len()
+            );
+            for e in &report.errors {
+                println!("  ✗ {e}");
+            }
+            for w in &report.warnings {
+                println!("  ! {w}");
+            }
+            if !report.errors.is_empty() {
+                bail!(
+                    "{} problème(s) à corriger avant l'ajout",
+                    report.errors.len()
+                );
+            }
+            if report.keys_to_add.is_empty() {
+                println!("rien à ajouter");
+                return Ok(());
+            }
+            let n = report.final_validators;
+            println!(
+                "  ✓ {} nœud(s) prêt(s) ; après l'ajout : {n} validateurs, {} doivent voter, {} panne(s) tolérée(s)",
+                report.keys_to_add.len(),
+                preflight::quorum(n),
+                n.saturating_sub(preflight::quorum(n))
+            );
+            let nonce = client.status()?.admin_nonce;
+            println!(
+                "\nCommandes, à envoyer à la suite (ils voteront deux blocs après l'inclusion) :"
+            );
+            for (i, key) in report.keys_to_add.iter().enumerate() {
+                let next = nonce.saturating_add(1).saturating_add(i as u64);
+                println!(
+                    "  vinx-wallet --node {} admin propose --out add-{i}.json --nonce {next} add-validator --key {key}",
+                    reference.url
+                );
+            }
+            println!("  puis, pour chaque fichier : deux « admin approve », et « admin submit »");
         }
         Command::Admin(cmd) => match cmd {
             AdminCommand::Status => print_governance(&client.governance()?),

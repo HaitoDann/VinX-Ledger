@@ -69,9 +69,9 @@ pub enum TxError {
     InsufficientBalance,
     #[error("solde sous la réserve minimale")]
     BelowReserve,
-    #[error("escrow : {0:?}")]
+    #[error("escrow : {0}")]
     Escrow(EscrowError),
-    #[error("validateurs : {0:?}")]
+    #[error("validateurs : {0}")]
     Validator(ValidatorError),
     #[error("valeur de paramètre invalide")]
     InvalidParam,

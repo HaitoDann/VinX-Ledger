@@ -40,6 +40,10 @@ enum Command {
         /// Nombre de validateurs.
         #[arg(long, default_value_t = 1)]
         validators: usize,
+        /// Période de l'escrow en secondes, au lieu d'un mois. Réservé aux réseaux
+        /// de test (`chain_id` contenant « testnet » ou « devnet »).
+        #[arg(long)]
+        escrow_period: Option<u64>,
     },
     /// Écrit la genèse d'un réseau à partir des clés publiques de ses participants.
     ///
@@ -57,6 +61,10 @@ enum Command {
         /// Horodatage Unix de la genèse (par défaut : maintenant).
         #[arg(long)]
         time: Option<u64>,
+        /// Période de l'escrow en secondes, au lieu d'un mois. Réservé aux réseaux
+        /// de test (`chain_id` contenant « testnet » ou « devnet »).
+        #[arg(long)]
+        escrow_period: Option<u64>,
         #[arg(long)]
         out: PathBuf,
     },
@@ -95,6 +103,25 @@ enum Command {
     },
 }
 
+/// Remplace la période de l'escrow, sur un réseau de test seulement.
+fn with_escrow_period(mut genesis: Genesis, period: Option<u64>) -> Result<Genesis> {
+    let Some(period) = period else {
+        return Ok(genesis);
+    };
+    let is_test = ["testnet", "devnet"]
+        .iter()
+        .any(|t| genesis.chain_id.contains(t));
+    if !is_test {
+        bail!(
+            "--escrow-period est réservé aux réseaux de test : l'identifiant de chaîne \
+             doit contenir « testnet » ou « devnet »"
+        );
+    }
+    genesis.escrow = vinx_state::Escrow::genesis_with_period(genesis.genesis_time, period)
+        .context("période d'escrow invalide")?;
+    Ok(genesis)
+}
+
 fn new_key(path: &Path, password: &str) -> Result<KeyPair> {
     let keypair = KeyPair::generate();
     KeyFile::encrypt(&keypair, password, DEFAULT_KDF)?.save(path)?;
@@ -129,6 +156,7 @@ async fn main() -> Result<()> {
             dir,
             chain_id,
             validators: count,
+            escrow_period,
         } => {
             let pw = pw()?;
             if *count == 0 {
@@ -158,6 +186,7 @@ async fn main() -> Result<()> {
                 validators.iter().map(KeyPair::public_key).collect(),
             )
             .context("horodatage de genèse invalide")?;
+            let genesis = with_escrow_period(genesis, *escrow_period)?;
             GenesisFile::save(&genesis, &dir.join("genesis.json"))?;
             for (i, a) in admins.iter().enumerate() {
                 describe(&format!("admin-{}", i.saturating_add(1)), a);
@@ -176,6 +205,7 @@ async fn main() -> Result<()> {
             admins,
             validators,
             time,
+            escrow_period,
             out,
         } => {
             let admins = admins
@@ -192,6 +222,7 @@ async fn main() -> Result<()> {
             let time = time.unwrap_or_else(|| node::now_ms() / 1000);
             let genesis = Genesis::standard(chain_id.clone(), time, admins, validators)
                 .context("horodatage de genèse invalide")?;
+            let genesis = with_escrow_period(genesis, *escrow_period)?;
             // Vérifie toutes les règles (doublons, supply) avant d'écrire.
             genesis
                 .clone()

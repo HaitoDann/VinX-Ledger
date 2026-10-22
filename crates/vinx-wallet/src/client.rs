@@ -89,6 +89,23 @@ impl Client {
         })
     }
 
+    /// Statut brut (`GET /status`).
+    pub fn status_json(&self) -> Result<Value> {
+        self.request("GET", "/status", None)?
+            .ok_or_else(|| anyhow!("statut indisponible"))
+    }
+
+    /// Hash du bloc `height`, s'il est conservé par le nœud.
+    pub fn block_hash(&self, height: u64) -> Result<Option<String>> {
+        Ok(self
+            .request("GET", &format!("/blocks/{height}"), None)?
+            .and_then(|b| b.get("hash")?.as_str().map(str::to_owned)))
+    }
+
+    pub fn base_url(&self) -> &str {
+        &self.base
+    }
+
     /// État de la gouvernance (`GET /governance`), tel que le renvoie le nœud.
     pub fn governance(&self) -> Result<Value> {
         self.request("GET", "/governance", None)?
