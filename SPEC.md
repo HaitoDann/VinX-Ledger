@@ -264,8 +264,21 @@ Algorithme Tendermint :
 5. Sans quorum avant expiration des délais, on passe au round `r + 1`.
 
 - Message de vote signé : `"vinx/vote" ‖ borsh(chain_id, type, height, round, block_hash | nil)`.
+- Message de proposition signé : `"vinx/proposal" ‖ borsh(chain_id, height, round, pol_round, block_hash)`,
+  où `pol_round` est le round où le bloc re-proposé a obtenu un quorum de prevotes.
+  Une proposition n'est acceptée que du proposeur du round, et seule la première
+  l'est pour un round donné.
+- **Comptage des votes.** Un validateur qui vote pour plusieurs cibles à la même
+  étape (équivoque) est compté pour chacune. C'est sans risque pour la sûreté,
+  deux quorums se recoupant toujours sur au moins un validateur honnête, et
+  nécessaire à la vivacité. Pour borner la mémoire, un nœud garde au plus deux
+  cibles par validateur et par étape, plus la cible de la proposition du round.
 - Un validateur ne signe **jamais** deux votes différents pour le même
   `(height, round, type)`. Ce garde est persisté sur disque **avant** l'envoi.
+- **Relais.** Un nœud relaie chaque proposition et chaque vote valides la première
+  fois qu'il les reçoit.
+- **Rattrapage.** Un nœud qui reçoit des messages d'une hauteur supérieure récupère
+  les blocs manquants avec leur certificat de commit (§6.1) et les applique.
 - Délais par round (§11) : `timeout_propose + r × timeout_propose_delta`, et
   `timeout_vote + r × timeout_vote_delta` pour les votes.
 
@@ -307,6 +320,7 @@ hauteur `H + 2`. `validators_hash` du bloc `H + 1` reflète déjà le nouvel ens
 | Identifiant de transaction admin | `vinx/admin/txid` |
 | En-tête de bloc | `vinx/block` |
 | Vote de consensus | `vinx/vote` |
+| Proposition de bloc | `vinx/proposal` |
 | Ensemble de validateurs | `vinx/validators` |
 | Arbre des comptes (feuille / nœud) | `vinx/smt/leaf`, `vinx/smt/node` |
 | Merkle (feuille / nœud / liste vide) | `vinx/merkle/leaf`, `vinx/merkle/node`, `vinx/merkle/empty` |
