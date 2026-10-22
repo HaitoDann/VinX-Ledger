@@ -4,6 +4,7 @@
 //! transactions sont soumises encodées en borsh, en hexadécimal.
 
 use crate::encoding::{amount_to_string, hash_to_hex, key_to_hex};
+use crate::network::NetMessage;
 use crate::node::{SharedRef, lock};
 use axum::extract::{Path, State};
 use axum::http::StatusCode;
@@ -123,18 +124,22 @@ fn decode_hex<T: borsh::BorshDeserialize>(s: &str) -> Result<T, (StatusCode, Jso
 
 async fn submit(State(shared): State<SharedRef>, Json(body): Json<Submission>) -> ApiResult {
     let tx: SignedTransaction = decode_hex(&body.tx)?;
-    let id = lock(&shared)
+    let mut s = lock(&shared);
+    let id = s
         .mempool
-        .add(tx)
+        .add(tx.clone())
         .map_err(|e| error(StatusCode::UNPROCESSABLE_ENTITY, e))?;
+    s.broadcast(NetMessage::Tx(tx));
     Ok(Json(json!({ "id": hash_to_hex(&id) })))
 }
 
 async fn submit_admin(State(shared): State<SharedRef>, Json(body): Json<Submission>) -> ApiResult {
     let tx: SignedAdminTransaction = decode_hex(&body.tx)?;
-    let id = lock(&shared)
+    let mut s = lock(&shared);
+    let id = s
         .mempool
-        .add_admin(tx)
+        .add_admin(tx.clone())
         .map_err(|e| error(StatusCode::UNPROCESSABLE_ENTITY, e))?;
+    s.broadcast(NetMessage::AdminTx(tx));
     Ok(Json(json!({ "id": hash_to_hex(&id) })))
 }

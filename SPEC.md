@@ -297,6 +297,21 @@ hauteur `H + 2`. `validators_hash` du bloc `H + 1` reflète déjà le nouvel ens
 - Un nouveau nœud se synchronise depuis un instantané d'état dont la racine est
   vérifiée contre un en-tête finalisé, puis rejoue les blocs suivants.
 
+### 8.1 Réseau
+
+- Transport TCP chiffré et authentifié (Noise), multiplexé (Yamux), via libp2p.
+  Chaque nœud a une identité réseau Ed25519, distincte de ses clés de consensus.
+- **Liste autorisée** : un nœud n'accepte que les pairs qu'il est configuré pour
+  joindre ou explicitement autorisés. Les autres connexions sont refusées dès
+  la poignée de main.
+- **Relais** : propositions, votes et transactions circulent sur le sujet
+  gossipsub `vinx/<chain_id>/1`, encodés en borsh (`NetMessage`). Un message est
+  identifié par le hachage BLAKE3 de son contenu et relayé une seule fois.
+- **Rattrapage** : protocole requête-réponse `/vinx/sync/1`. Une requête donne
+  la première hauteur manquante ; la réponse contient au plus 50 blocs finalisés
+  avec leurs certificats. Le nœud vérifie chaque certificat contre l'ensemble de
+  validateurs de la hauteur, puis exécute le bloc, avant de l'adopter.
+
 ## 9. Mises à jour du protocole
 
 - `ScheduleUpgrade` fixe `version` (= version actuelle + 1) et
