@@ -375,3 +375,7 @@ Fichier JSON contenant :
 - `params` : valeurs initiales de §11.
 
 Un nœud refuse une genèse dont l'invariant (§4.3) n'est pas exactement respecté.
+
+Le bloc 1 a pour `prev_hash` la racine d'état de la genèse (§4.1), et son
+horodatage doit être postérieur à `genesis_time`. Deux réseaux de genèses
+différentes ne partagent donc aucun bloc.
