@@ -39,3 +39,15 @@ jobs:
         with:
           components: rustfmt
       - run: cargo fmt --all --check
+
+  alerts:
+    name: Alertes Prometheus
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Vérifie et teste les règles d'alerte
+        run: |
+          docker run --rm -v "$PWD/deploy/monitoring:/m" -w /m \
+            --entrypoint promtool prom/prometheus:v2.55.1 check rules alerts.yml
+          docker run --rm -v "$PWD/deploy/monitoring:/m" -w /m \
+            --entrypoint promtool prom/prometheus:v2.55.1 test rules alerts.test.yml

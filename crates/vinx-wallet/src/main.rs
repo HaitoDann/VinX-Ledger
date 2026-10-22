@@ -85,6 +85,8 @@ enum Command {
 
 #[derive(Subcommand)]
 enum AdminCommand {
+    /// Affiche la gouvernance : multisig, validateurs, paramètres, escrow, trésorerie.
+    Status,
     /// Prépare une proposition (sans approbation) dans un fichier.
     Propose {
         #[arg(long)]
@@ -227,6 +229,82 @@ fn action(arg: ActionArg) -> Result<AdminAction> {
     })
 }
 
+/// Champ JSON par chemin (`/a/b`), `null` s'il manque.
+fn at<'a>(v: &'a serde_json::Value, path: &str) -> &'a serde_json::Value {
+    v.pointer(path).unwrap_or(&serde_json::Value::Null)
+}
+
+fn units(v: &serde_json::Value) -> String {
+    v.as_str()
+        .and_then(|s| s.parse::<u64>().ok())
+        .map_or_else(|| v.to_string(), |u| format!("{} VINX", format_vinx(u)))
+}
+
+fn strings(v: &serde_json::Value) -> Vec<String> {
+    v.as_array()
+        .into_iter()
+        .flatten()
+        .map(|k| k.as_str().unwrap_or_default().to_owned())
+        .collect()
+}
+
+fn print_governance(g: &serde_json::Value) {
+    println!("protocole          version {}", at(g, "/protocol_version"));
+    if !at(g, "/upgrade").is_null() {
+        println!(
+            "mise à jour        version {} à la hauteur {}",
+            at(g, "/upgrade/version"),
+            at(g, "/upgrade/activation_height")
+        );
+    }
+    let signers = strings(at(g, "/admin/signers"));
+    println!(
+        "multisig           {} sur {}, nonce {}",
+        at(g, "/admin/threshold"),
+        signers.len(),
+        at(g, "/admin/nonce")
+    );
+    for (i, k) in signers.iter().enumerate() {
+        println!("  signataire {i}     {k}");
+    }
+    for (i, k) in strings(at(g, "/validators/active")).iter().enumerate() {
+        println!("  validateur {}     {k}", i.saturating_add(1));
+    }
+    for p in at(g, "/validators/pending")
+        .as_array()
+        .into_iter()
+        .flatten()
+    {
+        println!(
+            "  en attente       {} de {} à la hauteur {}",
+            at(p, "/change").as_str().unwrap_or_default(),
+            at(p, "/key").as_str().unwrap_or_default(),
+            at(p, "/effective_height")
+        );
+    }
+    println!("trésorerie         {}", units(at(g, "/treasury/balance")));
+    println!(
+        "escrow             {}, {} tranche(s)",
+        units(at(g, "/escrow/total")),
+        at(g, "/escrow/tranches")
+    );
+    if !at(g, "/escrow/next").is_null() {
+        println!(
+            "  prochaine        {} à l'horodatage {}",
+            units(at(g, "/escrow/next/amount")),
+            at(g, "/escrow/next/matures_at")
+        );
+    }
+    println!(
+        "paramètres         frais min. {}, réserve {}, bloc {} ms, délais {} / {} ms",
+        units(at(g, "/params/min_fee")),
+        units(at(g, "/params/min_reserve")),
+        at(g, "/params/min_block_interval_ms"),
+        at(g, "/params/timeout_propose_ms"),
+        at(g, "/params/timeout_vote_ms")
+    );
+}
+
 fn load_key(path: &Path, password_file: Option<&Path>) -> Result<KeyPair> {
     KeyFile::load(path)?.decrypt(&password(password_file)?)
 }
@@ -289,6 +367,7 @@ fn main() -> Result<()> {
             );
         }
         Command::Admin(cmd) => match cmd {
+            AdminCommand::Status => print_governance(&client.governance()?),
             AdminCommand::Propose {
                 out,
                 nonce,

@@ -7,7 +7,7 @@ use std::net::SocketAddr;
 use std::path::{Path, PathBuf};
 use tracing::info;
 use vinx_crypto::{Address, KeyPair};
-use vinx_node::encoding::key_to_hex;
+use vinx_node::encoding::{key_from_hex, key_to_hex};
 use vinx_node::genesis_file::GenesisFile;
 use vinx_node::keyfile::{DEFAULT_KDF, KeyFile, password};
 use vinx_node::network::{self, NetConfig};
@@ -40,6 +40,25 @@ enum Command {
         /// Nombre de validateurs.
         #[arg(long, default_value_t = 1)]
         validators: usize,
+    },
+    /// Écrit la genèse d'un réseau à partir des clés publiques de ses participants.
+    ///
+    /// Chaque clé est créée sur la machine qui la détient (`keygen`) ; seules
+    /// les clés publiques sont réunies ici.
+    Genesis {
+        #[arg(long)]
+        chain_id: String,
+        /// Clé publique d'un signataire admin (exactement 3 fois).
+        #[arg(long = "admin", required = true, num_args = 1)]
+        admins: Vec<String>,
+        /// Clé publique d'un validateur (répétable).
+        #[arg(long = "validator", required = true, num_args = 1)]
+        validators: Vec<String>,
+        /// Horodatage Unix de la genèse (par défaut : maintenant).
+        #[arg(long)]
+        time: Option<u64>,
+        #[arg(long)]
+        out: PathBuf,
     },
     /// Affiche l'identifiant réseau du nœud (crée sa clé réseau si besoin).
     PeerId {
@@ -151,6 +170,38 @@ async fn main() -> Result<()> {
                 "\nDémarrer : vinx-node run --genesis {0}/genesis.json --key {0}/validator-1.json --data-dir {0}/data-1",
                 dir.display()
             );
+        }
+        Command::Genesis {
+            chain_id,
+            admins,
+            validators,
+            time,
+            out,
+        } => {
+            let admins = admins
+                .iter()
+                .map(|k| key_from_hex(k))
+                .collect::<Result<Vec<_>>>()?;
+            let admins: [_; 3] = admins
+                .try_into()
+                .map_err(|_| anyhow::anyhow!("il faut exactement 3 clés --admin"))?;
+            let validators = validators
+                .iter()
+                .map(|k| key_from_hex(k))
+                .collect::<Result<Vec<_>>>()?;
+            let time = time.unwrap_or_else(|| node::now_ms() / 1000);
+            let genesis = Genesis::standard(chain_id.clone(), time, admins, validators)
+                .context("horodatage de genèse invalide")?;
+            // Vérifie toutes les règles (doublons, supply) avant d'écrire.
+            genesis
+                .clone()
+                .into_state()
+                .map_err(|e| anyhow::anyhow!("genèse invalide : {e}"))?;
+            if out.exists() {
+                bail!("{} existe déjà", out.display());
+            }
+            GenesisFile::save(&genesis, out)?;
+            println!("genèse écrite dans {}", out.display());
         }
         Command::PeerId { data_dir } => {
             let id = network::load_or_create_identity(data_dir)?;

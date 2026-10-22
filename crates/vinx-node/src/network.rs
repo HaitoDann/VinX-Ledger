@@ -394,11 +394,13 @@ pub async fn run(
                     } else {
                         info!(%peer_id, "pair connecté");
                         connected.insert(peer_id);
+                        lock(&shared).metrics.peers = connected.len();
                     }
                 }
                 SwarmEvent::ConnectionClosed { peer_id, num_established: 0, .. } => {
                     info!(%peer_id, "pair déconnecté");
                     connected.remove(&peer_id);
+                    lock(&shared).metrics.peers = connected.len();
                 }
                 SwarmEvent::Behaviour(BehaviourEvent::Gossip(gossipsub::Event::Message {
                     propagation_source,

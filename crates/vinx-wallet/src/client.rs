@@ -89,6 +89,12 @@ impl Client {
         })
     }
 
+    /// État de la gouvernance (`GET /governance`), tel que le renvoie le nœud.
+    pub fn governance(&self) -> Result<Value> {
+        self.request("GET", "/governance", None)?
+            .ok_or_else(|| anyhow!("gouvernance indisponible"))
+    }
+
     /// Frais conseillés par le nœud selon l'encombrement du réseau.
     pub fn recommended_fee(&self) -> Result<Amount> {
         let v = self
