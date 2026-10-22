@@ -42,6 +42,13 @@ async fn status(State(shared): State<SharedRef>) -> ApiResult {
         "state_root": hash_to_hex(&st.state_root()),
         "validators": st.validators_at(st.height.saturating_add(1)).iter().map(key_to_hex).collect::<Vec<_>>(),
         "pending_transactions": s.mempool.len(),
+        "admin_nonce": st.admin.nonce,
+        "params": {
+            "min_fee": amount_to_string(st.params.min_fee),
+            "min_reserve": amount_to_string(st.params.min_reserve),
+            "max_memo_bytes": st.params.max_memo_bytes,
+            "min_block_interval_ms": st.params.min_block_interval_ms,
+        },
     })))
 }
 

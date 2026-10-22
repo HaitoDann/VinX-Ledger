@@ -29,3 +29,23 @@ passe, ainsi que la genèse. L'API écoute sur `http://127.0.0.1:8545` :
 `/status`, `/accounts/{adresse}`, `/blocks/{hauteur}`, `/escrow`, et en `POST`
 `/transactions` et `/admin-transactions`.
 
+
+## Utiliser le wallet
+
+```bash
+alias wallet='cargo run --release -q -p vinx-wallet --'
+wallet keygen --out alice.json            # adresse vinx1…
+wallet balance <adresse>
+wallet send --key alice.json --to <adresse> --amount 12.5 --memo "FAC-1"
+wallet memo-required --key boutique.json on
+```
+
+Les actions de la trésorerie et de l'escrow passent par une proposition que
+deux des trois signataires approuvent, chacun avec sa propre clé :
+
+```bash
+wallet admin propose --out p.json treasury-transfer --to <adresse> --amount 250
+wallet admin approve --file p.json --key devnet/admin-1.json --index 0
+wallet admin approve --file p.json --key devnet/admin-2.json --index 1
+wallet admin submit --file p.json
+```
