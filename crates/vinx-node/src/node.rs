@@ -17,9 +17,9 @@ use std::sync::{Arc, Mutex, MutexGuard};
 use std::time::Instant;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use tokio::sync::{mpsc, watch};
-use tracing::{debug, info, warn};
+use tracing::{debug, error, info, warn};
 use vinx_consensus::guard::Step;
-use vinx_consensus::{Action, BlockValidator, Engine, SignGuard, SignedVote, Timeout};
+use vinx_consensus::{Action, BlockValidator, Engine, Evidence, SignGuard, SignedVote, Timeout};
 use vinx_core::Account;
 use vinx_core::{Block, CommitCertificate, SignedAdminTransaction, SignedTransaction};
 use vinx_crypto::KeyPair;
@@ -240,6 +240,34 @@ struct Download {
 /// Délai sans réponse après lequel un téléchargement d'instantané est abandonné.
 const DOWNLOAD_TIMEOUT: Duration = Duration::from_secs(30);
 
+/// Enregistre une preuve d'équivoque, alerte et, si elle vient de nous, la diffuse.
+fn record_evidence(s: &Shared, evidence: &Evidence, broadcast: bool) {
+    match s.store.record_evidence(evidence) {
+        Ok(true) => {
+            let validators = s.chain.state.validators_at(evidence.height());
+            let index = evidence.validator(validators.len());
+            let key = index
+                .and_then(|i| validators.get(usize::from(i)))
+                .map(vinx_keystore::encoding::key_to_hex)
+                .unwrap_or_default();
+            error!(
+                height = evidence.height(),
+                round = evidence.round(),
+                step = evidence.step(),
+                validator = ?index,
+                key = %key,
+                "ÉQUIVOQUE : un validateur a signé deux messages contradictoires \
+                 (clé compromise ou nœud malveillant) ; envisager son retrait"
+            );
+            if broadcast {
+                s.broadcast(NetMessage::Evidence(Box::new(evidence.clone())));
+            }
+        }
+        Ok(false) => {}
+        Err(e) => warn!("preuve d'équivoque non enregistrée : {e}"),
+    }
+}
+
 fn remember(own: &mut VecDeque<NetMessage>, msg: NetMessage) {
     if own.len() >= MAX_OWN {
         own.pop_front();
@@ -346,6 +374,10 @@ impl Runner {
                     self.queue
                         .extend(self.engine.on_vote(signed, &mut Checker(&s.chain)));
                 }
+                Action::Equivocation(evidence) => {
+                    let s = lock(&self.shared);
+                    record_evidence(&s, &evidence, true);
+                }
                 Action::ScheduleTimeout { timeout, after_ms } => {
                     let tx = self.timeouts.clone();
                     tokio::spawn(async move {
@@ -395,6 +427,17 @@ impl Runner {
                 }
                 NetMessage::AdminTx(tx) => {
                     let _ = lock(&self.shared).mempool.add_admin(tx);
+                }
+                NetMessage::Evidence(evidence) => {
+                    let s = lock(&self.shared);
+                    let validators = s.chain.state.validators_at(evidence.height());
+                    if evidence
+                        .verify(&s.chain.state.chain_id, &validators)
+                        .is_ok()
+                    {
+                        // Déjà relayée par gossip : pas de nouvelle diffusion.
+                        record_evidence(&s, &evidence, false);
+                    }
                 }
                 consensus => {
                     let height = message_height(&consensus).unwrap_or(0);

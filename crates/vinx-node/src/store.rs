@@ -10,7 +10,7 @@ use anyhow::{Context, Result, bail};
 use borsh::{BorshDeserialize, BorshSerialize};
 use redb::{Database, ReadableTable, ReadableTableMetadata, TableDefinition};
 use std::path::Path;
-use vinx_consensus::SignGuard;
+use vinx_consensus::{Evidence, SignGuard};
 use vinx_core::{Account, Block, CommitCertificate, encode};
 use vinx_crypto::Address;
 use vinx_crypto::Hash;
@@ -20,6 +20,10 @@ const BLOCKS: TableDefinition<u64, &[u8]> = TableDefinition::new("blocks");
 const CERTS: TableDefinition<u64, &[u8]> = TableDefinition::new("certificates");
 const META: TableDefinition<&str, &[u8]> = TableDefinition::new("meta");
 const ACCOUNTS: TableDefinition<&[u8; 20], &[u8]> = TableDefinition::new("accounts");
+const EVIDENCE: TableDefinition<&[u8; 32], &[u8]> = TableDefinition::new("evidence");
+
+/// Preuves d'équivoque conservées au plus.
+pub const MAX_EVIDENCE: u64 = 1_000;
 
 /// Version du format de la base. Le format 1 stockait l'état d'un seul tenant.
 const FORMAT: &str = "format";
@@ -48,6 +52,7 @@ impl Store {
             tx.open_table(BLOCKS)?;
             tx.open_table(CERTS)?;
             tx.open_table(ACCOUNTS)?;
+            tx.open_table(EVIDENCE)?;
             let mut meta = tx.open_table(META)?;
             if meta.get(LEGACY_STATE)?.is_some() {
                 bail!(
@@ -200,6 +205,35 @@ impl Store {
         Ok(removed)
     }
 
+    /// Enregistre une preuve d'équivoque. Renvoie `false` si elle était déjà
+    /// connue ou si la limite de conservation est atteinte.
+    pub fn record_evidence(&self, evidence: &Evidence) -> Result<bool> {
+        let id = evidence.id();
+        let tx = self.db.begin_write()?;
+        let added = {
+            let mut table = tx.open_table(EVIDENCE)?;
+            if table.get(&id)?.is_some() || table.len()? >= MAX_EVIDENCE {
+                false
+            } else {
+                table.insert(&id, encode(evidence).as_slice())?;
+                true
+            }
+        };
+        tx.commit()?;
+        Ok(added)
+    }
+
+    pub fn evidence(&self) -> Result<Vec<Evidence>> {
+        let tx = self.db.begin_read()?;
+        let table = tx.open_table(EVIDENCE)?;
+        let mut out = Vec::new();
+        for entry in table.iter()? {
+            let (_, bytes) = entry?;
+            out.push(decode(bytes.value(), "preuve")?);
+        }
+        Ok(out)
+    }
+
     pub fn block(&self, height: u64) -> Result<Option<Block>> {
         let tx = self.db.begin_read()?;
         let table = tx.open_table(BLOCKS)?;
@@ -305,6 +339,33 @@ mod tests {
         assert_eq!(reloaded, state);
         assert_eq!(reloaded.state_root(), state.state_root());
         assert!(reloaded.check_invariant().is_ok());
+    }
+
+    #[test]
+    fn evidence_is_recorded_once() {
+        use vinx_consensus::SignedVote;
+        use vinx_core::{Vote, VoteKind};
+        use vinx_crypto::KeyPair;
+        let dir = tempfile::tempdir().unwrap();
+        let store = Store::open(&dir.path().join("db"), [1; 32]).unwrap();
+        let kp = KeyPair::generate();
+        let vote = |target| Vote {
+            chain_id: "vinx-test".into(),
+            kind: VoteKind::Prevote,
+            height: 4,
+            round: 0,
+            block_hash: target,
+        };
+        let a = SignedVote::new(vote(Some([1; 32])), 0, &kp);
+        let b = SignedVote::new(vote(None), 0, &kp);
+        assert!(
+            store
+                .record_evidence(&Evidence::Votes(a.clone(), b.clone()))
+                .unwrap()
+        );
+        // Même preuve, messages dans l'autre ordre : déjà connue.
+        assert!(!store.record_evidence(&Evidence::Votes(b, a)).unwrap());
+        assert_eq!(store.evidence().unwrap().len(), 1);
     }
 
     #[test]

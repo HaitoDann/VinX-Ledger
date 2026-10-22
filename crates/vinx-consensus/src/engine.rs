@@ -7,6 +7,7 @@
 //! Un moteur couvre une seule hauteur : une fois le bloc décidé, le nœud crée un
 //! nouveau moteur pour la hauteur suivante.
 
+use crate::evidence::Evidence;
 use crate::header::proposer_index;
 use crate::messages::{Proposal, SignedProposal, SignedVote};
 use std::collections::{BTreeMap, BTreeSet};
@@ -49,6 +50,8 @@ pub enum Action {
         block: Block,
         certificate: CommitCertificate,
     },
+    /// Un validateur a signé deux messages contradictoires : preuve vérifiable.
+    Equivocation(Evidence),
 }
 
 /// Votes d'une étape : validateur → cible (`None` = nil) → vote signé.
@@ -79,6 +82,12 @@ pub struct Engine {
     validity: BTreeMap<Hash, bool>,
     /// Première proposition reçue du proposeur légitime de chaque round.
     proposals: BTreeMap<u32, (Hash, Option<u32>)>,
+    /// La même, signée, pour pouvoir prouver une équivoque du proposeur.
+    signed_proposals: BTreeMap<u32, SignedProposal>,
+    /// Preuves d'équivoque relevées, à remettre au nœud.
+    evidence: Vec<Evidence>,
+    /// Rounds dont l'équivoque du proposeur est déjà prouvée.
+    evidence_rounds: BTreeSet<u32>,
     /// Votes par `(round, type)`, puis par validateur et par cible.
     ///
     /// Un validateur honnête ne vote qu'une fois par étape. Un validateur
@@ -118,6 +127,9 @@ impl Engine {
             blocks: BTreeMap::new(),
             validity: BTreeMap::new(),
             proposals: BTreeMap::new(),
+            signed_proposals: BTreeMap::new(),
+            evidence: Vec::new(),
+            evidence_rounds: BTreeSet::new(),
             votes: BTreeMap::new(),
             prevote_timeout_set: BTreeSet::new(),
             precommit_timeout_set: BTreeSet::new(),
@@ -171,6 +183,7 @@ impl Engine {
         if self.accept_proposal(sp) {
             self.process(v, &mut out);
         }
+        out.extend(self.evidence.drain(..).map(Action::Equivocation));
         out
     }
 
@@ -179,6 +192,7 @@ impl Engine {
         if self.accept_vote(sv) {
             self.process(v, &mut out);
         }
+        out.extend(self.evidence.drain(..).map(Action::Equivocation));
         out
     }
 
@@ -229,11 +243,26 @@ impl Engine {
             && h.chain_id == self.chain_id
             && h.proposer == proposer
             && p.pol_round.is_none_or(|vr| vr < p.round);
-        if !well_formed || self.proposals.contains_key(&p.round) || !sp.verify(key) {
-            // Une seconde proposition pour le même round est une équivoque : ignorée.
+        if !well_formed || !sp.verify(key) {
             return false;
         }
         let hash = p.block.hash();
+        if let Some(first) = self.signed_proposals.get(&p.round) {
+            // Une seconde proposition différente pour le même round est une
+            // équivoque : elle est ignorée, mais prouvée (une fois par round).
+            let conflicting =
+                first.proposal.block.hash() != hash || first.proposal.pol_round != p.pol_round;
+            let already = self.evidence_rounds.contains(&p.round);
+            if conflicting && !already {
+                self.evidence_rounds.insert(p.round);
+                self.evidence.push(Evidence::Proposals(
+                    Box::new(first.clone()),
+                    Box::new(sp.clone()),
+                ));
+            }
+            return false;
+        }
+        self.signed_proposals.insert(p.round, sp.clone());
         self.proposals.insert(p.round, (hash, p.pol_round));
         self.blocks.entry(hash).or_insert(sp.proposal.block);
         true
@@ -261,7 +290,17 @@ impl Engine {
         // Mémoire bornée face à un validateur malveillant : au plus deux cibles
         // par étape, plus la cible de la proposition du round.
         let room = by_validator.len() < 2 || known_proposal;
-        if by_validator.contains_key(&target) || !room || !sv.verify(key) {
+        if by_validator.contains_key(&target) || !sv.verify(key) {
+            return false;
+        }
+        // Première contradiction de ce validateur à cette étape : on la prouve.
+        if by_validator.len() == 1 {
+            if let Some(first) = by_validator.values().next() {
+                self.evidence
+                    .push(Evidence::Votes(first.clone(), sv.clone()));
+            }
+        }
+        if !room {
             return false;
         }
         by_validator.insert(target, sv);

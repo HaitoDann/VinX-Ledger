@@ -6,11 +6,13 @@
 //! renvoie ses propres messages. Il est donc testable de façon déterministe.
 
 pub mod engine;
+pub mod evidence;
 pub mod guard;
 pub mod header;
 pub mod messages;
 
 pub use engine::{Action, BlockValidator, Engine, Timeout, TimeoutKind};
+pub use evidence::{Evidence, EvidenceError};
 pub use guard::SignGuard;
 pub use header::{HeaderError, check_header_link, proposer_index};
 pub use messages::{Proposal, SignedProposal, SignedVote};

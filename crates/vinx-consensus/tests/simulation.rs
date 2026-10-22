@@ -18,7 +18,8 @@
 use std::collections::BTreeMap;
 use vinx_consensus::guard::Step;
 use vinx_consensus::{
-    Action, BlockValidator, Engine, Proposal, SignGuard, SignedProposal, SignedVote, Timeout,
+    Action, BlockValidator, Engine, Evidence, Proposal, SignGuard, SignedProposal, SignedVote,
+    Timeout,
 };
 use vinx_core::{Block, BlockHeader, CommitCertificate, Params, Vote};
 use vinx_crypto::{Hash, KeyPair, PublicKey};
@@ -97,6 +98,8 @@ struct Sim {
     /// Blocs finalisés et leurs certificats, comme les servirait la synchronisation.
     committed: BTreeMap<u64, (Block, CommitCertificate)>,
     synced: usize,
+    /// Preuves d'équivoque relevées par les nœuds honnêtes : (hauteur, preuve).
+    evidence: Vec<Evidence>,
 }
 
 impl Sim {
@@ -135,6 +138,7 @@ impl Sim {
             max_round: 0,
             committed: BTreeMap::new(),
             synced: 0,
+            evidence: Vec::new(),
         };
         for i in 0..sim.nodes.len() {
             if sim.nodes[i].behavior != Behavior::Crashed {
@@ -170,6 +174,11 @@ impl Sim {
                     self.timers.push((self.now + after_ms, i, timeout));
                 }
                 Action::Decide { block, certificate } => self.adopt(i, block, certificate),
+                Action::Equivocation(ev) => {
+                    if self.nodes[i].behavior == Behavior::Honest {
+                        self.evidence.push(ev);
+                    }
+                }
             }
         }
     }
@@ -364,6 +373,10 @@ fn four_honest_validators_finalize() {
     let mut sim = Sim::new(&[Honest; 4], 1);
     sim.run(10, 200_000);
     sim.assert_agreement();
+    assert!(
+        sim.evidence.is_empty(),
+        "aucune preuve contre des validateurs honnêtes"
+    );
     assert_eq!(sim.min_height(), 10);
     assert_eq!(
         sim.max_round, 0,
@@ -415,6 +428,12 @@ fn an_equivocating_validator_cannot_break_safety() {
         sim.run(8, 400_000);
         sim.assert_agreement();
         assert_eq!(sim.min_height(), 8, "graine {seed}");
+        // Le fautif est démasqué par des preuves que tout le monde peut vérifier.
+        assert!(!sim.evidence.is_empty(), "graine {seed} : aucune preuve");
+        for ev in &sim.evidence {
+            ev.verify(CHAIN, &sim.validators).expect("preuve invalide");
+            assert_eq!(ev.validator(4), Some(0), "seul le validateur 0 est fautif");
+        }
     }
 }
 

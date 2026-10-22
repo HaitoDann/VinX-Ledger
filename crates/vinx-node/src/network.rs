@@ -24,7 +24,7 @@ use std::path::Path;
 use std::time::{Duration, Instant};
 use tokio::sync::mpsc;
 use tracing::{debug, info, warn};
-use vinx_consensus::{SignedProposal, SignedVote};
+use vinx_consensus::{Evidence, SignedProposal, SignedVote};
 use vinx_core::{
     Account, Block, CommitCertificate, SignedAdminTransaction, SignedTransaction, encode,
 };
@@ -39,6 +39,8 @@ pub enum NetMessage {
     Vote(SignedVote) = 0x02,
     Tx(SignedTransaction) = 0x03,
     AdminTx(SignedAdminTransaction) = 0x04,
+    /// Preuve d'équivoque d'un validateur.
+    Evidence(Box<Evidence>) = 0x05,
 }
 
 /// Enveloppe gossip. Le numéro de séquence rend chaque envoi unique : gossipsub

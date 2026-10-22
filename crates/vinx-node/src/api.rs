@@ -33,6 +33,7 @@ pub fn router(shared: SharedRef) -> Router {
         .route("/blocks/{height}", get(block))
         .route("/escrow", get(escrow))
         .route("/fees", get(fees))
+        .route("/evidence", get(evidence))
         .route("/transactions", post(submit))
         .route("/admin-transactions", post(submit_admin))
         // Une transaction encodée tient largement en 64 Kio.
@@ -130,6 +131,34 @@ async fn fees(State(shared): State<SharedRef>) -> ApiResult {
         "pending_transactions": s.mempool.len(),
         "max_block_txs": p.max_block_txs,
     })))
+}
+
+/// Preuves d'équivoque connues du nœud.
+async fn evidence(State(shared): State<SharedRef>) -> ApiResult {
+    let s = lock(&shared);
+    let list = s
+        .store
+        .evidence()
+        .map_err(|e| error(StatusCode::INTERNAL_SERVER_ERROR, e))?;
+    let items: Vec<Value> = list
+        .iter()
+        .map(|ev| {
+            let validators = s.chain.state.validators_at(ev.height());
+            let index = ev.validator(validators.len());
+            json!({
+                "id": hash_to_hex(&ev.id()),
+                "height": ev.height(),
+                "round": ev.round(),
+                "step": ev.step(),
+                "validator_index": index,
+                "validator_key": index
+                    .and_then(|i| validators.get(usize::from(i)))
+                    .map(key_to_hex),
+                "proof": hex::encode(vinx_core::encode(ev)),
+            })
+        })
+        .collect();
+    Ok(Json(json!({ "evidence": items })))
 }
 
 #[derive(Deserialize)]
