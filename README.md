@@ -9,6 +9,7 @@ Un protocole de paiement volontairement simple et minimaliste : validateurs auto
 > **Statut : expérimental, en reconstruction.** Le token VINX n'a aucune valeur.
 
 - Spécification du protocole : [`SPEC.md`](./SPEC.md)
+- Déployer, observer et administrer un réseau : [`docs/EXPLOITATION.md`](./docs/EXPLOITATION.md)
 - Décisions d'architecture : [`docs/adr/`](./docs/adr/)
 - Ancien projet (archivé) : `VinX-Ledger-Legacy`
 - Licence : [Apache-2.0](./LICENSE)
@@ -25,8 +26,10 @@ cargo run --release -p vinx-node -- run \
 ```
 
 `devnet` crée trois clés admin et une clé de validateur, chiffrées par le mot de
-passe, ainsi que la genèse. L'API écoute sur `http://127.0.0.1:8545` :
-`/status`, `/accounts/{adresse}`, `/blocks/{hauteur}`, `/escrow`, `/fees`,
+passe, ainsi que la genèse. Le tableau de bord du nœud est sur
+`http://127.0.0.1:8545/`, ses métriques Prometheus sur `/metrics`. L'API :
+`/status`, `/governance`, `/accounts/{adresse}`, `/blocks`, `/blocks/{hauteur}`,
+`/escrow`, `/fees`,
 `/evidence` (preuves de validateurs fautifs), et en `POST`
 `/transactions` et `/admin-transactions`.
 

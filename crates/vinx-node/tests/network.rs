@@ -263,3 +263,48 @@ async fn four_validators_tolerate_a_crash_and_resync() {
         n.stop().await;
     }
 }
+
+/// L'intervalle entre blocs (2 s) dépasse le délai de proposition (1 s) : le
+/// consensus d'une hauteur ne doit démarrer qu'une fois l'intervalle écoulé,
+/// sans quoi chaque bloc était finalisé au round 1 au lieu du round 0.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn blocks_are_finalized_in_the_first_round() {
+    let root = tempfile::tempdir().unwrap();
+    let k = || KeyPair::generate().public_key();
+    let validators: Vec<KeyPair> = (0..4).map(|_| KeyPair::generate()).collect();
+    let mut genesis = Genesis::standard(
+        CHAIN,
+        node::now_ms() / 1000,
+        [k(), k(), k()],
+        validators.iter().map(KeyPair::public_key).collect(),
+    )
+    .unwrap();
+    genesis.params.min_block_interval_ms = 2_000;
+    genesis.params.timeout_propose_ms = 1_000;
+    let specs: Vec<Spec> = (0..4).map(|i| spec(root.path(), i)).collect();
+    let nodes: Vec<Running> = (0..4)
+        .map(|i| {
+            let others: Vec<&Spec> = specs
+                .iter()
+                .enumerate()
+                .filter(|(j, _)| *j != i)
+                .map(|(_, s)| s)
+                .collect();
+            start(&genesis, &specs[i], &others, Some(validators[i].clone()))
+        })
+        .collect();
+    wait_until("hauteur 5", || nodes.iter().all(|n| n.height() >= 5)).await;
+    for n in &nodes {
+        let s = node::lock(&n.shared);
+        // Le tout premier bloc peut attendre les connexions ; tous les suivants
+        // doivent être finalisés au premier round.
+        let later_rounds = s.metrics.blocks - s.metrics.blocks_first_round;
+        assert!(
+            later_rounds <= 1,
+            "{later_rounds} blocs finalisés après le round 0"
+        );
+    }
+    for n in nodes {
+        n.stop().await;
+    }
+}

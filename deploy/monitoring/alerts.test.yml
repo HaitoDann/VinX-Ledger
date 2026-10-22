@@ -1,0 +1,74 @@
+# Tests des alertes : promtool test rules alerts.test.yml
+rule_files:
+  - alerts.yml
+
+evaluation_interval: 15s
+
+tests:
+  # La chaîne avance puis s'arrête : l'alerte se déclenche après 60 s sans
+  # bloc, maintenus une minute.
+  - interval: 15s
+    input_series:
+      - series: 'vinx_last_block_timestamp_seconds{job="vinx"}'
+        values: '0 15 30 45 60 60x20'
+    alert_rule_test:
+      - eval_time: 1m
+        alertname: VinxChaineArretee
+        exp_alerts: []
+      - eval_time: 4m
+        alertname: VinxChaineArretee
+        exp_alerts:
+          - exp_labels: { severity: critical, job: vinx }
+            exp_annotations:
+              summary: "Aucun bloc depuis plus d'une minute"
+              description: "Moins de 2/3 des validateurs participent. Voir « La chaîne est à l'arrêt »."
+
+  # Une preuve d'équivoque déclenche immédiatement l'alerte.
+  - interval: 15s
+    input_series:
+      - series: 'vinx_evidence_total{job="vinx"}'
+        values: '0 0 1 1'
+    alert_rule_test:
+      - eval_time: 15s
+        alertname: VinxEquivoque
+        exp_alerts: []
+      - eval_time: 30s
+        alertname: VinxEquivoque
+        exp_alerts:
+          - exp_labels: { severity: critical, job: vinx }
+            exp_annotations:
+              summary: "Un validateur a signé deux messages contradictoires"
+              description: "Clé de validateur probablement compromise. Voir « Équivoque détectée » ; détail sur GET /evidence."
+
+  # Un validateur sur un réseau de 4 ne voit que 1 pair pendant 5 minutes.
+  - interval: 1m
+    input_series:
+      - series: 'vinx_is_validator{job="vinx"}'
+        values: '1x10'
+      - series: 'vinx_validators{job="vinx"}'
+        values: '4x10'
+      - series: 'vinx_peers{job="vinx"}'
+        values: '3 3 1x8'
+    alert_rule_test:
+      - eval_time: 3m
+        alertname: VinxPairsManquants
+        exp_alerts: []
+      - eval_time: 8m
+        alertname: VinxPairsManquants
+        exp_alerts:
+          - exp_labels: { severity: warning, job: vinx }
+            exp_annotations:
+              summary: "Le validateur ne voit pas tous les autres validateurs"
+              description: "1 pair(s) connecté(s). Vérifier le pare-feu et les options --peer."
+
+  # Réseau sain : tous les blocs au premier round, aucune alerte.
+  - interval: 5s
+    input_series:
+      - series: 'vinx_blocks_total{job="vinx"}'
+        values: '0+1x1000'
+      - series: 'vinx_blocks_first_round_total{job="vinx"}'
+        values: '0+1x1000'
+    alert_rule_test:
+      - eval_time: 80m
+        alertname: VinxRoundsSupplementaires
+        exp_alerts: []

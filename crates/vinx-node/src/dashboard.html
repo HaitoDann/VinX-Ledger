@@ -1,0 +1,249 @@
+<!doctype html>
+<html lang="fr">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>VinX Ledger — nœud</title>
+<link rel="icon" href="data:,">
+<style>
+  :root {
+    --bg: #f6f7f9; --card: #ffffff; --text: #17191c; --muted: #646b75;
+    --line: #e2e5ea; --accent: #2f5fd0; --ok: #1f8a4c; --warn: #b26a00; --bad: #c0362c;
+  }
+  @media (prefers-color-scheme: dark) {
+    :root {
+      --bg: #111316; --card: #1a1d21; --text: #e7e9ec; --muted: #9aa1ab;
+      --line: #2a2e34; --accent: #7aa2ff; --ok: #4cc27f; --warn: #e0a440; --bad: #ef6b5f;
+    }
+  }
+  * { box-sizing: border-box; }
+  body { margin: 0; background: var(--bg); color: var(--text);
+         font: 15px/1.45 system-ui, -apple-system, "Segoe UI", sans-serif; }
+  header { padding: 18px 16px 8px; max-width: 1100px; margin: 0 auto;
+           display: flex; flex-wrap: wrap; gap: 8px 16px; align-items: baseline; }
+  h1 { font-size: 20px; margin: 0; }
+  h2 { font-size: 15px; margin: 0 0 10px; color: var(--muted); font-weight: 600; }
+  main { max-width: 1100px; margin: 0 auto; padding: 0 16px 32px; display: grid; gap: 14px; }
+  .tiles { display: grid; grid-template-columns: repeat(auto-fit, minmax(150px, 1fr)); gap: 10px; }
+  .tile, .card { background: var(--card); border: 1px solid var(--line); border-radius: 10px; padding: 12px 14px; }
+  .tile .label { color: var(--muted); font-size: 12px; }
+  .tile .value { font-size: 22px; font-weight: 650; font-variant-numeric: tabular-nums; margin-top: 2px; }
+  .tile .sub { color: var(--muted); font-size: 12px; }
+  .grid2 { display: grid; grid-template-columns: repeat(auto-fit, minmax(320px, 1fr)); gap: 14px; }
+  table { width: 100%; border-collapse: collapse; font-variant-numeric: tabular-nums; }
+  th, td { text-align: left; padding: 5px 6px; border-bottom: 1px solid var(--line); font-size: 13px; }
+  th { color: var(--muted); font-weight: 600; }
+  .mono { font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 12px; word-break: break-all; }
+  .ok { color: var(--ok); } .warn { color: var(--warn); } .bad { color: var(--bad); }
+  .pill { display: inline-block; padding: 1px 8px; border-radius: 99px; font-size: 12px; border: 1px solid currentColor; }
+  .alert { border-left: 4px solid var(--bad); }
+  dl { display: grid; grid-template-columns: max-content 1fr; gap: 4px 12px; margin: 0; font-size: 13px; }
+  dt { color: var(--muted); }
+  dd { margin: 0; }
+  /* Police à chasse fixe : une adresse doit se lire caractère par caractère. */
+  input { width: 100%; padding: 8px 10px; border-radius: 8px; border: 1px solid var(--line);
+          background: var(--bg); color: var(--text);
+          font: 14px ui-monospace, SFMono-Regular, Menlo, monospace; }
+  .scroll { overflow-x: auto; }
+  #error { display: none; }
+</style>
+</head>
+<body>
+<header>
+  <h1>VinX Ledger</h1>
+  <span id="chain" class="mono"></span>
+  <span id="role" class="pill"></span>
+  <span id="health" class="pill"></span>
+</header>
+<main>
+  <div id="error" class="card alert"></div>
+
+  <section class="tiles">
+    <div class="tile"><div class="label">Hauteur</div><div class="value" id="height">—</div><div class="sub" id="age"></div></div>
+    <div class="tile"><div class="label">Rythme des blocs</div><div class="value" id="pace">—</div><div class="sub" id="pace-target"></div></div>
+    <div class="tile"><div class="label">Finalisés au 1er round</div><div class="value" id="first-round">—</div><div class="sub">depuis le démarrage</div></div>
+    <div class="tile"><div class="label">Pairs connectés</div><div class="value" id="peers">—</div><div class="sub" id="validators"></div></div>
+    <div class="tile"><div class="label">En attente</div><div class="value" id="mempool">—</div><div class="sub" id="fees"></div></div>
+  </section>
+
+  <div id="alerts"></div>
+
+  <div class="grid2">
+    <section class="card">
+      <h2>Trésorerie et escrow</h2>
+      <dl>
+        <dt>Trésorerie</dt><dd id="treasury">—</dd>
+        <dt>En escrow</dt><dd id="escrow">—</dd>
+        <dt>Prochaine tranche</dt><dd id="next-tranche">—</dd>
+        <dt>Tranches restantes</dt><dd id="tranches">—</dd>
+      </dl>
+    </section>
+    <section class="card">
+      <h2>Gouvernance</h2>
+      <dl>
+        <dt>Protocole</dt><dd id="protocol">—</dd>
+        <dt>Multisig</dt><dd id="multisig">—</dd>
+        <dt>Validateurs</dt><dd id="validator-list">—</dd>
+        <dt>Paramètres</dt><dd id="params">—</dd>
+      </dl>
+    </section>
+  </div>
+
+  <section class="card">
+    <h2>Derniers blocs</h2>
+    <div class="scroll">
+      <table>
+        <thead><tr><th>Hauteur</th><th>Heure</th><th>Round</th><th>Proposeur</th><th>Tx</th><th>Hash</th></tr></thead>
+        <tbody id="blocks"></tbody>
+      </table>
+    </div>
+  </section>
+
+  <section class="card">
+    <h2>Consulter un compte</h2>
+    <input id="lookup" placeholder="vinx1…" autocomplete="off" spellcheck="false">
+    <dl id="account" style="margin-top:10px"></dl>
+  </section>
+</main>
+
+<script>
+const UNITS = 1000000000n;
+
+function vinx(units) {
+  const v = BigInt(units);
+  const whole = v / UNITS, frac = v % UNITS;
+  const w = whole.toString().replace(/\B(?=(\d{3})+(?!\d))/g, " ");
+  if (frac === 0n) return w + " VINX";
+  return w + "," + frac.toString().padStart(9, "0").replace(/0+$/, "") + " VINX";
+}
+const short = (s, n = 10) => s ? s.slice(0, n) + "…" : "—";
+const time = (ms) => new Date(ms).toLocaleTimeString("fr-FR");
+const date = (s) => new Date(s * 1000).toLocaleString("fr-FR");
+const ago = (ms) => {
+  const s = Math.max(0, Math.round((Date.now() - ms) / 1000));
+  return s < 90 ? `il y a ${s} s` : `il y a ${Math.round(s / 60)} min`;
+};
+const $ = (id) => document.getElementById(id);
+const esc = (s) => String(s).replace(/[&<>"]/g, c => ({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;"}[c]));
+
+async function get(path) {
+  const r = await fetch(path, { cache: "no-store" });
+  if (!r.ok) throw new Error(`${path} : ${r.status}`);
+  return r.json();
+}
+
+async function refresh() {
+  try {
+    const [status, gov, fees, blocks, evidence] = await Promise.all([
+      get("/status"), get("/governance"), get("/fees"), get("/blocks"), get("/evidence"),
+    ]);
+    $("error").style.display = "none";
+    const interval = status.params.min_block_interval_ms;
+
+    $("chain").textContent = status.chain_id;
+    const role = $("role");
+    if (status.validator_index === null) { role.textContent = "observateur"; role.className = "pill"; }
+    else { role.textContent = `validateur n° ${status.validator_index + 1}`; role.className = "pill ok"; }
+
+    $("height").textContent = status.height.toLocaleString("fr-FR");
+    const last = blocks.blocks[0];
+    const lastAge = last ? Date.now() - last.timestamp : Infinity;
+    $("age").textContent = last ? "dernier bloc " + ago(last.timestamp) : "aucun bloc";
+
+    if (blocks.blocks.length > 1) {
+      const b = blocks.blocks, span = b[0].timestamp - b[b.length - 1].timestamp;
+      $("pace").textContent = (span / (b.length - 1) / 1000).toFixed(1) + " s";
+    }
+    $("pace-target").textContent = `cible ${interval / 1000} s`;
+
+    const ratio = status.first_round_ratio;
+    const fr = $("first-round");
+    fr.textContent = ratio === null ? "—" : (ratio * 100).toFixed(1) + " %";
+    fr.className = "value " + (ratio === null ? "" : ratio >= 0.99 ? "ok" : ratio >= 0.9 ? "warn" : "bad");
+
+    $("peers").textContent = status.peers;
+    $("validators").textContent = `${status.validators.length} validateur(s)`;
+    $("mempool").textContent = status.pending_transactions;
+    $("fees").textContent = "frais conseillés " + vinx(fees.recommended_fee);
+
+    // Santé : la chaîne avance-t-elle ?
+    const health = $("health");
+    const stalled = lastAge >= interval * 6;
+    if (lastAge < interval * 3) { health.textContent = "chaîne active"; health.className = "pill ok"; }
+    else if (!stalled) { health.textContent = "chaîne lente"; health.className = "pill warn"; }
+    else { health.textContent = "chaîne à l'arrêt"; health.className = "pill bad"; }
+
+    // Alertes : chaîne à l'arrêt, puis preuves d'équivoque.
+    const stallAlert = stalled && last ? `
+      <div class="card alert">
+        <strong class="bad">Aucun bloc ${ago(last.timestamp)}</strong> — la chaîne n'avance que si plus
+        des deux tiers des validateurs (${Math.floor(2 * status.validators.length / 3) + 1}
+        sur ${status.validators.length}) sont en ligne et connectés. Ce nœud voit
+        ${status.peers} pair(s). Vérifiez l'état des serveurs validateurs et leur réseau.
+      </div>` : "";
+    $("alerts").innerHTML = stallAlert + evidence.evidence.map(e => `
+      <div class="card alert">
+        <strong class="bad">Équivoque détectée</strong> — le validateur n° ${e.validator_index + 1}
+        a signé deux messages contradictoires (hauteur ${e.height}, round ${e.round}, ${esc(e.step)}).
+        Sa clé est peut-être compromise : envisagez son retrait par la multisig.
+        <div class="mono">${esc(e.validator_key || "")}</div>
+      </div>`).join("");
+
+    $("treasury").textContent = vinx(gov.treasury.balance);
+    $("escrow").textContent = vinx(gov.escrow.total);
+    $("tranches").textContent = gov.escrow.tranches;
+    const next = gov.escrow.next;
+    if (next) {
+      const due = next.matures_at * 1000 <= Date.now();
+      $("next-tranche").innerHTML = `${vinx(next.amount)} — ${due
+        ? '<span class="ok">libérable maintenant</span>'
+        : "échéance " + esc(date(next.matures_at))}`;
+    } else {
+      $("next-tranche").textContent = "aucune";
+    }
+
+    $("protocol").textContent = "version " + gov.protocol_version + (gov.upgrade
+      ? ` — passage à la v${gov.upgrade.version} à la hauteur ${gov.upgrade.activation_height}` : "");
+    $("multisig").textContent = `${gov.admin.threshold} sur ${gov.admin.signers.length}, nonce ${gov.admin.nonce}`;
+    $("validator-list").innerHTML = gov.validators.active
+      .map((k, i) => `<div class="mono">${i + 1}. ${esc(short(k, 18))}</div>`).join("")
+      + gov.validators.pending.map(p =>
+        `<div class="warn">${esc(p.change)} prévu à la hauteur ${p.effective_height}</div>`).join("");
+    const p = gov.params;
+    $("params").textContent =
+      `frais min. ${vinx(p.min_fee)}, réserve ${vinx(p.min_reserve)}, ` +
+      `bloc toutes les ${p.min_block_interval_ms / 1000} s, ${p.max_block_txs} tx max.`;
+
+    $("blocks").innerHTML = blocks.blocks.map(b => `
+      <tr>
+        <td>${b.height}</td><td>${time(b.timestamp)}</td>
+        <td class="${b.round === 0 ? "" : "warn"}">${b.round ?? "—"}</td>
+        <td>${b.proposer + 1}</td>
+        <td>${b.transactions + b.admin_transactions}</td>
+        <td class="mono">${esc(short(b.hash, 16))}</td>
+      </tr>`).join("");
+  } catch (e) {
+    $("error").style.display = "block";
+    $("error").textContent = "Nœud injoignable : " + e.message;
+    $("health").textContent = "hors ligne"; $("health").className = "pill bad";
+  }
+}
+
+$("lookup").addEventListener("change", async (ev) => {
+  const out = $("account"), addr = ev.target.value.trim();
+  if (!addr) { out.innerHTML = ""; return; }
+  try {
+    const a = await get("/accounts/" + encodeURIComponent(addr));
+    out.innerHTML = `<dt>Solde</dt><dd>${vinx(a.balance)}</dd>
+      <dt>Transactions</dt><dd>${a.nonce}</dd>
+      <dt>Mémo obligatoire</dt><dd>${a.memo_required ? "oui" : "non"}</dd>`;
+  } catch (e) {
+    out.innerHTML = `<dt>Résultat</dt><dd class="warn">compte inconnu ou adresse invalide</dd>`;
+  }
+});
+
+refresh();
+setInterval(refresh, 3000);
+</script>
+</body>
+</html>

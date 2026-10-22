@@ -1,0 +1,61 @@
+# Alertes VinX Ledger. Chaque alerte renvoie à la procédure correspondante de
+# docs/EXPLOITATION.md, section « Incidents ».
+groups:
+  - name: vinx
+    rules:
+      - alert: VinxNoeudInjoignable
+        expr: up{job="vinx"} == 0
+        for: 1m
+        labels: { severity: critical }
+        annotations:
+          summary: "Le nœud {{ $labels.node }} ne répond plus"
+          description: "Processus arrêté ou serveur injoignable. Voir « Un validateur est hors ligne »."
+
+      - alert: VinxChaineArretee
+        expr: time() - vinx_last_block_timestamp_seconds > 60
+        for: 1m
+        labels: { severity: critical }
+        annotations:
+          summary: "Aucun bloc depuis plus d'une minute"
+          description: "Moins de 2/3 des validateurs participent. Voir « La chaîne est à l'arrêt »."
+
+      - alert: VinxEquivoque
+        expr: vinx_evidence_total > 0
+        labels: { severity: critical }
+        annotations:
+          summary: "Un validateur a signé deux messages contradictoires"
+          description: "Clé de validateur probablement compromise. Voir « Équivoque détectée » ; détail sur GET /evidence."
+
+      - alert: VinxPairsManquants
+        expr: vinx_is_validator == 1 and vinx_peers < vinx_validators - 1
+        for: 5m
+        labels: { severity: warning }
+        annotations:
+          summary: "Le validateur ne voit pas tous les autres validateurs"
+          description: "{{ $value }} pair(s) connecté(s). Vérifier le pare-feu et les options --peer."
+
+      - alert: VinxRoundsSupplementaires
+        expr: >
+          (increase(vinx_blocks_total[1h]) - increase(vinx_blocks_first_round_total[1h]))
+          / increase(vinx_blocks_total[1h]) > 0.01
+        for: 30m
+        labels: { severity: warning }
+        annotations:
+          summary: "Plus de 1 % des blocs finalisés après le premier round"
+          description: "Réseau lent ou validateur défaillant. Ne pas réduire l'intervalle de bloc."
+
+      - alert: VinxMempoolEncombre
+        expr: vinx_mempool_transactions > 5000
+        for: 10m
+        labels: { severity: warning }
+        annotations:
+          summary: "{{ $value }} transactions en attente"
+          description: "Afflux ou spam. Les frais conseillés augmentent ; envisager de relever min_fee."
+
+      - alert: VinxTrancheLiberable
+        expr: vinx_escrow_next_maturity_seconds > 0 and time() >= vinx_escrow_next_maturity_seconds
+        for: 1h
+        labels: { severity: info }
+        annotations:
+          summary: "Une tranche d'escrow est échue"
+          description: "Libérable par la multisig : voir « Libérer une tranche d'escrow »."

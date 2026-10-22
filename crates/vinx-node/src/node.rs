@@ -41,6 +41,23 @@ pub struct Shared {
     pub retention_ms: Option<u64>,
     /// Validateurs de la genèse, qui authentifient les instantanés (SPEC §8.3).
     pub genesis_validators: Vec<PublicKey>,
+    pub metrics: Metrics,
+}
+
+/// Compteurs d'exploitation, exposés par `/metrics` et le tableau de bord.
+#[derive(Clone, Debug, Default)]
+pub struct Metrics {
+    /// Blocs finalisés depuis le démarrage du nœud.
+    pub blocks: u64,
+    /// Dont finalisés au premier round : un taux proche de 100 % indique un
+    /// réseau sain (SPEC §11, critère pour réduire l'intervalle de bloc).
+    pub blocks_first_round: u64,
+    pub last_round: u32,
+    pub peers: usize,
+    /// Indice de ce nœud dans l'ensemble de validateurs, s'il vote.
+    pub validator_index: Option<u16>,
+    pub snapshots_installed: u64,
+    pub started_ms: u64,
 }
 
 /// Conservation des blocs par défaut : 24 heures.
@@ -132,6 +149,10 @@ pub fn open(genesis: Genesis, data_dir: &Path) -> Result<SharedRef> {
         snapshot: None,
         retention_ms: Some(DEFAULT_RETENTION_MS),
         genesis_validators,
+        metrics: Metrics {
+            started_ms: now_ms(),
+            ..Metrics::default()
+        },
     }));
     lock(&shared).refresh_snapshot()?;
     Ok(shared)
@@ -166,6 +187,11 @@ fn commit(
     mut next: vinx_state::State,
 ) -> Result<()> {
     s.store.commit_block(block, cert, &mut next)?;
+    s.metrics.blocks = s.metrics.blocks.saturating_add(1);
+    if cert.round == 0 {
+        s.metrics.blocks_first_round = s.metrics.blocks_first_round.saturating_add(1);
+    }
+    s.metrics.last_round = cert.round;
     let included: BTreeSet<_> = block
         .admin_txs
         .iter()
@@ -227,6 +253,8 @@ struct Runner {
     build: Option<(u32, u64)>,
     timeouts: mpsc::UnboundedSender<Timeout>,
     download: Option<Download>,
+    /// Instant (ms) auquel démarrer le moteur de la hauteur courante.
+    start_at: Option<u64>,
 }
 
 /// Téléchargement d'un instantané en cours.
@@ -294,6 +322,7 @@ impl Runner {
             .as_ref()
             .and_then(|k| validators.iter().position(|v| *v == k.public_key()))
             .and_then(|i| u16::try_from(i).ok());
+        s.metrics.validator_index = self.me;
         self.engine = Engine::new(
             s.chain.state.chain_id.clone(),
             height,
@@ -304,7 +333,16 @@ impl Runner {
         self.build = None;
         self.own.clear();
         self.queue.clear();
-        self.queue.extend(self.engine.start(&mut Checker(&s.chain)));
+        // Le consensus de cette hauteur ne démarre qu'une fois l'intervalle
+        // minimal écoulé depuis le bloc précédent : sinon le délai de
+        // proposition expirerait chez les autres validateurs pendant que le
+        // proposeur attend encore de pouvoir construire son bloc, et chaque
+        // bloc coûterait un round.
+        self.start_at = Some(
+            s.chain
+                .parent_time_ms()
+                .saturating_add(s.chain.state.params.min_block_interval_ms),
+        );
         let (now, later): (Vec<_>, Vec<_>) = std::mem::take(&mut self.future)
             .into_iter()
             .filter(|m| message_height(m).is_some_and(|h| h >= height))
@@ -612,6 +650,7 @@ impl Runner {
             .install_snapshot(&d.info.block, &d.info.cert, &mut state)?;
         s.chain.advance(&d.info.block, state);
         s.mempool.reset(&s.chain.state, &BTreeSet::new());
+        s.metrics.snapshots_installed = s.metrics.snapshots_installed.saturating_add(1);
         s.refresh_snapshot()?;
         info!(
             height = d.info.block.header.height,
@@ -652,6 +691,7 @@ pub async fn run(
         own: VecDeque::new(),
         build: None,
         download: None,
+        start_at: None,
         timeouts: timeouts_tx,
     };
     r.new_height();
@@ -660,11 +700,22 @@ pub async fn run(
     }
     let mut rebroadcast = tokio::time::interval(REBROADCAST);
     loop {
+        if r.start_at.is_some_and(|at| at <= now_ms()) {
+            r.start_at = None;
+            let s = lock(&r.shared);
+            let actions = r.engine.start(&mut Checker(&s.chain));
+            drop(s);
+            r.queue.extend(actions);
+        }
         r.drain()?;
+        let start_in = r
+            .start_at
+            .map(|at| Duration::from_millis(at.saturating_sub(now_ms())));
         let build_in = r
             .build
             .map(|(_, at)| Duration::from_millis(at.saturating_sub(now_ms())));
         tokio::select! {
+            _ = tokio::time::sleep(start_in.unwrap_or(Duration::MAX)), if start_in.is_some() => {}
             _ = tokio::time::sleep(build_in.unwrap_or(Duration::MAX)), if build_in.is_some() => {
                 if let Some((round, _)) = r.build.take() {
                     r.build_now(round);

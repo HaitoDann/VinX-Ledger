@@ -187,7 +187,47 @@ async fn devnet_produces_blocks_and_processes_payments() {
     assert_eq!(status, StatusCode::OK);
     assert_eq!(block["height"], json!(1));
 
-    // 4. Arrêt puis reprise : la chaîne repart de là où elle s'était arrêtée.
+    // 4. Outils d'exploitation : gouvernance, derniers blocs, métriques, tableau de bord.
+    let (status, gov) = call(&shared, "GET", "/governance", None).await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(gov["admin"]["nonce"], json!(1));
+    assert_eq!(gov["admin"]["signers"].as_array().unwrap().len(), 3);
+    assert_eq!(gov["validators"]["active"].as_array().unwrap().len(), 1);
+    let (_, recent) = call(&shared, "GET", "/blocks", None).await;
+    let recent = recent["blocks"].as_array().unwrap();
+    assert!(!recent.is_empty() && recent.len() <= 20);
+    assert!(recent[0]["height"].as_u64() > recent.last().unwrap()["height"].as_u64());
+    let request = Request::builder()
+        .uri("/metrics")
+        .body(Body::empty())
+        .unwrap();
+    let response = api::router(shared.clone()).oneshot(request).await.unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+    let text = String::from_utf8(
+        response
+            .into_body()
+            .collect()
+            .await
+            .unwrap()
+            .to_bytes()
+            .to_vec(),
+    )
+    .unwrap();
+    for metric in [
+        "vinx_height ",
+        "vinx_blocks_first_round_total ",
+        "vinx_peers ",
+        "vinx_evidence_total 0",
+    ] {
+        assert!(text.contains(metric), "métrique absente : {metric}");
+    }
+    let request = Request::builder().uri("/").body(Body::empty()).unwrap();
+    let response = api::router(shared.clone()).oneshot(request).await.unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+    let page = response.into_body().collect().await.unwrap().to_bytes();
+    assert!(String::from_utf8_lossy(&page).contains("VinX Ledger"));
+
+    // 5. Arrêt puis reprise : la chaîne repart de là où elle s'était arrêtée.
     stop.send(true).unwrap();
     task.await.unwrap().unwrap();
     let height = node::lock(&shared).chain.state.height;
