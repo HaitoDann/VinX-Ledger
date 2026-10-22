@@ -27,7 +27,7 @@ pub struct PendingUpgrade {
 }
 
 /// État complet après le bloc `height`.
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq, BorshSerialize, BorshDeserialize)]
 pub struct State {
     pub chain_id: String,
     pub protocol_version: u32,
