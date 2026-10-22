@@ -123,6 +123,53 @@ fn reserve_rules() {
 }
 
 #[test]
+fn account_can_be_emptied_and_cannot_be_replayed() {
+    let mut net = Net::new();
+    let alice = net.funded(10 * VINX);
+    let bob = addr(&KeyPair::generate());
+    let empty_all = transfer(&alice, 1, bob, 10 * VINX - FEE, true);
+    let mut s = net.state.clone();
+    s.apply_tx(&empty_all).unwrap();
+    assert_eq!(s.balance(&addr(&alice)), 0);
+    assert_eq!(s.accounts[&addr(&alice)].nonce, 1);
+    // Refinancé, même sous la réserve : ses anciennes transactions restent mortes.
+    let carol = net.funded(10 * VINX);
+    s.accounts
+        .insert(addr(&carol), net.state.accounts[&addr(&carol)].clone());
+    let refund = transfer(&carol, 1, addr(&alice), VINX / 100, true);
+    s.apply_tx(&refund).unwrap();
+    assert_eq!(
+        s.apply_tx(&transfer(&alice, 1, bob, 1, false)),
+        Err(TxError::BadNonce)
+    );
+    // Et il peut encore tout envoyer.
+    s.apply_tx(&transfer(&alice, 2, bob, VINX / 100 - FEE, false))
+        .unwrap();
+    assert_eq!(s.balance(&addr(&alice)), 0);
+}
+
+#[test]
+fn raising_the_reserve_never_locks_funds() {
+    let mut net = Net::new();
+    let alice = net.funded(VINX);
+    let tx = net.admin(AdminAction::SetParam {
+        param: ParamId::MinReserve,
+        value: 5 * VINX,
+    });
+    net.block(T0, &[tx], &[]).unwrap();
+    let bob = net.funded(10 * VINX);
+    let mut s = net.state.clone();
+    // Envoyer une partie laisserait Alice entre 0 et la réserve : refusé.
+    assert_eq!(
+        s.apply_tx(&transfer(&alice, 1, addr(&bob), VINX / 2, true)),
+        Err(TxError::BelowReserve)
+    );
+    // Tout envoyer est autorisé.
+    s.apply_tx(&transfer(&alice, 1, addr(&bob), VINX - FEE, true))
+        .unwrap();
+}
+
+#[test]
 fn unknown_sender_and_insufficient_balance() {
     let mut net = Net::new();
     let ghost = KeyPair::generate();
