@@ -78,7 +78,12 @@ fn start_delayed(
     let identity = network::load_or_create_identity(&me.dir).unwrap();
     let (out_tx, out_rx) = mpsc::unbounded_channel();
     let (in_tx, in_rx) = mpsc::unbounded_channel();
-    node::lock(&shared).outbound = Some(out_tx);
+    let (req_tx, req_rx) = mpsc::unbounded_channel();
+    {
+        let mut s = node::lock(&shared);
+        s.outbound = Some(out_tx);
+        s.requests = Some(req_tx);
+    }
     let (stop, stop_rx) = watch::channel(false);
     let peers: Vec<Multiaddr> = others
         .iter()
@@ -97,7 +102,7 @@ fn start_delayed(
     let stop2 = stop_rx.clone();
     let net = tokio::spawn(async move {
         tokio::time::sleep(Duration::from_millis(delay_ms)).await;
-        network::run(identity, config, shared2, out_rx, in_tx, stop2).await
+        network::run(identity, config, shared2, out_rx, req_rx, in_tx, stop2).await
     });
     let consensus = tokio::spawn(node::run(shared.clone(), key, in_rx, stop_rx));
     Running {

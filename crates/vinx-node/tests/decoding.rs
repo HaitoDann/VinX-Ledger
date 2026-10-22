@@ -13,12 +13,14 @@
 use borsh::{BorshDeserialize, BorshSerialize};
 use proptest::prelude::*;
 use vinx_consensus::{Proposal, SignedVote};
+use vinx_core::Account;
 use vinx_core::{
     AdminAction, AdminTransaction, Block, BlockHeader, CommitCertificate, SignedAdminTransaction,
     SignedTransaction, Transaction, TxBody, Vote, VoteKind,
 };
 use vinx_crypto::{Address, KeyPair};
 use vinx_node::network::{NetMessage, SyncRequest, SyncResponse};
+use vinx_node::snapshot::SnapshotInfo;
 use vinx_state::Genesis;
 
 /// Décode `bytes` ; en cas de succès, l'encodage doit redonner exactement `bytes`.
@@ -115,8 +117,22 @@ fn samples() -> Vec<Vec<u8>> {
         borsh::to_vec(&NetMessage::Proposal(proposal)).unwrap(),
         borsh::to_vec(&NetMessage::Vote(SignedVote::new(vote, 0, &kp))).unwrap(),
         borsh::to_vec(&NetMessage::Tx(tx)).unwrap(),
-        borsh::to_vec(&SyncResponse {
-            blocks: vec![(block, cert)],
+        borsh::to_vec(&SyncResponse::Blocks {
+            lowest: 1,
+            blocks: vec![(block.clone(), cert.clone())],
+        })
+        .unwrap(),
+        borsh::to_vec(&SyncResponse::SnapshotInfo(Some(Box::new(SnapshotInfo {
+            block,
+            cert,
+            globals: vec![1, 2, 3],
+            accounts: 2,
+        }))))
+        .unwrap(),
+        borsh::to_vec(&SyncResponse::SnapshotChunk {
+            height: 3,
+            chunk: Some(vec![(Address::treasury(), Account::default())]),
+            done: true,
         })
         .unwrap(),
     ]
@@ -174,7 +190,7 @@ proptest! {
 
     #[test]
     fn mutated_messages_never_crash(
-        which in 0usize..8,
+        which in 0usize..10,
         mutations in prop::collection::vec(mutation(), 1..6),
     ) {
         let bytes = mutate(samples()[which].clone(), &mutations);

@@ -67,6 +67,12 @@ enum Command {
         /// Identifiant de pair supplémentaire autorisé à se connecter (répétable).
         #[arg(long = "allow")]
         allowed: Vec<PeerId>,
+        /// Conserver tous les blocs (nœud archive) au lieu de les élaguer.
+        #[arg(long)]
+        archive: bool,
+        /// Durée de conservation des blocs, en heures (ignorée avec --archive).
+        #[arg(long, default_value_t = 24)]
+        block_retention_hours: u64,
     },
 }
 
@@ -158,6 +164,8 @@ async fn main() -> Result<()> {
             listen,
             peers,
             allowed,
+            archive,
+            block_retention_hours,
         } => {
             let genesis = GenesisFile::load(genesis)?;
             let keypair = match key {
@@ -168,7 +176,23 @@ async fn main() -> Result<()> {
             let identity = network::load_or_create_identity(data_dir)?;
             let (out_tx, out_rx) = tokio::sync::mpsc::unbounded_channel();
             let (in_tx, in_rx) = tokio::sync::mpsc::unbounded_channel();
-            node::lock(&shared).outbound = Some(out_tx);
+            let (req_tx, req_rx) = tokio::sync::mpsc::unbounded_channel();
+            {
+                let mut s = node::lock(&shared);
+                s.outbound = Some(out_tx);
+                s.requests = Some(req_tx);
+                s.retention_ms =
+                    (!*archive).then(|| block_retention_hours.saturating_mul(3_600_000));
+                info!(
+                    archive = *archive,
+                    "conservation des blocs : {}",
+                    if *archive {
+                        "tous".to_owned()
+                    } else {
+                        format!("{block_retention_hours} h")
+                    }
+                );
+            }
             {
                 let s = node::lock(&shared);
                 info!(
@@ -200,6 +224,7 @@ async fn main() -> Result<()> {
                 },
                 shared.clone(),
                 out_rx,
+                req_rx,
                 in_tx,
                 stop_rx.clone(),
             ));

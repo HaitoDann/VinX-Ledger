@@ -70,6 +70,23 @@ impl Accounts {
         self.map.values()
     }
 
+    /// Au plus `max` comptes situés après `after` (exclu), dans l'ordre des adresses.
+    /// Sert à transmettre l'état par morceaux.
+    pub fn chunk_after(&self, after: Option<&Address>, max: usize) -> Vec<(Address, Account)> {
+        use std::ops::Bound::{Excluded, Unbounded};
+        let lower = after.map_or(Unbounded, |a| Excluded(*a));
+        self.map
+            .range((lower, Unbounded))
+            .take(max)
+            .map(|(a, acc)| (*a, acc.clone()))
+            .collect()
+    }
+
+    /// Marque tous les comptes comme modifiés, pour les écrire tous sur disque.
+    pub fn mark_all_dirty(&mut self) {
+        self.dirty = self.map.keys().copied().collect();
+    }
+
     /// Écrit un compte : invalide son chemin dans l'arbre et le note comme modifié.
     pub fn insert(&mut self, address: Address, account: Account) {
         self.tree

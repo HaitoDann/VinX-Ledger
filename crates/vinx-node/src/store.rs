@@ -131,6 +131,75 @@ impl Store {
         Ok(())
     }
 
+    /// Remplace tout le contenu par un instantané vérifié : l'état complet, son
+    /// bloc et son certificat. Les blocs antérieurs éventuels sont effacés.
+    pub fn install_snapshot(
+        &self,
+        block: &Block,
+        cert: &CommitCertificate,
+        state: &mut State,
+    ) -> Result<()> {
+        let height = block.header.height;
+        state.accounts.mark_all_dirty();
+        let tx = self.db.begin_write()?;
+        for table in [BLOCKS, CERTS] {
+            tx.delete_table(table)?;
+        }
+        tx.delete_table(ACCOUNTS)?;
+        tx.open_table(BLOCKS)?
+            .insert(height, encode(block).as_slice())?;
+        tx.open_table(CERTS)?
+            .insert(height, encode(cert).as_slice())?;
+        {
+            let mut table = tx.open_table(ACCOUNTS)?;
+            for (address, account) in state.accounts.take_dirty() {
+                table.insert(address.as_bytes(), encode(&account).as_slice())?;
+            }
+        }
+        tx.open_table(META)?
+            .insert(GLOBALS, state.globals_bytes().as_slice())?;
+        tx.commit()?;
+        Ok(())
+    }
+
+    /// Plus petite hauteur dont le bloc est encore conservé.
+    pub fn lowest_height(&self) -> Result<Option<u64>> {
+        let tx = self.db.begin_read()?;
+        let table = tx.open_table(BLOCKS)?;
+        let first = table.first()?;
+        Ok(first.map(|(h, _)| h.value()))
+    }
+
+    /// Supprime les blocs (et certificats) horodatés avant `cutoff_ms`, en gardant
+    /// toujours le plus récent. Renvoie le nombre de blocs supprimés.
+    pub fn prune(&self, cutoff_ms: u64) -> Result<u64> {
+        let tx = self.db.begin_write()?;
+        let mut removed = 0u64;
+        {
+            let mut blocks = tx.open_table(BLOCKS)?;
+            let mut certs = tx.open_table(CERTS)?;
+            let newest = blocks.last()?.map(|(h, _)| h.value());
+            loop {
+                let first = blocks
+                    .first()?
+                    .map(|(h, b)| (h.value(), b.value().to_vec()));
+                let Some((height, bytes)) = first else { break };
+                if Some(height) == newest {
+                    break;
+                }
+                let block: Block = decode(&bytes, "bloc")?;
+                if block.header.timestamp >= cutoff_ms {
+                    break;
+                }
+                blocks.remove(height)?;
+                certs.remove(height)?;
+                removed = removed.saturating_add(1);
+            }
+        }
+        tx.commit()?;
+        Ok(removed)
+    }
+
     pub fn block(&self, height: u64) -> Result<Option<Block>> {
         let tx = self.db.begin_read()?;
         let table = tx.open_table(BLOCKS)?;
@@ -162,6 +231,7 @@ impl Store {
 }
 
 #[cfg(test)]
+#[allow(clippy::arithmetic_side_effects)] // code de test
 mod tests {
     use super::*;
 

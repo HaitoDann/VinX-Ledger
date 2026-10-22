@@ -289,13 +289,16 @@ hauteur `H + 2`. `validators_hash` du bloc `H + 1` reflète déjà le nouvel ens
 
 `validators_hash = H("vinx/validators" ‖ borsh(liste ordonnée des clés))`.
 
-## 8. Élagage
+## 8. Élagage et synchronisation
 
-- Un nœud conserve **l'état complet** et les blocs des `block_retention` dernières
-  secondes ; les blocs plus anciens sont supprimés.
-- Mode **archive** optionnel : aucun bloc n'est supprimé.
-- Un nouveau nœud se synchronise depuis un instantané d'état dont la racine est
-  vérifiée contre un en-tête finalisé, puis rejoue les blocs suivants.
+- Un nœud conserve **l'état complet** et les blocs des `block_retention`
+  dernières heures (24 h par défaut) ; les plus anciens sont supprimés. Le bloc
+  le plus récent est toujours conservé.
+- Mode **archive** : aucun bloc n'est supprimé. Un nœud archive ne se
+  synchronise jamais par instantané : il rejoue la chaîne depuis la genèse
+  auprès d'un pair qui possède encore les blocs.
+- Un nœud qui a manqué peu de blocs les récupère un par un (§8.1, rattrapage).
+  Si ses pairs les ont élagués, il se synchronise par l'état (§8.3).
 
 ### 8.1 Réseau
 
@@ -322,6 +325,24 @@ hauteur `H + 2`. `validators_hash` du bloc `H + 1` reflète déjà le nouvel ens
   60 secondes ; au plus 4 requêtes de rattrapage par seconde et par pair ; une
   réponse de rattrapage vise 8 Mio au plus. Un message n'est relayé qu'après
   avoir été décodé avec succès.
+
+### 8.3 Synchronisation par l'état
+
+- Chaque nœud prépare un **instantané** de son état toutes les 100 hauteurs,
+  et plus souvent si l'élagage rendait l'instantané courant impossible à
+  prolonger par des blocs conservés.
+- Le protocole `/vinx/sync/2` sert : les blocs à partir d'une hauteur (avec la
+  plus petite hauteur encore conservée), la description de l'instantané (bloc,
+  certificat, état hors comptes, nombre de comptes) et ses comptes par morceaux
+  de 10 000, dans l'ordre des adresses.
+- Le nœud qui télécharge vérifie, **avant** d'adopter l'état :
+  1. que le certificat de commit du bloc est valide pour les validateurs de la genèse ;
+  2. que la racine de l'état reconstitué est exactement le `state_root` du bloc ;
+  3. que l'ensemble de validateurs de l'état redonne le `validators_hash` du bloc ;
+  4. l'invariant de supply.
+- Si les validateurs ont changé depuis la genèse, le point 1 échoue : le nœud
+  doit se synchroniser bloc par bloc auprès d'un nœud archive, ce qui vérifie
+  chaque changement de validateurs.
 
 ### 8.2 Mempool (politique locale)
 
@@ -399,7 +420,7 @@ Paramètres non modifiables par `SetParam` :
 | `max_clock_drift` | 15 000 ms | |
 | `min_upgrade_delay` | 17 280 blocs | ≈ 24 h à 5 s par bloc |
 | `escrow.period` | 2 629 800 s | |
-| `block_retention` | 30 jours | réglage local du nœud, hors consensus |
+| `block_retention` | 24 heures | réglage local du nœud, hors consensus ; illimité en mode archive |
 
 ## 12. Genèse
 

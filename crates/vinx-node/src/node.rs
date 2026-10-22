@@ -6,19 +6,24 @@
 
 use crate::chain::Chain;
 use crate::mempool::Mempool;
-use crate::network::{NetEvent, NetMessage};
+use crate::network::{NetEvent, NetMessage, SyncRequest, SyncResponse};
+use crate::snapshot::{self, SNAPSHOT_INTERVAL, Snapshot, SnapshotInfo};
 use crate::store::Store;
 use anyhow::{Context, Result, bail};
+use libp2p::PeerId;
 use std::collections::{BTreeSet, VecDeque};
 use std::path::Path;
 use std::sync::{Arc, Mutex, MutexGuard};
+use std::time::Instant;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use tokio::sync::{mpsc, watch};
-use tracing::{info, warn};
+use tracing::{debug, info, warn};
 use vinx_consensus::guard::Step;
 use vinx_consensus::{Action, BlockValidator, Engine, SignGuard, SignedVote, Timeout};
+use vinx_core::Account;
 use vinx_core::{Block, CommitCertificate, SignedAdminTransaction, SignedTransaction};
 use vinx_crypto::KeyPair;
+use vinx_crypto::{Address, PublicKey};
 use vinx_state::Genesis;
 
 pub struct Shared {
@@ -28,13 +33,49 @@ pub struct Shared {
     pub guard: SignGuard,
     /// Diffusion sur le réseau, si le nœud est connecté.
     pub outbound: Option<mpsc::UnboundedSender<NetMessage>>,
+    /// Requêtes de rattrapage adressées à un pair précis.
+    pub requests: Option<mpsc::UnboundedSender<(PeerId, SyncRequest)>>,
+    /// Instantané d'état servi aux pairs.
+    pub snapshot: Option<Snapshot>,
+    /// Conservation des blocs : `None` en mode archive (tout garder).
+    pub retention_ms: Option<u64>,
+    /// Validateurs de la genèse, qui authentifient les instantanés (SPEC §8.3).
+    pub genesis_validators: Vec<PublicKey>,
 }
+
+/// Conservation des blocs par défaut : 24 heures.
+pub const DEFAULT_RETENTION_MS: u64 = 24 * 60 * 60 * 1000;
 
 impl Shared {
     pub fn broadcast(&self, msg: NetMessage) {
         if let Some(out) = &self.outbound {
             let _ = out.send(msg);
         }
+    }
+
+    pub fn request(&self, peer: PeerId, request: SyncRequest) {
+        if let Some(out) = &self.requests {
+            let _ = out.send((peer, request));
+        }
+    }
+
+    /// Prépare l'instantané servi aux pairs à partir du dernier bloc finalisé.
+    fn refresh_snapshot(&mut self) -> Result<()> {
+        let height = self.chain.state.height;
+        if height == 0 {
+            return Ok(());
+        }
+        let (Some(block), Some(cert)) =
+            (self.store.block(height)?, self.store.certificate(height)?)
+        else {
+            return Ok(());
+        };
+        self.snapshot = Some(Snapshot {
+            block,
+            cert,
+            state: self.chain.state.clone(),
+        });
+        Ok(())
     }
 }
 
@@ -56,6 +97,7 @@ pub fn now_ms() -> u64 {
 /// Ouvre la base de données et reprend la chaîne là où elle s'était arrêtée.
 pub fn open(genesis: Genesis, data_dir: &Path) -> Result<SharedRef> {
     let genesis_time_ms = genesis.genesis_time.saturating_mul(1000);
+    let genesis_validators = genesis.validators.clone();
     let initial = genesis
         .into_state()
         .map_err(|e| anyhow::anyhow!("genèse invalide : {e}"))?;
@@ -75,7 +117,7 @@ pub fn open(genesis: Genesis, data_dir: &Path) -> Result<SharedRef> {
     };
     let guard = store.load_guard()?;
     let mempool = Mempool::new(&state);
-    Ok(Arc::new(Mutex::new(Shared {
+    let shared = Arc::new(Mutex::new(Shared {
         chain: Chain {
             state,
             last,
@@ -86,7 +128,13 @@ pub fn open(genesis: Genesis, data_dir: &Path) -> Result<SharedRef> {
         store,
         guard,
         outbound: None,
-    })))
+        requests: None,
+        snapshot: None,
+        retention_ms: Some(DEFAULT_RETENTION_MS),
+        genesis_validators,
+    }));
+    lock(&shared).refresh_snapshot()?;
+    Ok(shared)
 }
 
 struct Checker<'a>(&'a Chain);
@@ -128,6 +176,20 @@ fn commit(
     s.mempool.reset(&s.chain.state, &included);
     s.guard.prune_below(block.header.height.saturating_add(1));
     s.store.save_guard(&s.guard)?;
+    if let Some(retention) = s.retention_ms {
+        s.store
+            .prune(block.header.timestamp.saturating_sub(retention))?;
+    }
+    // Un instantané doit rester suivi de blocs conservés : sinon, un nœud qui
+    // l'installe ne pourrait pas rattraper les blocs suivants.
+    let lowest = s.store.lowest_height()?;
+    let unusable = s
+        .snapshot
+        .as_ref()
+        .is_none_or(|snap| lowest.is_some_and(|l| snap.block.header.height.saturating_add(1) < l));
+    if unusable || block.header.height.checked_rem(SNAPSHOT_INTERVAL) == Some(0) {
+        s.refresh_snapshot()?;
+    }
     info!(
         height = block.header.height,
         txs = included.len(),
@@ -164,7 +226,19 @@ struct Runner {
     /// Round et instant (ms) auxquels construire notre proposition.
     build: Option<(u32, u64)>,
     timeouts: mpsc::UnboundedSender<Timeout>,
+    download: Option<Download>,
 }
+
+/// Téléchargement d'un instantané en cours.
+struct Download {
+    peer: PeerId,
+    info: SnapshotInfo,
+    accounts: Vec<(Address, Account)>,
+    last_progress: Instant,
+}
+
+/// Délai sans réponse après lequel un téléchargement d'instantané est abandonné.
+const DOWNLOAD_TIMEOUT: Duration = Duration::from_secs(30);
 
 fn remember(own: &mut VecDeque<NetMessage>, msg: NetMessage) {
     if own.len() >= MAX_OWN {
@@ -344,29 +418,163 @@ impl Runner {
                     self.queue.extend(actions);
                 }
             },
-            NetEvent::Blocks(mut blocks) => {
-                blocks.sort_by_key(|(b, _)| b.header.height);
-                let mut advanced = false;
-                {
-                    let mut guard = lock(&self.shared);
-                    for (block, cert) in &blocks {
-                        if block.header.height < guard.chain.next_height() {
-                            continue;
-                        }
-                        match apply_synced(&mut guard, block, cert) {
-                            Ok(()) => advanced = true,
-                            Err(e) => {
-                                warn!("rattrapage interrompu : {e}");
-                                break;
-                            }
-                        }
-                    }
+            NetEvent::Sync(peer, response) => self.on_sync(peer, *response),
+        }
+    }
+
+    fn on_sync(&mut self, peer: PeerId, response: SyncResponse) {
+        match response {
+            SyncResponse::Blocks { lowest, blocks } => self.on_blocks(peer, lowest, blocks),
+            SyncResponse::SnapshotInfo(Some(info)) => self.on_snapshot_info(peer, *info),
+            SyncResponse::SnapshotInfo(None) => {}
+            SyncResponse::SnapshotChunk {
+                height,
+                chunk,
+                done,
+            } => {
+                self.on_snapshot_chunk(peer, height, chunk, done);
+            }
+        }
+    }
+
+    fn on_blocks(
+        &mut self,
+        peer: PeerId,
+        lowest: u64,
+        mut blocks: Vec<(Block, CommitCertificate)>,
+    ) {
+        let next = lock(&self.shared).chain.next_height();
+        // Les blocs qui nous manquent ont été élagués chez ce pair : on passe
+        // par un instantané d'état.
+        if blocks.is_empty() && lowest > next {
+            // Un nœud archive doit garder tout l'historique : il attend un pair
+            // qui possède encore les blocs, au lieu d'installer un instantané.
+            if lock(&self.shared).retention_ms.is_none() {
+                debug!(%peer, next, lowest, "blocs élagués chez ce pair : un nœud archive attend un autre pair");
+                return;
+            }
+            let stalled = self
+                .download
+                .as_ref()
+                .is_none_or(|d| d.last_progress.elapsed() > DOWNLOAD_TIMEOUT);
+            if stalled {
+                info!(%peer, next, lowest, "blocs élagués chez le pair : synchronisation par l'état");
+                self.download = None;
+                lock(&self.shared).request(peer, SyncRequest::SnapshotInfo);
+            }
+            return;
+        }
+        blocks.sort_by_key(|(b, _)| b.header.height);
+        let mut advanced = false;
+        {
+            let mut guard = lock(&self.shared);
+            for (block, cert) in &blocks {
+                if block.header.height < guard.chain.next_height() {
+                    continue;
                 }
-                if advanced {
-                    self.new_height();
+                match apply_synced(&mut guard, block, cert) {
+                    Ok(()) => advanced = true,
+                    Err(e) => {
+                        warn!("rattrapage interrompu : {e}");
+                        break;
+                    }
                 }
             }
         }
+        if advanced {
+            self.new_height();
+        }
+    }
+
+    fn on_snapshot_info(&mut self, peer: PeerId, info: SnapshotInfo) {
+        if self.download.is_some() {
+            return;
+        }
+        let s = lock(&self.shared);
+        if info.block.header.height < s.chain.next_height() {
+            return;
+        }
+        if let Err(e) = snapshot::verify_info(&info, &s.chain.state.chain_id, &s.genesis_validators)
+        {
+            warn!(%peer, "instantané refusé : {e}");
+            return;
+        }
+        let height = info.block.header.height;
+        s.request(
+            peer,
+            SyncRequest::SnapshotChunk {
+                height,
+                after: None,
+            },
+        );
+        drop(s);
+        info!(%peer, height, accounts = info.accounts, "téléchargement de l'instantané");
+        self.download = Some(Download {
+            peer,
+            info,
+            accounts: Vec::new(),
+            last_progress: Instant::now(),
+        });
+    }
+
+    fn on_snapshot_chunk(
+        &mut self,
+        peer: PeerId,
+        height: u64,
+        chunk: Option<Vec<(Address, Account)>>,
+        done: bool,
+    ) {
+        let Some(d) = self.download.as_mut() else {
+            return;
+        };
+        if d.peer != peer || d.info.block.header.height != height {
+            return;
+        }
+        let Some(chunk) = chunk else {
+            warn!(%peer, "le pair ne sert plus cet instantané");
+            self.download = None;
+            return;
+        };
+        d.accounts.extend(chunk);
+        d.last_progress = Instant::now();
+        let over_limit = u64::try_from(d.accounts.len()).unwrap_or(u64::MAX) > d.info.accounts;
+        if over_limit {
+            warn!(%peer, "instantané plus grand qu'annoncé : abandon");
+            self.download = None;
+            return;
+        }
+        if !done {
+            let after = d.accounts.last().map(|(a, _)| *a);
+            lock(&self.shared).request(peer, SyncRequest::SnapshotChunk { height, after });
+            return;
+        }
+        let Some(d) = self.download.take() else {
+            return;
+        };
+        match self.install(d) {
+            Ok(()) => self.new_height(),
+            Err(e) => warn!("instantané refusé : {e}"),
+        }
+    }
+
+    /// Vérifie l'état téléchargé et l'adopte.
+    fn install(&mut self, d: Download) -> Result<()> {
+        let mut state = snapshot::assemble(&d.info, d.accounts)?;
+        let mut guard = lock(&self.shared);
+        let s = &mut *guard;
+        if d.info.block.header.height < s.chain.next_height() {
+            return Ok(());
+        }
+        s.store
+            .install_snapshot(&d.info.block, &d.info.cert, &mut state)?;
+        s.chain.advance(&d.info.block, state);
+        s.mempool.reset(&s.chain.state, &BTreeSet::new());
+        s.refresh_snapshot()?;
+        info!(
+            height = d.info.block.header.height,
+            "état installé depuis un instantané"
+        );
+        Ok(())
     }
 }
 
@@ -400,6 +608,7 @@ pub async fn run(
         future: Vec::new(),
         own: VecDeque::new(),
         build: None,
+        download: None,
         timeouts: timeouts_tx,
     };
     r.new_height();
