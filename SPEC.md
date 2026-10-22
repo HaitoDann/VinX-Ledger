@@ -62,8 +62,13 @@ Account {
 
 - Un compte est créé en recevant un premier transfert.
 - **Réserve minimale** : après toute transaction, un compte ordinaire doit avoir
-  `balance ≥ min_reserve` (§11). Un transfert qui crée un compte doit donc
-  apporter au moins `min_reserve`. La trésorerie n'est pas soumise à la réserve.
+  `balance ≥ min_reserve` (§11) **ou** `balance = 0`. Un transfert qui crée un
+  compte doit donc apporter au moins `min_reserve`. La trésorerie n'est pas
+  soumise à la réserve.
+- Un compte vidé n'est **pas supprimé** : il garde son nonce et sa clé, pour
+  qu'aucune de ses anciennes transactions ne puisse être rejouée. Il peut de
+  nouveau recevoir des fonds, quel que soit le montant. Ainsi, relever
+  `min_reserve` ne bloque jamais les fonds d'un compte existant.
 - La clé publique est stockée lors de la première transaction signée du compte.
 
 ## 4. État global

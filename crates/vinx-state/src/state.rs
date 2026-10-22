@@ -283,7 +283,11 @@ impl State {
                 changes.get(&self.accounts, tx.sender).key = Some(new_key.clone());
             }
         }
-        if changes.get(&self.accounts, tx.sender).balance < self.params.min_reserve {
+        // Un compte peut être vidé entièrement. Il est conservé avec son nonce :
+        // le supprimer permettrait de rejouer ses anciennes transactions s'il
+        // était recréé.
+        let remaining = changes.get(&self.accounts, tx.sender).balance;
+        if remaining != 0 && remaining < self.params.min_reserve {
             return Err(TxError::BelowReserve);
         }
         changes.commit(&mut self.accounts);
