@@ -2,21 +2,31 @@
 //!
 //! Un bloc, son certificat et l'état qui en résulte sont écrits dans une seule
 //! transaction : après un arrêt brutal, le nœud repart d'un état cohérent.
+//!
+//! Seuls les comptes modifiés par le bloc sont écrits, avec le reste de l'état
+//! (escrow, validateurs, paramètres), qui est petit.
 
 use anyhow::{Context, Result, bail};
 use borsh::{BorshDeserialize, BorshSerialize};
 use redb::{Database, ReadableTable, ReadableTableMetadata, TableDefinition};
 use std::path::Path;
 use vinx_consensus::SignGuard;
-use vinx_core::{Block, CommitCertificate, encode};
+use vinx_core::{Account, Block, CommitCertificate, encode};
+use vinx_crypto::Address;
 use vinx_crypto::Hash;
 use vinx_state::State;
 
 const BLOCKS: TableDefinition<u64, &[u8]> = TableDefinition::new("blocks");
 const CERTS: TableDefinition<u64, &[u8]> = TableDefinition::new("certificates");
 const META: TableDefinition<&str, &[u8]> = TableDefinition::new("meta");
+const ACCOUNTS: TableDefinition<&[u8; 20], &[u8]> = TableDefinition::new("accounts");
 
-const STATE: &str = "state";
+/// Version du format de la base. Le format 1 stockait l'état d'un seul tenant.
+const FORMAT: &str = "format";
+const FORMAT_VERSION: u8 = 2;
+const GLOBALS: &str = "globals";
+
+const LEGACY_STATE: &str = "state";
 const GUARD: &str = "guard";
 const GENESIS_ROOT: &str = "genesis_root";
 
@@ -37,7 +47,15 @@ impl Store {
         {
             tx.open_table(BLOCKS)?;
             tx.open_table(CERTS)?;
+            tx.open_table(ACCOUNTS)?;
             let mut meta = tx.open_table(META)?;
+            if meta.get(LEGACY_STATE)?.is_some() {
+                bail!(
+                    "base de données à l'ancien format : supprimez le dossier de données \
+                     pour resynchroniser le nœud"
+                );
+            }
+            meta.insert(FORMAT, [FORMAT_VERSION].as_slice())?;
             let existing = meta.get(GENESIS_ROOT)?.map(|v| v.value().to_vec());
             match existing {
                 Some(root) if root != genesis_root => {
@@ -69,15 +87,31 @@ impl Store {
 
     /// Dernier état enregistré, ou `None` si la chaîne n'a jamais démarré.
     pub fn load_state(&self) -> Result<Option<State>> {
-        self.meta(STATE)
+        let tx = self.db.begin_read()?;
+        let meta = tx.open_table(META)?;
+        let Some(globals) = meta.get(GLOBALS)? else {
+            return Ok(None);
+        };
+        let mut accounts = Vec::new();
+        for entry in tx.open_table(ACCOUNTS)?.iter()? {
+            let (address, account) = entry?;
+            accounts.push((
+                Address::from_bytes(*address.value()),
+                decode::<Account>(account.value(), "compte")?,
+            ));
+        }
+        let state = State::from_parts(globals.value(), accounts.into_iter().collect())
+            .context("état corrompu sur le disque")?;
+        Ok(Some(state))
     }
 
     /// Enregistre un bloc finalisé, son certificat et le nouvel état, atomiquement.
+    /// Seuls les comptes modifiés depuis la dernière écriture sont écrits.
     pub fn commit_block(
         &self,
         block: &Block,
         cert: &CommitCertificate,
-        state: &State,
+        state: &mut State,
     ) -> Result<()> {
         let height = block.header.height;
         let tx = self.db.begin_write()?;
@@ -85,8 +119,14 @@ impl Store {
             .insert(height, encode(block).as_slice())?;
         tx.open_table(CERTS)?
             .insert(height, encode(cert).as_slice())?;
+        {
+            let mut table = tx.open_table(ACCOUNTS)?;
+            for (address, account) in state.accounts.take_dirty() {
+                table.insert(address.as_bytes(), encode(&account).as_slice())?;
+            }
+        }
         tx.open_table(META)?
-            .insert(STATE, encode(state).as_slice())?;
+            .insert(GLOBALS, state.globals_bytes().as_slice())?;
         tx.commit()?;
         Ok(())
     }
@@ -132,6 +172,69 @@ mod tests {
         drop(Store::open(&path, [1; 32]).unwrap());
         assert!(Store::open(&path, [2; 32]).is_err());
         assert!(Store::open(&path, [1; 32]).is_ok());
+    }
+
+    #[test]
+    fn incremental_state_reloads_identically() {
+        use vinx_core::{Account, BlockHeader};
+        use vinx_crypto::KeyPair;
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("db");
+        let k = || KeyPair::generate().public_key();
+        let mut state = vinx_state::Genesis::standard("vinx-test", 1, [k(), k(), k()], vec![k()])
+            .unwrap()
+            .into_state()
+            .unwrap();
+        let store = Store::open(&path, [1; 32]).unwrap();
+        assert!(store.load_state().unwrap().is_none());
+        let block = |height| Block {
+            header: BlockHeader {
+                protocol_version: 1,
+                chain_id: "vinx-test".into(),
+                height,
+                timestamp: height,
+                prev_hash: [0; 32],
+                tx_root: [0; 32],
+                state_root: [0; 32],
+                validators_hash: [0; 32],
+                proposer: 0,
+            },
+            admin_txs: vec![],
+            txs: vec![],
+        };
+        let cert = CommitCertificate {
+            height: 1,
+            round: 0,
+            block_hash: [0; 32],
+            signatures: vec![],
+        };
+        // Bloc 1 : la trésorerie (compte de genèse) est écrite.
+        state.height = 1;
+        store.commit_block(&block(1), &cert, &mut state).unwrap();
+        // Bloc 2 : un seul compte modifié.
+        let alice = vinx_crypto::Address::from_bytes([9; 20]);
+        let mut treasury = state.accounts[&vinx_crypto::Address::treasury()].clone();
+        treasury.balance -= 5;
+        state.set_account_for_tests(vinx_crypto::Address::treasury(), treasury);
+        state.set_account_for_tests(
+            alice,
+            Account {
+                balance: 5,
+                ..Account::default()
+            },
+        );
+        state.height = 2;
+        store.commit_block(&block(2), &cert, &mut state).unwrap();
+        drop(store);
+
+        let reloaded = Store::open(&path, [1; 32])
+            .unwrap()
+            .load_state()
+            .unwrap()
+            .unwrap();
+        assert_eq!(reloaded, state);
+        assert_eq!(reloaded.state_root(), state.state_root());
+        assert!(reloaded.check_invariant().is_ok());
     }
 
     #[test]

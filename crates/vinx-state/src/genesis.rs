@@ -3,7 +3,6 @@
 use crate::escrow::Escrow;
 use crate::state::{AdminSet, State};
 use crate::validators::ValidatorSet;
-use std::collections::BTreeMap;
 use thiserror::Error;
 use vinx_core::{ADMIN_SIGNERS, Account, Amount, Params, TOTAL_SUPPLY, UNITS_PER_VINX};
 use vinx_crypto::{Address, PublicKey};
@@ -95,7 +94,7 @@ impl Genesis {
             chain_id: self.chain_id,
             protocol_version: self.protocol_version,
             height: 0,
-            accounts: BTreeMap::from([(Address::treasury(), treasury)]),
+            accounts: [(Address::treasury(), treasury)].into_iter().collect(),
             escrow: self.escrow,
             admin: AdminSet {
                 signers: self.admin,
