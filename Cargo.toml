@@ -4,7 +4,9 @@ members = [
     "crates/vinx-core",
     "crates/vinx-state",
     "crates/vinx-consensus",
+    "crates/vinx-keystore",
     "crates/vinx-node",
+    "crates/vinx-wallet",
 ]
 resolver = "3"
 
@@ -20,6 +22,9 @@ vinx-crypto = { path = "crates/vinx-crypto" }
 vinx-core = { path = "crates/vinx-core" }
 vinx-state = { path = "crates/vinx-state" }
 vinx-consensus = { path = "crates/vinx-consensus" }
+vinx-keystore = { path = "crates/vinx-keystore" }
+vinx-node = { path = "crates/vinx-node" }
+ureq = { version = "2", default-features = false, features = ["json"] }
 bech32 = "0.9"
 blake3 = "1"
 borsh = { version = "1", features = ["derive"] }

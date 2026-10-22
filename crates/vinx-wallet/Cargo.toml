@@ -1,0 +1,30 @@
+[package]
+name = "vinx-wallet"
+description = "Wallet en ligne de commande de VinX Ledger"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[lints]
+workspace = true
+
+[dependencies]
+vinx-crypto.workspace = true
+vinx-core.workspace = true
+vinx-keystore.workspace = true
+anyhow.workspace = true
+borsh.workspace = true
+clap.workspace = true
+hex.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+ureq.workspace = true
+
+[dev-dependencies]
+vinx-node.workspace = true
+vinx-state.workspace = true
+axum.workspace = true
+tempfile.workspace = true
+tokio.workspace = true
