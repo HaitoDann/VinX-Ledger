@@ -1,7 +1,7 @@
 //! État global et application des transactions et des blocs (SPEC §4, §5, §6, §9).
 
+use crate::accounts::Accounts;
 use crate::escrow::{Escrow, EscrowError};
-use crate::smt;
 use crate::validators::{ValidatorChange, ValidatorError, ValidatorSet, validators_hash};
 use borsh::{BorshDeserialize, BorshSerialize};
 use std::collections::BTreeMap;
@@ -33,7 +33,7 @@ pub struct State {
     pub protocol_version: u32,
     /// Hauteur du dernier bloc appliqué (0 à la genèse).
     pub height: u64,
-    pub accounts: BTreeMap<Address, Account>,
+    pub accounts: Accounts,
     pub escrow: Escrow,
     pub admin: AdminSet,
     pub validators: ValidatorSet,
@@ -125,18 +125,13 @@ struct Changes {
 }
 
 impl Changes {
-    fn get(&mut self, base: &BTreeMap<Address, Account>, address: Address) -> &mut Account {
+    fn get(&mut self, base: &Accounts, address: Address) -> &mut Account {
         self.touched
             .entry(address)
             .or_insert_with(|| base.get(&address).cloned().unwrap_or_default())
     }
 
-    fn debit(
-        &mut self,
-        base: &BTreeMap<Address, Account>,
-        address: Address,
-        amount: Amount,
-    ) -> Result<(), TxError> {
+    fn debit(&mut self, base: &Accounts, address: Address, amount: Amount) -> Result<(), TxError> {
         let account = self.get(base, address);
         account.balance = account
             .balance
@@ -145,12 +140,7 @@ impl Changes {
         Ok(())
     }
 
-    fn credit(
-        &mut self,
-        base: &BTreeMap<Address, Account>,
-        address: Address,
-        amount: Amount,
-    ) -> Result<(), TxError> {
+    fn credit(&mut self, base: &Accounts, address: Address, amount: Amount) -> Result<(), TxError> {
         let account = self.get(base, address);
         account.balance = account
             .balance
@@ -159,15 +149,62 @@ impl Changes {
         Ok(())
     }
 
-    fn commit(self, accounts: &mut BTreeMap<Address, Account>) {
-        accounts.extend(self.touched);
+    fn commit(self, accounts: &mut Accounts) {
+        for (address, account) in self.touched {
+            accounts.insert(address, account);
+        }
     }
 }
 
+/// Tout l'état sauf les comptes, pour l'écrire sur disque à part.
+#[derive(BorshSerialize, BorshDeserialize)]
+struct Globals {
+    chain_id: String,
+    protocol_version: u32,
+    height: u64,
+    escrow: Escrow,
+    admin: AdminSet,
+    validators: ValidatorSet,
+    params: Params,
+    upgrade: Option<PendingUpgrade>,
+}
+
 impl State {
+    /// État sans les comptes, encodé : le stockage écrit les comptes séparément.
+    pub fn globals_bytes(&self) -> Vec<u8> {
+        encode(&Globals {
+            chain_id: self.chain_id.clone(),
+            protocol_version: self.protocol_version,
+            height: self.height,
+            escrow: self.escrow.clone(),
+            admin: self.admin.clone(),
+            validators: self.validators.clone(),
+            params: self.params.clone(),
+            upgrade: self.upgrade.clone(),
+        })
+    }
+
+    /// Reconstitue un état à partir de [`Self::globals_bytes`] et des comptes.
+    pub fn from_parts(globals: &[u8], accounts: Accounts) -> Option<Self> {
+        let g: Globals = vinx_core::decode(globals).ok()?;
+        let mut accounts = accounts;
+        accounts.take_dirty();
+        Some(Self {
+            chain_id: g.chain_id,
+            protocol_version: g.protocol_version,
+            height: g.height,
+            accounts,
+            escrow: g.escrow,
+            admin: g.admin,
+            validators: g.validators,
+            params: g.params,
+            upgrade: g.upgrade,
+        })
+    }
+
     /// `Σ soldes + Σ escrow = 10¹⁸ unités`.
     pub fn check_invariant(&self) -> Result<(), BlockError> {
-        let balances: u128 = self.accounts.values().map(|a| u128::from(a.balance)).sum();
+        let balances = self.accounts.total_balance();
         if balances.checked_add(self.escrow.total()) == Some(u128::from(TOTAL_SUPPLY)) {
             Ok(())
         } else {
@@ -187,10 +224,7 @@ impl State {
         ));
         hash_tagged_parts(
             Domain::State,
-            &[
-                &smt::root(&self.accounts),
-                blake3::hash(&globals).as_bytes(),
-            ],
+            &[&self.accounts.root(), blake3::hash(&globals).as_bytes()],
         )
     }
 
@@ -202,6 +236,16 @@ impl State {
     /// `validators_hash` attendu dans l'en-tête du bloc `self.height`.
     pub fn next_validators_hash(&self) -> Hash {
         validators_hash(&self.validators_at(self.height.saturating_add(1)))
+    }
+
+    pub fn account(&self, address: &Address) -> Option<&Account> {
+        self.accounts.get(address)
+    }
+
+    /// Écrit un compte directement, sans règle : réservé aux tests et bancs d'essai.
+    #[doc(hidden)]
+    pub fn set_account_for_tests(&mut self, address: Address, account: Account) {
+        self.accounts.insert(address, account);
     }
 
     pub fn balance(&self, address: &Address) -> Amount {

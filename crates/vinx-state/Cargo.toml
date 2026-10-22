@@ -15,7 +15,9 @@ vinx-crypto.workspace = true
 vinx-core.workspace = true
 blake3.workspace = true
 borsh.workspace = true
+imbl.workspace = true
 thiserror.workspace = true
 
 [dev-dependencies]
+borsh.workspace = true
 proptest.workspace = true

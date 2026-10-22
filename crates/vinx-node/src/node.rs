@@ -115,9 +115,9 @@ fn commit(
     s: &mut Shared,
     block: &Block,
     cert: &CommitCertificate,
-    next: vinx_state::State,
+    mut next: vinx_state::State,
 ) -> Result<()> {
-    s.store.commit_block(block, cert, &next)?;
+    s.store.commit_block(block, cert, &mut next)?;
     let included: BTreeSet<_> = block
         .admin_txs
         .iter()

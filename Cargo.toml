@@ -30,6 +30,7 @@ blake3 = "1"
 borsh = { version = "1", features = ["derive"] }
 ed25519-dalek = { version = "2", features = ["rand_core"] }
 hex = "0.4"
+imbl = "7"
 proptest = "1"
 anyhow = "1"
 async-trait = "0.1"
