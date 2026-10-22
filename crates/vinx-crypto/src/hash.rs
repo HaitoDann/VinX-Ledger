@@ -20,6 +20,9 @@ pub enum Domain {
     MerkleLeaf,
     MerkleNode,
     MerkleEmpty,
+    SmtLeaf,
+    SmtNode,
+    Validators,
 }
 
 impl Domain {
@@ -36,6 +39,9 @@ impl Domain {
             Domain::MerkleLeaf => "vinx/merkle/leaf",
             Domain::MerkleNode => "vinx/merkle/node",
             Domain::MerkleEmpty => "vinx/merkle/empty",
+            Domain::SmtLeaf => "vinx/smt/leaf",
+            Domain::SmtNode => "vinx/smt/node",
+            Domain::Validators => "vinx/validators",
         }
     }
 }
@@ -85,7 +91,7 @@ pub fn hash_tagged_parts(domain: Domain, parts: &[&[u8]]) -> Hash {
 mod tests {
     use super::*;
 
-    const ALL: [Domain; 11] = [
+    const ALL: [Domain; 14] = [
         Domain::Address,
         Domain::State,
         Domain::Tx,
@@ -97,6 +103,9 @@ mod tests {
         Domain::MerkleLeaf,
         Domain::MerkleNode,
         Domain::MerkleEmpty,
+        Domain::SmtLeaf,
+        Domain::SmtNode,
+        Domain::Validators,
     ];
 
     /// Vecteur officiel : BLAKE3("abc"). Fige l'algorithme.

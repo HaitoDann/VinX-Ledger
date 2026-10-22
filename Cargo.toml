@@ -25,6 +25,7 @@ blake3 = "1"
 borsh = { version = "1", features = ["derive"] }
 ed25519-dalek = { version = "2", features = ["rand_core"] }
 hex = "0.4"
+proptest = "1"
 rand_core = { version = "0.6", features = ["getrandom"] }
 thiserror = "2"
 
@@ -40,6 +41,10 @@ unwrap_used = "warn"
 expect_used = "warn"
 panic = "warn"
 indexing_slicing = "warn"
+
+# Les dépendances (cryptographie) optimisées même en debug : tests bien plus rapides.
+[profile.dev.package."*"]
+opt-level = 2
 
 [profile.release]
 lto = "thin"

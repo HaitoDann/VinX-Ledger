@@ -81,7 +81,16 @@ State {
 }
 ```
 
-`state_root = H("vinx/state" ‖ racine_SMT(accounts) ‖ H(borsh(escrow, admin, validators, params, upgrade)))`.
+`state_root = H("vinx/state" ‖ racine_SMT(accounts) ‖ H(borsh(escrow, admin, validators, params, upgrade, protocol_version)))`.
+
+**Arbre des comptes (SMT).** Arbre binaire compact indexé par les 160 bits de
+l'adresse, du bit de poids fort au bit de poids faible :
+
+- sous-arbre vide : 32 octets nuls ;
+- sous-arbre contenant un seul compte : `H("vinx/smt/leaf" ‖ adresse ‖ borsh(compte))` ;
+- sinon : `H("vinx/smt/node" ‖ gauche ‖ droite)`, gauche = bit suivant à 0.
+
+La racine ne dépend que de l'ensemble des comptes, pas de l'ordre d'insertion.
 
 ### 4.2 Escrow
 
@@ -141,7 +150,7 @@ SignedTransaction {
 
 | Code | Transaction | Champs | Effet |
 |---|---|---|---|
-| `0x01` | `Transfer` | `to: Address`, `amount: u64`, `memo: Option<Vec<u8>>` | Transfert ; `amount > 0` ; mémo ≤ `max_memo_bytes` ; refusé sans mémo si `to.memo_required` |
+| `0x01` | `Transfer` | `to: Address`, `amount: u64`, `memo: Option<Vec<u8>>` | Transfert ; `amount > 0` ; `to ≠ sender` ; mémo, s'il est présent, de 1 à `max_memo_bytes` octets ; refusé sans mémo si `to.memo_required` |
 | `0x02` | `SetMemoRequired` | `required: bool` | Active ou désactive le mémo obligatoire du compte |
 | `0x03` | `RotateKey` | `new_key: PublicKey` | Remplace la clé du compte ; l'adresse ne change pas |
 
@@ -174,8 +183,8 @@ SignedAdminTransaction {
 | `TreasuryTransfer` | `to: Address`, `amount: u64`, `memo: Option<Vec<u8>>` | Mêmes règles qu'un `Transfer`, depuis la trésorerie |
 | `AddValidator` | `key: PublicKey` | Effectif à `H + 2` (§7.4) |
 | `RemoveValidator` | `key: PublicKey` | Effectif à `H + 2` ; l'ensemble ne peut pas devenir vide |
-| `SetParam` | `param: ParamId`, `value: u64` | Uniquement les paramètres modifiables de §11 |
-| `ReplaceSigner` | `index: u8`, `new_key: PublicKey` | Remplace un signataire admin |
+| `SetParam` | `param: ParamId`, `value: u64` | Uniquement les paramètres de §11 ; `value > 0` sauf pour `min_fee` et `min_reserve` |
+| `ReplaceSigner` | `index: u8`, `new_key: PublicKey` | Remplace un signataire admin ; `new_key` ne doit pas déjà être signataire |
 | `ScheduleUpgrade` | `version: u32`, `activation_height: u64` | Voir §9 |
 
 Les actions sont encodées avec les codes `0x01` à `0x08`, dans l'ordre du tableau.
@@ -202,6 +211,8 @@ block_hash = H("vinx/block" ‖ borsh(header))
 ```
 
 - Ordre d'application : transactions d'administration, puis transactions utilisateur.
+- Un bloc est invalide dès qu'une de ses transactions l'est : le proposeur ne
+  retient que des transactions applicables.
 - `timestamp` strictement supérieur à celui du parent et au plus
   `max_clock_drift` en avance sur l'horloge locale.
 - Taille et nombre de transactions bornés par `max_block_bytes` et `max_block_txs`.
@@ -258,6 +269,8 @@ Algorithme Tendermint :
 Un `AddValidator` ou `RemoveValidator` inclus dans le bloc `H` prend effet à la
 hauteur `H + 2`. `validators_hash` du bloc `H + 1` reflète déjà le nouvel ensemble.
 
+`validators_hash = H("vinx/validators" ‖ borsh(liste ordonnée des clés))`.
+
 ## 8. Élagage
 
 - Un nœud conserve **l'état complet** et les blocs des `block_retention` dernières
@@ -289,6 +302,8 @@ hauteur `H + 2`. `validators_hash` du bloc `H + 1` reflète déjà le nouvel ens
 | Identifiant de transaction admin | `vinx/admin/txid` |
 | En-tête de bloc | `vinx/block` |
 | Vote de consensus | `vinx/vote` |
+| Ensemble de validateurs | `vinx/validators` |
+| Arbre des comptes (feuille / nœud) | `vinx/smt/leaf`, `vinx/smt/node` |
 | Merkle (feuille / nœud / liste vide) | `vinx/merkle/leaf`, `vinx/merkle/node`, `vinx/merkle/empty` |
 
 ### 10.1 Arbre de Merkle (`tx_root`)
