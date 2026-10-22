@@ -37,6 +37,14 @@ pub enum NetMessage {
     AdminTx(SignedAdminTransaction) = 0x04,
 }
 
+/// Enveloppe gossip. Le numéro de séquence rend chaque envoi unique : gossipsub
+/// déduplique par contenu, et un message retransmis doit pouvoir repartir.
+#[derive(Clone, Debug, BorshSerialize, BorshDeserialize)]
+struct Envelope {
+    seq: u64,
+    msg: NetMessage,
+}
+
 #[derive(Clone, Debug, BorshSerialize, BorshDeserialize)]
 pub struct SyncRequest {
     pub from_height: u64,
@@ -315,13 +323,16 @@ pub async fn run(
 
     let mut connected: BTreeSet<PeerId> = BTreeSet::new();
     let mut quotas = Quotas::default();
+    let mut seq: u64 = 0;
     let mut redial = tokio::time::interval(Duration::from_secs(3));
     let mut sync_tick = tokio::time::interval(Duration::from_secs(2));
     loop {
         tokio::select! {
             _ = shutdown.changed() => return Ok(()),
             Some(msg) = outbound.recv() => {
-                if let Err(e) = swarm.behaviour_mut().gossip.publish(topic.clone(), encode(&msg)) {
+                seq = seq.wrapping_add(1);
+                let data = encode(&Envelope { seq, msg });
+                if let Err(e) = swarm.behaviour_mut().gossip.publish(topic.clone(), data) {
                     // Pas encore de pair, ou message déjà diffusé : sans conséquence.
                     debug!("diffusion impossible : {e}");
                 }
@@ -362,7 +373,7 @@ pub async fn run(
                     message_id,
                     message,
                 })) => {
-                    let decoded = borsh::from_slice::<NetMessage>(&message.data).ok();
+                    let decoded = borsh::from_slice::<Envelope>(&message.data).ok().map(|e| e.msg);
                     let within_quota = quotas.charge_message(propagation_source, decoded.is_some(), Instant::now());
                     let verdict = match (decoded, within_quota) {
                         (Some(msg), true) => {

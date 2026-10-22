@@ -54,7 +54,7 @@ enum Command {
         amount: String,
         #[arg(long)]
         memo: Option<String>,
-        /// Frais en VINX (par défaut : le minimum du réseau).
+        /// Frais en VINX (par défaut : les frais conseillés par le nœud).
         #[arg(long)]
         fee: Option<String>,
     },
@@ -256,6 +256,10 @@ fn main() -> Result<()> {
             println!("chaîne      {}", s.chain_id);
             println!("hauteur     {}", s.height);
             println!("frais min.  {} VINX", format_vinx(s.min_fee));
+            println!(
+                "conseillés  {} VINX",
+                format_vinx(client.recommended_fee()?)
+            );
             println!("nonce admin {}", s.admin_nonce);
         }
         Command::Balance { address } => println!("{}", client.describe_balance(&address)?),

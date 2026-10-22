@@ -87,6 +87,28 @@ impl Mempool {
         &self.txs
     }
 
+    /// Frais conseillés pour être inclus dans le prochain bloc.
+    ///
+    /// Tant que les transactions en attente tiennent dans un bloc, le minimum
+    /// suffit ; sinon, il faut payer plus que la dernière transaction qui y
+    /// entrerait. Mempool plein, il faut aussi dépasser la moins chère pour y entrer.
+    pub fn recommended_fee(&self, min_fee: u64, max_block_txs: u64) -> u64 {
+        let block = usize::try_from(max_block_txs).unwrap_or(usize::MAX);
+        let mut fee = min_fee;
+        if self.txs.len() >= block {
+            let ranked = self.by_priority();
+            if let Some(cutoff) = block.checked_sub(1).and_then(|i| ranked.get(i)) {
+                fee = fee.max(cutoff.tx.fee.saturating_add(1));
+            }
+        }
+        if self.len() >= self.capacity {
+            if let Some(cheapest) = self.txs.iter().map(|t| t.tx.fee).min() {
+                fee = fee.max(cheapest.saturating_add(1));
+            }
+        }
+        fee
+    }
+
     /// Candidates pour un bloc : frais décroissants, ordre d'arrivée à frais égaux.
     pub fn by_priority(&self) -> Vec<SignedTransaction> {
         let mut out = self.txs.clone();
@@ -301,6 +323,23 @@ mod tests {
         pool.add(pay(&users[1], 1, min * 20)).unwrap();
         let nonces: Vec<_> = pool.txs().iter().map(|t| t.tx.nonce).collect();
         assert_eq!(nonces, [1, 1]);
+    }
+
+    #[test]
+    fn recommended_fee_follows_congestion() {
+        let users: Vec<KeyPair> = (0..4).map(|_| KeyPair::generate()).collect();
+        let mut pool = Mempool::with_capacity(&funded(&users), 4);
+        let min = VINX / 1000;
+        assert_eq!(pool.recommended_fee(min, 2), min);
+        pool.add(pay(&users[0], 1, min * 5)).unwrap();
+        pool.add(pay(&users[1], 1, min * 3)).unwrap();
+        // Deux transactions, blocs de deux : il faut battre la 2e (3 × min).
+        assert_eq!(pool.recommended_fee(min, 2), min * 3 + 1);
+        assert_eq!(pool.recommended_fee(min, 10), min);
+        pool.add(pay(&users[2], 1, min * 2)).unwrap();
+        pool.add(pay(&users[3], 1, min * 4)).unwrap();
+        // Plein (4/4) avec des blocs de 10 : il faut battre la moins chère.
+        assert_eq!(pool.recommended_fee(min, 10), min * 2 + 1);
     }
 
     #[test]

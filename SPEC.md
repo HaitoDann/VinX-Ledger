@@ -304,6 +304,12 @@ hauteur `H + 2`. `validators_hash` du bloc `H + 1` reflète déjà le nouvel ens
 - **Liste autorisée** : un nœud n'accepte que les pairs qu'il est configuré pour
   joindre ou explicitement autorisés. Les autres connexions sont refusées dès
   la poignée de main.
+- **Retransmission** : un validateur rediffuse ses propres propositions et votes
+  de la hauteur en cours toutes les secondes, jusqu'à la décision. Tendermint
+  suppose que tout message finit par arriver ; un message diffusé avant que les
+  pairs soient connectés serait sinon perdu, et la chaîne pourrait s'arrêter.
+- Chaque message gossip est enveloppé avec un numéro de séquence, pour qu'une
+  retransmission ne soit pas écartée comme doublon.
 - **Relais** : propositions, votes et transactions circulent sur le sujet
   gossipsub `vinx/<chain_id>/1`, encodés en borsh (`NetMessage`). Un message est
   identifié par le hachage BLAKE3 de son contenu et relayé une seule fois.
@@ -325,6 +331,9 @@ hauteur `H + 2`. `validators_hash` du bloc `H + 1` reflète déjà le nouvel ens
   dernière transaction en attente d'un compte est évinçable.
 - Le proposeur remplit le bloc par frais décroissants, dans le respect de
   l'ordre des nonces de chaque compte.
+- Frais conseillés (`GET /fees`) : le minimum tant que les transactions en
+  attente tiennent dans un bloc ; sinon de quoi dépasser la dernière qui y
+  entrerait, et, mempool plein, la moins chère en attente.
 
 ## 9. Mises à jour du protocole
 

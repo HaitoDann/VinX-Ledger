@@ -9,7 +9,8 @@ use vinx_crypto::{Address, KeyPair, PublicKey};
 ///
 /// Le compte émetteur est `from`, ou à défaut l'adresse dérivée de la clé.
 /// Après une rotation de clé, il faut indiquer `from` : l'adresse reste celle
-/// de la clé d'origine. `fee` vaut par défaut les frais minimaux du réseau.
+/// de la clé d'origine. `fee` vaut par défaut les frais conseillés par le nœud
+/// (le minimum du réseau, sauf en cas d'encombrement).
 pub fn submit(
     client: &Client,
     keypair: &KeyPair,
@@ -30,7 +31,10 @@ pub fn submit(
         chain_id: status.chain_id,
         sender,
         nonce,
-        fee: fee.unwrap_or(status.min_fee),
+        fee: match fee {
+            Some(f) => f,
+            None => client.recommended_fee()?,
+        },
         body,
     };
     // La clé publique n'est jointe qu'à la première dépense du compte.

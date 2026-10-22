@@ -89,6 +89,14 @@ impl Client {
         })
     }
 
+    /// Frais conseillés par le nœud selon l'encombrement du réseau.
+    pub fn recommended_fee(&self) -> Result<Amount> {
+        let v = self
+            .request("GET", "/fees", None)?
+            .ok_or_else(|| anyhow!("frais indisponibles"))?;
+        amount(&v, "recommended_fee")
+    }
+
     pub fn account(&self, address: &Address) -> Result<Option<AccountInfo>> {
         let Some(v) = self.request("GET", &format!("/accounts/{address}"), None)? else {
             return Ok(None);

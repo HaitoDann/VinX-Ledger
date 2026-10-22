@@ -32,6 +32,7 @@ pub fn router(shared: SharedRef) -> Router {
         .route("/accounts/{address}", get(account))
         .route("/blocks/{height}", get(block))
         .route("/escrow", get(escrow))
+        .route("/fees", get(fees))
         .route("/transactions", post(submit))
         .route("/admin-transactions", post(submit_admin))
         // Une transaction encodée tient largement en 64 Kio.
@@ -117,6 +118,17 @@ async fn escrow(State(shared): State<SharedRef>) -> ApiResult {
             "amount": amount_to_string(t.amount),
             "matures_at": t.matures_at,
         })),
+    })))
+}
+
+async fn fees(State(shared): State<SharedRef>) -> ApiResult {
+    let s = lock(&shared);
+    let p = &s.chain.state.params;
+    Ok(Json(json!({
+        "min_fee": amount_to_string(p.min_fee),
+        "recommended_fee": amount_to_string(s.mempool.recommended_fee(p.min_fee, p.max_block_txs)),
+        "pending_transactions": s.mempool.len(),
+        "max_block_txs": p.max_block_txs,
     })))
 }
 
