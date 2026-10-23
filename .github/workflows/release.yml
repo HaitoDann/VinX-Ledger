@@ -3,6 +3,8 @@ name: Release
 # Pousser une étiquette v0.2.0 publie une release GitHub avec l'archive
 # vinx-0.2.0-linux-x86_64.tar.gz : binaires, script d'installation, service
 # systemd, supervision. Voir docs/DEPLOYER-UN-VALIDATEUR.md.
+# Une release créée depuis l'interface GitHub crée aussi l'étiquette et
+# déclenche ce workflow.
 on:
   push:
     tags: ["v*"]
@@ -48,7 +50,11 @@ jobs:
       - name: Publie la release
         env:
           GH_TOKEN: ${{ github.token }}
+        # La release peut déjà exister si elle a été créée depuis l'interface
+        # GitHub : on y ajoute alors les fichiers.
         run: |
-          gh release create "$GITHUB_REF_NAME" --title "VinX Ledger $VERSION" \
-            --notes "Installation et mise à jour : DEPLOYER-UN-VALIDATEUR.md, inclus dans l'archive." \
-            vinx-*.tar.gz SHA256SUMS
+          if ! gh release view "$GITHUB_REF_NAME" >/dev/null 2>&1; then
+            gh release create "$GITHUB_REF_NAME" --title "VinX Ledger $VERSION" \
+              --notes "Installation et mise à jour : DEPLOYER-UN-VALIDATEUR.md, inclus dans l'archive."
+          fi
+          gh release upload "$GITHUB_REF_NAME" --clobber vinx-*.tar.gz SHA256SUMS
