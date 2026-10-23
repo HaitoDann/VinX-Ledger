@@ -60,6 +60,15 @@ impl Store {
                      pour resynchroniser le nœud"
                 );
             }
+            let format = meta.get(FORMAT)?.and_then(|v| v.value().first().copied());
+            if format.is_some_and(|f| f > FORMAT_VERSION) {
+                bail!(
+                    "base de données écrite par une version plus récente de vinx-node \
+                     (format {}, cette version lit le format {FORMAT_VERSION}) : \
+                     restaurez la sauvegarde faite avant la mise à jour",
+                    format.unwrap_or_default()
+                );
+            }
             meta.insert(FORMAT, [FORMAT_VERSION].as_slice())?;
             let existing = meta.get(GENESIS_ROOT)?.map(|v| v.value().to_vec());
             match existing {
@@ -276,6 +285,22 @@ mod tests {
         drop(Store::open(&path, [1; 32]).unwrap());
         assert!(Store::open(&path, [2; 32]).is_err());
         assert!(Store::open(&path, [1; 32]).is_ok());
+    }
+
+    #[test]
+    fn refuses_a_database_from_a_newer_version() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("db");
+        let store = Store::open(&path, [1; 32]).unwrap();
+        let tx = store.db.begin_write().unwrap();
+        tx.open_table(META)
+            .unwrap()
+            .insert(FORMAT, [FORMAT_VERSION + 1].as_slice())
+            .unwrap();
+        tx.commit().unwrap();
+        drop(store);
+        let err = Store::open(&path, [1; 32]).err().unwrap();
+        assert!(err.to_string().contains("plus récente"));
     }
 
     #[test]

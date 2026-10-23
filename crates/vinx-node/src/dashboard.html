@@ -82,6 +82,7 @@
       <h2>Gouvernance</h2>
       <dl>
         <dt>Protocole</dt><dd id="protocol">—</dd>
+        <dt>Logiciel</dt><dd id="node-version">—</dd>
         <dt>Multisig</dt><dd id="multisig">—</dd>
         <dt>Validateurs</dt><dd id="validator-list">—</dd>
         <dt>Paramètres</dt><dd id="params">—</dd>
@@ -141,6 +142,7 @@ async function refresh() {
     const interval = status.params.min_block_interval_ms;
 
     $("chain").textContent = status.chain_id;
+    $("node-version").textContent = "vinx-node " + status.node_version;
     const role = $("role");
     if (status.validator_index === null) { role.textContent = "observateur"; role.className = "pill"; }
     else { role.textContent = `validateur n° ${status.validator_index + 1}`; role.className = "pill ok"; }
