@@ -244,6 +244,7 @@ async fn status(State(shared): State<SharedRef>) -> ApiResult {
     let st = &s.chain.state;
     Ok(Json(json!({
         "chain_id": st.chain_id,
+        "node_version": env!("CARGO_PKG_VERSION"),
         "protocol_version": st.protocol_version,
         "height": st.height,
         "last_block_hash": s.chain.last.as_ref().map(|h| hash_to_hex(&h.hash())),

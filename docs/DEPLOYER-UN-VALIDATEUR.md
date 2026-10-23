@@ -9,19 +9,33 @@ Il y a deux machines :
 | Où | Quoi | Outil |
 |---|---|---|
 | **Ton poste** | les 3 clés admin, la genèse, l'administration | `vinx-wallet`, `vinx-node genesis` |
-| **Le serveur** | le validateur, et rien d'autre | `deploy/install-validator.sh` |
+| **Le serveur** | le validateur, et rien d'autre | `install-validator.sh` |
 
 Les clés admin ne vont **jamais** sur un serveur.
 
-## 1. Compiler (une fois, sur ton poste)
+## 1. Récupérer les binaires
+
+Chaque version est publiée sur la page *Releases* du dépôt GitHub, sous la
+forme d'une archive `vinx-<version>-linux-x86_64.tar.gz` (Debian 12, Ubuntu
+22.04 ou plus récents). Elle contient `vinx-node`, `vinx-wallet`, le script
+`install-validator.sh`, le service systemd et la supervision.
 
 ```bash
-cargo build --release -p vinx-node -p vinx-wallet
-sudo install target/release/vinx-node target/release/vinx-wallet /usr/local/bin/
+V=0.1.0
+curl -LO https://github.com/HaitoDann/VinX-Ledger/releases/download/v$V/vinx-$V-linux-x86_64.tar.gz
+curl -LO https://github.com/HaitoDann/VinX-Ledger/releases/download/v$V/SHA256SUMS
+sha256sum -c SHA256SUMS                     # doit afficher : OK
+tar xzf vinx-$V-linux-x86_64.tar.gz
 ```
 
-Le dossier `deploy/` plus le binaire `target/release/vinx-node` suffisent à
-installer un serveur.
+Sur ton poste, installe le wallet et l'outil de genèse :
+
+```bash
+sudo install vinx-$V-linux-x86_64/vinx-node vinx-$V-linux-x86_64/vinx-wallet /usr/local/bin/
+```
+
+Pour compiler toi-même à la place : `cargo build --release -p vinx-node -p
+vinx-wallet`, puis utilise `deploy/` et `target/release/` du dépôt.
 
 ## 2. Créer les clés admin (une fois, sur ton poste)
 
@@ -43,10 +57,9 @@ fixe. Sous Proxmox, un conteneur LXC convient.
 
 ```bash
 # Depuis ton poste :
-scp -r deploy target/release/vinx-node root@<IP>:/root/
+scp -r vinx-$V-linux-x86_64 root@<IP>:/root/vinx
 # Sur le serveur :
-mv /root/vinx-node /root/deploy/
-sudo /root/deploy/install-validator.sh prepare
+sudo /root/vinx/install-validator.sh prepare
 ```
 
 Le script affiche :
@@ -82,7 +95,7 @@ La genèse est définitive : la modifier, c'est créer une autre chaîne.
 ```bash
 scp genesis.json root@<IP>:/root/
 # Sur le serveur :
-sudo /root/deploy/install-validator.sh start /root/genesis.json --archive
+sudo /root/vinx/install-validator.sh start /root/genesis.json --archive
 ```
 
 Le script installe le service systemd, le démarre et affiche l'état du nœud.
@@ -148,10 +161,10 @@ trois nouveaux **ensemble**.
 
    ```bash
    # nœud 1 (garde --archive)
-   sudo /root/deploy/install-validator.sh start /root/genesis.json --archive \
+   sudo /root/vinx/install-validator.sh start /root/genesis.json --archive \
      --peer <adresse 2> --peer <adresse 3> --peer <adresse 4>
    # nœud 2 (de même pour 3 et 4)
-   sudo /root/deploy/install-validator.sh start /root/genesis.json \
+   sudo /root/vinx/install-validator.sh start /root/genesis.json \
      --peer <adresse 1> --peer <adresse 3> --peer <adresse 4>
    ```
 
@@ -180,6 +193,39 @@ trois nouveaux **ensemble**.
 | En arrêter deux | la chaîne s'arrête, sans diverger |
 | En relancer un | la chaîne repart |
 | Paiements avec un validateur arrêté | finalisés normalement |
+
+## 8. Mettre à jour
+
+Récupère la nouvelle archive (section 1), copie-la sur le serveur, puis :
+
+```bash
+sudo /root/vinx-<nouvelle version>/install-validator.sh upgrade
+```
+
+Le script :
+
+1. arrête le nœud et sauvegarde le binaire actuel et les données dans
+   `/var/backups/vinx/` (les trois dernières sauvegardes sont gardées) ;
+2. installe le nouveau binaire et redémarre ;
+3. attend qu'un nouveau bloc soit finalisé, deux minutes au plus ;
+4. sinon, **revient de lui-même à l'ancien binaire** et le dit.
+
+`sudo …/install-validator.sh rollback` revient à l'ancien binaire à la main.
+`/status` et le tableau de bord indiquent la version (`node_version`).
+
+- **Avec un validateur**, la chaîne s'arrête quelques secondes pendant la
+  mise à jour, puis repart.
+- **Avec quatre**, mets-les à jour **un par un** : attends que le script
+  affiche « mise à jour terminée » avant de passer au suivant. Un seul nœud
+  arrêté à la fois, et la chaîne continue.
+- **Le retour arrière ne restaure que le binaire**, jamais les données : elles
+  gardent la mémoire des votes déjà signés, ce qui empêche le validateur de
+  voter deux fois à la même hauteur.
+- Si une version change le format de la base, l'ancienne version refusera de
+  la lire après coup ; les notes de la version le signaleront. Dans ce cas,
+  corrige vers l'avant plutôt que de restaurer une sauvegarde de données. Une
+  sauvegarde ne se restaure que **réseau arrêté**, pour la raison donnée dans
+  « Pièges ».
 
 ## Pièges
 
