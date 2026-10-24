@@ -6,6 +6,7 @@ use serde_json::{Value, json};
 use vinx_core::{Amount, SignedAdminTransaction, SignedTransaction, encode};
 use vinx_crypto::Address;
 
+#[derive(Clone)]
 pub struct Client {
     base: String,
 }
@@ -100,6 +101,15 @@ impl Client {
         Ok(self
             .request("GET", &format!("/blocks/{height}"), None)?
             .and_then(|b| b.get("hash")?.as_str().map(str::to_owned)))
+    }
+
+    /// Horodatage (ms) et nombre de transactions du bloc `height`, s'il est conservé.
+    pub fn block_summary(&self, height: u64) -> Result<Option<(u64, u64)>> {
+        let Some(b) = self.request("GET", &format!("/blocks/{height}"), None)? else {
+            return Ok(None);
+        };
+        let txs = field(&b, "transactions")?.as_array().map_or(0, Vec::len);
+        Ok(Some((as_u64(&b, "timestamp")?, u64::try_from(txs)?)))
     }
 
     pub fn base_url(&self) -> &str {

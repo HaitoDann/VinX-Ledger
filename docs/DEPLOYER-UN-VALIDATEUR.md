@@ -227,6 +227,43 @@ Le script :
   sauvegarde ne se restaure que **réseau arrêté**, pour la raison donnée dans
   « Pièges ».
 
+## 9. Mesurer le débit (test de charge)
+
+`vinx-wallet bench` crée des comptes jetables, les finance depuis un compte
+existant, leur fait s'envoyer des montants minimes, puis compte les
+transactions **finalisées** (pas seulement envoyées). Lance-le **sur la
+machine du nœud** : à travers un tunnel SSH, c'est le tunnel qu'on mesure.
+
+```bash
+# Le compte qui finance doit avoir au moins comptes × (fund + 0,001) VINX :
+# 200 comptes × 1 VINX par défaut, soit un peu plus de 200 VINX.
+vinx-wallet bench --key alice.json --accounts 200 --duration 60
+```
+
+```
+envoyées         45710
+refusées         0
+finalisées       45710 en 10 bloc(s), 50.0 s
+débit moyen      914 transactions/s
+bloc le plus plein  5000 transactions
+```
+
+- **Le plafond du protocole** est `max_block_txs / intervalle de bloc` :
+  5 000 / 5 s = **1 000 transactions/s** avec les paramètres par défaut. Si
+  « bloc le plus plein » vaut 5 000, c'est ce plafond qu'on a atteint, pas
+  celui de la machine.
+- **Pour trouver le plafond de la machine**, relève la limite sur un réseau de
+  test : `admin propose … set-param --param max_block_txs --value 20000`, puis
+  relance avec `--accounts 220 --fund 3`. Chaque compte garde au plus 90
+  transactions en attente : il faut environ `max_block_txs / 90` comptes pour
+  remplir un bloc. Quand les blocs mettent nettement plus de 5 s à venir
+  (`journalctl`), c'est le nœud qui sature.
+- Repère : sur 4 cœurs, environ 900 transactions/s aux paramètres par défaut
+  et 2 600 transactions/s avec des blocs de 20 000 transactions, où un bloc
+  plein prend alors 9 s. Un conteneur à 2 vCPU fera moins.
+- Remets ensuite `max_block_txs` à 5000 : des blocs trop gros allongent la
+  finalité et le rattrapage des nœuds.
+
 ## Pièges
 
 - **Ne restaure pas le snapshot d'un validateur pendant que le réseau tourne.**
