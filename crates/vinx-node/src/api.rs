@@ -255,7 +255,9 @@ async fn status(State(shared): State<SharedRef>) -> ApiResult {
         "peers": s.metrics.peers,
         "validator_index": s.metrics.validator_index,
         "validator_key": s.metrics.validator_key.as_ref().map(key_to_hex),
-        "first_round_ratio": (s.metrics.blocks > 0).then(|| {
+        // Sur la dernière heure ; depuis le démarrage dans `first_round_ratio_total`.
+        "first_round_ratio": s.metrics.recent_first_round_ratio(),
+        "first_round_ratio_total": (s.metrics.blocks > 0).then(|| {
             s.metrics.blocks_first_round as f64 / s.metrics.blocks as f64
         }),
         "params": {

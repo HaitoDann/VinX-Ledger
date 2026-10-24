@@ -1,10 +1,13 @@
 name: Release
 
-# Pousser une étiquette v0.2.0 publie une release GitHub avec l'archive
-# vinx-0.2.0-linux-x86_64.tar.gz : binaires, script d'installation, service
-# systemd, supervision. Voir docs/DEPLOYER-UN-VALIDATEUR.md.
-# Une release créée depuis l'interface GitHub crée aussi l'étiquette et
-# déclenche ce workflow.
+# Pousser une étiquette vX.Y.Z (ou créer la release depuis l'interface GitHub,
+# ce qui crée l'étiquette) publie :
+#   vinx-X.Y.Z-linux-x86_64.tar.gz    serveur : binaires, script d'installation,
+#                                     service systemd, supervision, guides
+#   vinx-X.Y.Z-windows-x86_64.zip     poste d'administration : vinx-wallet et
+#   vinx-X.Y.Z-macos-arm64.tar.gz     vinx-node (genèse, clés), guides
+#   SHA256SUMS
+# Voir docs/DEPLOYER-UN-VALIDATEUR.md.
 on:
   push:
     tags: ["v*"]
@@ -16,15 +19,15 @@ permissions:
   contents: write
 
 jobs:
-  release:
-    name: Binaires Linux x86_64
-    # Ubuntu 22.04 : glibc 2.35, compatible avec Debian 12 et Ubuntu 22.04 et plus.
+  version:
+    name: Version
     runs-on: ubuntu-22.04
+    outputs:
+      version: ${{ steps.v.outputs.version }}
     steps:
       - uses: actions/checkout@v4
-      - uses: dtolnay/rust-toolchain@stable
-
       - name: Vérifie que l'étiquette correspond à la version du code
+        id: v
         run: |
           version="$(cargo metadata --no-deps --format-version 1 \
             | jq -r '.packages[] | select(.name == "vinx-node") | .version')"
@@ -32,11 +35,20 @@ jobs:
             echo "étiquette $GITHUB_REF_NAME, mais Cargo.toml indique $version" >&2
             exit 1
           fi
-          echo "VERSION=$version" >>"$GITHUB_ENV"
+          echo "version=$version" >>"$GITHUB_OUTPUT"
 
+  linux:
+    name: Serveur Linux x86_64
+    needs: version
+    # Ubuntu 22.04 : glibc 2.35, compatible avec Debian 12 et Ubuntu 22.04 et plus.
+    runs-on: ubuntu-22.04
+    env:
+      VERSION: ${{ needs.version.outputs.version }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
       - run: cargo test --workspace --locked
       - run: cargo build --release --locked -p vinx-node -p vinx-wallet
-
       - name: Assemble l'archive
         run: |
           name="vinx-$VERSION-linux-x86_64"
@@ -45,16 +57,73 @@ jobs:
           cp -r deploy/install-validator.sh deploy/systemd deploy/monitoring "$name/"
           cp docs/DEPLOYER-UN-VALIDATEUR.md docs/EXPLOITATION.md LICENSE "$name/"
           tar czf "$name.tar.gz" "$name"
-          sha256sum "$name.tar.gz" >SHA256SUMS
+      - uses: actions/upload-artifact@v4
+        with:
+          name: linux
+          path: vinx-*.tar.gz
 
+  poste:
+    name: Poste ${{ matrix.label }}
+    needs: version
+    strategy:
+      matrix:
+        include:
+          - os: windows-latest
+            label: windows-x86_64
+          - os: macos-latest
+            label: macos-arm64
+    runs-on: ${{ matrix.os }}
+    env:
+      VERSION: ${{ needs.version.outputs.version }}
+    defaults:
+      run:
+        shell: bash
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - run: cargo test --locked -p vinx-wallet -p vinx-keystore -p vinx-crypto
+      - run: cargo build --release --locked -p vinx-node -p vinx-wallet
+      - name: Assemble l'archive
+        run: |
+          name="vinx-$VERSION-${{ matrix.label }}"
+          mkdir "$name"
+          ext=""
+          [ "${{ runner.os }}" = Windows ] && ext=".exe"
+          cp "target/release/vinx-wallet$ext" "target/release/vinx-node$ext" "$name/"
+          cp docs/DEPLOYER-UN-VALIDATEUR.md docs/EXPLOITATION.md LICENSE "$name/"
+          if [ "${{ runner.os }}" = Windows ]; then
+            7z a "$name.zip" "$name" >/dev/null
+          else
+            tar czf "$name.tar.gz" "$name"
+          fi
+      - uses: actions/upload-artifact@v4
+        with:
+          name: ${{ matrix.label }}
+          path: |
+            vinx-*.zip
+            vinx-*.tar.gz
+
+  publish:
+    name: Publication
+    needs: [version, linux, poste]
+    runs-on: ubuntu-22.04
+    env:
+      VERSION: ${{ needs.version.outputs.version }}
+      GH_TOKEN: ${{ github.token }}
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          path: dist
+          merge-multiple: true
       - name: Publie la release
-        env:
-          GH_TOKEN: ${{ github.token }}
+        working-directory: dist
         # La release peut déjà exister si elle a été créée depuis l'interface
         # GitHub : on y ajoute alors les fichiers.
         run: |
-          if ! gh release view "$GITHUB_REF_NAME" >/dev/null 2>&1; then
-            gh release create "$GITHUB_REF_NAME" --title "VinX Ledger $VERSION" \
-              --notes "Installation et mise à jour : DEPLOYER-UN-VALIDATEUR.md, inclus dans l'archive."
+          sha256sum vinx-* >SHA256SUMS
+          if ! gh release view "$GITHUB_REF_NAME" --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1; then
+            gh release create "$GITHUB_REF_NAME" --repo "$GITHUB_REPOSITORY" \
+              --title "VinX Ledger $VERSION" \
+              --notes "Installation et mise à jour : DEPLOYER-UN-VALIDATEUR.md, inclus dans les archives."
           fi
-          gh release upload "$GITHUB_REF_NAME" --clobber vinx-*.tar.gz SHA256SUMS
+          gh release upload "$GITHUB_REF_NAME" --repo "$GITHUB_REPOSITORY" --clobber vinx-* SHA256SUMS

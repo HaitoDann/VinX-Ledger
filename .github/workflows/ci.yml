@@ -19,6 +19,19 @@ jobs:
       - uses: Swatinem/rust-cache@v2
       - run: cargo test --workspace --locked
 
+  poste:
+    name: Poste ${{ matrix.os }}
+    strategy:
+      matrix:
+        os: [windows-latest, macos-latest]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - run: cargo test --locked -p vinx-wallet -p vinx-keystore -p vinx-crypto
+      - run: cargo build --locked -p vinx-node -p vinx-wallet
+
   clippy:
     name: Clippy
     runs-on: ubuntu-latest

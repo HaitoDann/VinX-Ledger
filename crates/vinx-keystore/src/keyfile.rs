@@ -109,6 +109,17 @@ impl KeyFile {
     }
 
     pub fn load(path: &Path) -> Result<Self> {
+        if !path.exists() {
+            let here = std::env::current_dir()
+                .map(|d| d.display().to_string())
+                .unwrap_or_default();
+            bail!(
+                "fichier de clé introuvable : {} (dossier courant : {here}). Une clé \
+                 n'existe que sur la machine où elle a été créée : les clés admin sur \
+                 la machine d'administration, la clé d'un validateur sur son serveur",
+                path.display()
+            );
+        }
         let text = std::fs::read_to_string(path)
             .with_context(|| format!("lecture de {}", path.display()))?;
         serde_json::from_str(&text).context("fichier de clé invalide")
@@ -151,6 +162,17 @@ mod tests {
         t_cost: 1,
         p_cost: 1,
     };
+
+    #[test]
+    fn missing_key_file_says_where_keys_live() {
+        let err = KeyFile::load(Path::new("absente/admin-1.json"))
+            .unwrap_err()
+            .to_string();
+        assert!(
+            err.contains("introuvable") && err.contains("machine d'administration"),
+            "{err}"
+        );
+    }
 
     #[test]
     fn roundtrip_and_wrong_password() {
