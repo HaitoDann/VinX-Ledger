@@ -57,6 +57,14 @@ impl Address {
     /// la casse mixte et toute longueur autre que 20 octets.
     pub fn from_bech32(s: &str) -> Result<Self, CryptoError> {
         let bad = |m: String| CryptoError::InvalidAddress(m);
+        // Erreur fréquente : coller une clé publique (01 + 64 caractères hexadécimaux).
+        if s.len() == 66 && s.starts_with("01") && s.bytes().all(|b| b.is_ascii_hexdigit()) {
+            return Err(bad(
+                "c'est une clé publique, pas une adresse : utilise l'adresse vinx1… \
+                 affichée à côté de la clé"
+                    .into(),
+            ));
+        }
         let (hrp, data, variant) = bech32::decode(s).map_err(|e| bad(e.to_string()))?;
         if hrp != HRP {
             return Err(bad(format!("préfixe « {hrp} » au lieu de « {HRP} »")));
@@ -96,6 +104,13 @@ impl FromStr for Address {
 mod tests {
     use super::*;
     use crate::KeyPair;
+
+    #[test]
+    fn a_public_key_is_not_an_address() {
+        let key = format!("01{}", "ab".repeat(32));
+        let err = Address::from_bech32(&key).unwrap_err().to_string();
+        assert!(err.contains("clé publique"), "{err}");
+    }
 
     #[test]
     fn derivation_is_deterministic_and_typed() {

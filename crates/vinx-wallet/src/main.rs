@@ -9,7 +9,7 @@ use vinx_keystore::encoding::{key_from_hex, key_to_hex};
 use vinx_keystore::keyfile::{DEFAULT_KDF, KeyFile, password};
 use vinx_wallet::amount::{format_vinx, parse_vinx};
 use vinx_wallet::client::Client;
-use vinx_wallet::{admin, ops, preflight};
+use vinx_wallet::{admin, bench, ops, preflight};
 
 #[derive(Parser)]
 #[command(name = "vinx-wallet", version, about = "Wallet VinX Ledger")]
@@ -88,6 +88,29 @@ enum Command {
     Preflight {
         #[arg(long = "new-node", required = true, num_args = 1)]
         new_nodes: Vec<String>,
+    },
+    /// Test de charge : mesure le débit de transactions finalisées.
+    ///
+    /// Crée des comptes jetables financés par `--key`, leur fait s'envoyer des
+    /// montants minimes pendant `--duration` secondes, puis compte les
+    /// transactions finalisées. À lancer sur un réseau de test, de préférence
+    /// sur la machine du nœud (pas à travers un tunnel SSH).
+    Bench {
+        /// Compte qui finance les comptes jetables.
+        #[arg(long)]
+        key: PathBuf,
+        /// Nombre de comptes jetables (chacun garde au plus 90 transactions en attente).
+        #[arg(long, default_value_t = 200)]
+        accounts: usize,
+        /// VINX versés à chaque compte jetable.
+        #[arg(long, default_value = "1")]
+        fund: String,
+        /// Durée de l'envoi, en secondes.
+        #[arg(long, default_value_t = 60)]
+        duration: u64,
+        /// Fils d'envoi en parallèle.
+        #[arg(long, default_value_t = 8)]
+        threads: usize,
     },
 }
 
@@ -382,6 +405,34 @@ fn main() -> Result<()> {
                 "transaction {}",
                 ops::rotate_key(&client, &keypair, from, new)?
             );
+        }
+        Command::Bench {
+            key,
+            accounts,
+            fund,
+            duration,
+            threads,
+        } => {
+            let keypair = load_key(&key, pwf)?;
+            let cfg = bench::Config {
+                accounts,
+                fund: parse_vinx(&fund)?,
+                duration: std::time::Duration::from_secs(duration),
+                threads,
+            };
+            let r = bench::run(&client, &keypair, &cfg, &|m| println!("{m}"))?;
+            println!();
+            println!("envoyées         {}", r.submitted);
+            println!("refusées         {}", r.rejected);
+            if let Some(e) = &r.first_error {
+                println!("  premier refus  {e}");
+            }
+            println!(
+                "finalisées       {} en {} bloc(s), {:.1} s",
+                r.finalized, r.blocks, r.seconds
+            );
+            println!("débit moyen      {:.0} transactions/s", r.tps());
+            println!("bloc le plus plein  {} transactions", r.peak_block);
         }
         Command::Preflight { new_nodes } => {
             let nodes: Vec<Client> = new_nodes.iter().map(Client::new).collect();
