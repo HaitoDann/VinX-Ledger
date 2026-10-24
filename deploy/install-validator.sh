@@ -84,7 +84,13 @@ start() {
     while [ $# -gt 0 ]; do
         case "$1" in
             --archive) options+=(--archive); shift ;;
-            --peer) [ $# -ge 2 ] || die "--peer attend une adresse"; options+=(--peer "$2"); shift 2 ;;
+            --peer)
+                [ $# -ge 2 ] || die "--peer attend une adresse"
+                # Vérifiée avant de toucher au nœud : une adresse invalide
+                # l'empêcherait de redémarrer.
+                [[ "$2" =~ ^/(ip4|ip6|dns|dns4|dns6)/[^/]+/tcp/[0-9]+/p2p/[1-9A-HJ-NP-Za-km-z]+$ ]] ||
+                    die "adresse de pair invalide : « $2 » (attendu : /ip4/IP/tcp/26656/p2p/12D3KooW…, affichée par « prepare » sur l'autre nœud)"
+                options+=(--peer "$2"); shift 2 ;;
             *) die "option inconnue : $1" ;;
         esac
     done
