@@ -466,6 +466,12 @@ impl Runner {
                 NetMessage::Tx(tx) => {
                     let _ = lock(&self.shared).mempool.add(tx);
                 }
+                NetMessage::Txs(txs) => {
+                    let mut s = lock(&self.shared);
+                    for tx in txs {
+                        let _ = s.mempool.add(tx);
+                    }
+                }
                 NetMessage::AdminTx(tx) => {
                     let _ = lock(&self.shared).mempool.add_admin(tx);
                 }

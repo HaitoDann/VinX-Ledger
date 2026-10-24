@@ -116,7 +116,8 @@ fn samples() -> Vec<Vec<u8>> {
         borsh::to_vec(&cert).unwrap(),
         borsh::to_vec(&NetMessage::Proposal(proposal)).unwrap(),
         borsh::to_vec(&NetMessage::Vote(SignedVote::new(vote, 0, &kp))).unwrap(),
-        borsh::to_vec(&NetMessage::Tx(tx)).unwrap(),
+        borsh::to_vec(&NetMessage::Tx(tx.clone())).unwrap(),
+        borsh::to_vec(&NetMessage::Txs(vec![tx.clone(), tx])).unwrap(),
         borsh::to_vec(&SyncResponse::Blocks {
             lowest: 1,
             blocks: vec![(block.clone(), cert.clone())],

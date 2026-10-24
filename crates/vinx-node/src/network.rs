@@ -41,6 +41,9 @@ pub enum NetMessage {
     AdminTx(SignedAdminTransaction) = 0x04,
     /// Preuve d'équivoque d'un validateur.
     Evidence(Box<Evidence>) = 0x05,
+    /// Lot de transactions : un message par transaction ferait dépasser le
+    /// quota de messages par pair dès quelques milliers de transactions/s.
+    Txs(Vec<SignedTransaction>) = 0x06,
 }
 
 /// Enveloppe gossip. Le numéro de séquence rend chaque envoi unique : gossipsub
@@ -89,6 +92,10 @@ const MAX_MESSAGE_BYTES: usize = 16 * 1024 * 1024;
 /// Taille visée d'une réponse de rattrapage : nettement sous `MAX_MESSAGE_BYTES`,
 /// car 50 blocs pleins (4 Mio chacun) la dépasseraient.
 const SYNC_RESPONSE_BYTES: usize = 8 * 1024 * 1024;
+
+/// Transactions par lot diffusé, et délai maximal avant la diffusion d'un lot.
+const TX_BATCH: usize = 1_000;
+const TX_FLUSH: Duration = Duration::from_millis(100);
 
 /// Messages gossip relayés par seconde au plus, par pair.
 const MAX_MESSAGES_PER_SEC: u32 = 1_000;
@@ -356,15 +363,33 @@ pub async fn run(
     let mut sync_turn: usize = 0;
     let mut redial = tokio::time::interval(Duration::from_secs(3));
     let mut sync_tick = tokio::time::interval(Duration::from_secs(2));
+    // Transactions reçues par l'API, diffusées par lots.
+    let mut txs: Vec<SignedTransaction> = Vec::new();
+    let mut tx_flush = tokio::time::interval(TX_FLUSH);
+    tx_flush.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+    let mut publish = |swarm: &mut Swarm<Behaviour>, msg: NetMessage| {
+        seq = seq.wrapping_add(1);
+        let data = encode(&Envelope { seq, msg });
+        if let Err(e) = swarm.behaviour_mut().gossip.publish(topic.clone(), data) {
+            // Pas encore de pair, ou message déjà diffusé : sans conséquence.
+            debug!("diffusion impossible : {e}");
+        }
+    };
     loop {
         tokio::select! {
             _ = shutdown.changed() => return Ok(()),
-            Some(msg) = outbound.recv() => {
-                seq = seq.wrapping_add(1);
-                let data = encode(&Envelope { seq, msg });
-                if let Err(e) = swarm.behaviour_mut().gossip.publish(topic.clone(), data) {
-                    // Pas encore de pair, ou message déjà diffusé : sans conséquence.
-                    debug!("diffusion impossible : {e}");
+            Some(msg) = outbound.recv() => match msg {
+                NetMessage::Tx(tx) => {
+                    txs.push(tx);
+                    if txs.len() >= TX_BATCH {
+                        publish(&mut swarm, NetMessage::Txs(std::mem::take(&mut txs)));
+                    }
+                }
+                msg => publish(&mut swarm, msg),
+            },
+            _ = tx_flush.tick() => {
+                if !txs.is_empty() {
+                    publish(&mut swarm, NetMessage::Txs(std::mem::take(&mut txs)));
                 }
             }
             Some((peer, request)) = requests.recv() => {
