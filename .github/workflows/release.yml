@@ -83,6 +83,16 @@ jobs:
       - uses: dtolnay/rust-toolchain@stable
       - run: cargo test --locked -p vinx-wallet -p vinx-keystore -p vinx-crypto
       - run: cargo build --release --locked -p vinx-node -p vinx-wallet
+      - name: Vérifie que les .exe ne dépendent pas du runtime Visual C++
+        if: runner.os == 'Windows'
+        run: |
+          for exe in target/release/vinx-wallet.exe target/release/vinx-node.exe; do
+            if grep -aqi "vcruntime140.dll" "$exe"; then
+              echo "$exe dépend encore de VCRUNTIME140.dll" >&2
+              exit 1
+            fi
+            "$exe" --version
+          done
       - name: Assemble l'archive
         run: |
           name="vinx-$VERSION-${{ matrix.label }}"
