@@ -187,6 +187,49 @@ async fn devnet_produces_blocks_and_processes_payments() {
     assert_eq!(status, StatusCode::OK);
     assert_eq!(block["height"], json!(1));
 
+    // 3 bis. Recherche, historique, état des validateurs, mempool.
+    let pay_id = hex::encode(pay.id());
+    let (status, found) = call(&shared, "GET", &format!("/transactions/{pay_id}"), None).await;
+    assert_eq!(status, StatusCode::OK, "{found}");
+    assert_eq!(found["status"], json!("finalisée"));
+    assert_eq!(found["memo"], json!("FAC-1"));
+    assert_eq!(found["to"], json!(bob.to_string()));
+    let (status, _) = call(
+        &shared,
+        "GET",
+        &format!("/transactions/{}", "ab".repeat(32)),
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::NOT_FOUND);
+    let (status, _) = call(&shared, "GET", "/transactions/zz", None).await;
+    assert_eq!(status, StatusCode::BAD_REQUEST);
+    let (_, block) = call(
+        &shared,
+        "GET",
+        &format!("/blocks/{}", found["height"]),
+        None,
+    )
+    .await;
+    assert_eq!(block["details"][0]["id"], json!(pay_id));
+    assert_eq!(block["signers"].as_array().unwrap().len(), 1);
+    let (_, history) = call(&shared, "GET", "/admin-history", None).await;
+    assert_eq!(
+        history["actions"][0]["kind"],
+        json!("transfert de trésorerie")
+    );
+    assert_eq!(history["actions"][0]["approvals"], json!([0, 2]));
+    let (_, validators) = call(&shared, "GET", "/validators", None).await;
+    assert_eq!(validators["validators"][0]["presence"], json!("en ligne"));
+    assert_eq!(validators["validators"][0]["this_node"], json!(true));
+    let (_, mempool) = call(&shared, "GET", "/mempool", None).await;
+    assert_eq!(
+        mempool["rejects"][0]["reason"],
+        json!("transaction déjà en attente")
+    );
+    let (_, hist) = call(&shared, "GET", "/history", None).await;
+    assert!(!hist["blocks"].as_array().unwrap().is_empty());
+
     // 4. Outils d'exploitation : gouvernance, derniers blocs, métriques, tableau de bord.
     let (status, gov) = call(&shared, "GET", "/governance", None).await;
     assert_eq!(status, StatusCode::OK);

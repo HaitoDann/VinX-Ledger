@@ -104,7 +104,31 @@ enum Command {
         /// de mémoire par transaction.
         #[arg(long, default_value_t = vinx_node::mempool::MAX_PENDING)]
         mempool_size: usize,
+        /// Fichier JSON des noms de validateurs pour le tableau de bord :
+        /// `{ "01…clé…": "Validateur-3", … }`.
+        #[arg(long)]
+        validator_names: Option<PathBuf>,
     },
+}
+
+/// Lit le fichier des noms de validateurs : un objet JSON clé → nom.
+fn load_names(path: &Path) -> Result<std::collections::BTreeMap<vinx_crypto::PublicKey, String>> {
+    let text =
+        std::fs::read_to_string(path).with_context(|| format!("lecture de {}", path.display()))?;
+    let raw: std::collections::BTreeMap<String, String> = serde_json::from_str(&text)
+        .with_context(|| {
+            format!(
+                "{} : objet JSON attendu, {{ \"01…\": \"nom\" }}",
+                path.display()
+            )
+        })?;
+    raw.into_iter()
+        .map(|(k, name)| {
+            let key = key_from_hex(k.trim())
+                .with_context(|| format!("{} : clé invalide « {k} »", path.display()))?;
+            Ok((key, name))
+        })
+        .collect()
 }
 
 /// Remplace la période de l'escrow, sur un réseau de test seulement.
@@ -253,6 +277,7 @@ async fn main() -> Result<()> {
             archive,
             block_retention_hours,
             mempool_size,
+            validator_names,
         } => {
             let genesis = GenesisFile::load(genesis)?;
             let keypair = match key {
@@ -271,6 +296,10 @@ async fn main() -> Result<()> {
                 s.retention_ms =
                     (!*archive).then(|| block_retention_hours.saturating_mul(3_600_000));
                 s.mempool.set_capacity(*mempool_size);
+                if let Some(path) = validator_names {
+                    s.names = load_names(path)?;
+                    info!(noms = s.names.len(), "noms de validateurs chargés");
+                }
                 info!(
                     archive = *archive,
                     "conservation des blocs : {}",

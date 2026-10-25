@@ -12,8 +12,8 @@ use axum::routing::{get, post};
 use axum::{Json, Router};
 use serde::Deserialize;
 use serde_json::{Value, json};
-use vinx_core::{SignedAdminTransaction, SignedTransaction, decode};
-use vinx_crypto::Address;
+use vinx_core::{AdminAction, ParamId, SignedAdminTransaction, SignedTransaction, TxBody, decode};
+use vinx_crypto::{Address, PublicKey};
 
 /// Taille maximale d'une requête.
 pub const MAX_BODY_BYTES: usize = 64 * 1024;
@@ -38,6 +38,11 @@ pub fn router(shared: SharedRef) -> Router {
         .route("/escrow", get(escrow))
         .route("/fees", get(fees))
         .route("/evidence", get(evidence))
+        .route("/validators", get(validators))
+        .route("/history", get(history))
+        .route("/mempool", get(mempool))
+        .route("/admin-history", get(admin_history))
+        .route("/transactions/{id}", get(transaction))
         .route("/transactions", post(submit))
         .route("/admin-transactions", post(submit_admin))
         // Une transaction encodée tient largement en 64 Kio.
@@ -149,6 +154,33 @@ async fn metrics(
         out.push_str(&format!(
             "# HELP {name} {help}\n# TYPE {name} gauge\n{name} {value}\n"
         ));
+    }
+    // Par validateur, d'après les certificats de la dernière heure.
+    let set = st.validators_at(st.height.saturating_add(1));
+    let reports = m.activity.validators(&set, crate::node::now_ms());
+    out.push_str(
+        "# HELP vinx_validator_up 1 si le validateur a signé l'un des derniers blocs.\n\
+         # TYPE vinx_validator_up gauge\n",
+    );
+    for (i, r) in reports.iter().enumerate() {
+        let up = u8::from(r.presence == crate::activity::Presence::Online);
+        out.push_str(&format!(
+            "vinx_validator_up{{{}}} {up}\n",
+            validator_labels(&s, i, &r.key)
+        ));
+    }
+    out.push_str(
+        "# HELP vinx_validator_signed_ratio Part des blocs de la dernière heure signés.\n\
+         # TYPE vinx_validator_signed_ratio gauge\n",
+    );
+    for (i, r) in reports.iter().enumerate() {
+        if r.expected > 0 {
+            out.push_str(&format!(
+                "vinx_validator_signed_ratio{{{}}} {}\n",
+                validator_labels(&s, i, &r.key),
+                r.signed as f64 / r.expected as f64
+            ));
+        }
     }
     (
         StatusCode::OK,
@@ -296,6 +328,20 @@ async fn block(State(shared): State<SharedRef>, Path(height): Path<u64>) -> ApiR
         .block(height)
         .map_err(|e| error(StatusCode::INTERNAL_SERVER_ERROR, e))?
         .ok_or_else(|| error(StatusCode::NOT_FOUND, "bloc introuvable"))?;
+    let cert = s
+        .store
+        .certificate(height)
+        .map_err(|e| error(StatusCode::INTERNAL_SERVER_ERROR, e))?;
+    // Ensemble de validateurs actuel : exact tant qu'il n'a pas changé depuis.
+    let set = s.chain.state.validators_at(height);
+    let signers: Vec<Value> = cert
+        .iter()
+        .flat_map(|c| c.signatures.iter())
+        .filter_map(|(i, _)| {
+            let i = usize::from(*i);
+            Some(validator_json(&s, i, set.get(i)?))
+        })
+        .collect();
     let h = &block.header;
     Ok(Json(json!({
         "height": h.height,
@@ -308,6 +354,12 @@ async fn block(State(shared): State<SharedRef>, Path(height): Path<u64>) -> ApiR
         "proposer": h.proposer,
         "admin_transactions": block.admin_txs.iter().map(|t| hash_to_hex(&t.id())).collect::<Vec<_>>(),
         "transactions": block.txs.iter().map(|t| hash_to_hex(&t.id())).collect::<Vec<_>>(),
+        "round": cert.as_ref().map(|c| c.round),
+        "proposer_validator": set.get(usize::from(h.proposer)).map(|k| validator_json(&s, usize::from(h.proposer), k)),
+        "signers": signers,
+        "admin_details": block.admin_txs.iter().map(admin_json).collect::<Vec<_>>(),
+        // Le détail des 200 premières : au-delà, la réponse deviendrait lourde.
+        "details": block.txs.iter().take(200).map(tx_json).collect::<Vec<_>>(),
     })))
 }
 
@@ -322,6 +374,12 @@ async fn escrow(State(shared): State<SharedRef>) -> ApiResult {
             "amount": amount_to_string(t.amount),
             "matures_at": t.matures_at,
         })),
+        "released": vinx_state::escrow::GENESIS_TRANCHES
+            .saturating_sub(u64::try_from(e.tranches.len()).unwrap_or(u64::MAX)),
+        "schedule": e.tranches.iter().take(24).map(|t| json!({
+            "amount": amount_to_string(t.amount),
+            "matures_at": t.matures_at,
+        })).collect::<Vec<_>>(),
     })))
 }
 
@@ -380,10 +438,13 @@ fn decode_hex<T: borsh::BorshDeserialize>(s: &str) -> Result<T, (StatusCode, Jso
 async fn submit(State(shared): State<SharedRef>, Json(body): Json<Submission>) -> ApiResult {
     let tx: SignedTransaction = decode_hex(&body.tx)?;
     let mut s = lock(&shared);
-    let id = s
-        .mempool
-        .add(tx.clone())
-        .map_err(|e| error(StatusCode::UNPROCESSABLE_ENTITY, e))?;
+    let id = match s.mempool.add(tx.clone()) {
+        Ok(id) => id,
+        Err(e) => {
+            s.record_reject(Some(tx.tx.sender.to_string()), e.to_string());
+            return Err(error(StatusCode::UNPROCESSABLE_ENTITY, e));
+        }
+    };
     s.broadcast(NetMessage::Tx(tx));
     Ok(Json(json!({ "id": hash_to_hex(&id) })))
 }
@@ -391,10 +452,289 @@ async fn submit(State(shared): State<SharedRef>, Json(body): Json<Submission>) -
 async fn submit_admin(State(shared): State<SharedRef>, Json(body): Json<Submission>) -> ApiResult {
     let tx: SignedAdminTransaction = decode_hex(&body.tx)?;
     let mut s = lock(&shared);
-    let id = s
-        .mempool
-        .add_admin(tx.clone())
-        .map_err(|e| error(StatusCode::UNPROCESSABLE_ENTITY, e))?;
+    let id = match s.mempool.add_admin(tx.clone()) {
+        Ok(id) => id,
+        Err(e) => {
+            s.record_reject(Some("admin".into()), e.to_string());
+            return Err(error(StatusCode::UNPROCESSABLE_ENTITY, e));
+        }
+    };
     s.broadcast(NetMessage::AdminTx(tx));
     Ok(Json(json!({ "id": hash_to_hex(&id) })))
+}
+
+/// Transaction utilisateur lisible.
+fn tx_json(stx: &SignedTransaction) -> Value {
+    let t = &stx.tx;
+    let mut v = json!({
+        "id": hash_to_hex(&stx.id()),
+        "sender": t.sender.to_string(),
+        "nonce": t.nonce,
+        "fee": amount_to_string(t.fee),
+    });
+    let body = match &t.body {
+        TxBody::Transfer { to, amount, memo } => json!({
+            "kind": "paiement",
+            "to": to.to_string(),
+            "amount": amount_to_string(*amount),
+            "memo": memo.as_ref().map(|m| String::from_utf8_lossy(m).into_owned()),
+        }),
+        TxBody::SetMemoRequired { required } => json!({
+            "kind": "mémo obligatoire",
+            "required": required,
+        }),
+        TxBody::RotateKey { new_key } => json!({
+            "kind": "rotation de clé",
+            "new_key": key_to_hex(new_key),
+        }),
+    };
+    if let (Some(o), Some(b)) = (v.as_object_mut(), body.as_object()) {
+        o.extend(b.clone());
+    }
+    v
+}
+
+/// Action admin lisible.
+fn admin_json(satx: &SignedAdminTransaction) -> Value {
+    let (kind, detail) = match &satx.tx.action {
+        AdminAction::EscrowRelease { amount } => (
+            "libération d'escrow",
+            json!({ "amount": amount_to_string(*amount) }),
+        ),
+        AdminAction::EscrowReturn { amount } => (
+            "retour en escrow",
+            json!({ "amount": amount_to_string(*amount) }),
+        ),
+        AdminAction::TreasuryTransfer { to, amount, memo } => (
+            "transfert de trésorerie",
+            json!({
+                "to": to.to_string(),
+                "amount": amount_to_string(*amount),
+                "memo": memo.as_ref().map(|m| String::from_utf8_lossy(m).into_owned()),
+            }),
+        ),
+        AdminAction::AddValidator { key } => {
+            ("ajout de validateur", json!({ "key": key_to_hex(key) }))
+        }
+        AdminAction::RemoveValidator { key } => {
+            ("retrait de validateur", json!({ "key": key_to_hex(key) }))
+        }
+        AdminAction::SetParam { param, value } => (
+            "paramètre",
+            json!({ "param": param_name(*param), "value": value }),
+        ),
+        AdminAction::ReplaceSigner { index, new_key } => (
+            "remplacement de signataire",
+            json!({ "index": index, "new_key": key_to_hex(new_key) }),
+        ),
+        AdminAction::ScheduleUpgrade {
+            version,
+            activation_height,
+        } => (
+            "mise à jour du protocole",
+            json!({ "version": version, "activation_height": activation_height }),
+        ),
+    };
+    json!({
+        "id": hash_to_hex(&satx.id()),
+        "nonce": satx.tx.nonce,
+        "kind": kind,
+        "detail": detail,
+        "approvals": satx.approvals.iter().map(|a| a.signer_index).collect::<Vec<_>>(),
+    })
+}
+
+/// Nom d'un paramètre, tel que l'attend `vinx-wallet admin propose set-param`.
+pub fn param_name(p: ParamId) -> &'static str {
+    match p {
+        ParamId::MinFee => "min_fee",
+        ParamId::MinReserve => "min_reserve",
+        ParamId::MaxMemoBytes => "max_memo_bytes",
+        ParamId::MaxBlockTxs => "max_block_txs",
+        ParamId::MaxBlockBytes => "max_block_bytes",
+        ParamId::TimeoutPropose => "timeout_propose",
+        ParamId::TimeoutProposeDelta => "timeout_propose_delta",
+        ParamId::TimeoutVote => "timeout_vote",
+        ParamId::TimeoutVoteDelta => "timeout_vote_delta",
+        ParamId::MinBlockInterval => "min_block_interval",
+    }
+}
+
+/// Étiquettes Prometheus d'un validateur : numéro (à partir de 1) et nom.
+fn validator_labels(s: &crate::node::Shared, index: usize, key: &PublicKey) -> String {
+    let name: String = s
+        .name_of(key)
+        .unwrap_or_default()
+        .chars()
+        .filter(|c| !matches!(c, '"' | '\\' | '\n'))
+        .collect();
+    format!("validator=\"{}\",name=\"{name}\"", index.saturating_add(1))
+}
+
+/// Validateur : clé et nom lisible éventuel.
+fn validator_json(s: &crate::node::Shared, index: usize, key: &PublicKey) -> Value {
+    json!({
+        "index": index,
+        "key": key_to_hex(key),
+        "name": s.name_of(key),
+    })
+}
+
+/// État de chaque validateur, tiré des certificats de la dernière heure.
+async fn validators(State(shared): State<SharedRef>) -> ApiResult {
+    let s = lock(&shared);
+    let st = &s.chain.state;
+    let set = st.validators_at(st.height.saturating_add(1));
+    let me = s.metrics.validator_key.clone();
+    let reports = s.metrics.activity.validators(&set, crate::node::now_ms());
+    let items: Vec<Value> = reports
+        .iter()
+        .enumerate()
+        .map(|(i, r)| {
+            let mut v = validator_json(&s, i, &r.key);
+            if let Some(o) = v.as_object_mut() {
+                o.extend([
+                    ("presence".into(), json!(r.presence.as_str())),
+                    ("last_signed_height".into(), json!(r.last_signed_height)),
+                    ("last_signed_ms".into(), json!(r.last_signed_ms)),
+                    ("signed".into(), json!(r.signed)),
+                    ("expected".into(), json!(r.expected)),
+                    ("missed_proposals".into(), json!(r.missed_proposals)),
+                    ("this_node".into(), json!(me.as_ref() == Some(&r.key))),
+                ]);
+            }
+            v
+        })
+        .collect();
+    Ok(Json(json!({
+        "window_blocks": s.metrics.activity.blocks.len(),
+        "validators": items,
+    })))
+}
+
+/// Blocs de la dernière heure, pour les graphiques.
+async fn history(State(shared): State<SharedRef>) -> ApiResult {
+    let s = lock(&shared);
+    let blocks: Vec<Value> = s
+        .metrics
+        .activity
+        .blocks
+        .iter()
+        .map(|b| {
+            json!({
+                "height": b.height,
+                "timestamp": b.timestamp,
+                "round": b.round,
+                "transactions": b.txs,
+                // Inconnu pour un bloc relu sur le disque au démarrage.
+                "peers": b.live.then_some(b.peers),
+                "signers": b.participants(),
+            })
+        })
+        .collect();
+    Ok(Json(json!({ "blocks": blocks })))
+}
+
+/// Une transaction par son identifiant : finalisée (avec son bloc) ou en attente.
+async fn transaction(State(shared): State<SharedRef>, Path(id): Path<String>) -> ApiResult {
+    let bytes = hex::decode(id.trim())
+        .ok()
+        .and_then(|b| <[u8; 32]>::try_from(b).ok())
+        .ok_or_else(|| {
+            error(
+                StatusCode::BAD_REQUEST,
+                "identifiant invalide : 64 caractères hexadécimaux",
+            )
+        })?;
+    let s = lock(&shared);
+    if let Some(t) = s.mempool.txs().iter().find(|t| t.id() == bytes) {
+        let mut v = tx_json(t);
+        if let Some(o) = v.as_object_mut() {
+            o.insert("status".into(), json!("en attente"));
+        }
+        return Ok(Json(v));
+    }
+    let height = s
+        .store
+        .tx_height(&bytes)
+        .map_err(|e| error(StatusCode::INTERNAL_SERVER_ERROR, e))?
+        .ok_or_else(|| {
+            error(
+                StatusCode::NOT_FOUND,
+                "transaction inconnue de ce nœud (jamais vue, ou dans un bloc élagué)",
+            )
+        })?;
+    let block = s
+        .store
+        .block(height)
+        .map_err(|e| error(StatusCode::INTERNAL_SERVER_ERROR, e))?
+        .ok_or_else(|| error(StatusCode::NOT_FOUND, "bloc élagué"))?;
+    let found = block
+        .txs
+        .iter()
+        .position(|t| t.id() == bytes)
+        .and_then(|i| Some((i, tx_json(block.txs.get(i)?))))
+        .or_else(|| {
+            let i = block.admin_txs.iter().position(|t| t.id() == bytes)?;
+            Some((i, admin_json(block.admin_txs.get(i)?)))
+        });
+    let (index, mut v) =
+        found.ok_or_else(|| error(StatusCode::NOT_FOUND, "transaction absente de son bloc"))?;
+    if let Some(o) = v.as_object_mut() {
+        o.extend([
+            ("status".into(), json!("finalisée")),
+            ("height".into(), json!(height)),
+            ("index".into(), json!(index)),
+            ("timestamp".into(), json!(block.header.timestamp)),
+        ]);
+    }
+    Ok(Json(v))
+}
+
+/// Historique des actions admin finalisées.
+async fn admin_history(State(shared): State<SharedRef>) -> ApiResult {
+    let s = lock(&shared);
+    let log = s
+        .store
+        .admin_log(100)
+        .map_err(|e| error(StatusCode::INTERNAL_SERVER_ERROR, e))?;
+    let items: Vec<Value> = log
+        .iter()
+        .map(|e| {
+            let mut v = admin_json(&e.tx);
+            if let Some(o) = v.as_object_mut() {
+                o.extend([
+                    ("height".into(), json!(e.height)),
+                    ("timestamp".into(), json!(e.timestamp)),
+                ]);
+            }
+            v
+        })
+        .collect();
+    Ok(Json(json!({ "actions": items })))
+}
+
+/// Transactions en attente (les 100 premières par priorité) et derniers refus.
+async fn mempool(State(shared): State<SharedRef>) -> ApiResult {
+    let s = lock(&shared);
+    let pending: Vec<Value> = s
+        .mempool
+        .by_priority()
+        .iter()
+        .take(100)
+        .map(tx_json)
+        .collect();
+    let admin: Vec<Value> = s.mempool.admin_txs().iter().map(admin_json).collect();
+    let rejects: Vec<Value> = s
+        .rejects
+        .iter()
+        .map(|r| json!({ "at": r.at_ms, "sender": r.sender, "reason": r.reason }))
+        .collect();
+    Ok(Json(json!({
+        "count": s.mempool.len(),
+        "capacity": s.mempool.capacity(),
+        "transactions": pending,
+        "admin_transactions": admin,
+        "rejects": rejects,
+    })))
 }

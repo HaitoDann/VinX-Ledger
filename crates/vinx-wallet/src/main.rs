@@ -217,7 +217,12 @@ fn param_id(name: &str) -> Result<ParamId> {
         "timeout_vote" => ParamId::TimeoutVote,
         "timeout_vote_delta" => ParamId::TimeoutVoteDelta,
         "min_block_interval" => ParamId::MinBlockInterval,
-        other => bail!("paramètre inconnu : {other}"),
+        other => bail!(
+            "paramètre inconnu : {other}. Paramètres valides : min_fee, min_reserve, \
+             max_memo_bytes, max_block_txs, max_block_bytes, timeout_propose, \
+             timeout_propose_delta, timeout_vote, timeout_vote_delta, min_block_interval \
+             (durées en millisecondes, montants en unités : 1 VINX = 1000000000)"
+        ),
     })
 }
 

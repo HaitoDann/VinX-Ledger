@@ -31,7 +31,9 @@ passe, ainsi que la genèse. Le tableau de bord du nœud est sur
 `http://127.0.0.1:8545/`, ses métriques Prometheus sur `/metrics`. L'API :
 `/status`, `/governance`, `/accounts/{adresse}`, `/blocks`, `/blocks/{hauteur}`,
 `/escrow`, `/fees`,
-`/evidence` (preuves de validateurs fautifs), et en `POST`
+`/evidence` (preuves de validateurs fautifs), `/validators` (état de chaque
+validateur), `/history`, `/mempool`, `/admin-history`, `/transactions/{id}`,
+et en `POST`
 `/transactions` et `/admin-transactions`.
 
 

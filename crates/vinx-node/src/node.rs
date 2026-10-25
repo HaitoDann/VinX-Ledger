@@ -11,7 +11,7 @@ use crate::snapshot::{self, SNAPSHOT_INTERVAL, Snapshot, SnapshotInfo};
 use crate::store::Store;
 use anyhow::{Context, Result, bail};
 use libp2p::PeerId;
-use std::collections::{BTreeSet, VecDeque};
+use std::collections::{BTreeMap, BTreeSet, VecDeque};
 use std::path::Path;
 use std::sync::{Arc, Mutex, MutexGuard};
 use std::time::Instant;
@@ -42,7 +42,22 @@ pub struct Shared {
     /// Validateurs de la genèse, qui authentifient les instantanés (SPEC §8.3).
     pub genesis_validators: Vec<PublicKey>,
     pub metrics: Metrics,
+    /// Noms lisibles des validateurs (`--validator-names`), pour l'affichage.
+    pub names: BTreeMap<PublicKey, String>,
+    /// Dernières transactions refusées par l'API de ce nœud, la plus récente en tête.
+    pub rejects: VecDeque<Reject>,
 }
+
+/// Transaction refusée à la soumission.
+#[derive(Clone, Debug)]
+pub struct Reject {
+    pub at_ms: u64,
+    pub sender: Option<String>,
+    pub reason: String,
+}
+
+/// Refus gardés pour le tableau de bord.
+pub const MAX_REJECTS: usize = 50;
 
 /// Compteurs d'exploitation, exposés par `/metrics` et le tableau de bord.
 #[derive(Clone, Debug, Default)]
@@ -52,10 +67,10 @@ pub struct Metrics {
     /// Dont finalisés au premier round : un taux proche de 100 % indique un
     /// réseau sain (SPEC §11, critère pour réduire l'intervalle de bloc).
     pub blocks_first_round: u64,
-    /// Blocs de la dernière heure : (horodatage en ms, finalisé au premier
-    /// round). Le tableau de bord en tire un taux qui reflète l'état actuel
-    /// du réseau, et pas une panne ancienne.
-    pub recent_rounds: std::collections::VecDeque<(u64, bool)>,
+    /// Blocs de la dernière heure : signataires, rounds, rythme. Le tableau de
+    /// bord en tire l'état de chaque validateur et des taux qui reflètent
+    /// l'état actuel du réseau, et pas une panne ancienne.
+    pub activity: crate::activity::Activity,
     pub last_round: u32,
     pub peers: usize,
     /// Indice de ce nœud dans l'ensemble de validateurs, s'il vote.
@@ -67,22 +82,61 @@ pub struct Metrics {
     pub started_ms: u64,
 }
 
-/// Fenêtre des indicateurs récents du tableau de bord : une heure.
-pub const RECENT_WINDOW_MS: u64 = 60 * 60 * 1000;
-
 /// Conservation des blocs par défaut : 24 heures.
 pub const DEFAULT_RETENTION_MS: u64 = 24 * 60 * 60 * 1000;
 
 impl Metrics {
     /// Part des blocs de la dernière heure finalisés au premier round.
     pub fn recent_first_round_ratio(&self) -> Option<f64> {
-        let total = self.recent_rounds.len();
-        let first = self.recent_rounds.iter().filter(|(_, r)| *r).count();
-        (total > 0).then(|| first as f64 / total as f64)
+        self.activity.first_round_ratio()
     }
 }
 
 impl Shared {
+    /// Reconstitue l'activité de la dernière heure à partir des blocs conservés,
+    /// pour que le tableau de bord soit complet dès le démarrage. L'ensemble de
+    /// validateurs pris est l'actuel : approximatif autour d'un changement.
+    fn backfill_activity(&mut self) -> Result<()> {
+        let Some(last) = &self.chain.last else {
+            return Ok(());
+        };
+        let newest = last.timestamp;
+        let set = self.chain.state.validators_at(last.height);
+        let mut records = Vec::new();
+        let mut h = last.height;
+        while h > 0 {
+            let (Some(block), Some(cert)) = (self.store.block(h)?, self.store.certificate(h)?)
+            else {
+                break;
+            };
+            if newest.saturating_sub(block.header.timestamp) > crate::activity::WINDOW_MS {
+                break;
+            }
+            let mut record = crate::activity::BlockRecord::new(&block, &cert, set.clone(), 0);
+            record.live = false;
+            records.push(record);
+            h = h.saturating_sub(1);
+        }
+        for r in records.into_iter().rev() {
+            self.metrics.activity.record(r);
+        }
+        Ok(())
+    }
+
+    /// Nom lisible d'un validateur, s'il en a un.
+    pub fn name_of(&self, key: &PublicKey) -> Option<&str> {
+        self.names.get(key).map(String::as_str)
+    }
+
+    pub fn record_reject(&mut self, sender: Option<String>, reason: String) {
+        self.rejects.push_front(Reject {
+            at_ms: now_ms(),
+            sender,
+            reason,
+        });
+        self.rejects.truncate(MAX_REJECTS);
+    }
+
     pub fn broadcast(&self, msg: NetMessage) {
         if let Some(out) = &self.outbound {
             let _ = out.send(msg);
@@ -172,7 +226,17 @@ pub fn open(genesis: Genesis, data_dir: &Path) -> Result<SharedRef> {
             started_ms: now_ms(),
             ..Metrics::default()
         },
+        names: BTreeMap::new(),
+        rejects: VecDeque::new(),
     }));
+    {
+        let mut s = lock(&shared);
+        let indexed = s.store.backfill_indexes()?;
+        if indexed > 0 {
+            info!(blocs = indexed, "index des transactions construit");
+        }
+        s.backfill_activity()?;
+    }
     lock(&shared).refresh_snapshot()?;
     Ok(shared)
 }
@@ -198,6 +262,27 @@ const REBROADCAST: Duration = Duration::from_secs(1);
 /// Nos derniers messages retransmis, au plus.
 const MAX_OWN: usize = 8;
 
+/// Note pour le tableau de bord le vote d'un autre validateur, après avoir
+/// vérifié sa signature. Les votes arrivés après le quorum, que le consensus
+/// ignore, comptent aussi : ils montrent que leur auteur est en ligne.
+fn note_vote(shared: &SharedRef, v: &SignedVote) {
+    let mut s = lock(shared);
+    let height = v.vote.height;
+    let next = s.chain.next_height();
+    // Hauteurs utiles : le dernier bloc finalisé et les suivantes proches.
+    if height.saturating_add(1) < next || height > next.saturating_add(2) {
+        return;
+    }
+    let validators = s.chain.state.validators_at(height);
+    let Some(key) = validators.get(usize::from(v.validator)) else {
+        return;
+    };
+    if s.metrics.activity.knows_vote(height, key) || !v.verify(key) {
+        return;
+    }
+    s.metrics.activity.note_vote(height, key, now_ms());
+}
+
 /// Enregistre un bloc finalisé : disque, chaîne, mempool, garde.
 fn commit(
     s: &mut Shared,
@@ -211,16 +296,12 @@ fn commit(
         s.metrics.blocks_first_round = s.metrics.blocks_first_round.saturating_add(1);
     }
     s.metrics.last_round = cert.round;
-    let now = block.header.timestamp;
-    s.metrics.recent_rounds.push_back((now, cert.round == 0));
-    while s
-        .metrics
-        .recent_rounds
-        .front()
-        .is_some_and(|(t, _)| now.saturating_sub(*t) > RECENT_WINDOW_MS)
-    {
-        s.metrics.recent_rounds.pop_front();
-    }
+    // Ensemble de validateurs de ce bloc : l'état n'a pas encore avancé.
+    let set = s.chain.state.validators_at(block.header.height);
+    let peers = s.metrics.peers;
+    s.metrics
+        .activity
+        .record(crate::activity::BlockRecord::new(block, cert, set, peers));
     let included: BTreeSet<_> = block
         .admin_txs
         .iter()
@@ -434,7 +515,11 @@ impl Runner {
                         continue;
                     }
                     s.store.save_guard(&s.guard)?;
+                    let height = vote.height;
                     let signed = SignedVote::new(vote, me, key);
+                    s.metrics
+                        .activity
+                        .note_vote(height, &key.public_key(), now_ms());
                     let msg = NetMessage::Vote(signed.clone());
                     s.broadcast(msg.clone());
                     remember(&mut self.own, msg);
@@ -516,6 +601,9 @@ impl Runner {
                     }
                 }
                 consensus => {
+                    if let NetMessage::Vote(v) = &consensus {
+                        note_vote(&self.shared, v);
+                    }
                     let height = message_height(&consensus).unwrap_or(0);
                     if height > self.engine.height() {
                         if self.future.len() < MAX_BUFFERED {
@@ -775,19 +863,5 @@ pub async fn run(
             }
             _ = shutdown.changed() => return Ok(()),
         }
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn recent_ratio_counts_first_round_blocks() {
-        let mut m = Metrics::default();
-        assert_eq!(m.recent_first_round_ratio(), None);
-        m.recent_rounds
-            .extend([(1, true), (2, false), (3, true), (4, true)]);
-        assert_eq!(m.recent_first_round_ratio(), Some(0.75));
     }
 }
