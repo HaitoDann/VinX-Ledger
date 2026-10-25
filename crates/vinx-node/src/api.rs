@@ -56,7 +56,27 @@ pub fn router(shared: SharedRef) -> Router {
 
 /// Tableau de bord web : une page autonome qui interroge l'API.
 async fn dashboard() -> axum::response::Html<&'static str> {
-    axum::response::Html(include_str!("dashboard.html"))
+    static PAGE: std::sync::LazyLock<String> =
+        std::sync::LazyLock::new(|| render_page(include_str!("dashboard.html")));
+    axum::response::Html(PAGE.as_str())
+}
+
+/// Page complète : feuille de style commune, logo et icône de la charte VinX
+/// (`assets/`), insérés dans le gabarit.
+fn render_page(template: &str) -> String {
+    let logo = include_str!("../../../assets/logo.svg").trim();
+    let favicon = format!(
+        "data:image/svg+xml,{}",
+        logo.replace("currentColor", "#0DDC8E")
+            .replace('"', "'")
+            .replace('#', "%23")
+            .replace('<', "%3C")
+            .replace('>', "%3E")
+    );
+    template
+        .replace("/*__THEME__*/", include_str!("../../../assets/theme.css"))
+        .replace("<!--__LOGO__-->", logo)
+        .replace("__FAVICON__", &favicon)
 }
 
 /// Métriques au format texte de Prometheus.
