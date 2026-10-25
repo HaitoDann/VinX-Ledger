@@ -458,7 +458,25 @@ fn keys(c: &Cockpit) -> Result<Value> {
 // ----- Routes -----
 
 async fn page(State(c): State<Shared>) -> Html<String> {
-    Html(include_str!("cockpit.html").replace("__COCKPIT_TOKEN__", &c.token))
+    Html(render_page(include_str!("cockpit.html")).replace("__COCKPIT_TOKEN__", &c.token))
+}
+
+/// Page complète : feuille de style commune, logo et icône de la charte VinX
+/// (`assets/`), insérés dans le gabarit.
+fn render_page(template: &str) -> String {
+    let logo = include_str!("../../../assets/logo.svg").trim();
+    let favicon = format!(
+        "data:image/svg+xml,{}",
+        logo.replace("currentColor", "#0DDC8E")
+            .replace('"', "'")
+            .replace('#', "%23")
+            .replace('<', "%3C")
+            .replace('>', "%3E")
+    );
+    template
+        .replace("/*__THEME__*/", include_str!("../../../assets/theme.css"))
+        .replace("<!--__LOGO__-->", logo)
+        .replace("__FAVICON__", &favicon)
 }
 
 /// Refuse tout appel sans jeton, ou adressé à un autre hôte que 127.0.0.1.
