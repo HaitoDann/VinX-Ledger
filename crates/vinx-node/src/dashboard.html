@@ -61,7 +61,7 @@
   <section class="tiles">
     <div class="tile"><div class="label">Hauteur</div><div class="value" id="height">—</div><div class="sub" id="age"></div></div>
     <div class="tile"><div class="label">Rythme des blocs</div><div class="value" id="pace">—</div><div class="sub" id="pace-target"></div></div>
-    <div class="tile"><div class="label">Finalisés au 1er round</div><div class="value" id="first-round">—</div><div class="sub">depuis le démarrage</div></div>
+    <div class="tile"><div class="label">Finalisés au 1er round</div><div class="value" id="first-round">—</div><div class="sub">sur la dernière heure</div></div>
     <div class="tile"><div class="label">Pairs connectés</div><div class="value" id="peers">—</div><div class="sub" id="validators"></div></div>
     <div class="tile"><div class="label">En attente</div><div class="value" id="mempool">—</div><div class="sub" id="fees"></div></div>
   </section>
@@ -156,7 +156,7 @@ async function refresh() {
       const b = blocks.blocks, span = b[0].timestamp - b[b.length - 1].timestamp;
       $("pace").textContent = (span / (b.length - 1) / 1000).toFixed(1) + " s";
     }
-    $("pace-target").textContent = `cible ${interval / 1000} s`;
+    $("pace-target").textContent = `20 derniers blocs, cible ${interval / 1000} s`;
 
     const ratio = status.first_round_ratio;
     const fr = $("first-round");

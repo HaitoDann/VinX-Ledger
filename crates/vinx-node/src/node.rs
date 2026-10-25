@@ -52,6 +52,10 @@ pub struct Metrics {
     /// Dont finalisés au premier round : un taux proche de 100 % indique un
     /// réseau sain (SPEC §11, critère pour réduire l'intervalle de bloc).
     pub blocks_first_round: u64,
+    /// Blocs de la dernière heure : (horodatage en ms, finalisé au premier
+    /// round). Le tableau de bord en tire un taux qui reflète l'état actuel
+    /// du réseau, et pas une panne ancienne.
+    pub recent_rounds: std::collections::VecDeque<(u64, bool)>,
     pub last_round: u32,
     pub peers: usize,
     /// Indice de ce nœud dans l'ensemble de validateurs, s'il vote.
@@ -63,8 +67,20 @@ pub struct Metrics {
     pub started_ms: u64,
 }
 
+/// Fenêtre des indicateurs récents du tableau de bord : une heure.
+pub const RECENT_WINDOW_MS: u64 = 60 * 60 * 1000;
+
 /// Conservation des blocs par défaut : 24 heures.
 pub const DEFAULT_RETENTION_MS: u64 = 24 * 60 * 60 * 1000;
+
+impl Metrics {
+    /// Part des blocs de la dernière heure finalisés au premier round.
+    pub fn recent_first_round_ratio(&self) -> Option<f64> {
+        let total = self.recent_rounds.len();
+        let first = self.recent_rounds.iter().filter(|(_, r)| *r).count();
+        (total > 0).then(|| first as f64 / total as f64)
+    }
+}
 
 impl Shared {
     pub fn broadcast(&self, msg: NetMessage) {
@@ -195,6 +211,16 @@ fn commit(
         s.metrics.blocks_first_round = s.metrics.blocks_first_round.saturating_add(1);
     }
     s.metrics.last_round = cert.round;
+    let now = block.header.timestamp;
+    s.metrics.recent_rounds.push_back((now, cert.round == 0));
+    while s
+        .metrics
+        .recent_rounds
+        .front()
+        .is_some_and(|(t, _)| now.saturating_sub(*t) > RECENT_WINDOW_MS)
+    {
+        s.metrics.recent_rounds.pop_front();
+    }
     let included: BTreeSet<_> = block
         .admin_txs
         .iter()
@@ -746,5 +772,19 @@ pub async fn run(
             }
             _ = shutdown.changed() => return Ok(()),
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn recent_ratio_counts_first_round_blocks() {
+        let mut m = Metrics::default();
+        assert_eq!(m.recent_first_round_ratio(), None);
+        m.recent_rounds
+            .extend([(1, true), (2, false), (3, true), (4, true)]);
+        assert_eq!(m.recent_first_round_ratio(), Some(0.75));
     }
 }
