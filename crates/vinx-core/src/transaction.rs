@@ -30,6 +30,50 @@ pub enum TxBody {
     RotateKey {
         new_key: PublicKey,
     } = 0x03,
+    // Protocole 2 et suivants.
+    /// Enregistre `nom.vinx` pour un an, ou le renouvelle si l'émetteur le possède.
+    RegisterName {
+        name: String,
+    } = 0x04,
+    /// Cède un nom possédé, non expiré.
+    TransferName {
+        name: String,
+        to: Address,
+    } = 0x05,
+    /// Bloque `amount` en séquestre au profit de `seller` (SPEC §5.5).
+    OpenDeal {
+        seller: Address,
+        arbiter: Option<Address>,
+        amount: Amount,
+        /// Horodatage Unix (secondes) après lequel l'acheteur peut se rembourser.
+        deadline: u64,
+        memo: Option<Vec<u8>>,
+    } = 0x06,
+    /// Verse le séquestre au vendeur : acheteur ou arbitre.
+    ReleaseDeal {
+        id: Hash,
+    } = 0x07,
+    /// Rend le séquestre à l'acheteur : vendeur, arbitre, ou acheteur après l'échéance.
+    RefundDeal {
+        id: Hash,
+    } = 0x08,
+}
+
+impl TxBody {
+    /// Version du protocole à partir de laquelle ce type de transaction est accepté.
+    pub fn min_protocol(&self) -> u32 {
+        match self {
+            TxBody::Transfer { .. } | TxBody::SetMemoRequired { .. } | TxBody::RotateKey { .. } => {
+                1
+            }
+            _ => 2,
+        }
+    }
+}
+
+/// Identifiant d'un séquestre : `H("vinx/deal" ‖ borsh(acheteur, nonce))`.
+pub fn deal_id(buyer: &Address, nonce: u64) -> Hash {
+    hash_tagged(Domain::Deal, &encode(&(buyer, nonce)))
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, BorshSerialize, BorshDeserialize)]
@@ -105,7 +149,7 @@ mod tests {
         .map(|b| encode(&b)[0]);
         assert_eq!(codes, [0x01, 0x02, 0x03]);
         assert!(decode::<TxBody>(&[0x00, 1]).is_err());
-        assert!(decode::<TxBody>(&[0x04, 1]).is_err());
+        assert!(decode::<TxBody>(&[0x09, 1]).is_err());
     }
 
     #[test]

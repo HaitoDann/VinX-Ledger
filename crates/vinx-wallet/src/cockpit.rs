@@ -463,7 +463,7 @@ async fn page(State(c): State<Shared>) -> Html<String> {
 
 /// Page complète : feuille de style commune, logo et icône de la charte VinX
 /// (`assets/`), insérés dans le gabarit.
-fn render_page(template: &str) -> String {
+pub(crate) fn render_page(template: &str) -> String {
     let logo = include_str!("../../../assets/logo.svg").trim();
     let favicon = format!(
         "data:image/svg+xml,{}",

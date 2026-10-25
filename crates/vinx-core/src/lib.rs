@@ -16,7 +16,7 @@ pub use amount::{Amount, TOTAL_SUPPLY, UNITS_PER_VINX};
 pub use block::{Block, BlockHeader};
 pub use consensus::{CommitCertificate, Vote, VoteKind, quorum};
 pub use params::{ParamId, Params};
-pub use transaction::{SignedTransaction, Transaction, TxBody};
+pub use transaction::{SignedTransaction, Transaction, TxBody, deal_id};
 pub use vinx_crypto::{Address, Hash, PublicKey, Signature};
 
 use thiserror::Error;

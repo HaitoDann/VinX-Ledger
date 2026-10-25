@@ -2,16 +2,24 @@
 
 use crate::accounts::Accounts;
 use crate::escrow::{Escrow, EscrowError};
+use crate::registry::{
+    Deal, MAX_DEAL_DURATION, NAME_GRACE, NAME_PERIOD, NameRecord, Registry, valid_name,
+};
 use crate::validators::{ValidatorChange, ValidatorError, ValidatorSet, validators_hash};
 use borsh::{BorshDeserialize, BorshSerialize};
 use std::collections::BTreeMap;
+use std::sync::Arc;
 use thiserror::Error;
 use vinx_core::params::MIN_UPGRADE_DELAY;
 use vinx_core::{
     ADMIN_SIGNERS, Account, AdminAction, Amount, Block, ParamId, Params, SignedAdminTransaction,
-    SignedTransaction, TOTAL_SUPPLY, TxBody, encode,
+    SignedTransaction, TOTAL_SUPPLY, TxBody, deal_id, encode,
 };
 use vinx_crypto::{Address, Domain, Hash, PublicKey, hash_tagged_parts, merkle_root};
+
+/// Dernière version du protocole que ce code sait exécuter. Un nœud plus
+/// ancien qu'une mise à jour activée s'arrête au lieu de diverger.
+pub const SUPPORTED_PROTOCOL: u32 = 2;
 
 #[derive(Clone, Debug, PartialEq, Eq, BorshSerialize, BorshDeserialize)]
 pub struct AdminSet {
@@ -39,10 +47,28 @@ pub struct State {
     pub validators: ValidatorSet,
     pub params: Params,
     pub upgrade: Option<PendingUpgrade>,
+    /// Noms et séquestres (protocole 2). Vide et hors de `state_root` avant.
+    pub registry: Registry,
 }
 
 #[derive(Debug, Error, PartialEq, Eq)]
 pub enum TxError {
+    #[error(
+        "type de transaction pas encore actif sur ce réseau (mise à jour du protocole requise)"
+    )]
+    NotYetActive,
+    #[error("nom invalide : 3 à 32 caractères a-z, 0-9 et tiret")]
+    InvalidName,
+    #[error("nom déjà pris")]
+    NameTaken,
+    #[error("ce nom n'appartient pas à l'émetteur, ou a expiré")]
+    NotNameOwner,
+    #[error("séquestre inconnu")]
+    UnknownDeal,
+    #[error("séquestre invalide (participants ou échéance)")]
+    InvalidDeal,
+    #[error("action non autorisée sur ce séquestre")]
+    DealForbidden,
     #[error("mauvais identifiant de chaîne")]
     WrongChain,
     #[error("compte émetteur inconnu")]
@@ -167,6 +193,36 @@ struct Globals {
     validators: ValidatorSet,
     params: Params,
     upgrade: Option<PendingUpgrade>,
+    registry: Registry,
+}
+
+/// [`Globals`] des versions 0.7 et antérieures, sans registre.
+#[derive(BorshDeserialize)]
+struct LegacyGlobals {
+    chain_id: String,
+    protocol_version: u32,
+    height: u64,
+    escrow: Escrow,
+    admin: AdminSet,
+    validators: ValidatorSet,
+    params: Params,
+    upgrade: Option<PendingUpgrade>,
+}
+
+impl From<LegacyGlobals> for Globals {
+    fn from(g: LegacyGlobals) -> Self {
+        Self {
+            chain_id: g.chain_id,
+            protocol_version: g.protocol_version,
+            height: g.height,
+            escrow: g.escrow,
+            admin: g.admin,
+            validators: g.validators,
+            params: g.params,
+            upgrade: g.upgrade,
+            registry: Registry::default(),
+        }
+    }
 }
 
 impl State {
@@ -181,12 +237,15 @@ impl State {
             validators: self.validators.clone(),
             params: self.params.clone(),
             upgrade: self.upgrade.clone(),
+            registry: self.registry.clone(),
         })
     }
 
     /// Reconstitue un état à partir de [`Self::globals_bytes`] et des comptes.
     pub fn from_parts(globals: &[u8], accounts: Accounts) -> Option<Self> {
-        let g: Globals = vinx_core::decode(globals).ok()?;
+        let g: Globals = vinx_core::decode(globals)
+            .or_else(|_| vinx_core::decode::<LegacyGlobals>(globals).map(Globals::from))
+            .ok()?;
         let mut accounts = accounts;
         accounts.take_dirty();
         Some(Self {
@@ -199,13 +258,18 @@ impl State {
             validators: g.validators,
             params: g.params,
             upgrade: g.upgrade,
+            registry: g.registry,
         })
     }
 
-    /// `Σ soldes + Σ escrow = 10¹⁸ unités`.
+    /// `Σ soldes + Σ escrow + Σ séquestres = 10¹⁸ unités`.
     pub fn check_invariant(&self) -> Result<(), BlockError> {
-        let balances = self.accounts.total_balance();
-        if balances.checked_add(self.escrow.total()) == Some(u128::from(TOTAL_SUPPLY)) {
+        let total = self
+            .accounts
+            .total_balance()
+            .checked_add(self.escrow.total())
+            .and_then(|t| t.checked_add(self.registry.locked()));
+        if total == Some(u128::from(TOTAL_SUPPLY)) {
             Ok(())
         } else {
             Err(BlockError::InvariantViolated)
@@ -213,8 +277,9 @@ impl State {
     }
 
     /// `H("vinx/state" ‖ racine_SMT(comptes) ‖ H(borsh(reste de l'état)))`.
+    /// Le registre en fait partie à partir du protocole 2.
     pub fn state_root(&self) -> Hash {
-        let globals = encode(&(
+        let mut globals = encode(&(
             &self.escrow,
             &self.admin,
             &self.validators,
@@ -222,6 +287,9 @@ impl State {
             &self.upgrade,
             self.protocol_version,
         ));
+        if self.protocol_version >= 2 {
+            globals.extend_from_slice(&encode(&self.registry));
+        }
         hash_tagged_parts(
             Domain::State,
             &[&self.accounts.root(), blake3::hash(&globals).as_bytes()],
@@ -306,8 +374,12 @@ impl State {
         if tx.fee < self.params.min_fee {
             return Err(TxError::FeeTooLow);
         }
+        if tx.body.min_protocol() > self.protocol_version {
+            return Err(TxError::NotYetActive);
+        }
 
         let mut changes = Changes::default();
+        let mut registry = None;
         changes.debit(&self.accounts, tx.sender, tx.fee)?;
         changes.credit(&self.accounts, Address::treasury(), tx.fee)?;
         let account = changes.get(&self.accounts, tx.sender);
@@ -325,6 +397,79 @@ impl State {
             TxBody::RotateKey { new_key } => {
                 changes.get(&self.accounts, tx.sender).key = Some(new_key.clone());
             }
+            TxBody::RegisterName { name } => {
+                let record = self.register_name(tx.sender, name)?;
+                let fee = self.registry.name_fee;
+                if fee > 0 {
+                    changes.debit(&self.accounts, tx.sender, fee)?;
+                    changes.credit(&self.accounts, Address::treasury(), fee)?;
+                }
+                registry = Some(Write::Name(name.clone(), record));
+            }
+            TxBody::TransferName { name, to } => {
+                let now = self.registry.now;
+                if self.registry.resolve(name, now) != Some(tx.sender) {
+                    return Err(TxError::NotNameOwner);
+                }
+                if *to == tx.sender {
+                    return Err(TxError::SelfTransfer);
+                }
+                let mut record = self
+                    .registry
+                    .names
+                    .get(name)
+                    .cloned()
+                    .ok_or(TxError::NotNameOwner)?;
+                record.owner = *to;
+                registry = Some(Write::Name(name.clone(), record));
+            }
+            TxBody::OpenDeal {
+                seller,
+                arbiter,
+                amount,
+                deadline,
+                memo,
+            } => {
+                let now = self.registry.now;
+                let latest = now
+                    .checked_add(MAX_DEAL_DURATION)
+                    .ok_or(TxError::Overflow)?;
+                let bad_arbiter = arbiter.is_some_and(|a| a == tx.sender || a == *seller);
+                if bad_arbiter || *deadline <= now || *deadline > latest {
+                    return Err(TxError::InvalidDeal);
+                }
+                self.check_payment(tx.sender, *seller, *amount, memo)?;
+                changes.debit(&self.accounts, tx.sender, *amount)?;
+                let deal = Deal {
+                    buyer: tx.sender,
+                    seller: *seller,
+                    arbiter: *arbiter,
+                    amount: *amount,
+                    deadline: *deadline,
+                    memo: memo.clone(),
+                };
+                registry = Some(Write::OpenDeal(deal_id(&tx.sender, tx.nonce), deal));
+            }
+            TxBody::ReleaseDeal { id } => {
+                let deal = self.registry.deals.get(id).ok_or(TxError::UnknownDeal)?;
+                if tx.sender != deal.buyer && deal.arbiter != Some(tx.sender) {
+                    return Err(TxError::DealForbidden);
+                }
+                changes.credit(&self.accounts, deal.seller, deal.amount)?;
+                registry = Some(Write::CloseDeal(*id));
+            }
+            TxBody::RefundDeal { id } => {
+                let deal = self.registry.deals.get(id).ok_or(TxError::UnknownDeal)?;
+                let expired = self.registry.now >= deal.deadline;
+                let allowed = tx.sender == deal.seller
+                    || deal.arbiter == Some(tx.sender)
+                    || (tx.sender == deal.buyer && expired);
+                if !allowed {
+                    return Err(TxError::DealForbidden);
+                }
+                changes.credit(&self.accounts, deal.buyer, deal.amount)?;
+                registry = Some(Write::CloseDeal(*id));
+            }
         }
         // Un compte peut être vidé entièrement. Il est conservé avec son nonce :
         // le supprimer permettrait de rejouer ses anciennes transactions s'il
@@ -334,7 +479,39 @@ impl State {
             return Err(TxError::BelowReserve);
         }
         changes.commit(&mut self.accounts);
+        match registry {
+            Some(Write::Name(name, record)) => {
+                Arc::make_mut(&mut self.registry.names).insert(name, record);
+            }
+            Some(Write::OpenDeal(id, deal)) => {
+                Arc::make_mut(&mut self.registry.deals).insert(id, deal);
+            }
+            Some(Write::CloseDeal(id)) => {
+                Arc::make_mut(&mut self.registry.deals).remove(&id);
+            }
+            None => {}
+        }
         Ok(())
+    }
+
+    /// Enregistrement ou renouvellement de `name` par `sender` : renvoie la fiche à écrire.
+    fn register_name(&self, sender: Address, name: &str) -> Result<NameRecord, TxError> {
+        if !valid_name(name) {
+            return Err(TxError::InvalidName);
+        }
+        let now = self.registry.now;
+        let start = match self.registry.names.get(name) {
+            // Renouvellement : l'année s'ajoute à l'échéance en cours.
+            Some(r) if r.owner == sender => r.expires_at.max(now),
+            Some(r) if now < r.expires_at.saturating_add(NAME_GRACE) => {
+                return Err(TxError::NameTaken);
+            }
+            _ => now,
+        };
+        Ok(NameRecord {
+            owner: sender,
+            expires_at: start.checked_add(NAME_PERIOD).ok_or(TxError::Overflow)?,
+        })
     }
 
     // ── Transactions d'administration ───────────────────────────────────────
@@ -386,6 +563,15 @@ impl State {
             }
             AdminAction::RemoveValidator { key } => {
                 self.schedule_validator(ValidatorChange::Remove(key.clone()), ctx)?;
+            }
+            AdminAction::SetParam {
+                param: ParamId::NameFee,
+                value,
+            } => {
+                if self.protocol_version < 2 {
+                    return Err(TxError::NotYetActive);
+                }
+                self.registry.name_fee = *value;
             }
             AdminAction::SetParam { param, value } => {
                 let may_be_zero = matches!(param, ParamId::MinFee | ParamId::MinReserve);
@@ -472,6 +658,10 @@ impl State {
         crate::sigcache::preverify(self, txs);
         let mut next = self.clone();
         next.begin_block(height);
+        if next.protocol_version > SUPPORTED_PROTOCOL {
+            return Err(BlockError::WrongVersion);
+        }
+        next.registry.now = ctx.now;
         for (index, satx) in admin_txs.iter().enumerate() {
             next.apply_admin(satx, ctx)
                 .map_err(|error| BlockError::InvalidAdminTx { index, error })?;
@@ -513,6 +703,13 @@ impl State {
         *self = next;
         Ok(())
     }
+}
+
+/// Écriture dans le registre, différée comme celles des comptes.
+enum Write {
+    Name(String, NameRecord),
+    OpenDeal(Hash, Deal),
+    CloseDeal(Hash),
 }
 
 /// Racine des transactions d'un bloc, pour le proposeur.

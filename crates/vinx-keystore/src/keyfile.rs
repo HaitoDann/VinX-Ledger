@@ -126,9 +126,56 @@ impl KeyFile {
     }
 }
 
+/// Données quelconques chiffrées par mot de passe, avec le même schéma que
+/// [`KeyFile`] (phrase de récupération du portefeuille).
+#[derive(Clone, Debug, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct Sealed {
+    pub kdf: Kdf,
+    pub salt: String,
+    pub nonce: String,
+    pub ciphertext: String,
+}
+
+impl Sealed {
+    pub fn seal(data: &[u8], password: &str, kdf: Kdf) -> Result<Self> {
+        if password.is_empty() {
+            bail!("le mot de passe ne peut pas être vide");
+        }
+        let mut salt = [0u8; 16];
+        let mut nonce = [0u8; 24];
+        OsRng.fill_bytes(&mut salt);
+        OsRng.fill_bytes(&mut nonce);
+        let key = derive(password.as_bytes(), &salt, kdf)?;
+        let ciphertext = XChaCha20Poly1305::new(&key.into())
+            .encrypt(XNonce::from_slice(&nonce), data)
+            .map_err(|_| anyhow!("échec du chiffrement"))?;
+        Ok(Self {
+            kdf,
+            salt: hex::encode(salt),
+            nonce: hex::encode(nonce),
+            ciphertext: hex::encode(ciphertext),
+        })
+    }
+
+    pub fn open(&self, password: &str) -> Result<Vec<u8>> {
+        let salt = hex::decode(&self.salt)?;
+        let nonce: [u8; 24] = hex::decode(&self.nonce)?
+            .try_into()
+            .map_err(|_| anyhow!("nonce invalide"))?;
+        let key = derive(password.as_bytes(), &salt, self.kdf)?;
+        XChaCha20Poly1305::new(&key.into())
+            .decrypt(
+                XNonce::from_slice(&nonce),
+                hex::decode(&self.ciphertext)?.as_slice(),
+            )
+            .map_err(|_| anyhow!("mot de passe incorrect"))
+    }
+}
+
 /// Écrit un fichier lisible par son seul propriétaire (droits 600 sous Unix).
 /// Refuse d'écraser un fichier existant.
-fn write_private(path: &Path, data: &[u8]) -> std::io::Result<()> {
+pub fn write_private(path: &Path, data: &[u8]) -> std::io::Result<()> {
     use std::io::Write;
     let mut options = std::fs::OpenOptions::new();
     options.write(true).create_new(true);

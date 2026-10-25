@@ -34,6 +34,9 @@ pub fn router(shared: SharedRef) -> Router {
         .route("/blocks", get(recent_blocks))
         .route("/status", get(status))
         .route("/accounts/{address}", get(account))
+        .route("/accounts/{address}/transactions", get(account_history))
+        .route("/names/{name}", get(name))
+        .route("/deals/{id}", get(deal))
         .route("/blocks/{height}", get(block))
         .route("/escrow", get(escrow))
         .route("/fees", get(fees))
@@ -248,6 +251,7 @@ async fn governance(State(shared): State<SharedRef>) -> ApiResult {
             "timeout_vote_ms": p.timeout_vote_ms,
             "timeout_vote_delta_ms": p.timeout_vote_delta_ms,
             "min_block_interval_ms": p.min_block_interval_ms,
+            "name_fee": amount_to_string(st.registry.name_fee),
         },
         "protocol_version": st.protocol_version,
         "upgrade": st.upgrade.as_ref().map(|u| json!({
@@ -317,6 +321,7 @@ async fn status(State(shared): State<SharedRef>) -> ApiResult {
             "min_reserve": amount_to_string(st.params.min_reserve),
             "max_memo_bytes": st.params.max_memo_bytes,
             "min_block_interval_ms": st.params.min_block_interval_ms,
+            "name_fee": amount_to_string(st.registry.name_fee),
         },
     })))
 }
@@ -326,19 +331,149 @@ async fn account(State(shared): State<SharedRef>, Path(address): Path<String>) -
         .parse()
         .map_err(|e| error(StatusCode::BAD_REQUEST, e))?;
     let s = lock(&shared);
-    let account = s
-        .chain
-        .state
+    let st = &s.chain.state;
+    let account = st
         .accounts
         .get(&address)
         .ok_or_else(|| error(StatusCode::NOT_FOUND, "compte inconnu"))?;
+    let reg = &st.registry;
+    let names: Vec<Value> = reg
+        .names_of(&address, reg.now)
+        .into_iter()
+        .map(|(n, expires_at)| json!({ "name": format!("{n}.vinx"), "expires_at": expires_at }))
+        .collect();
+    let deals: Vec<Value> = reg
+        .deals_of(&address)
+        .iter()
+        .map(|(id, d)| deal_json(id, d, reg.now))
+        .collect();
     Ok(Json(json!({
         "address": address.to_string(),
         "balance": amount_to_string(account.balance),
         "nonce": account.nonce,
         "memo_required": account.memo_required,
         "public_key": account.key.as_ref().map(key_to_hex),
+        "names": names,
+        "deals": deals,
     })))
+}
+
+#[derive(Deserialize)]
+struct Limit {
+    limit: Option<usize>,
+}
+
+/// Dernières transactions d'une adresse (blocs conservés), plus les siennes en attente.
+async fn account_history(
+    State(shared): State<SharedRef>,
+    Path(address): Path<String>,
+    axum::extract::Query(q): axum::extract::Query<Limit>,
+) -> ApiResult {
+    let address: Address = address
+        .parse()
+        .map_err(|e| error(StatusCode::BAD_REQUEST, e))?;
+    let limit = q.limit.unwrap_or(50).min(200);
+    let s = lock(&shared);
+    let mut out: Vec<Value> = s
+        .mempool
+        .txs()
+        .iter()
+        .filter(|t| crate::store::parties(t).contains(&address))
+        .map(|t| {
+            let mut v = tx_json(t);
+            if let Some(o) = v.as_object_mut() {
+                o.insert("status".into(), json!("en attente"));
+            }
+            v
+        })
+        .collect();
+    let done = s
+        .store
+        .address_history(&address, limit)
+        .map_err(|e| error(StatusCode::INTERNAL_SERVER_ERROR, e))?;
+    for (height, timestamp, entry) in done {
+        let mut v = match &entry {
+            crate::store::HistoryEntry::User(t) => tx_json(t),
+            crate::store::HistoryEntry::Admin(t) => treasury_payment_json(t),
+        };
+        if let Some(o) = v.as_object_mut() {
+            o.insert("status".into(), json!("finalisée"));
+            o.insert("height".into(), json!(height));
+            o.insert("timestamp".into(), json!(timestamp));
+        }
+        out.push(v);
+    }
+    Ok(Json(json!({ "transactions": out })))
+}
+
+/// Paiement de la trésorerie, présenté comme un paiement ordinaire.
+fn treasury_payment_json(t: &SignedAdminTransaction) -> Value {
+    let AdminAction::TreasuryTransfer { to, amount, memo } = &t.tx.action else {
+        return admin_json(t);
+    };
+    json!({
+        "id": hash_to_hex(&t.id()),
+        "kind": "paiement",
+        "sender": Address::treasury().to_string(),
+        "to": to.to_string(),
+        "amount": amount_to_string(*amount),
+        "memo": memo.as_ref().map(|m| String::from_utf8_lossy(m).into_owned()),
+        "treasury": true,
+    })
+}
+
+/// Titulaire d'un nom (`alice` ou `alice.vinx`) ; `available` s'il peut être enregistré.
+async fn name(State(shared): State<SharedRef>, Path(name): Path<String>) -> ApiResult {
+    let name = name.trim().to_lowercase();
+    let name = name.strip_suffix(".vinx").unwrap_or(&name).to_string();
+    if !vinx_state::registry::valid_name(&name) {
+        return Err(error(
+            StatusCode::BAD_REQUEST,
+            "nom invalide : 3 à 32 caractères a-z, 0-9 et tiret",
+        ));
+    }
+    let s = lock(&shared);
+    let reg = &s.chain.state.registry;
+    let record = reg.names.get(&name);
+    let grace_end = record.map(|r| {
+        r.expires_at
+            .saturating_add(vinx_state::registry::NAME_GRACE)
+    });
+    Ok(Json(json!({
+        "name": format!("{name}.vinx"),
+        "owner": reg.resolve(&name, reg.now).map(|a| a.to_string()),
+        "expires_at": record.map(|r| r.expires_at),
+        "available": grace_end.is_none_or(|g| reg.now >= g),
+        "fee": amount_to_string(reg.name_fee),
+        "active": s.chain.state.protocol_version >= 2,
+    })))
+}
+
+async fn deal(State(shared): State<SharedRef>, Path(id): Path<String>) -> ApiResult {
+    let id = hex::decode(id.trim())
+        .ok()
+        .and_then(|b| <[u8; 32]>::try_from(b).ok())
+        .ok_or_else(|| error(StatusCode::BAD_REQUEST, "identifiant invalide"))?;
+    let s = lock(&shared);
+    let reg = &s.chain.state.registry;
+    let d = reg
+        .deals
+        .get(&id)
+        .ok_or_else(|| error(StatusCode::NOT_FOUND, "séquestre inconnu ou clos"))?;
+    Ok(Json(deal_json(&id, d, reg.now)))
+}
+
+fn deal_json(id: &vinx_crypto::Hash, d: &vinx_state::Deal, now: u64) -> Value {
+    json!({
+        "id": hash_to_hex(id),
+        "buyer": d.buyer.to_string(),
+        "seller": d.seller.to_string(),
+        "arbiter": d.arbiter.map(|a| a.to_string()),
+        "amount": amount_to_string(d.amount),
+        "deadline": d.deadline,
+        "expired": now >= d.deadline,
+        "memo": d.memo.as_ref().map(|m| String::from_utf8_lossy(m).into_owned()),
+    })
 }
 
 async fn block(State(shared): State<SharedRef>, Path(height): Path<u64>) -> ApiResult {
@@ -507,6 +642,38 @@ fn tx_json(stx: &SignedTransaction) -> Value {
             "kind": "rotation de clé",
             "new_key": key_to_hex(new_key),
         }),
+        TxBody::RegisterName { name } => json!({
+            "kind": "nom",
+            "name": format!("{name}.vinx"),
+        }),
+        TxBody::TransferName { name, to } => json!({
+            "kind": "cession de nom",
+            "name": format!("{name}.vinx"),
+            "to": to.to_string(),
+        }),
+        TxBody::OpenDeal {
+            seller,
+            arbiter,
+            amount,
+            deadline,
+            memo,
+        } => json!({
+            "kind": "séquestre",
+            "deal": hash_to_hex(&vinx_core::deal_id(&t.sender, t.nonce)),
+            "to": seller.to_string(),
+            "arbiter": arbiter.map(|a| a.to_string()),
+            "amount": amount_to_string(*amount),
+            "deadline": deadline,
+            "memo": memo.as_ref().map(|m| String::from_utf8_lossy(m).into_owned()),
+        }),
+        TxBody::ReleaseDeal { id } => json!({
+            "kind": "séquestre versé",
+            "deal": hash_to_hex(id),
+        }),
+        TxBody::RefundDeal { id } => json!({
+            "kind": "séquestre remboursé",
+            "deal": hash_to_hex(id),
+        }),
     };
     if let (Some(o), Some(b)) = (v.as_object_mut(), body.as_object()) {
         o.extend(b.clone());
@@ -577,6 +744,7 @@ pub fn param_name(p: ParamId) -> &'static str {
         ParamId::TimeoutVote => "timeout_vote",
         ParamId::TimeoutVoteDelta => "timeout_vote_delta",
         ParamId::MinBlockInterval => "min_block_interval",
+        ParamId::NameFee => "name_fee",
     }
 }
 

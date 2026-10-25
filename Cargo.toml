@@ -11,7 +11,7 @@ members = [
 resolver = "3"
 
 [workspace.package]
-version = "0.7.0"
+version = "0.8.0"
 edition = "2024"
 rust-version = "1.85"
 license = "Apache-2.0"
@@ -27,7 +27,7 @@ vinx-node = { path = "crates/vinx-node" }
 ureq = { version = "2", default-features = false, features = ["json"] }
 bech32 = "0.9"
 blake3 = "1"
-borsh = { version = "1", features = ["derive"] }
+borsh = { version = "1", features = ["derive", "rc"] }
 ed25519-dalek = { version = "2", features = ["rand_core"] }
 hex = "0.4"
 imbl = "7"

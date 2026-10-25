@@ -25,6 +25,9 @@ ureq.workspace = true
 axum.workspace = true
 tokio.workspace = true
 rand_core.workspace = true
+# Portefeuille : phrase de récupération.
+bip39 = { version = "2", default-features = false, features = ["std"] }
+blake3.workspace = true
 
 [dev-dependencies]
 vinx-node.workspace = true
