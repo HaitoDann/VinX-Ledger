@@ -15,8 +15,11 @@ use vinx_crypto::Address;
 use vinx_crypto::Hash;
 use vinx_state::{State, TxError};
 
-/// Capacité maximale, pour borner la mémoire.
+/// Capacité par défaut, pour borner la mémoire (`--mempool-size`).
 pub const MAX_PENDING: usize = 20_000;
+
+/// Capacité minimale : un bloc plein par défaut (5 000) doit pouvoir s'y former.
+pub const MIN_CAPACITY: usize = 5_000;
 
 /// Transactions en attente au plus par compte.
 pub const MAX_PER_ACCOUNT: usize = 100;
@@ -140,7 +143,20 @@ impl Mempool {
         Ok(id)
     }
 
-    /// Retire la transaction évinçable la moins chère si elle paie moins que `fee`.
+    /// Change la capacité (au moins [`MIN_CAPACITY`]). Les transactions déjà
+    /// en attente sont gardées, même au-delà.
+    pub fn set_capacity(&mut self, capacity: usize) {
+        self.capacity = capacity.max(MIN_CAPACITY);
+    }
+
+    pub fn capacity(&self) -> usize {
+        self.capacity
+    }
+
+    /// Retire les transactions évinçables les moins chères qui paient moins que
+    /// `fee` : 1 % de la capacité d'un coup, car chaque éviction réapplique tout
+    /// le mempool ; une à la fois, un afflux de transactions mieux payées
+    /// le reconstruirait à chaque arrivée.
     ///
     /// Seule la dernière transaction en attente d'un compte est évinçable :
     /// retirer une transaction intermédiaire rendrait les suivantes invalides.
@@ -149,16 +165,24 @@ impl Mempool {
         for (i, t) in self.txs.iter().enumerate() {
             last_of_sender.insert(t.tx.sender, i);
         }
-        let victim = last_of_sender
+        let mut victims: Vec<(usize, u64)> = last_of_sender
             .values()
             .copied()
             .filter_map(|i| Some((i, self.txs.get(i)?.tx.fee)))
             .filter(|(_, f)| *f < fee)
-            .min_by_key(|(_, f)| *f)
-            .map(|(i, _)| i)
-            .ok_or(MempoolError::Full)?;
-        let mut txs = std::mem::take(&mut self.txs);
-        txs.remove(victim);
+            .collect();
+        if victims.is_empty() {
+            return Err(MempoolError::Full);
+        }
+        victims.sort_by_key(|(_, f)| *f);
+        victims.truncate((self.capacity / 100).max(1));
+        let evicted: BTreeSet<usize> = victims.into_iter().map(|(i, _)| i).collect();
+        let txs = std::mem::take(&mut self.txs)
+            .into_iter()
+            .enumerate()
+            .filter(|(i, _)| !evicted.contains(i))
+            .map(|(_, t)| t)
+            .collect();
         let admin = std::mem::take(&mut self.admin);
         self.rebuild(txs, admin);
         Ok(())
@@ -399,6 +423,30 @@ mod tests {
         pool.add(pay(&users[1], 1, min * 20)).unwrap();
         let nonces: Vec<_> = pool.txs().iter().map(|t| t.tx.nonce).collect();
         assert_eq!(nonces, [1, 1]);
+    }
+
+    #[test]
+    fn a_full_pool_evicts_one_percent_at_once() {
+        let users: Vec<KeyPair> = (0..201).map(|_| KeyPair::generate()).collect();
+        let mut pool = Mempool::with_capacity(&funded(&users), 200);
+        let min = VINX / 1000;
+        for (i, u) in users.iter().take(200).enumerate() {
+            pool.add(pay(u, 1, min + i as u64)).unwrap();
+        }
+        // Une seule reconstruction pour deux places : les deux moins chères sortent.
+        pool.add(pay(&users[200], 1, min * 10)).unwrap();
+        assert_eq!(pool.len(), 199);
+        let fees: Vec<_> = pool.txs().iter().map(|t| t.tx.fee).collect();
+        assert!(!fees.contains(&min) && !fees.contains(&(min + 1)));
+    }
+
+    #[test]
+    fn capacity_has_a_floor() {
+        let mut pool = Mempool::new(&funded(&[]));
+        pool.set_capacity(10);
+        assert_eq!(pool.capacity(), MIN_CAPACITY);
+        pool.set_capacity(100_000);
+        assert_eq!(pool.capacity(), 100_000);
     }
 
     #[test]

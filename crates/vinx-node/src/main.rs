@@ -100,6 +100,10 @@ enum Command {
         /// Durée de conservation des blocs, en heures (ignorée avec --archive).
         #[arg(long, default_value_t = 24)]
         block_retention_hours: u64,
+        /// Transactions en attente au plus (au moins 5 000). Environ 500 octets
+        /// de mémoire par transaction.
+        #[arg(long, default_value_t = vinx_node::mempool::MAX_PENDING)]
+        mempool_size: usize,
     },
 }
 
@@ -248,6 +252,7 @@ async fn main() -> Result<()> {
             allowed,
             archive,
             block_retention_hours,
+            mempool_size,
         } => {
             let genesis = GenesisFile::load(genesis)?;
             let keypair = match key {
@@ -265,6 +270,7 @@ async fn main() -> Result<()> {
                 s.requests = Some(req_tx);
                 s.retention_ms =
                     (!*archive).then(|| block_retention_hours.saturating_mul(3_600_000));
+                s.mempool.set_capacity(*mempool_size);
                 info!(
                     archive = *archive,
                     "conservation des blocs : {}",

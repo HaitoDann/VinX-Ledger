@@ -343,9 +343,17 @@ bloc le plus plein  5000 transactions
   test (`admin propose … set-param --param max_block_txs --value 20000`), puis
   relance avec `--accounts 220 --fund 3` (environ 700 VINX). Quand les blocs
   mettent nettement plus de 5 s à venir (`journalctl`), c'est le nœud qui
-  sature. Repère : environ 3 000 transactions/s sur un validateur seul.
+  sature. Repère (0.4.0, 4 cœurs) : 3 500 transactions/s avec 4 validateurs,
+  un bloc de 20 000 transactions toutes les 5 s.
 - Remets ensuite `max_block_txs` à 5000 : des blocs trop gros allongent la
   finalité et le rattrapage des nœuds.
+- Le mempool garde au plus 20 000 transactions en attente. Pour des blocs
+  plus gros, agrandis-le : relance `install-validator.sh start` avec les mêmes
+  options et `--mempool-size 50000` (environ 500 octets de mémoire par
+  transaction).
+- `cargo run --release -p vinx-node --example profil_bloc 20000`, depuis le
+  dépôt, chronomètre chaque étape de l'application d'un bloc (signatures,
+  état, écriture disque).
 
 ## Pièges
 

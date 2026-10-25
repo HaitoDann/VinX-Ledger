@@ -3,6 +3,7 @@
 pub mod accounts;
 pub mod escrow;
 pub mod genesis;
+pub mod sigcache;
 pub mod smt;
 pub mod state;
 pub mod validators;

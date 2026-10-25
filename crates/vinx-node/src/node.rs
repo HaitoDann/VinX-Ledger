@@ -493,6 +493,9 @@ impl Runner {
                     let _ = lock(&self.shared).mempool.add(tx);
                 }
                 NetMessage::Txs(txs) => {
+                    // Signatures vérifiées sur tous les cœurs, hors du verrou.
+                    let state = lock(&self.shared).chain.state.clone();
+                    vinx_state::sigcache::preverify(&state, &txs);
                     let mut s = lock(&self.shared);
                     for tx in txs {
                         let _ = s.mempool.add(tx);

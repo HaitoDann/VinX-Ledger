@@ -299,8 +299,7 @@ impl State {
             (None, Some(given)) if Address::from_public_key(given) == tx.sender => given.clone(),
             _ => return Err(TxError::KeyMismatch),
         };
-        stx.verify_signature(&key)
-            .map_err(|_| TxError::BadSignature)?;
+        crate::sigcache::verify(stx, &key).map_err(|_| TxError::BadSignature)?;
         if sender.nonce.checked_add(1) != Some(tx.nonce) {
             return Err(TxError::BadNonce);
         }
@@ -468,6 +467,9 @@ impl State {
             height,
             now: timestamp_ms / 1000,
         };
+        // Signatures vérifiées sur tous les cœurs ; l'application, séquentielle,
+        // ne fait plus que les retrouver.
+        crate::sigcache::preverify(self, txs);
         let mut next = self.clone();
         next.begin_block(height);
         for (index, satx) in admin_txs.iter().enumerate() {
