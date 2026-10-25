@@ -1,0 +1,5 @@
+# Windows : le runtime C de Microsoft est lié dans l'exécutable. Sans cela,
+# vinx-wallet.exe et vinx-node.exe ne démarrent pas sur un PC où le
+# « Visual C++ Redistributable » n'est pas installé (code de sortie -1073741515).
+[target.x86_64-pc-windows-msvc]
+rustflags = ["-C", "target-feature=+crt-static"]

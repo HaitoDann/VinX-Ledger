@@ -31,6 +31,15 @@ jobs:
       - uses: Swatinem/rust-cache@v2
       - run: cargo test --locked -p vinx-wallet -p vinx-keystore -p vinx-crypto
       - run: cargo build --locked -p vinx-node -p vinx-wallet
+      # Comme pour la release : sans runtime Visual C++ à installer.
+      - name: Vérifie les .exe autonomes
+        if: runner.os == 'Windows'
+        shell: bash
+        env:
+          RUSTFLAGS: "-C target-feature=+crt-static"
+        run: |
+          cargo build --locked -p vinx-wallet
+          ! grep -aqi "vcruntime140.dll" target/debug/vinx-wallet.exe
 
   clippy:
     name: Clippy
