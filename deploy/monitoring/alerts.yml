@@ -26,6 +26,15 @@ groups:
           summary: "Un validateur a signé deux messages contradictoires"
           description: "Clé de validateur probablement compromise. Voir « Équivoque détectée » ; détail sur GET /evidence."
 
+      # Vu par l'ensemble des nœuds supervisés : absent si aucun ne voit sa signature.
+      - alert: VinxValidateurAbsent
+        expr: max by (validator, name) (vinx_validator_up) == 0
+        for: 2m
+        labels: { severity: warning }
+        annotations:
+          summary: "Le validateur n° {{ $labels.validator }} {{ $labels.name }} ne signe plus de blocs"
+          description: "Nœud arrêté, coupé du réseau ou en retard. Voir « Un validateur est hors ligne »."
+
       - alert: VinxPairsManquants
         expr: vinx_is_validator == 1 and vinx_peers < vinx_validators - 1
         for: 5m

@@ -180,6 +180,35 @@ impossible est refusée dès `submit`, avec sa raison.
 | Coupure brutale | 🗄️ arrêter puis relancer le serveur | repart à la même hauteur |
 | Alerte | 🗄️ `systemctl stop vinx-node` une minute | tableau de bord « chaîne à l'arrêt » |
 
+### Le tableau de bord
+
+<http://127.0.0.1:8545>, par le tunnel, a quatre onglets :
+
+- **Aperçu** : santé de la chaîne, état de **chaque validateur** (en ligne, en
+  retard, absent, d'après les votes reçus par ce nœud), graphiques de la
+  dernière heure (temps entre les blocs, transactions par seconde, pairs) et
+  derniers blocs. Cliquer sur un bloc en affiche le détail.
+- **Gouvernance** : trésorerie, calendrier de l'escrow, multisig, tous les
+  paramètres avec leur nom pour `set-param`, historique des actions admin.
+- **Mempool** : transactions en attente et derniers refus, avec leur raison.
+- **Recherche** : une adresse `vinx1…`, un identifiant de transaction ou une
+  hauteur de bloc.
+
+Pour afficher les validateurs par leur nom plutôt que par leur numéro, écris un
+fichier `noms.json` qui associe chaque clé publique à un nom :
+
+```json
+{
+  "01386b9e…26df8": "Validateur-3",
+  "014f90e8…5d9d4c": "Validateur-1"
+}
+```
+
+(les clés complètes, telles qu'affichées par `prepare`), puis 🗄️ sur chaque
+serveur, relance `start` avec les mêmes options et
+`--validator-names /root/noms.json`. Les noms apparaissent aussi dans les
+métriques Prometheus (`vinx_validator_up`) et l'alerte `VinxValidateurAbsent`.
+
 ## 7. Passer à quatre validateurs
 
 Un validateur ne tolère aucune panne. Quatre en tolèrent une :
@@ -267,7 +296,7 @@ joignables par des tunnels.
 
 | Test | Action | Attendu |
 |---|---|---|
-| Une panne | 🗄️ `systemctl stop vinx-node` sur un serveur | la chaîne continue ; ses tours passent en round 1 (environ 9 s) |
+| Une panne | 🗄️ `systemctl stop vinx-node` sur un serveur | la chaîne continue ; ses tours passent en round 1 ; le tableau de bord le montre « absent » |
 | Retour | 🗄️ `systemctl start vinx-node` | il rattrape la chaîne, `"peers":3` |
 | Deux pannes | arrêter deux serveurs | la chaîne s'arrête ; même hauteur et même `last_block_hash` sur les deux restants |
 | Reprise | en relancer un | la chaîne repart d'elle-même |

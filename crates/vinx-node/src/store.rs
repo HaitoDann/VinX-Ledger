@@ -11,7 +11,7 @@ use borsh::{BorshDeserialize, BorshSerialize};
 use redb::{Database, ReadableTable, ReadableTableMetadata, TableDefinition};
 use std::path::Path;
 use vinx_consensus::{Evidence, SignGuard};
-use vinx_core::{Account, Block, CommitCertificate, encode};
+use vinx_core::{Account, Block, CommitCertificate, SignedAdminTransaction, encode};
 use vinx_crypto::Address;
 use vinx_crypto::Hash;
 use vinx_state::State;
@@ -21,6 +21,12 @@ const CERTS: TableDefinition<u64, &[u8]> = TableDefinition::new("certificates");
 const META: TableDefinition<&str, &[u8]> = TableDefinition::new("meta");
 const ACCOUNTS: TableDefinition<&[u8; 20], &[u8]> = TableDefinition::new("accounts");
 const EVIDENCE: TableDefinition<&[u8; 32], &[u8]> = TableDefinition::new("evidence");
+/// Identifiant de transaction → hauteur de son bloc, pour la recherche. Suit
+/// l'élagage des blocs.
+const TX_INDEX: TableDefinition<&[u8; 32], u64> = TableDefinition::new("tx_index");
+/// Nonce admin → action admin finalisée, pour l'historique de gouvernance.
+/// Petit et jamais élagué : il survit aux blocs d'où il vient.
+const ADMIN_LOG: TableDefinition<u64, &[u8]> = TableDefinition::new("admin_log");
 
 /// Preuves d'équivoque conservées au plus.
 pub const MAX_EVIDENCE: u64 = 1_000;
@@ -42,6 +48,34 @@ fn decode<T: BorshDeserialize>(bytes: &[u8], what: &str) -> Result<T> {
     borsh::from_slice(bytes).with_context(|| format!("{what} corrompu sur le disque"))
 }
 
+/// Action admin finalisée, telle que gardée dans le journal.
+#[derive(Clone, Debug, BorshSerialize, BorshDeserialize)]
+pub struct AdminLogEntry {
+    pub height: u64,
+    pub timestamp: u64,
+    pub tx: SignedAdminTransaction,
+}
+
+/// Indexe les transactions d'un bloc et journalise ses actions admin.
+fn index_block(tx: &redb::WriteTransaction, block: &Block) -> Result<()> {
+    let height = block.header.height;
+    let mut index = tx.open_table(TX_INDEX)?;
+    for t in &block.txs {
+        index.insert(&t.id(), height)?;
+    }
+    let mut log = tx.open_table(ADMIN_LOG)?;
+    for t in &block.admin_txs {
+        index.insert(&t.id(), height)?;
+        let entry = AdminLogEntry {
+            height,
+            timestamp: block.header.timestamp,
+            tx: t.clone(),
+        };
+        log.insert(t.tx.nonce, encode(&entry).as_slice())?;
+    }
+    Ok(())
+}
+
 impl Store {
     /// Ouvre (ou crée) la base. Refuse une base créée pour une autre genèse.
     pub fn open(path: &Path, genesis_root: Hash) -> Result<Self> {
@@ -53,6 +87,8 @@ impl Store {
             tx.open_table(CERTS)?;
             tx.open_table(ACCOUNTS)?;
             tx.open_table(EVIDENCE)?;
+            tx.open_table(TX_INDEX)?;
+            tx.open_table(ADMIN_LOG)?;
             let mut meta = tx.open_table(META)?;
             if meta.get(LEGACY_STATE)?.is_some() {
                 bail!(
@@ -133,6 +169,7 @@ impl Store {
             .insert(height, encode(block).as_slice())?;
         tx.open_table(CERTS)?
             .insert(height, encode(cert).as_slice())?;
+        index_block(&tx, block)?;
         {
             let mut table = tx.open_table(ACCOUNTS)?;
             for (address, account) in state.accounts.take_dirty() {
@@ -160,10 +197,13 @@ impl Store {
             tx.delete_table(table)?;
         }
         tx.delete_table(ACCOUNTS)?;
+        // Les blocs effacés ne sont plus consultables : leur index non plus.
+        tx.delete_table(TX_INDEX)?;
         tx.open_table(BLOCKS)?
             .insert(height, encode(block).as_slice())?;
         tx.open_table(CERTS)?
             .insert(height, encode(cert).as_slice())?;
+        index_block(&tx, block)?;
         {
             let mut table = tx.open_table(ACCOUNTS)?;
             for (address, account) in state.accounts.take_dirty() {
@@ -204,6 +244,13 @@ impl Store {
                 let block: Block = decode(&bytes, "bloc")?;
                 if block.header.timestamp >= cutoff_ms {
                     break;
+                }
+                let mut index = tx.open_table(TX_INDEX)?;
+                for t in &block.txs {
+                    index.remove(&t.id())?;
+                }
+                for t in &block.admin_txs {
+                    index.remove(&t.id())?;
                 }
                 blocks.remove(height)?;
                 certs.remove(height)?;
@@ -264,6 +311,48 @@ impl Store {
     /// Persiste le garde. À appeler **avant** d'envoyer la signature autorisée.
     pub fn save_guard(&self, guard: &SignGuard) -> Result<()> {
         self.put_meta(GUARD, guard)
+    }
+
+    /// Hauteur du bloc qui contient la transaction (utilisateur ou admin), s'il
+    /// est encore conservé.
+    pub fn tx_height(&self, id: &Hash) -> Result<Option<u64>> {
+        let tx = self.db.begin_read()?;
+        Ok(tx.open_table(TX_INDEX)?.get(id)?.map(|v| v.value()))
+    }
+
+    /// Les `limit` dernières actions admin finalisées, de la plus récente à la
+    /// plus ancienne.
+    pub fn admin_log(&self, limit: usize) -> Result<Vec<AdminLogEntry>> {
+        let tx = self.db.begin_read()?;
+        let table = tx.open_table(ADMIN_LOG)?;
+        let mut out = Vec::new();
+        for entry in table.iter()?.rev().take(limit) {
+            let (_, bytes) = entry?;
+            out.push(decode(bytes.value(), "journal admin")?);
+        }
+        Ok(out)
+    }
+
+    /// Construit l'index des transactions et le journal admin à partir des
+    /// blocs conservés, pour une base créée avant leur existence. Sans effet
+    /// si l'index contient déjà des entrées.
+    pub fn backfill_indexes(&self) -> Result<u64> {
+        let tx = self.db.begin_write()?;
+        let mut indexed = 0u64;
+        {
+            if !tx.open_table(TX_INDEX)?.is_empty()? {
+                return Ok(0);
+            }
+            let blocks = tx.open_table(BLOCKS)?;
+            for entry in blocks.iter()? {
+                let (_, bytes) = entry?;
+                let block: Block = decode(bytes.value(), "bloc")?;
+                index_block(&tx, &block)?;
+                indexed = indexed.saturating_add(1);
+            }
+        }
+        tx.commit()?;
+        Ok(indexed)
     }
 
     /// Nombre de blocs conservés (pour l'élagage et les tests).

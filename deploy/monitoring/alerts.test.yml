@@ -72,3 +72,24 @@ tests:
       - eval_time: 80m
         alertname: VinxRoundsSupplementaires
         exp_alerts: []
+
+  # Le validateur 4 ne signe plus, vu par deux nœuds : alerte après 2 minutes.
+  - interval: 1m
+    input_series:
+      - series: 'vinx_validator_up{job="vinx",node="v1",validator="4",name="Validateur-4"}'
+        values: '1 0 0 0 0 0'
+      - series: 'vinx_validator_up{job="vinx",node="v2",validator="4",name="Validateur-4"}'
+        values: '1 0 0 0 0 0'
+      - series: 'vinx_validator_up{job="vinx",node="v1",validator="1",name="Validateur-3"}'
+        values: '1 1 1 1 1 1'
+    alert_rule_test:
+      - eval_time: 2m
+        alertname: VinxValidateurAbsent
+        exp_alerts: []
+      - eval_time: 4m
+        alertname: VinxValidateurAbsent
+        exp_alerts:
+          - exp_labels: { severity: warning, validator: "4", name: Validateur-4 }
+            exp_annotations:
+              summary: "Le validateur n° 4 Validateur-4 ne signe plus de blocs"
+              description: "Nœud arrêté, coupé du réseau ou en retard. Voir « Un validateur est hors ligne »."

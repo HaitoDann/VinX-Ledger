@@ -9,11 +9,13 @@
   :root {
     --bg: #f6f7f9; --card: #ffffff; --text: #17191c; --muted: #646b75;
     --line: #e2e5ea; --accent: #2f5fd0; --ok: #1f8a4c; --warn: #b26a00; --bad: #c0362c;
+    --chart: #2f5fd0; --chart-soft: rgba(47, 95, 208, .14);
   }
   @media (prefers-color-scheme: dark) {
     :root {
       --bg: #111316; --card: #1a1d21; --text: #e7e9ec; --muted: #9aa1ab;
       --line: #2a2e34; --accent: #7aa2ff; --ok: #4cc27f; --warn: #e0a440; --bad: #ef6b5f;
+      --chart: #7aa2ff; --chart-soft: rgba(122, 162, 255, .16);
     }
   }
   * { box-sizing: border-box; }
@@ -23,28 +25,50 @@
            display: flex; flex-wrap: wrap; gap: 8px 16px; align-items: baseline; }
   h1 { font-size: 20px; margin: 0; }
   h2 { font-size: 15px; margin: 0 0 10px; color: var(--muted); font-weight: 600; }
+  h3 { font-size: 13px; margin: 14px 0 6px; color: var(--muted); font-weight: 600; }
+  nav { max-width: 1100px; margin: 0 auto; padding: 0 16px 10px; display: flex; flex-wrap: wrap; gap: 6px; }
+  nav a { padding: 5px 12px; border-radius: 99px; border: 1px solid var(--line); color: var(--text);
+          text-decoration: none; font-size: 13px; background: var(--card); }
+  nav a.active { border-color: var(--accent); color: var(--accent); font-weight: 600; }
   main { max-width: 1100px; margin: 0 auto; padding: 0 16px 32px; display: grid; gap: 14px; }
   .tiles { display: grid; grid-template-columns: repeat(auto-fit, minmax(150px, 1fr)); gap: 10px; }
-  .tile, .card { background: var(--card); border: 1px solid var(--line); border-radius: 10px; padding: 12px 14px; }
+  .tile, .card { background: var(--card); border: 1px solid var(--line); border-radius: 10px; padding: 12px 14px; min-width: 0; }
   .tile .label { color: var(--muted); font-size: 12px; }
   .tile .value { font-size: 22px; font-weight: 650; font-variant-numeric: tabular-nums; margin-top: 2px; }
-  .tile .sub { color: var(--muted); font-size: 12px; }
+  .tile .sub, .sub { color: var(--muted); font-size: 12px; }
   .grid2 { display: grid; grid-template-columns: repeat(auto-fit, minmax(320px, 1fr)); gap: 14px; }
+  .grid3 { display: grid; grid-template-columns: repeat(auto-fit, minmax(280px, 1fr)); gap: 14px; }
   table { width: 100%; border-collapse: collapse; font-variant-numeric: tabular-nums; }
-  th, td { text-align: left; padding: 5px 6px; border-bottom: 1px solid var(--line); font-size: 13px; }
+  th, td { text-align: left; padding: 5px 6px; border-bottom: 1px solid var(--line); font-size: 13px; vertical-align: top; }
   th { color: var(--muted); font-weight: 600; }
+  tr.link { cursor: pointer; }
+  tr.link:hover td { background: var(--bg); }
+  a { color: var(--accent); }
   .mono { font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 12px; word-break: break-all; }
-  .ok { color: var(--ok); } .warn { color: var(--warn); } .bad { color: var(--bad); }
+  .ok { color: var(--ok); } .warn { color: var(--warn); } .bad { color: var(--bad); } .muted { color: var(--muted); }
   .pill { display: inline-block; padding: 1px 8px; border-radius: 99px; font-size: 12px; border: 1px solid currentColor; }
+  .dot { display: inline-block; width: 9px; height: 9px; border-radius: 50%; margin-right: 6px; background: currentColor; }
   .alert { border-left: 4px solid var(--bad); }
+  .alert.warning { border-left-color: var(--warn); }
   dl { display: grid; grid-template-columns: max-content 1fr; gap: 4px 12px; margin: 0; font-size: 13px; }
   dt { color: var(--muted); }
-  dd { margin: 0; }
+  dd { margin: 0; min-width: 0; }
   /* Police à chasse fixe : une adresse doit se lire caractère par caractère. */
   input { width: 100%; padding: 8px 10px; border-radius: 8px; border: 1px solid var(--line);
           background: var(--bg); color: var(--text);
           font: 14px ui-monospace, SFMono-Regular, Menlo, monospace; }
   .scroll { overflow-x: auto; }
+  .chart svg { display: block; width: 100%; height: 90px; }
+  .chart .axis { display: flex; justify-content: space-between; color: var(--muted); font-size: 11px; margin-top: 2px; }
+  .chart .now { font-size: 18px; font-weight: 650; font-variant-numeric: tabular-nums; }
+  .bar { height: 8px; border-radius: 4px; background: var(--line); overflow: hidden; min-width: 60px; }
+  .bar > span { display: block; height: 100%; background: var(--ok); }
+  .timeline { display: flex; gap: 3px; flex-wrap: wrap; margin-top: 6px; }
+  .timeline span { width: 14px; height: 14px; border-radius: 3px; background: var(--line); }
+  .timeline span.done { background: var(--ok); }
+  .timeline span.due { background: var(--warn); }
+  .view { display: none; gap: 14px; }
+  .view.active { display: grid; }
   #error { display: none; }
 </style>
 </head>
@@ -55,197 +79,506 @@
   <span id="role" class="pill"></span>
   <span id="health" class="pill"></span>
 </header>
+<nav>
+  <a href="#apercu" data-view="apercu">Aperçu</a>
+  <a href="#gouvernance" data-view="gouvernance">Gouvernance</a>
+  <a href="#mempool" data-view="mempool">Mempool</a>
+  <a href="#recherche" data-view="recherche">Recherche</a>
+</nav>
 <main>
   <div id="error" class="card alert"></div>
 
-  <section class="tiles">
-    <div class="tile"><div class="label">Hauteur</div><div class="value" id="height">—</div><div class="sub" id="age"></div></div>
-    <div class="tile"><div class="label">Rythme des blocs</div><div class="value" id="pace">—</div><div class="sub" id="pace-target"></div></div>
-    <div class="tile"><div class="label">Finalisés au 1er round</div><div class="value" id="first-round">—</div><div class="sub">sur la dernière heure</div></div>
-    <div class="tile"><div class="label">Pairs connectés</div><div class="value" id="peers">—</div><div class="sub" id="validators"></div></div>
-    <div class="tile"><div class="label">En attente</div><div class="value" id="mempool">—</div><div class="sub" id="fees"></div></div>
-  </section>
-
-  <div id="alerts"></div>
-
-  <div class="grid2">
-    <section class="card">
-      <h2>Trésorerie et escrow</h2>
-      <dl>
-        <dt>Trésorerie</dt><dd id="treasury">—</dd>
-        <dt>En escrow</dt><dd id="escrow">—</dd>
-        <dt>Prochaine tranche</dt><dd id="next-tranche">—</dd>
-        <dt>Tranches restantes</dt><dd id="tranches">—</dd>
-      </dl>
-    </section>
-    <section class="card">
-      <h2>Gouvernance</h2>
-      <dl>
-        <dt>Protocole</dt><dd id="protocol">—</dd>
-        <dt>Logiciel</dt><dd id="node-version">—</dd>
-        <dt>Multisig</dt><dd id="multisig">—</dd>
-        <dt>Validateurs</dt><dd id="validator-list">—</dd>
-        <dt>Paramètres</dt><dd id="params">—</dd>
-      </dl>
-    </section>
-  </div>
-
-  <section class="card">
-    <h2>Derniers blocs</h2>
-    <div class="scroll">
-      <table>
-        <thead><tr><th>Hauteur</th><th>Heure</th><th>Round</th><th>Proposeur</th><th>Tx</th><th>Hash</th></tr></thead>
-        <tbody id="blocks"></tbody>
-      </table>
+  <!-- Aperçu -->
+  <section id="view-apercu" class="view">
+    <div class="tiles">
+      <div class="tile"><div class="label">Hauteur</div><div class="value" id="height">—</div><div class="sub" id="age"></div></div>
+      <div class="tile"><div class="label">Rythme des blocs</div><div class="value" id="pace">—</div><div class="sub" id="pace-target"></div></div>
+      <div class="tile"><div class="label">Finalisés au 1er round</div><div class="value" id="first-round">—</div><div class="sub">sur la dernière heure</div></div>
+      <div class="tile"><div class="label">Pairs connectés</div><div class="value" id="peers">—</div><div class="sub" id="validators-count"></div></div>
+      <div class="tile"><div class="label">En attente</div><div class="value" id="mempool-count">—</div><div class="sub" id="fees"></div></div>
     </div>
+
+    <div id="alerts" style="display:grid;gap:14px"></div>
+
+    <section class="card">
+      <h2>Validateurs</h2>
+      <div class="scroll">
+        <table>
+          <thead><tr><th>Validateur</th><th>État</th><th>Dernier vote</th><th>Blocs signés (1 h)</th><th>Tours manqués</th><th>Clé</th></tr></thead>
+          <tbody id="validators"></tbody>
+        </table>
+      </div>
+      <div class="sub" style="margin-top:6px">D'après les certificats des blocs et les votes reçus par ce nœud, sur la dernière heure.
+        « En ligne » : a voté pendant les 3 derniers blocs ; « en retard » : a voté dans la dernière minute.
+        Le taux ne compte que les blocs suivis depuis le démarrage du nœud.</div>
+    </section>
+
+    <div class="grid3">
+      <section class="card chart"><h2>Temps entre les blocs</h2><div class="now" id="c-interval-now">—</div><div id="c-interval"></div><div class="axis"><span>il y a 1 h</span><span>maintenant</span></div></section>
+      <section class="card chart"><h2>Transactions par seconde</h2><div class="now" id="c-tps-now">—</div><div id="c-tps"></div><div class="axis"><span>il y a 1 h</span><span>maintenant</span></div></section>
+      <section class="card chart"><h2>Pairs connectés</h2><div class="now" id="c-peers-now">—</div><div id="c-peers"></div><div class="axis"><span>il y a 1 h</span><span>maintenant</span></div></section>
+    </div>
+
+    <section class="card">
+      <h2>Derniers blocs <span class="sub">— cliquer pour le détail</span></h2>
+      <div class="scroll">
+        <table>
+          <thead><tr><th>Hauteur</th><th>Heure</th><th>Round</th><th>Proposeur</th><th>Tx</th><th>Hash</th></tr></thead>
+          <tbody id="blocks"></tbody>
+        </table>
+      </div>
+    </section>
   </section>
 
-  <section class="card">
-    <h2>Consulter un compte</h2>
-    <input id="lookup" placeholder="vinx1…" autocomplete="off" spellcheck="false">
-    <dl id="account" style="margin-top:10px"></dl>
+  <!-- Gouvernance -->
+  <section id="view-gouvernance" class="view">
+    <div class="grid2">
+      <section class="card">
+        <h2>Trésorerie et escrow</h2>
+        <dl>
+          <dt>Trésorerie</dt><dd id="treasury">—</dd>
+          <dt>En escrow</dt><dd id="escrow">—</dd>
+          <dt>Prochaine tranche</dt><dd id="next-tranche">—</dd>
+          <dt>Tranches</dt><dd id="tranches">—</dd>
+        </dl>
+        <h3>Calendrier</h3>
+        <div id="escrow-timeline" class="timeline"></div>
+        <div class="sub" style="margin-top:6px"><span class="ok">■</span> libérée <span class="warn">■</span> échue, libérable <span class="muted">■</span> à venir</div>
+        <div class="scroll"><table style="margin-top:8px"><tbody id="escrow-schedule"></tbody></table></div>
+      </section>
+      <section class="card">
+        <h2>Gouvernance</h2>
+        <dl>
+          <dt>Protocole</dt><dd id="protocol">—</dd>
+          <dt>Logiciel</dt><dd id="node-version">—</dd>
+          <dt>Multisig</dt><dd id="multisig">—</dd>
+          <dt>Signataires</dt><dd id="signers">—</dd>
+          <dt>Validateurs</dt><dd id="validator-list">—</dd>
+        </dl>
+        <h3>Paramètres</h3>
+        <table><tbody id="params"></tbody></table>
+      </section>
+    </div>
+    <section class="card">
+      <h2>Historique des actions admin</h2>
+      <div class="scroll">
+        <table>
+          <thead><tr><th>Nonce</th><th>Date</th><th>Action</th><th>Détail</th><th>Signataires</th><th>Bloc</th></tr></thead>
+          <tbody id="admin-history"></tbody>
+        </table>
+      </div>
+    </section>
+  </section>
+
+  <!-- Mempool -->
+  <section id="view-mempool" class="view">
+    <div class="tiles">
+      <div class="tile"><div class="label">En attente</div><div class="value" id="mp-count">—</div><div class="sub" id="mp-capacity"></div></div>
+      <div class="tile"><div class="label">Frais conseillés</div><div class="value" id="mp-fee" style="font-size:18px">—</div><div class="sub">pour le prochain bloc</div></div>
+      <div class="tile"><div class="label">Actions admin en attente</div><div class="value" id="mp-admin">—</div></div>
+    </div>
+    <section class="card">
+      <h2>Transactions en attente <span class="sub">— les 100 premières, par frais décroissants</span></h2>
+      <div class="scroll">
+        <table>
+          <thead><tr><th>Émetteur</th><th>Nonce</th><th>Type</th><th>Montant</th><th>Frais</th><th>Identifiant</th></tr></thead>
+          <tbody id="mp-txs"></tbody>
+        </table>
+      </div>
+    </section>
+    <section class="card">
+      <h2>Derniers refus <span class="sub">— soumis à ce nœud</span></h2>
+      <div class="scroll">
+        <table>
+          <thead><tr><th>Heure</th><th>Émetteur</th><th>Raison</th></tr></thead>
+          <tbody id="mp-rejects"></tbody>
+        </table>
+      </div>
+    </section>
+  </section>
+
+  <!-- Recherche -->
+  <section id="view-recherche" class="view">
+    <section class="card">
+      <h2>Rechercher</h2>
+      <input id="search" placeholder="adresse vinx1…, identifiant de transaction (64 caractères) ou hauteur de bloc" autocomplete="off" spellcheck="false">
+      <div class="sub" style="margin-top:6px">Entrée pour lancer la recherche.</div>
+      <div id="search-result" style="margin-top:12px"></div>
+    </section>
+  </section>
+
+  <!-- Détail d'un bloc ou d'une transaction -->
+  <section id="view-detail" class="view">
+    <section class="card" id="detail"></section>
   </section>
 </main>
 
 <script>
 const UNITS = 1000000000n;
+const REFRESH_MS = 3000;
 
 function vinx(units) {
   const v = BigInt(units);
   const whole = v / UNITS, frac = v % UNITS;
-  const w = whole.toString().replace(/\B(?=(\d{3})+(?!\d))/g, " ");
+  const w = whole.toString().replace(/\B(?=(\d{3})+(?!\d))/g, " ");
   if (frac === 0n) return w + " VINX";
   return w + "," + frac.toString().padStart(9, "0").replace(/0+$/, "") + " VINX";
 }
 const short = (s, n = 10) => s ? s.slice(0, n) + "…" : "—";
 const time = (ms) => new Date(ms).toLocaleTimeString("fr-FR");
+const dateTime = (ms) => new Date(ms).toLocaleString("fr-FR");
 const date = (s) => new Date(s * 1000).toLocaleString("fr-FR");
 const ago = (ms) => {
   const s = Math.max(0, Math.round((Date.now() - ms) / 1000));
-  return s < 90 ? `il y a ${s} s` : `il y a ${Math.round(s / 60)} min`;
+  if (s < 90) return `il y a ${s} s`;
+  if (s < 5400) return `il y a ${Math.round(s / 60)} min`;
+  return `il y a ${Math.round(s / 3600)} h`;
 };
 const $ = (id) => document.getElementById(id);
-const esc = (s) => String(s).replace(/[&<>"]/g, c => ({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;"}[c]));
+const esc = (s) => String(s ?? "").replace(/[&<>"]/g, c => ({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;"}[c]));
+const fr = (n) => Number(n).toLocaleString("fr-FR");
 
 async function get(path) {
   const r = await fetch(path, { cache: "no-store" });
-  if (!r.ok) throw new Error(`${path} : ${r.status}`);
+  if (!r.ok) {
+    let msg = `${r.status}`;
+    try { msg = (await r.json()).error || msg; } catch (_) {}
+    const e = new Error(msg); e.status = r.status; throw e;
+  }
   return r.json();
 }
 
-async function refresh() {
-  try {
-    const [status, gov, fees, blocks, evidence] = await Promise.all([
-      get("/status"), get("/governance"), get("/fees"), get("/blocks"), get("/evidence"),
-    ]);
-    $("error").style.display = "none";
-    const interval = status.params.min_block_interval_ms;
-
-    $("chain").textContent = status.chain_id;
-    $("node-version").textContent = "vinx-node " + status.node_version;
-    const role = $("role");
-    if (status.validator_index === null) { role.textContent = "observateur"; role.className = "pill"; }
-    else { role.textContent = `validateur n° ${status.validator_index + 1}`; role.className = "pill ok"; }
-
-    $("height").textContent = status.height.toLocaleString("fr-FR");
-    const last = blocks.blocks[0];
-    const lastAge = last ? Date.now() - last.timestamp : Infinity;
-    $("age").textContent = last ? "dernier bloc " + ago(last.timestamp) : "aucun bloc";
-
-    if (blocks.blocks.length > 1) {
-      const b = blocks.blocks, span = b[0].timestamp - b[b.length - 1].timestamp;
-      $("pace").textContent = (span / (b.length - 1) / 1000).toFixed(1) + " s";
-    }
-    $("pace-target").textContent = `20 derniers blocs, cible ${interval / 1000} s`;
-
-    const ratio = status.first_round_ratio;
-    const fr = $("first-round");
-    fr.textContent = ratio === null ? "—" : (ratio * 100).toFixed(1) + " %";
-    fr.className = "value " + (ratio === null ? "" : ratio >= 0.99 ? "ok" : ratio >= 0.9 ? "warn" : "bad");
-
-    $("peers").textContent = status.peers;
-    $("validators").textContent = `${status.validators.length} validateur(s)`;
-    $("mempool").textContent = status.pending_transactions;
-    $("fees").textContent = "frais conseillés " + vinx(fees.recommended_fee);
-
-    // Santé : la chaîne avance-t-elle ?
-    const health = $("health");
-    const stalled = lastAge >= interval * 6;
-    if (lastAge < interval * 3) { health.textContent = "chaîne active"; health.className = "pill ok"; }
-    else if (!stalled) { health.textContent = "chaîne lente"; health.className = "pill warn"; }
-    else { health.textContent = "chaîne à l'arrêt"; health.className = "pill bad"; }
-
-    // Alertes : chaîne à l'arrêt, puis preuves d'équivoque.
-    const stallAlert = stalled && last ? `
-      <div class="card alert">
-        <strong class="bad">Aucun bloc ${ago(last.timestamp)}</strong> — la chaîne n'avance que si plus
-        des deux tiers des validateurs (${Math.floor(2 * status.validators.length / 3) + 1}
-        sur ${status.validators.length}) sont en ligne et connectés. Ce nœud voit
-        ${status.peers} pair(s). Vérifiez l'état des serveurs validateurs et leur réseau.
-      </div>` : "";
-    $("alerts").innerHTML = stallAlert + evidence.evidence.map(e => `
-      <div class="card alert">
-        <strong class="bad">Équivoque détectée</strong> — le validateur n° ${e.validator_index + 1}
-        a signé deux messages contradictoires (hauteur ${e.height}, round ${e.round}, ${esc(e.step)}).
-        Sa clé est peut-être compromise : envisagez son retrait par la multisig.
-        <div class="mono">${esc(e.validator_key || "")}</div>
-      </div>`).join("");
-
-    $("treasury").textContent = vinx(gov.treasury.balance);
-    $("escrow").textContent = vinx(gov.escrow.total);
-    $("tranches").textContent = gov.escrow.tranches;
-    const next = gov.escrow.next;
-    if (next) {
-      const due = next.matures_at * 1000 <= Date.now();
-      $("next-tranche").innerHTML = `${vinx(next.amount)} — ${due
-        ? '<span class="ok">libérable maintenant</span>'
-        : "échéance " + esc(date(next.matures_at))}`;
-    } else {
-      $("next-tranche").textContent = "aucune";
-    }
-
-    $("protocol").textContent = "version " + gov.protocol_version + (gov.upgrade
-      ? ` — passage à la v${gov.upgrade.version} à la hauteur ${gov.upgrade.activation_height}` : "");
-    $("multisig").textContent = `${gov.admin.threshold} sur ${gov.admin.signers.length}, nonce ${gov.admin.nonce}`;
-    $("validator-list").innerHTML = gov.validators.active
-      .map((k, i) => `<div class="mono">${i + 1}. ${esc(short(k, 18))}</div>`).join("")
-      + gov.validators.pending.map(p =>
-        `<div class="warn">${esc(p.change)} prévu à la hauteur ${p.effective_height}</div>`).join("");
-    const p = gov.params;
-    $("params").textContent =
-      `frais min. ${vinx(p.min_fee)}, réserve ${vinx(p.min_reserve)}, ` +
-      `bloc toutes les ${p.min_block_interval_ms / 1000} s, ${p.max_block_txs} tx max.`;
-
-    $("blocks").innerHTML = blocks.blocks.map(b => `
-      <tr>
-        <td>${b.height}</td><td>${time(b.timestamp)}</td>
-        <td class="${b.round === 0 ? "" : "warn"}">${b.round ?? "—"}</td>
-        <td>${b.proposer + 1}</td>
-        <td>${b.transactions + b.admin_transactions}</td>
-        <td class="mono">${esc(short(b.hash, 16))}</td>
-      </tr>`).join("");
-  } catch (e) {
-    $("error").style.display = "block";
-    $("error").textContent = "Nœud injoignable : " + e.message;
-    $("health").textContent = "hors ligne"; $("health").className = "pill bad";
-  }
+/* Noms des validateurs : numéro (à partir de 1) et nom lisible. */
+let names = {};
+const vname = (v) => v ? (v.name ? `${esc(v.name)} <span class="muted">(n° ${v.index + 1})</span>` : `Validateur n° ${v.index + 1}`) : "—";
+function proposerName(index) {
+  const n = names[index];
+  return n ? `${esc(n)} <span class="muted">(${index + 1})</span>` : String(index + 1);
 }
 
-$("lookup").addEventListener("change", async (ev) => {
-  const out = $("account"), addr = ev.target.value.trim();
-  if (!addr) { out.innerHTML = ""; return; }
-  try {
-    const a = await get("/accounts/" + encodeURIComponent(addr));
-    out.innerHTML = `<dt>Solde</dt><dd>${vinx(a.balance)}</dd>
-      <dt>Transactions</dt><dd>${a.nonce}</dd>
-      <dt>Mémo obligatoire</dt><dd>${a.memo_required ? "oui" : "non"}</dd>`;
-  } catch (e) {
-    out.innerHTML = `<dt>Résultat</dt><dd class="warn">compte inconnu ou adresse invalide</dd>`;
+/* Petit graphique en ligne, sans bibliothèque : une aire sous une courbe. */
+function chart(values, { min = 0, max, refLine } = {}) {
+  if (values.length < 2) return '<div class="sub">pas encore assez de blocs</div>';
+  const W = 600, H = 90, pad = 4;
+  const hi = Math.max(max ?? 0, ...values, refLine ?? 0) || 1;
+  const x = (i) => (i / (values.length - 1)) * W;
+  const y = (v) => H - pad - ((v - min) / (hi - min)) * (H - 2 * pad);
+  const pts = values.map((v, i) => `${x(i).toFixed(1)},${y(v).toFixed(1)}`).join(" ");
+  const ref = refLine != null
+    ? `<line x1="0" x2="${W}" y1="${y(refLine)}" y2="${y(refLine)}" stroke="var(--muted)" stroke-dasharray="4 4" stroke-width="1" vector-effect="non-scaling-stroke"/>`
+    : "";
+  return `<svg viewBox="0 0 ${W} ${H}" preserveAspectRatio="none" role="img">
+    <polygon points="0,${H} ${pts} ${W},${H}" fill="var(--chart-soft)"/>
+    ${ref}
+    <polyline points="${pts}" fill="none" stroke="var(--chart)" stroke-width="1.5" vector-effect="non-scaling-stroke"/>
+  </svg>`;
+}
+
+/* ---------- Aperçu ---------- */
+async function refreshOverview() {
+  const [status, fees, blocks, evidence, vals, hist] = await Promise.all([
+    get("/status"), get("/fees"), get("/blocks"), get("/evidence"), get("/validators"), get("/history"),
+  ]);
+  const interval = status.params.min_block_interval_ms;
+  names = Object.fromEntries(vals.validators.filter(v => v.name).map(v => [v.index, v.name]));
+  header(status, blocks);
+
+  $("height").textContent = fr(status.height);
+  const last = blocks.blocks[0];
+  $("age").textContent = last ? "dernier bloc " + ago(last.timestamp) : "aucun bloc";
+  if (blocks.blocks.length > 1) {
+    const b = blocks.blocks, span = b[0].timestamp - b[b.length - 1].timestamp;
+    $("pace").textContent = (span / (b.length - 1) / 1000).toFixed(1) + " s";
   }
+  $("pace-target").textContent = `20 derniers blocs, cible ${interval / 1000} s`;
+  const ratio = status.first_round_ratio;
+  const frEl = $("first-round");
+  frEl.textContent = ratio === null ? "—" : (ratio * 100).toFixed(1) + " %";
+  frEl.className = "value " + (ratio === null ? "" : ratio >= 0.99 ? "ok" : ratio >= 0.9 ? "warn" : "bad");
+  $("peers").textContent = status.peers;
+  $("validators-count").textContent = `${status.validators.length} validateur(s)`;
+  $("mempool-count").textContent = fr(status.pending_transactions);
+  $("fees").textContent = "frais conseillés " + vinx(fees.recommended_fee);
+
+  // Alertes : chaîne à l'arrêt, validateurs absents, équivoques.
+  const lastAge = last ? Date.now() - last.timestamp : Infinity;
+  const stalled = lastAge >= interval * 6;
+  const alerts = [];
+  if (stalled && last) alerts.push(`
+    <div class="card alert">
+      <strong class="bad">Aucun bloc ${ago(last.timestamp)}</strong> — la chaîne n'avance que si plus
+      des deux tiers des validateurs (${Math.floor(2 * status.validators.length / 3) + 1}
+      sur ${status.validators.length}) sont en ligne et connectés. Ce nœud voit
+      ${status.peers} pair(s). Vérifiez l'état des serveurs validateurs et leur réseau.
+    </div>`);
+  const absent = vals.validators.filter(v => v.presence === "absent");
+  if (absent.length && !stalled) alerts.push(`
+    <div class="card alert warning">
+      <strong class="warn">${absent.length === 1 ? "Un validateur ne vote plus" : absent.length + " validateurs ne votent plus"}</strong>
+      — ${absent.map(v => vname(v) + (v.last_signed_ms ? ", dernier vote " + ago(v.last_signed_ms) : ", aucun vote sur l'heure")).join(" ; ")}.
+      Nœud arrêté, coupé du réseau ou en retard. ${absent.length * 3 >= status.validators.length
+        ? '<strong class="bad">Une absence de plus et la chaîne s\'arrête.</strong>' : ""}
+    </div>`);
+  for (const e of evidence.evidence) alerts.push(`
+    <div class="card alert">
+      <strong class="bad">Équivoque détectée</strong> — le validateur n° ${e.validator_index + 1}
+      a signé deux messages contradictoires (hauteur ${e.height}, round ${e.round}, ${esc(e.step)}).
+      Sa clé est peut-être compromise : envisagez son retrait par la multisig.
+      <div class="mono">${esc(e.validator_key || "")}</div>
+    </div>`);
+  $("alerts").innerHTML = alerts.join("");
+
+  // Validateurs.
+  const cls = { "en ligne": "ok", "en retard": "warn", "absent": "bad", "nouveau": "muted" };
+  $("validators").innerHTML = vals.validators.map(v => {
+    const pct = v.expected ? v.signed / v.expected : null;
+    return `<tr>
+      <td>${vname(v)}${v.this_node ? ' <span class="pill">ce nœud</span>' : ""}</td>
+      <td class="${cls[v.presence] || ""}"><span class="dot"></span>${esc(v.presence)}</td>
+      <td>${v.last_signed_ms ? `${ago(v.last_signed_ms)} <span class="muted">(${v.last_signed_height})</span>` : "—"}</td>
+      <td>${pct === null ? "—" : `<div style="display:flex;gap:8px;align-items:center"><div class="bar"><span style="width:${(pct * 100).toFixed(1)}%;background:var(--${pct >= .99 ? "ok" : pct >= .9 ? "warn" : "bad"})"></span></div>${(pct * 100).toFixed(1)} %</div>`}</td>
+      <td class="${v.missed_proposals ? "warn" : ""}">${v.missed_proposals}</td>
+      <td class="mono">${esc(short(v.key, 14))}</td>
+    </tr>`;
+  }).join("");
+
+  // Graphiques de la dernière heure.
+  const hb = hist.blocks;
+  const gaps = hb.slice(1).map((b, i) => (b.timestamp - hb[i].timestamp) / 1000);
+  const tps = hb.slice(1).map((b, i) => b.transactions / Math.max(0.001, (b.timestamp - hb[i].timestamp) / 1000));
+  $("c-interval").innerHTML = chart(gaps, { refLine: interval / 1000 });
+  $("c-interval-now").textContent = gaps.length ? `${Math.max(...gaps).toFixed(1)} s au plus` : "—";
+  $("c-tps").innerHTML = chart(tps);
+  $("c-tps-now").textContent = tps.length ? `${Math.round(Math.max(...tps))} au plus` : "—";
+  const peers = hb.filter(b => b.peers !== null).map(b => b.peers);
+  $("c-peers").innerHTML = chart(peers, { max: status.validators.length - 1 });
+  $("c-peers-now").textContent = `${status.peers} maintenant`;
+
+  $("blocks").innerHTML = blocks.blocks.map(b => `
+    <tr class="link" onclick="location.hash='#bloc/${b.height}'">
+      <td>${b.height}</td><td>${time(b.timestamp)}</td>
+      <td class="${b.round === 0 ? "" : "warn"}">${b.round ?? "—"}</td>
+      <td>${proposerName(b.proposer)}</td>
+      <td>${b.transactions + b.admin_transactions}</td>
+      <td class="mono">${esc(short(b.hash, 16))}</td>
+    </tr>`).join("");
+}
+
+function header(status, blocks) {
+  $("chain").textContent = status.chain_id;
+  const role = $("role");
+  if (status.validator_index === null) { role.textContent = "observateur"; role.className = "pill"; }
+  else { role.textContent = `validateur n° ${status.validator_index + 1}`; role.className = "pill ok"; }
+  // Santé : seulement quand la page connaît le dernier bloc.
+  if (!blocks) return;
+  const last = blocks.blocks[0];
+  const interval = status.params.min_block_interval_ms;
+  const lastAge = last ? Date.now() - last.timestamp : Infinity;
+  const health = $("health");
+  if (lastAge < interval * 3) { health.textContent = "chaîne active"; health.className = "pill ok"; }
+  else if (lastAge < interval * 6) { health.textContent = "chaîne lente"; health.className = "pill warn"; }
+  else { health.textContent = "chaîne à l'arrêt"; health.className = "pill bad"; }
+}
+
+/* ---------- Gouvernance ---------- */
+const PARAMS = [
+  ["min_fee", "Frais minimum", v => vinx(v)],
+  ["min_reserve", "Réserve minimale", v => vinx(v)],
+  ["max_memo_bytes", "Mémo, taille max.", v => v + " octets"],
+  ["max_block_txs", "Transactions par bloc, max.", v => fr(v)],
+  ["max_block_bytes", "Taille de bloc, max.", v => fr(v) + " octets"],
+  ["min_block_interval_ms", "Intervalle de bloc", v => v / 1000 + " s"],
+  ["timeout_propose_ms", "Délai de proposition", v => v + " ms"],
+  ["timeout_propose_delta_ms", "… par round supplémentaire", v => "+ " + v + " ms"],
+  ["timeout_vote_ms", "Délai de vote", v => v + " ms"],
+  ["timeout_vote_delta_ms", "… par round supplémentaire", v => "+ " + v + " ms"],
+];
+const SET_PARAM = { min_block_interval_ms: "min_block_interval", timeout_propose_ms: "timeout_propose",
+  timeout_propose_delta_ms: "timeout_propose_delta", timeout_vote_ms: "timeout_vote", timeout_vote_delta_ms: "timeout_vote_delta" };
+
+async function refreshGovernance() {
+  const [status, gov, escrow, history, vals, blocks] = await Promise.all([
+    get("/status"), get("/governance"), get("/escrow"), get("/admin-history"), get("/validators"), get("/blocks"),
+  ]);
+  header(status, blocks);
+  $("treasury").textContent = vinx(gov.treasury.balance);
+  $("escrow").textContent = vinx(gov.escrow.total);
+  $("tranches").textContent = `${escrow.released} libérée(s), ${escrow.tranches} restante(s)`;
+  const next = gov.escrow.next;
+  $("next-tranche").innerHTML = next
+    ? `${vinx(next.amount)} — ${next.matures_at * 1000 <= Date.now() ? '<span class="ok">libérable maintenant</span>' : "échéance " + esc(date(next.matures_at))}`
+    : "aucune";
+  const now = Date.now() / 1000;
+  $("escrow-timeline").innerHTML =
+    Array.from({ length: escrow.released }, () => '<span class="done" title="libérée"></span>').join("") +
+    escrow.schedule.map(t => `<span class="${t.matures_at <= now ? "due" : ""}" title="${esc(vinx(t.amount))} — ${esc(date(t.matures_at))}"></span>`).join("") +
+    (escrow.tranches > escrow.schedule.length ? ` <span style="width:auto;background:none" class="sub">+ ${escrow.tranches - escrow.schedule.length}</span>` : "");
+  $("escrow-schedule").innerHTML = escrow.schedule.slice(0, 6).map((t, i) => `
+    <tr><td>tranche ${escrow.released + i + 1}</td><td>${vinx(t.amount)}</td>
+    <td class="${t.matures_at <= now ? "warn" : ""}">${t.matures_at <= now ? "échue" : esc(date(t.matures_at))}</td></tr>`).join("");
+
+  $("node-version").textContent = "vinx-node " + status.node_version;
+  $("protocol").textContent = "version " + gov.protocol_version + (gov.upgrade
+    ? ` — passage à la v${gov.upgrade.version} à la hauteur ${gov.upgrade.activation_height}` : "");
+  $("multisig").textContent = `${gov.admin.threshold} sur ${gov.admin.signers.length}, nonce ${gov.admin.nonce}`;
+  $("signers").innerHTML = gov.admin.signers.map((k, i) => `<div class="mono">${i}. ${esc(short(k, 18))}</div>`).join("");
+  $("validator-list").innerHTML = vals.validators.map(v => `<div>${vname(v)} <span class="mono">${esc(short(v.key, 12))}</span></div>`).join("")
+    + gov.validators.pending.map(p => `<div class="warn">${esc(p.change)} prévu à la hauteur ${p.effective_height}</div>`).join("");
+  $("params").innerHTML = PARAMS.map(([k, label, f]) => `
+    <tr><td>${label}</td><td>${f(gov.params[k])}</td><td class="mono muted">${SET_PARAM[k] || k}</td></tr>`).join("");
+
+  $("admin-history").innerHTML = history.actions.length ? history.actions.map(a => `
+    <tr>
+      <td>${a.nonce}</td><td>${dateTime(a.timestamp)}</td><td>${esc(a.kind)}</td>
+      <td>${adminDetail(a)}</td>
+      <td>${a.approvals.join(", ")}</td>
+      <td><a href="#bloc/${a.height}">${a.height}</a></td>
+    </tr>`).join("") : '<tr><td colspan="6" class="muted">aucune action finalisée connue de ce nœud</td></tr>';
+}
+
+function adminDetail(a) {
+  const d = a.detail || {};
+  if (d.amount && d.to) return `${vinx(d.amount)} → <a href="#compte/${esc(d.to)}" class="mono">${esc(short(d.to, 14))}</a>${d.memo ? " — " + esc(d.memo) : ""}`;
+  if (d.amount) return vinx(d.amount);
+  if (d.param) return `${esc(d.param)} = ${fr(d.value)}`;
+  if (d.key) return `<span class="mono">${esc(short(d.key, 18))}</span>`;
+  if (d.new_key) return `signataire ${d.index} → <span class="mono">${esc(short(d.new_key, 18))}</span>`;
+  if (d.version) return `v${d.version} à la hauteur ${d.activation_height}`;
+  return "";
+}
+
+/* ---------- Mempool ---------- */
+async function refreshMempool() {
+  const [status, mp, fees, blocks] = await Promise.all([get("/status"), get("/mempool"), get("/fees"), get("/blocks")]);
+  header(status, blocks);
+  $("mp-count").textContent = fr(mp.count);
+  $("mp-capacity").textContent = `sur ${fr(mp.capacity)} places`;
+  $("mp-fee").textContent = vinx(fees.recommended_fee);
+  $("mp-admin").textContent = mp.admin_transactions.length;
+  $("mp-txs").innerHTML = mp.transactions.length ? mp.transactions.map(t => `
+    <tr class="link" onclick="location.hash='#tx/${t.id}'">
+      <td class="mono">${esc(short(t.sender, 16))}</td><td>${t.nonce}</td><td>${esc(t.kind)}</td>
+      <td>${t.amount ? vinx(t.amount) : "—"}</td><td>${vinx(t.fee)}</td>
+      <td class="mono">${esc(short(t.id, 16))}</td>
+    </tr>`).join("") : '<tr><td colspan="6" class="muted">aucune transaction en attente</td></tr>';
+  $("mp-rejects").innerHTML = mp.rejects.length ? mp.rejects.map(r => `
+    <tr><td>${time(r.at)}</td><td class="mono">${esc(short(r.sender, 16))}</td><td class="warn">${esc(r.reason)}</td></tr>`).join("")
+    : '<tr><td colspan="3" class="muted">aucun refus récent</td></tr>';
+}
+
+/* ---------- Recherche et détails ---------- */
+function txRows(t) {
+  const rows = [
+    ["Statut", t.status === "finalisée" ? `<span class="ok">finalisée</span> au bloc <a href="#bloc/${t.height}">${t.height}</a>, ${dateTime(t.timestamp)}` : `<span class="warn">${esc(t.status)}</span>`],
+    ["Identifiant", `<span class="mono">${esc(t.id)}</span>`],
+    ["Type", esc(t.kind)],
+  ];
+  if (t.sender) rows.push(["Émetteur", `<a class="mono" href="#compte/${esc(t.sender)}">${esc(t.sender)}</a>`], ["Nonce", t.nonce], ["Frais", vinx(t.fee)]);
+  if (t.to) rows.push(["Destinataire", `<a class="mono" href="#compte/${esc(t.to)}">${esc(t.to)}</a>`]);
+  if (t.amount) rows.push(["Montant", vinx(t.amount)]);
+  if (t.memo) rows.push(["Mémo", esc(t.memo)]);
+  if (t.new_key) rows.push(["Nouvelle clé", `<span class="mono">${esc(t.new_key)}</span>`]);
+  if (t.required !== undefined) rows.push(["Mémo exigé", t.required ? "oui" : "non"]);
+  if (t.detail) rows.push(["Détail", adminDetail(t)], ["Signataires admin", t.approvals.join(", ")]);
+  return `<dl>${rows.map(([k, v]) => `<dt>${k}</dt><dd>${v}</dd>`).join("")}</dl>`;
+}
+
+async function showTx(id) {
+  const t = await get("/transactions/" + encodeURIComponent(id));
+  return `<h2>Transaction</h2>${txRows(t)}`;
+}
+
+async function showAccount(addr) {
+  const a = await get("/accounts/" + encodeURIComponent(addr));
+  return `<h2>Compte</h2><dl>
+    <dt>Adresse</dt><dd class="mono">${esc(a.address)}</dd>
+    <dt>Solde</dt><dd>${vinx(a.balance)}</dd>
+    <dt>Transactions envoyées</dt><dd>${a.nonce}</dd>
+    <dt>Mémo obligatoire</dt><dd>${a.memo_required ? "oui" : "non"}</dd>
+    <dt>Clé</dt><dd class="mono">${esc(a.public_key || "pas encore connue (aucune dépense)")}</dd>
+  </dl>`;
+}
+
+async function showBlock(h) {
+  const b = await get("/blocks/" + encodeURIComponent(h));
+  const count = b.transactions.length + b.admin_transactions.length;
+  const nav = `<div style="display:flex;gap:12px;margin-bottom:8px">
+    ${b.height > 1 ? `<a href="#bloc/${b.height - 1}">← bloc ${b.height - 1}</a>` : ""}
+    <a href="#bloc/${b.height + 1}">bloc ${b.height + 1} →</a></div>`;
+  const shown = b.details.slice(0, 100);
+  const txs = shown.map(t => `
+    <tr class="link" onclick="location.hash='#tx/${t.id}'">
+      <td class="mono">${esc(short(t.sender, 14))}</td><td>${esc(t.kind)}</td>
+      <td class="mono">${t.to ? esc(short(t.to, 14)) : "—"}</td>
+      <td>${t.amount ? vinx(t.amount) : "—"}</td><td>${vinx(t.fee)}</td>
+    </tr>`).join("");
+  const admin = b.admin_details.map(a => `
+    <tr class="link" onclick="location.hash='#tx/${a.id}'"><td>admin n° ${a.nonce}</td><td>${esc(a.kind)}</td><td colspan="3">${adminDetail(a)}</td></tr>`).join("");
+  return `${nav}<h2>Bloc ${b.height}</h2>
+    <dl>
+      <dt>Heure</dt><dd>${dateTime(b.timestamp)}</dd>
+      <dt>Proposeur</dt><dd>${vname(b.proposer_validator)}</dd>
+      <dt>Round</dt><dd class="${b.round ? "warn" : ""}">${b.round ?? "—"}${b.round ? " — le ou les proposeurs précédents n'ont pas proposé à temps" : ""}</dd>
+      <dt>Certificat</dt><dd>${b.signers.map(vname).join(", ") || "—"} <span class="muted">— le quorum de signatures arrivé en premier</span></dd>
+      <dt>Transactions</dt><dd>${fr(count)}</dd>
+      <dt>Hash</dt><dd class="mono">${esc(b.hash)}</dd>
+      <dt>Parent</dt><dd class="mono">${esc(b.prev_hash)}</dd>
+      <dt>Racine d'état</dt><dd class="mono">${esc(b.state_root)}</dd>
+    </dl>
+    ${count ? `<h3>Transactions${b.transactions.length > shown.length ? ` (les ${fr(shown.length)} premières sur ${fr(b.transactions.length)})` : ""}</h3>
+    <div class="scroll"><table>
+      <thead><tr><th>Émetteur</th><th>Type</th><th>Destinataire</th><th>Montant</th><th>Frais</th></tr></thead>
+      <tbody>${admin}${txs}</tbody></table></div>` : ""}`;
+}
+
+async function search(q) {
+  q = q.trim();
+  if (!q) return "";
+  if (/^vinx1/i.test(q)) return showAccount(q);
+  if (/^[0-9a-f]{64}$/i.test(q)) return showTx(q);
+  if (/^\d+$/.test(q)) return showBlock(q);
+  if (/^01[0-9a-f]{64}$/i.test(q)) throw new Error("c'est une clé publique, pas une adresse : utilise l'adresse vinx1…");
+  throw new Error("format non reconnu : adresse vinx1…, identifiant de 64 caractères ou hauteur de bloc");
+}
+
+$("search").addEventListener("keydown", async (ev) => {
+  if (ev.key !== "Enter") return;
+  const out = $("search-result");
+  try { out.innerHTML = await search(ev.target.value); }
+  catch (e) { out.innerHTML = `<div class="warn">${esc(e.message)}</div>`; }
 });
 
-refresh();
-setInterval(refresh, 3000);
+/* ---------- Navigation ---------- */
+let timer = null;
+async function route() {
+  const [view, arg] = (location.hash.slice(1) || "apercu").split("/");
+  const detail = { bloc: showBlock, tx: showTx, compte: showAccount }[view];
+  const name = detail ? "detail" : (["apercu", "gouvernance", "mempool", "recherche"].includes(view) ? view : "apercu");
+  document.querySelectorAll(".view").forEach(v => v.classList.toggle("active", v.id === "view-" + name));
+  document.querySelectorAll("nav a").forEach(a => a.classList.toggle("active", a.dataset.view === name));
+  clearInterval(timer);
+  const refresh = { apercu: refreshOverview, gouvernance: refreshGovernance, mempool: refreshMempool }[name];
+  const run = async () => {
+    try {
+      if (refresh) await refresh();
+      $("error").style.display = "none";
+    } catch (e) {
+      $("error").style.display = "block";
+      $("error").textContent = "Nœud injoignable : " + e.message;
+      $("health").textContent = "hors ligne"; $("health").className = "pill bad";
+    }
+  };
+  if (detail) {
+    try { $("detail").innerHTML = await detail(decodeURIComponent(arg || "")); }
+    catch (e) { $("detail").innerHTML = `<div class="warn">${esc(e.message)}</div>`; }
+    Promise.all([get("/status"), get("/blocks")]).then(([s, b]) => header(s, b)).catch(() => {});
+    return;
+  }
+  await run();
+  if (refresh) timer = setInterval(run, REFRESH_MS);
+}
+window.addEventListener("hashchange", route);
+route();
 </script>
 </body>
 </html>

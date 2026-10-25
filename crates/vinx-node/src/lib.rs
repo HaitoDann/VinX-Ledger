@@ -1,5 +1,6 @@
 //! Nœud VinX Ledger : genèse, clés, stockage, mempool, consensus et API (SPEC §8).
 
+pub mod activity;
 pub mod api;
 pub mod chain;
 pub mod genesis_file;
