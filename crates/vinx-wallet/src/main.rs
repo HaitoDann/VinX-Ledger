@@ -3,7 +3,7 @@
 use anyhow::{Context, Result, anyhow, bail};
 use clap::{Args, Parser, Subcommand};
 use std::path::{Path, PathBuf};
-use vinx_core::{AdminAction, Amount, ParamId};
+use vinx_core::{AdminAction, Amount};
 use vinx_crypto::{Address, KeyPair};
 use vinx_keystore::encoding::{key_from_hex, key_to_hex};
 use vinx_keystore::keyfile::{DEFAULT_KDF, KeyFile, password};
@@ -88,6 +88,19 @@ enum Command {
     Preflight {
         #[arg(long = "new-node", required = true, num_args = 1)]
         new_nodes: Vec<String>,
+    },
+    /// Cockpit : interface web locale pour administrer le réseau.
+    ///
+    /// Sert une page sur http://127.0.0.1:PORT/. Le dossier contient les
+    /// fichiers de clé (signataires admin reconnus d'eux-mêmes, comptes),
+    /// `cockpit.json` (nœuds suivis) et `propositions/`. Les clés ne quittent
+    /// jamais ce poste.
+    Cockpit {
+        /// Dossier de travail.
+        #[arg(long, default_value = ".")]
+        dir: PathBuf,
+        #[arg(long, default_value_t = 8600)]
+        port: u16,
     },
     /// Test de charge : mesure le débit de transactions finalisées.
     ///
@@ -205,26 +218,7 @@ struct AmountArg {
     amount: String,
 }
 
-fn param_id(name: &str) -> Result<ParamId> {
-    Ok(match name {
-        "min_fee" => ParamId::MinFee,
-        "min_reserve" => ParamId::MinReserve,
-        "max_memo_bytes" => ParamId::MaxMemoBytes,
-        "max_block_txs" => ParamId::MaxBlockTxs,
-        "max_block_bytes" => ParamId::MaxBlockBytes,
-        "timeout_propose" => ParamId::TimeoutPropose,
-        "timeout_propose_delta" => ParamId::TimeoutProposeDelta,
-        "timeout_vote" => ParamId::TimeoutVote,
-        "timeout_vote_delta" => ParamId::TimeoutVoteDelta,
-        "min_block_interval" => ParamId::MinBlockInterval,
-        other => bail!(
-            "paramètre inconnu : {other}. Paramètres valides : min_fee, min_reserve, \
-             max_memo_bytes, max_block_txs, max_block_bytes, timeout_propose, \
-             timeout_propose_delta, timeout_vote, timeout_vote_delta, min_block_interval \
-             (durées en millisecondes, montants en unités : 1 VINX = 1000000000)"
-        ),
-    })
-}
+use vinx_wallet::params::param_id;
 
 fn action(arg: ActionArg) -> Result<AdminAction> {
     let memo = |m: Option<String>| m.map(String::into_bytes);
@@ -410,6 +404,9 @@ fn main() -> Result<()> {
                 "transaction {}",
                 ops::rotate_key(&client, &keypair, from, new)?
             );
+        }
+        Command::Cockpit { dir, port } => {
+            vinx_wallet::cockpit::serve(dir, port, &cli.node)?;
         }
         Command::Bench {
             key,

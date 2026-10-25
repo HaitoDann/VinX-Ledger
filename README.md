@@ -70,6 +70,9 @@ wallet send --key alice.json --to <adresse> --amount 12.5 --memo "FAC-1"
 wallet memo-required --key boutique.json on
 ```
 
+Pour administrer à la souris, `wallet cockpit` ouvre une interface locale sur
+`http://127.0.0.1:8600` (voir le guide de déploiement, section 6).
+
 Les actions de la trésorerie et de l'escrow passent par une proposition que
 deux des trois signataires approuvent, chacun avec sa propre clé :
 

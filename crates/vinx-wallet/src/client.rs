@@ -103,6 +103,11 @@ impl Client {
             .and_then(|b| b.get("hash")?.as_str().map(str::to_owned)))
     }
 
+    /// Réponse JSON brute d'une route `GET`, `None` sur 404.
+    pub fn get_json(&self, path: &str) -> Result<Option<Value>> {
+        self.request("GET", path, None)
+    }
+
     /// Horodatage (ms) et nombre de transactions du bloc `height`, s'il est conservé.
     pub fn block_summary(&self, height: u64) -> Result<Option<(u64, u64)>> {
         let Some(b) = self.request("GET", &format!("/blocks/{height}"), None)? else {
