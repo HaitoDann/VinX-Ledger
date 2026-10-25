@@ -2,6 +2,7 @@
 
 pub mod admin;
 pub mod amount;
+pub mod app;
 pub mod bench;
 pub mod client;
 pub mod cockpit;

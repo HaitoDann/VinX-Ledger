@@ -24,6 +24,7 @@ pub enum Domain {
     SmtLeaf,
     SmtNode,
     Validators,
+    Deal,
 }
 
 impl Domain {
@@ -44,6 +45,7 @@ impl Domain {
             Domain::SmtLeaf => "vinx/smt/leaf",
             Domain::SmtNode => "vinx/smt/node",
             Domain::Validators => "vinx/validators",
+            Domain::Deal => "vinx/deal",
         }
     }
 }

@@ -57,11 +57,15 @@ pub enum ParamId {
     TimeoutVote = 0x08,
     TimeoutVoteDelta = 0x09,
     MinBlockInterval = 0x0A,
+    /// Protocole 2 : prix d'un an de nom `.vinx`, tenu hors de [`Params`].
+    NameFee = 0x0B,
 }
 
 impl Params {
+    /// Sans effet pour [`ParamId::NameFee`], rangé ailleurs dans l'état.
     pub fn set(&mut self, id: ParamId, value: u64) {
         let slot = match id {
+            ParamId::NameFee => return,
             ParamId::MinFee => &mut self.min_fee,
             ParamId::MinReserve => &mut self.min_reserve,
             ParamId::MaxMemoBytes => &mut self.max_memo_bytes,
@@ -86,7 +90,7 @@ mod tests {
         assert_eq!(crate::encode(&ParamId::MinFee), [0x01]);
         assert_eq!(crate::encode(&ParamId::MinBlockInterval), [0x0A]);
         assert!(crate::decode::<ParamId>(&[0x00]).is_err());
-        assert!(crate::decode::<ParamId>(&[0x0B]).is_err());
+        assert!(crate::decode::<ParamId>(&[0x0C]).is_err());
     }
 
     #[test]

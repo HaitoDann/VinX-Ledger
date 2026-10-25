@@ -103,6 +103,7 @@ impl Genesis {
             validators: ValidatorSet::new(self.validators),
             params: self.params,
             upgrade: None,
+            registry: crate::Registry::default(),
         };
         state
             .check_invariant()

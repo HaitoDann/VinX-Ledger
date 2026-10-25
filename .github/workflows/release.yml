@@ -55,7 +55,7 @@ jobs:
           mkdir "$name"
           cp target/release/vinx-node target/release/vinx-wallet "$name/"
           cp -r deploy/install-validator.sh deploy/systemd deploy/monitoring "$name/"
-          cp docs/DEPLOYER-UN-VALIDATEUR.md docs/EXPLOITATION.md LICENSE "$name/"
+          cp docs/DEPLOYER-UN-VALIDATEUR.md docs/EXPLOITATION.md docs/PORTEFEUILLE.md LICENSE "$name/"
           tar czf "$name.tar.gz" "$name"
       - uses: actions/upload-artifact@v4
         with:
@@ -100,7 +100,7 @@ jobs:
           ext=""
           [ "${{ runner.os }}" = Windows ] && ext=".exe"
           cp "target/release/vinx-wallet$ext" "target/release/vinx-node$ext" "$name/"
-          cp docs/DEPLOYER-UN-VALIDATEUR.md docs/EXPLOITATION.md LICENSE "$name/"
+          cp docs/DEPLOYER-UN-VALIDATEUR.md docs/EXPLOITATION.md docs/PORTEFEUILLE.md LICENSE "$name/"
           if [ "${{ runner.os }}" = Windows ]; then
             7z a "$name.zip" "$name" >/dev/null
           else

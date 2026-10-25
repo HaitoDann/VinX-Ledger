@@ -11,7 +11,9 @@ use borsh::{BorshDeserialize, BorshSerialize};
 use redb::{Database, ReadableTable, ReadableTableMetadata, TableDefinition};
 use std::path::Path;
 use vinx_consensus::{Evidence, SignGuard};
-use vinx_core::{Account, Block, CommitCertificate, SignedAdminTransaction, encode};
+use vinx_core::{
+    Account, Block, CommitCertificate, SignedAdminTransaction, SignedTransaction, TxBody, encode,
+};
 use vinx_crypto::Address;
 use vinx_crypto::Hash;
 use vinx_state::State;
@@ -27,6 +29,10 @@ const TX_INDEX: TableDefinition<&[u8; 32], u64> = TableDefinition::new("tx_index
 /// Nonce admin → action admin finalisée, pour l'historique de gouvernance.
 /// Petit et jamais élagué : il survit aux blocs d'où il vient.
 const ADMIN_LOG: TableDefinition<u64, &[u8]> = TableDefinition::new("admin_log");
+/// (adresse, hauteur, rang dans le bloc) des transactions qui concernent une
+/// adresse, pour l'historique du portefeuille. Suit l'élagage des blocs. Les
+/// paiements de la trésorerie (admin) ont un rang marqué par [`ADMIN_RANK`].
+const ADDR_INDEX: TableDefinition<(&[u8; 20], u64, u32), ()> = TableDefinition::new("addr_index");
 
 /// Preuves d'équivoque conservées au plus.
 pub const MAX_EVIDENCE: u64 = 1_000;
@@ -56,12 +62,69 @@ pub struct AdminLogEntry {
     pub tx: SignedAdminTransaction,
 }
 
+/// Adresses concernées par une transaction : l'émetteur et, s'il y en a, le
+/// destinataire, le vendeur ou l'arbitre.
+pub fn parties(t: &SignedTransaction) -> Vec<Address> {
+    let mut out = vec![t.tx.sender];
+    match &t.tx.body {
+        TxBody::Transfer { to, .. } | TxBody::TransferName { to, .. } => out.push(*to),
+        TxBody::OpenDeal {
+            seller, arbiter, ..
+        } => {
+            out.push(*seller);
+            out.extend(*arbiter);
+        }
+        _ => {}
+    }
+    out.dedup();
+    out
+}
+
+/// Bit de rang des transactions admin dans [`ADDR_INDEX`].
+const ADMIN_RANK: u32 = 1 << 31;
+
+/// Transaction trouvée dans l'historique d'une adresse.
+pub enum HistoryEntry {
+    User(SignedTransaction),
+    /// Paiement de la trésorerie.
+    Admin(SignedAdminTransaction),
+}
+
+/// Bénéficiaire d'un paiement de la trésorerie.
+fn treasury_payee(t: &SignedAdminTransaction) -> Option<Address> {
+    match &t.tx.action {
+        vinx_core::AdminAction::TreasuryTransfer { to, .. } => Some(*to),
+        _ => None,
+    }
+}
+
+/// Clés de [`ADDR_INDEX`] d'un bloc.
+fn address_keys(block: &Block) -> Result<Vec<(Address, u32)>> {
+    let mut keys = Vec::new();
+    for (rank, t) in block.txs.iter().enumerate() {
+        let rank = u32::try_from(rank)?;
+        keys.extend(parties(t).into_iter().map(|a| (a, rank)));
+    }
+    for (i, t) in block.admin_txs.iter().enumerate() {
+        if let Some(to) = treasury_payee(t) {
+            let rank = u32::try_from(i)? | ADMIN_RANK;
+            keys.push((to, rank));
+            keys.push((Address::treasury(), rank));
+        }
+    }
+    Ok(keys)
+}
+
 /// Indexe les transactions d'un bloc et journalise ses actions admin.
 fn index_block(tx: &redb::WriteTransaction, block: &Block) -> Result<()> {
     let height = block.header.height;
     let mut index = tx.open_table(TX_INDEX)?;
     for t in &block.txs {
         index.insert(&t.id(), height)?;
+    }
+    let mut by_addr = tx.open_table(ADDR_INDEX)?;
+    for (a, rank) in address_keys(block)? {
+        by_addr.insert((a.as_bytes(), height, rank), ())?;
     }
     let mut log = tx.open_table(ADMIN_LOG)?;
     for t in &block.admin_txs {
@@ -89,6 +152,7 @@ impl Store {
             tx.open_table(EVIDENCE)?;
             tx.open_table(TX_INDEX)?;
             tx.open_table(ADMIN_LOG)?;
+            tx.open_table(ADDR_INDEX)?;
             let mut meta = tx.open_table(META)?;
             if meta.get(LEGACY_STATE)?.is_some() {
                 bail!(
@@ -199,6 +263,7 @@ impl Store {
         tx.delete_table(ACCOUNTS)?;
         // Les blocs effacés ne sont plus consultables : leur index non plus.
         tx.delete_table(TX_INDEX)?;
+        tx.delete_table(ADDR_INDEX)?;
         tx.open_table(BLOCKS)?
             .insert(height, encode(block).as_slice())?;
         tx.open_table(CERTS)?
@@ -248,6 +313,10 @@ impl Store {
                 let mut index = tx.open_table(TX_INDEX)?;
                 for t in &block.txs {
                     index.remove(&t.id())?;
+                }
+                let mut by_addr = tx.open_table(ADDR_INDEX)?;
+                for (a, rank) in address_keys(&block)? {
+                    by_addr.remove((a.as_bytes(), height, rank))?;
                 }
                 for t in &block.admin_txs {
                     index.remove(&t.id())?;
@@ -320,6 +389,43 @@ impl Store {
         Ok(tx.open_table(TX_INDEX)?.get(id)?.map(|v| v.value()))
     }
 
+    /// Les `limit` dernières transactions conservées qui concernent `address`,
+    /// de la plus récente à la plus ancienne, avec la hauteur et l'horodatage
+    /// de leur bloc.
+    pub fn address_history(
+        &self,
+        address: &Address,
+        limit: usize,
+    ) -> Result<Vec<(u64, u64, HistoryEntry)>> {
+        let tx = self.db.begin_read()?;
+        let index = tx.open_table(ADDR_INDEX)?;
+        let blocks = tx.open_table(BLOCKS)?;
+        let key = address.as_bytes();
+        let mut out = Vec::new();
+        for entry in index
+            .range((key, 0, 0)..=(key, u64::MAX, u32::MAX))?
+            .rev()
+            .take(limit)
+        {
+            let (k, _) = entry?;
+            let (_, height, rank) = k.value();
+            let Some(bytes) = blocks.get(height)? else {
+                continue;
+            };
+            let block: Block = decode(bytes.value(), "bloc")?;
+            let i = usize::try_from(rank & !ADMIN_RANK)?;
+            let entry = if rank & ADMIN_RANK == 0 {
+                block.txs.get(i).cloned().map(HistoryEntry::User)
+            } else {
+                block.admin_txs.get(i).cloned().map(HistoryEntry::Admin)
+            };
+            if let Some(e) = entry {
+                out.push((height, block.header.timestamp, e));
+            }
+        }
+        Ok(out)
+    }
+
     /// Les `limit` dernières actions admin finalisées, de la plus récente à la
     /// plus ancienne.
     pub fn admin_log(&self, limit: usize) -> Result<Vec<AdminLogEntry>> {
@@ -333,14 +439,16 @@ impl Store {
         Ok(out)
     }
 
-    /// Construit l'index des transactions et le journal admin à partir des
-    /// blocs conservés, pour une base créée avant leur existence. Sans effet
-    /// si l'index contient déjà des entrées.
+    /// Construit les index et le journal admin à partir des blocs conservés,
+    /// pour une base créée avant leur existence. Sans effet si les deux index
+    /// contiennent déjà des entrées.
     pub fn backfill_indexes(&self) -> Result<u64> {
         let tx = self.db.begin_write()?;
         let mut indexed = 0u64;
         {
-            if !tx.open_table(TX_INDEX)?.is_empty()? {
+            let filled =
+                !tx.open_table(TX_INDEX)?.is_empty()? && !tx.open_table(ADDR_INDEX)?.is_empty()?;
+            if filled {
                 return Ok(0);
             }
             let blocks = tx.open_table(BLOCKS)?;

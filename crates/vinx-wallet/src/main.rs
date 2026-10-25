@@ -20,8 +20,9 @@ struct Cli {
     /// Fichier contenant le mot de passe des clés (sinon : variable VINX_KEY_PASSWORD).
     #[arg(long, global = true)]
     password_file: Option<PathBuf>,
+    /// Sans commande (double-clic) : ouvre le portefeuille.
     #[command(subcommand)]
-    command: Command,
+    command: Option<Command>,
 }
 
 #[derive(Subcommand)]
@@ -88,6 +89,20 @@ enum Command {
     Preflight {
         #[arg(long = "new-node", required = true, num_args = 1)]
         new_nodes: Vec<String>,
+    },
+    /// Portefeuille : application locale pour envoyer et recevoir des VINX.
+    ///
+    /// C'est aussi ce que lance `vinx-wallet` sans argument (double-clic).
+    App {
+        /// Dossier du portefeuille (par défaut : celui de l'utilisateur, par exemple
+        /// %APPDATA%\VinX sous Windows).
+        #[arg(long)]
+        dir: Option<PathBuf>,
+        #[arg(long, default_value_t = 8700)]
+        port: u16,
+        /// N'ouvre pas le navigateur.
+        #[arg(long)]
+        no_browser: bool,
     },
     /// Cockpit : interface web locale pour administrer le réseau.
     ///
@@ -353,7 +368,17 @@ fn main() -> Result<()> {
     let client = Client::new(&cli.node);
     let pwf = cli.password_file.as_deref();
 
-    match cli.command {
+    let Some(command) = cli.command else {
+        // Double-clic : la fenêtre se fermerait avant qu'on lise une erreur.
+        let dir = vinx_wallet::app::default_dir();
+        if let Err(e) = vinx_wallet::app::serve(&dir, 8700, true) {
+            eprintln!("erreur : {e:#}");
+            eprintln!("Appuie sur Entrée pour fermer.");
+            let _ = std::io::stdin().read_line(&mut String::new());
+        }
+        return Ok(());
+    };
+    match command {
         Command::Keygen { out } => {
             let keypair = KeyPair::generate();
             KeyFile::encrypt(&keypair, &password(pwf)?, DEFAULT_KDF)?.save(&out)?;
@@ -404,6 +429,14 @@ fn main() -> Result<()> {
                 "transaction {}",
                 ops::rotate_key(&client, &keypair, from, new)?
             );
+        }
+        Command::App {
+            dir,
+            port,
+            no_browser,
+        } => {
+            let dir = dir.unwrap_or_else(vinx_wallet::app::default_dir);
+            vinx_wallet::app::serve(&dir, port, !no_browser)?;
         }
         Command::Cockpit { dir, port } => {
             vinx_wallet::cockpit::serve(dir, port, &cli.node)?;

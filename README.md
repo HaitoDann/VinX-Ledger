@@ -11,6 +11,7 @@ Un protocole de paiement volontairement simple et minimaliste : validateurs auto
 - Spécification du protocole : [`SPEC.md`](./SPEC.md)
 - Déployer, observer et administrer un réseau : [`docs/EXPLOITATION.md`](./docs/EXPLOITATION.md)
 - Déployer un validateur, puis passer de un à quatre : [`docs/DEPLOYER-UN-VALIDATEUR.md`](./docs/DEPLOYER-UN-VALIDATEUR.md)
+- Payer et recevoir des VINX avec le portefeuille : [`docs/PORTEFEUILLE.md`](./docs/PORTEFEUILLE.md)
 - Décisions d'architecture : [`docs/adr/`](./docs/adr/)
 - Ancien projet (archivé) : `VinX-Ledger-Legacy`
 - Licence : [Apache-2.0](./LICENSE)
@@ -33,6 +34,7 @@ passe, ainsi que la genèse. Le tableau de bord du nœud est sur
 `/escrow`, `/fees`,
 `/evidence` (preuves de validateurs fautifs), `/validators` (état de chaque
 validateur), `/history`, `/mempool`, `/admin-history`, `/transactions/{id}`,
+`/accounts/{adresse}/transactions`, `/names/{nom}`, `/deals/{id}`,
 et en `POST`
 `/transactions` et `/admin-transactions`.
 
@@ -61,6 +63,12 @@ vérifié contre un bloc certifié, au lieu de rejouer toute la chaîne. Gardez 
 moins un nœud `--archive`, qui conserve tout l'historique.
 
 ## Utiliser le wallet
+
+Pour tout le monde : `vinx-wallet` lancé sans argument (double-clic sous
+Windows) ouvre le portefeuille dans le navigateur. Voir
+[`docs/PORTEFEUILLE.md`](./docs/PORTEFEUILLE.md).
+
+En ligne de commande :
 
 ```bash
 alias wallet='cargo run --release -q -p vinx-wallet --'

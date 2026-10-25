@@ -83,10 +83,19 @@ State {
     validators: ValidatorSet,      // ensemble actif + changements programmés
     params:     Params,            // §11
     upgrade:    Option<PendingUpgrade>,
+    registry:   Registry,          // protocole 2 : noms et séquestres (§5.4, §5.5)
+}
+Registry {
+    now:      u64,                         // horodatage du bloc, en secondes
+    name_fee: u64,                         // §11
+    names:    Map<String, NameRecord>,     // triée par nom
+    deals:    Map<Hash, Deal>,             // triée par identifiant
 }
 ```
 
-`state_root = H("vinx/state" ‖ racine_SMT(accounts) ‖ H(borsh(escrow, admin, validators, params, upgrade, protocol_version)))`.
+`state_root = H("vinx/state" ‖ racine_SMT(accounts) ‖ H(G))`, avec
+`G = borsh(escrow, admin, validators, params, upgrade, protocol_version)`,
+suivi de `borsh(registry)` à partir du protocole 2.
 
 **Arbre des comptes (SMT).** Arbre binaire compact indexé par les 160 bits de
 l'adresse, du bit de poids fort au bit de poids faible :
@@ -121,8 +130,10 @@ Tranche { amount: u64, matures_at: u64 }   // horodatage Unix, secondes
 À la fin de chaque bloc :
 
 ```
-Σ accounts.balance + Σ escrow.tranches.amount = 10¹⁸ unités  (1 000 000 000 VINX)
+Σ accounts.balance + Σ escrow.tranches.amount + Σ deals.amount = 10¹⁸ unités  (1 000 000 000 VINX)
 ```
+
+Les séquestres (§5.5) ne font que déplacer des unités existantes : la supply ne change pas.
 
 Un bloc qui viole l'invariant est invalide.
 
@@ -158,6 +169,16 @@ SignedTransaction {
 | `0x01` | `Transfer` | `to: Address`, `amount: u64`, `memo: Option<Vec<u8>>` | Transfert ; `amount > 0` ; `to ≠ sender` ; mémo, s'il est présent, de 1 à `max_memo_bytes` octets ; refusé sans mémo si `to.memo_required` |
 | `0x02` | `SetMemoRequired` | `required: bool` | Active ou désactive le mémo obligatoire du compte |
 | `0x03` | `RotateKey` | `new_key: PublicKey` | Remplace la clé du compte ; l'adresse ne change pas |
+
+À partir du protocole 2 (avant, ces codes sont refusés) :
+
+| Code | Transaction | Champs | Effet |
+|---|---|---|---|
+| `0x04` | `RegisterName` | `name: String` | Enregistre ou renouvelle un nom (§5.4) |
+| `0x05` | `TransferName` | `name: String`, `to: Address` | Cède un nom non expiré à `to` |
+| `0x06` | `OpenDeal` | `seller: Address`, `arbiter: Option<Address>`, `amount: u64`, `deadline: u64`, `memo: Option<Vec<u8>>` | Ouvre un séquestre (§5.5) |
+| `0x07` | `ReleaseDeal` | `id: Hash` | Verse le séquestre au vendeur |
+| `0x08` | `RefundDeal` | `id: Hash` | Rend le séquestre à l'acheteur |
 
 `RotateKey` est aussi la voie de migration post-quantique : quand `0x02` sera
 actif, chaque compte pourra passer à une clé ML-DSA sans changer d'adresse.
@@ -196,6 +217,40 @@ Les actions sont encodées avec les codes `0x01` à `0x08`, dans l'ordre du tabl
 
 Aucune action ne peut créer d'unités, modifier une tranche existante ni débiter un
 autre compte que la trésorerie.
+
+### 5.4 Noms `.vinx` (protocole 2)
+
+```
+NameRecord { owner: Address, expires_at: u64 }   // horodatage Unix, secondes
+```
+
+- Un nom compte 3 à 32 caractères parmi `a-z`, `0-9` et `-`, sans tiret au début
+  ni à la fin. On l'écrit `nom.vinx` ; la chaîne ne stocke que `nom`.
+- `RegisterName` débite `name_fee` (§11) de l'émetteur, au profit de la
+  trésorerie, en plus des frais de la transaction.
+  - Nom libre : `owner = sender`, `expires_at = now + 31 557 600` (un an de 365,25 jours).
+  - Nom déjà à l'émetteur : renouvellement, `expires_at = max(expires_at, now) + 1 an`.
+  - Nom d'un autre : refusé tant que `now < expires_at + 30 jours` (délai de
+    grâce réservé à l'ancien titulaire).
+- `TransferName` : réservé au titulaire, avant `expires_at` ; l'échéance ne change pas.
+- Un nom résout vers `owner` tant que `now < expires_at`. Les paiements restent
+  adressés à une adresse : le portefeuille résout le nom avant de signer.
+
+### 5.5 Séquestres (protocole 2)
+
+```
+Deal { buyer, seller: Address, arbiter: Option<Address>, amount, deadline: u64, memo: Option<Vec<u8>> }
+```
+
+- Identifiant : `H("vinx/deal" ‖ borsh(sender, nonce))` de la transaction `OpenDeal`.
+- `OpenDeal` débite `amount` de l'acheteur (`sender`) et le bloque. Règles :
+  - mêmes règles qu'un `Transfer` vers `seller` (montant, mémo, réserve d'un nouveau compte) ;
+  - l'arbitre, s'il y en a un, n'est ni l'acheteur ni le vendeur ;
+  - `now < deadline ≤ now + 1 an`.
+- `ReleaseDeal` : par l'acheteur ou l'arbitre ; `amount` est crédité au vendeur.
+- `RefundDeal` : par le vendeur ou l'arbitre à tout moment, par l'acheteur si
+  `now ≥ deadline` ; `amount` est recrédité à l'acheteur.
+- Le séquestre est alors supprimé. Rien ne se dénoue sans transaction.
 
 ## 6. Blocs
 
@@ -378,6 +433,14 @@ hauteur `H + 2`. `validators_hash` du bloc `H + 1` reflète déjà le nouvel ens
   version ; les nœuds appliquent les règles correspondantes.
 - Une mise à jour **ne peut pas** modifier la supply, l'escrow ou l'invariant
   (§4, ADR 0001 §7).
+- Un nœud refuse les blocs d'une version qu'il ne connaît pas : il s'arrête au
+  lieu de diverger. Tous les validateurs doivent donc être mis à jour avant
+  `activation_height`.
+
+| Version | Apporte |
+|---|---|
+| 1 | Paiements, mémo obligatoire, rotation de clé, gouvernance |
+| 2 | Noms `.vinx` (§5.4), séquestres (§5.5), paramètre `name_fee` |
 
 ## 10. Étiquettes de domaine
 
@@ -393,6 +456,7 @@ hauteur `H + 2`. `validators_hash` du bloc `H + 1` reflète déjà le nouvel ens
 | Vote de consensus | `vinx/vote` |
 | Proposition de bloc | `vinx/proposal` |
 | Ensemble de validateurs | `vinx/validators` |
+| Identifiant de séquestre | `vinx/deal` |
 | Arbre des comptes (feuille / nœud) | `vinx/smt/leaf`, `vinx/smt/node` |
 | Merkle (feuille / nœud / liste vide) | `vinx/merkle/leaf`, `vinx/merkle/node`, `vinx/merkle/empty` |
 
@@ -424,6 +488,7 @@ premier round, de façon soutenue, en conditions réelles.
 | `0x08` | `timeout_vote` | 1 000 | ms |
 | `0x09` | `timeout_vote_delta` | 500 | ms par round |
 | `0x0A` | `min_block_interval` | 5 000 | ms |
+| `0x0B` | `name_fee` | 10 000 000 000 (10 VINX) | unités par an ; protocole 2 |
 
 Paramètres non modifiables par `SetParam` :
 

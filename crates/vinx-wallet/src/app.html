@@ -1,0 +1,538 @@
+<!doctype html>
+<html lang="fr">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Portefeuille VinX</title>
+<link rel="icon" href="__FAVICON__">
+<style>/*__THEME__*/</style>
+<style>
+/* Propre au portefeuille : écrans d'accueil et gros solde. */
+.narrow { max-width: 560px; width: 100%; margin: 0 auto; }
+.hero { padding: 22px 20px; }
+.hero .label { color: var(--muted); font-size: 11px; text-transform: uppercase; letter-spacing: .12em; font-weight: 600; }
+.hero .balance { font-size: 40px; font-weight: 750; letter-spacing: -.02em; font-variant-numeric: tabular-nums; margin: 4px 0 2px; }
+.hero .balance small { font-size: 18px; color: var(--accent); font-weight: 700; margin-left: 6px; }
+.words { display: grid; grid-template-columns: repeat(3, 1fr); gap: 8px; margin: 12px 0; counter-reset: w; }
+.words span { background: var(--bg); border: 1px solid var(--line); border-radius: 3px; padding: 8px 10px;
+              font: 14px ui-monospace, "Cascadia Mono", Menlo, monospace; counter-increment: w; }
+.words span::before { content: counter(w) ". "; color: var(--muted); }
+textarea { width: 100%; min-height: 90px; padding: 8px 10px; border-radius: 3px; border: 1px solid var(--line);
+           background: var(--bg); color: var(--text); font: 14px ui-monospace, Menlo, monospace; }
+.address { font: 15px ui-monospace, "Cascadia Mono", Menlo, monospace; word-break: break-all; padding: 12px;
+           background: var(--bg); border: 1px dashed var(--accent); border-radius: 3px; margin: 8px 0; }
+.found { font-size: 12px; margin-top: 6px; min-height: 18px; word-break: break-all; }
+.in { color: var(--ok); } .out { color: var(--text); }
+.check { display: flex; gap: 8px; align-items: flex-start; text-transform: none; letter-spacing: 0; font-size: 13px; color: var(--text); }
+.check input { width: auto; margin-top: 3px; }
+header .spacer { flex: 1; }
+header select { width: auto; min-width: 180px; }
+@media (max-width: 520px) { .words { grid-template-columns: repeat(2, 1fr); } .hero .balance { font-size: 32px; } }
+</style>
+</head>
+<body>
+<header>
+  <a class="brand" href="#"><!--__LOGO__--><span><b>VinX <span>Ledger</span></b><small>Portefeuille</small></span></a>
+  <span class="spacer"></span>
+  <select id="account" hidden aria-label="Compte"></select>
+  <button id="lockBtn" hidden>Verrouiller</button>
+</header>
+
+<!-- Accueil : création ou restauration. -->
+<main id="welcome" class="view">
+  <div class="card narrow hero">
+    <h2>Bienvenue</h2>
+    <p>Ce portefeuille garde tes clés sur cet ordinateur. Personne d'autre, pas même les opérateurs du réseau, ne peut dépenser tes VINX.</p>
+    <div class="actions">
+      <button class="primary" id="startCreate">Créer un portefeuille</button>
+      <button id="startRestore">J'ai déjà une phrase de récupération</button>
+    </div>
+  </div>
+</main>
+
+<main id="create" class="view">
+  <div class="card narrow" id="createWords">
+    <h2>1 · Ta phrase de récupération</h2>
+    <p>Recopie ces 12 mots <b>sur papier</b>, dans l'ordre, et range-les en lieu sûr. Ils permettent de tout récupérer si cet ordinateur est perdu. Quiconque les lit peut prendre tes VINX : ne les photographie pas, ne les envoie à personne.</p>
+    <div class="words" id="words"></div>
+    <label class="check"><input type="checkbox" id="wroteDown"> J'ai noté les 12 mots sur papier.</label>
+    <div class="actions"><button class="primary" id="toVerify" disabled>Continuer</button><button class="cancel">Annuler</button></div>
+  </div>
+  <div class="card narrow" id="createVerify" hidden>
+    <h2>2 · Vérification</h2>
+    <p>Pour être sûr que la phrase est bien notée, saisis les mots demandés.</p>
+    <div id="quiz"></div>
+    <div class="actions"><button class="primary" id="toPassword">Vérifier</button><button id="backWords">Revoir les mots</button></div>
+  </div>
+</main>
+
+<main id="restore" class="view">
+  <div class="card narrow">
+    <h2>Restaurer</h2>
+    <label for="restoreWords">Les 12 mots, séparés par des espaces</label>
+    <textarea id="restoreWords" autocomplete="off" spellcheck="false"></textarea>
+    <div class="actions"><button class="primary" id="restoreNext">Continuer</button><button class="cancel">Annuler</button></div>
+  </div>
+</main>
+
+<main id="secure" class="view">
+  <div class="card narrow">
+    <h2>Mot de passe et réseau</h2>
+    <p class="sub">Le mot de passe protège le portefeuille sur cet ordinateur. Il est demandé à l'ouverture ; sans lui, seule la phrase de 12 mots permet de récupérer les fonds.</p>
+    <label for="pw1">Mot de passe (8 caractères au moins)</label><input id="pw1" type="password" autocomplete="new-password">
+    <label for="pw2">Encore une fois</label><input id="pw2" type="password" autocomplete="new-password">
+    <label for="nodeUrl">Adresse du nœud VinX</label><input id="nodeUrl" class="mono" value="http://127.0.0.1:8545">
+    <p class="note muted">Donnée par l'opérateur du réseau. Modifiable ensuite dans Réglages.</p>
+    <div class="actions"><button class="primary" id="finish">Ouvrir mon portefeuille</button><button class="cancel">Annuler</button></div>
+  </div>
+</main>
+
+<main id="locked" class="view">
+  <div class="card narrow hero">
+    <h2>Portefeuille verrouillé</h2>
+    <label for="unlockPw">Mot de passe</label>
+    <input id="unlockPw" type="password" autocomplete="current-password">
+    <div class="actions"><button class="primary" id="unlockBtn">Déverrouiller</button></div>
+  </div>
+</main>
+
+<!-- Portefeuille ouvert. -->
+<nav id="tabs" hidden>
+  <a href="#home" data-view="home">Accueil</a>
+  <a href="#send" data-view="send">Envoyer</a>
+  <a href="#receive" data-view="receive">Recevoir</a>
+  <a href="#history" data-view="history">Historique</a>
+  <a href="#names" data-view="names">Noms .vinx</a>
+  <a href="#deals" data-view="deals">Séquestres</a>
+  <a href="#contacts" data-view="contacts">Contacts</a>
+  <a href="#settings" data-view="settings">Réglages</a>
+</nav>
+
+<main id="home" class="view">
+  <div class="card hero">
+    <div class="label" id="homeLabel">Solde</div>
+    <div class="balance"><span id="balance">—</span><small>VINX</small></div>
+    <div class="sub" id="homeNames"></div>
+    <div class="actions"><button class="primary" data-go="send">Envoyer</button><button data-go="receive">Recevoir</button></div>
+  </div>
+  <div class="card alert warning" id="netWarn" hidden></div>
+  <div class="card"><h2>Dernières opérations</h2><div class="scroll" id="recent"></div></div>
+</main>
+
+<main id="send" class="view">
+  <div class="card narrow">
+    <h2>Envoyer des VINX</h2>
+    <label for="sendTo">Destinataire</label>
+    <input id="sendTo" class="mono" placeholder="vinx1…, nom d'un contact ou alice.vinx" list="contactList" autocomplete="off">
+    <div class="found" id="sendFound"></div>
+    <label for="sendAmount">Montant (VINX)</label><input id="sendAmount" inputmode="decimal" placeholder="12.5">
+    <label for="sendMemo">Mémo (facultatif)</label><input id="sendMemo" placeholder="référence de facture…">
+    <div class="actions"><button class="primary" id="sendBtn">Vérifier avant d'envoyer</button></div>
+  </div>
+</main>
+
+<main id="receive" class="view">
+  <div class="card narrow">
+    <h2>Recevoir</h2>
+    <p>Donne cette adresse à la personne qui te paie :</p>
+    <div class="address" id="myAddress"></div>
+    <div class="actions"><button class="primary" id="copyAddr">Copier l'adresse</button></div>
+    <p class="sub" id="receiveNames"></p>
+    <p class="note muted" id="reserveNote"></p>
+  </div>
+</main>
+
+<main id="history" class="view">
+  <div class="card"><h2>Historique</h2><div class="scroll" id="historyTable"></div>
+  <p class="note muted">Le nœud ne garde que les blocs récents : les opérations plus anciennes n'apparaissent plus ici, mais restent comptées dans le solde.</p></div>
+</main>
+
+<main id="names" class="view">
+  <div class="card">
+    <h2>Mes noms</h2>
+    <p class="sub">Un nom .vinx remplace ton adresse : on peut te payer en tapant <span class="mono">tonnom.vinx</span>. Il se renouvelle chaque année.</p>
+    <div class="scroll" id="namesTable"></div>
+  </div>
+  <div class="card narrow">
+    <h2>Réserver un nom</h2>
+    <label for="newName">Nom</label><input id="newName" class="mono" placeholder="alice" autocomplete="off">
+    <div class="found" id="nameFound"></div>
+    <div class="actions"><button class="primary" id="registerBtn">Vérifier avant de réserver</button></div>
+  </div>
+</main>
+
+<main id="deals" class="view">
+  <div class="card">
+    <h2>Mes séquestres</h2>
+    <p class="sub">Un séquestre bloque un paiement jusqu'à ce que l'acheteur le libère (livraison reçue) ou que le vendeur rembourse. Un arbitre, choisi à l'ouverture, peut trancher un litige. À l'échéance, l'acheteur peut récupérer les fonds.</p>
+    <div class="scroll" id="dealsTable"></div>
+  </div>
+  <div class="card narrow">
+    <h2>Payer par séquestre</h2>
+    <label for="dealTo">Vendeur</label><input id="dealTo" class="mono" placeholder="vinx1…, contact ou nom.vinx" list="contactList" autocomplete="off">
+    <div class="found" id="dealFound"></div>
+    <label for="dealArbiter">Arbitre (facultatif)</label><input id="dealArbiter" class="mono" placeholder="tiers de confiance" list="contactList" autocomplete="off">
+    <div class="row">
+      <div><label for="dealAmount">Montant (VINX)</label><input id="dealAmount" inputmode="decimal"></div>
+      <div><label for="dealDays">Échéance (jours)</label><input id="dealDays" type="number" min="1" max="365" value="14"></div>
+    </div>
+    <label for="dealMemo">Mémo (facultatif)</label><input id="dealMemo" placeholder="commande n°…">
+    <div class="actions"><button class="primary" id="dealBtn">Vérifier avant de bloquer les fonds</button></div>
+  </div>
+</main>
+
+<main id="contacts" class="view">
+  <div class="card">
+    <h2>Contacts</h2>
+    <div class="scroll" id="contactsTable"></div>
+    <div class="row" style="margin-top:10px">
+      <div><label for="cName">Nom</label><input id="cName"></div>
+      <div style="flex:2 1 260px"><label for="cAddr">Adresse ou nom .vinx</label><input id="cAddr" class="mono"></div>
+      <div style="flex:0 0 auto"><button class="primary" id="addContact">Ajouter</button></div>
+    </div>
+  </div>
+</main>
+
+<main id="settings" class="view">
+  <div class="grid2">
+    <div class="card">
+      <h2>Comptes</h2>
+      <p class="sub">Tous tes comptes viennent de la même phrase de 12 mots : elle suffit à les restaurer.</p>
+      <div class="scroll" id="accountsTable"></div>
+      <div class="row" style="margin-top:10px">
+        <div><label for="newAccount">Nouveau compte</label><input id="newAccount" placeholder="Épargne"></div>
+        <div style="flex:0 0 auto"><button id="addAccount">Créer</button></div>
+      </div>
+    </div>
+    <div class="card">
+      <h2>Réseau</h2>
+      <label for="nodeSetting">Adresse du nœud</label><input id="nodeSetting" class="mono">
+      <div class="actions"><button id="saveNode">Enregistrer</button></div>
+      <p class="sub" id="netInfo"></p>
+    </div>
+    <div class="card">
+      <h2>Phrase de récupération</h2>
+      <p class="sub">À ne montrer à personne. Personne de VinX ne te la demandera jamais.</p>
+      <div class="actions"><button id="revealBtn">Afficher la phrase</button></div>
+    </div>
+  </div>
+</main>
+
+<datalist id="contactList"></datalist>
+<dialog id="dlg">
+  <form method="dialog">
+    <h2 id="dlgTitle"></h2>
+    <div id="dlgBody"></div>
+    <div class="actions">
+      <button value="ok" class="primary" id="dlgOk">Confirmer</button>
+      <button value="cancel" id="dlgCancel">Annuler</button>
+    </div>
+  </form>
+</dialog>
+<div id="toast"></div>
+<footer>Portefeuille VinX Ledger · tes clés restent sur cet ordinateur · verrouillage automatique après 15 minutes d'inactivité.</footer>
+
+<script>
+const TOKEN = "__APP_TOKEN__";
+const $ = (id) => document.getElementById(id);
+const esc = (s) => String(s ?? "").replace(/[&<>"']/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" })[c]);
+let state = null, current = 0, data = null, pendingWords = "";
+
+async function api(path, body) {
+  const r = await fetch(path, {
+    method: body === undefined ? "GET" : "POST",
+    headers: { "x-app-token": TOKEN, "content-type": "application/json" },
+    body: body === undefined ? undefined : JSON.stringify(body),
+    cache: "no-store",
+  });
+  const text = await r.text();
+  let d; try { d = JSON.parse(text); } catch (_) { d = { error: text }; }
+  if (!r.ok) {
+    if (/verrouillé/.test(d.error || "")) show("locked");
+    throw new Error(d.error || r.status);
+  }
+  return d;
+}
+function toast(msg, err = false) {
+  const d = document.createElement("div");
+  d.className = err ? "err" : ""; d.textContent = msg;
+  $("toast").appendChild(d); setTimeout(() => d.remove(), err ? 9000 : 5000);
+}
+function dialog(title, html, { ok = "Confirmer", cancel = true } = {}) {
+  $("dlgTitle").textContent = title; $("dlgBody").innerHTML = html;
+  $("dlgOk").textContent = ok; $("dlgCancel").hidden = !cancel;
+  const d = $("dlg"); d.returnValue = ""; d.showModal();
+  return new Promise((res) => d.addEventListener("close", () => res(d.returnValue === "ok"), { once: true }));
+}
+
+/* Unités (chaîne, 1 VINX = 10⁹) → texte en VINX. */
+function vinx(u) {
+  let n; try { n = BigInt(u || "0"); } catch (_) { return "—"; }
+  const whole = (n / 1000000000n).toString().replace(/\B(?=(\d{3})+(?!\d))/g, " ");
+  const frac = (n % 1000000000n).toString().padStart(9, "0").replace(/0+$/, "");
+  return whole + (frac ? "," + frac : "");
+}
+const date = (ms) => ms ? new Date(ms).toLocaleString("fr-FR", { dateStyle: "short", timeStyle: "short" }) : "—";
+const day = (s) => new Date(s * 1000).toLocaleDateString("fr-FR", { dateStyle: "medium" });
+const short = (a) => a ? a.slice(0, 10) + "…" + a.slice(-6) : "";
+
+function who(addr) {
+  const c = (state?.contacts || []).find((c) => c.address === addr);
+  if (c) return esc(c.name);
+  const me = (state?.accounts || []).find((a) => a.address === addr);
+  if (me) return esc(me.label);
+  return `<span class="mono" title="${esc(addr)}">${esc(short(addr))}</span>`;
+}
+
+/* ----- Écrans ----- */
+const PUBLIC = ["welcome", "create", "restore", "secure", "locked"];
+function show(view) {
+  document.querySelectorAll("main.view").forEach((m) => m.classList.toggle("active", m.id === view));
+  const open = !PUBLIC.includes(view);
+  $("tabs").hidden = !open; $("account").hidden = !open; $("lockBtn").hidden = !open;
+  document.querySelectorAll("#tabs a").forEach((a) => a.classList.toggle("active", a.dataset.view === view));
+  if (open && location.hash !== "#" + view) history.replaceState(null, "", "#" + view);
+  if (view === "locked") setTimeout(() => $("unlockPw").focus(), 50);
+}
+document.querySelectorAll("#tabs a").forEach((a) => a.addEventListener("click", (e) => { e.preventDefault(); show(a.dataset.view); }));
+document.querySelectorAll("[data-go]").forEach((b) => b.addEventListener("click", () => show(b.dataset.go)));
+document.querySelectorAll(".cancel").forEach((b) => b.addEventListener("click", () => { pendingWords = ""; show("welcome"); }));
+
+async function boot() {
+  state = await api("/api/state");
+  if (!state.exists) return show("welcome");
+  if (!state.unlocked) return show("locked");
+  fillAccounts();
+  const want = location.hash.slice(1);
+  show(want && !PUBLIC.includes(want) && $(want) ? want : "home");
+  refresh();
+}
+
+/* ----- Création et restauration ----- */
+$("startCreate").onclick = async () => {
+  pendingWords = (await api("/api/phrase")).words;
+  $("words").innerHTML = pendingWords.split(" ").map((w) => `<span>${esc(w)}</span>`).join("");
+  $("wroteDown").checked = false; $("toVerify").disabled = true;
+  $("createWords").hidden = false; $("createVerify").hidden = true;
+  show("create");
+};
+$("wroteDown").onchange = () => { $("toVerify").disabled = !$("wroteDown").checked; };
+let quiz = [];
+$("toVerify").onclick = () => {
+  quiz = [...Array(12).keys()].sort(() => Math.random() - .5).slice(0, 3).sort((a, b) => a - b);
+  $("quiz").innerHTML = quiz.map((i) => `<label for="q${i}">Mot n° ${i + 1}</label><input id="q${i}" class="mono" autocomplete="off" spellcheck="false">`).join("");
+  $("createWords").hidden = true; $("createVerify").hidden = false;
+};
+$("backWords").onclick = () => { $("createWords").hidden = false; $("createVerify").hidden = true; };
+$("toPassword").onclick = () => {
+  const words = pendingWords.split(" ");
+  if (!quiz.every((i) => $("q" + i).value.trim().toLowerCase() === words[i]))
+    return toast("Un des mots ne correspond pas : vérifie ta copie papier.", true);
+  show("secure"); $("pw1").focus();
+};
+$("startRestore").onclick = () => { $("restoreWords").value = ""; show("restore"); };
+$("restoreNext").onclick = () => {
+  const w = $("restoreWords").value.trim().toLowerCase().split(/\s+/).filter(Boolean);
+  if (w.length !== 12) return toast(`Il faut 12 mots (${w.length} saisis).`, true);
+  pendingWords = w.join(" "); show("secure");
+};
+$("finish").onclick = async () => {
+  if ($("pw1").value !== $("pw2").value) return toast("Les deux mots de passe diffèrent.", true);
+  $("finish").disabled = true;
+  try {
+    await api("/api/create", { words: pendingWords, password: $("pw1").value, node: $("nodeUrl").value });
+    pendingWords = ""; $("pw1").value = $("pw2").value = "";
+    toast("Portefeuille prêt.");
+    await boot();
+  } catch (e) { toast(e.message, true); } finally { $("finish").disabled = false; }
+};
+
+$("unlockBtn").onclick = async () => {
+  $("unlockBtn").disabled = true;
+  try { await api("/api/unlock", { password: $("unlockPw").value }); $("unlockPw").value = ""; await boot(); }
+  catch (e) { toast(e.message, true); } finally { $("unlockBtn").disabled = false; }
+};
+$("unlockPw").addEventListener("keydown", (e) => { if (e.key === "Enter") $("unlockBtn").click(); });
+$("lockBtn").onclick = async () => { await api("/api/lock", {}); state.unlocked = false; show("locked"); };
+
+/* ----- Comptes et contacts ----- */
+function fillAccounts() {
+  if (!state.accounts.some((a) => a.index === current)) current = state.accounts[0]?.index ?? 0;
+  $("account").innerHTML = state.accounts.map((a) => `<option value="${a.index}" ${a.index === current ? "selected" : ""}>${esc(a.label)}</option>`).join("");
+  $("contactList").innerHTML = state.contacts.map((c) => `<option value="${esc(c.name)}">`).join("");
+  $("accountsTable").innerHTML = `<table><tbody>${state.accounts.map((a) =>
+    `<tr><td>${esc(a.label)}</td><td class="mono">${esc(short(a.address))}</td><td><button data-rename="${a.index}">Renommer</button></td></tr>`).join("")}</tbody></table>`;
+  document.querySelectorAll("[data-rename]").forEach((b) => b.onclick = async () => {
+    const label = prompt("Nouveau nom du compte"); if (!label) return;
+    try { await api("/api/accounts/rename", { index: +b.dataset.rename, label }); await reloadState(); } catch (e) { toast(e.message, true); }
+  });
+  $("contactsTable").innerHTML = state.contacts.length ? `<table><thead><tr><th>Nom</th><th>Adresse</th><th></th></tr></thead><tbody>${state.contacts.map((c, i) =>
+    `<tr><td>${esc(c.name)}</td><td class="mono">${esc(c.address)}</td><td><button data-pay="${i}">Payer</button> <button class="danger" data-del="${i}">Retirer</button></td></tr>`).join("")}</tbody></table>`
+    : `<p class="muted">Aucun contact. Un contact évite de recopier une adresse à chaque paiement.</p>`;
+  document.querySelectorAll("[data-del]").forEach((b) => b.onclick = async () => {
+    const list = state.contacts.filter((_, i) => i !== +b.dataset.del);
+    try { await api("/api/contacts", { contacts: list }); await reloadState(); } catch (e) { toast(e.message, true); }
+  });
+  document.querySelectorAll("[data-pay]").forEach((b) => b.onclick = () => {
+    $("sendTo").value = state.contacts[+b.dataset.pay].name; lookupLater("sendTo", "sendFound"); show("send");
+  });
+  $("nodeSetting").value = state.node;
+}
+async function reloadState() { state = await api("/api/state"); fillAccounts(); }
+$("account").onchange = () => { current = +$("account").value; refresh(); };
+$("addAccount").onclick = async () => {
+  try { const r = await api("/api/accounts", { label: $("newAccount").value }); $("newAccount").value = ""; current = r.index; await reloadState(); refresh(); toast("Compte créé."); }
+  catch (e) { toast(e.message, true); }
+};
+$("addContact").onclick = async () => {
+  const name = $("cName").value.trim(); let address = $("cAddr").value.trim();
+  if (!name || !address) return toast("Nom et adresse requis.", true);
+  try {
+    if (!address.startsWith("vinx1")) address = (await api("/api/lookup", { to: address })).address;
+    await api("/api/contacts", { contacts: [...state.contacts, { name, address }] });
+    $("cName").value = $("cAddr").value = ""; await reloadState(); toast("Contact ajouté.");
+  } catch (e) { toast(e.message, true); }
+};
+$("saveNode").onclick = async () => {
+  try { await api("/api/node", { node: $("nodeSetting").value }); await reloadState(); refresh(); toast("Nœud enregistré."); }
+  catch (e) { toast(e.message, true); }
+};
+$("revealBtn").onclick = async () => {
+  const ok = await dialog("Afficher la phrase", `<p>Vérifie que personne ne regarde ton écran.</p><label for="revealPw">Mot de passe</label><input id="revealPw" type="password">`, { ok: "Afficher" });
+  if (!ok) return;
+  try {
+    const r = await api("/api/reveal", { password: $("revealPw").value });
+    await dialog("Phrase de récupération", `<div class="words">${r.words.split(" ").map((w) => `<span>${esc(w)}</span>`).join("")}</div>`, { ok: "Fermer", cancel: false });
+  } catch (e) { toast(e.message, true); }
+};
+
+/* ----- Données du compte ----- */
+async function refresh() {
+  if (!state?.unlocked) return;
+  try { data = await api("/api/overview?account=" + current); }
+  catch (e) {
+    $("balance").textContent = "—"; $("netWarn").hidden = false;
+    $("netWarn").textContent = "Nœud injoignable : " + e.message + " (vérifie l'adresse dans Réglages).";
+    return;
+  }
+  $("netWarn").hidden = true;
+  $("balance").textContent = vinx(data.balance);
+  $("homeLabel").textContent = "Solde · " + data.label;
+  const names = (data.names || []).map((n) => n.name);
+  $("homeNames").innerHTML = names.length ? "Mes noms : " + names.map((n) => `<b>${esc(n)}</b>`).join(", ") : "";
+  $("myAddress").textContent = data.address;
+  $("receiveNames").innerHTML = names.length ? `On peut aussi te payer avec : ${names.map((n) => `<b class="mono">${esc(n)}</b>`).join(", ")}` : `Astuce : réserve un nom .vinx pour qu'on te paie sans recopier l'adresse.`;
+  $("reserveNote").textContent = data.exists ? "" : `Ce compte n'existe pas encore sur le réseau : le premier versement doit être d'au moins ${vinx(data.network.min_reserve)} VINX.`;
+  const v2 = data.network.protocol_version >= 2;
+  $("netInfo").innerHTML = `Réseau <b>${esc(data.network.chain_id)}</b> · bloc ${esc(data.network.height)} · protocole ${esc(data.network.protocol_version)}${v2 ? "" : " (noms et séquestres pas encore actifs)"}`;
+  const rows = (list) => list.length ? `<table><thead><tr><th>Date</th><th>Opération</th><th>Avec</th><th style="text-align:right">Montant</th><th>Statut</th></tr></thead><tbody>${list.map(txRow).join("")}</tbody></table>` : `<p class="muted">Aucune opération pour l'instant.</p>`;
+  $("recent").innerHTML = rows(data.history.slice(0, 6));
+  $("historyTable").innerHTML = rows(data.history);
+  renderNames(); renderDeals();
+}
+function txRow(t) {
+  const out = t.sender === data.address;
+  const kinds = { "paiement": out ? "Envoi" : "Réception", "nom": "Nom " + (t.name || ""), "cession de nom": "Cession " + (t.name || ""),
+    "séquestre": out ? "Séquestre ouvert" : "Séquestre en votre faveur", "séquestre versé": "Séquestre versé", "séquestre remboursé": "Séquestre remboursé",
+    "mémo obligatoire": "Réglage du mémo", "rotation de clé": "Changement de clé" };
+  const other = out ? t.to : t.sender;
+  const from = t.treasury && !out ? "Trésorerie VinX" : null;
+  const amount = t.amount ? `<span class="${out ? "out" : "in"}">${out ? "−" : "+"} ${vinx(t.amount)}</span>` : "";
+  const fee = out ? `<div class="sub">frais ${vinx(t.fee)}</div>` : "";
+  return `<tr><td>${t.status === "en attente" ? "à l'instant" : date(t.timestamp)}</td><td>${esc(kinds[t.kind] || t.kind)}${t.memo ? `<div class="sub">${esc(t.memo)}</div>` : ""}</td>
+    <td>${from ? from : other ? who(other) : ""}</td><td style="text-align:right">${amount}${fee}</td>
+    <td>${t.status === "en attente" ? `<span class="pill warn">en attente</span>` : `<span class="pill ok">confirmée</span>`}</td></tr>`;
+}
+function renderNames() {
+  const n = data.names || [];
+  $("namesTable").innerHTML = n.length ? `<table><thead><tr><th>Nom</th><th>Expire le</th><th></th></tr></thead><tbody>${n.map((x) =>
+    `<tr><td class="mono"><b>${esc(x.name)}</b></td><td>${day(x.expires_at)}${x.expires_at * 1000 - Date.now() < 30 * 864e5 ? ` <span class="pill warn">bientôt</span>` : ""}</td>
+     <td><button data-renew="${esc(x.name)}">Renouveler</button> <button data-give="${esc(x.name)}">Céder</button></td></tr>`).join("")}</tbody></table>`
+    : `<p class="muted">Aucun nom pour ce compte.</p>`;
+  document.querySelectorAll("[data-renew]").forEach((b) => b.onclick = () => operate({ action: "register-name", name: b.dataset.renew }, "Renouveler le nom"));
+  document.querySelectorAll("[data-give]").forEach((b) => b.onclick = () => {
+    const to = prompt(`Céder ${b.dataset.give} à (adresse, contact ou nom .vinx)`); if (!to) return;
+    operate({ action: "transfer-name", name: b.dataset.give, to }, "Céder le nom");
+  });
+}
+function renderDeals() {
+  const list = data.deals || [];
+  const role = (d) => d.buyer === data.address ? "acheteur" : d.seller === data.address ? "vendeur" : "arbitre";
+  $("dealsTable").innerHTML = list.length ? `<table><thead><tr><th>Rôle</th><th>Acheteur → vendeur</th><th style="text-align:right">Montant</th><th>Échéance</th><th></th></tr></thead><tbody>${list.map((d) => {
+    const r = role(d);
+    const canRelease = r !== "vendeur";
+    const canRefund = r !== "acheteur" || d.expired;
+    return `<tr><td>${r}</td><td>${who(d.buyer)} → ${who(d.seller)}${d.memo ? `<div class="sub">${esc(d.memo)}</div>` : ""}</td>
+      <td style="text-align:right">${vinx(d.amount)}</td><td>${day(d.deadline)}${d.expired ? ` <span class="pill warn">échue</span>` : ""}</td>
+      <td>${canRelease ? `<button class="primary" data-release="${esc(d.id)}">Verser au vendeur</button> ` : ""}${canRefund ? `<button data-refund="${esc(d.id)}">Rembourser l'acheteur</button>` : ""}</td></tr>`;
+  }).join("")}</tbody></table>` : `<p class="muted">Aucun séquestre en cours.</p>`;
+  document.querySelectorAll("[data-release]").forEach((b) => b.onclick = () => operate({ action: "release-deal", deal: b.dataset.release }, "Verser au vendeur"));
+  document.querySelectorAll("[data-refund]").forEach((b) => b.onclick = () => operate({ action: "refund-deal", deal: b.dataset.refund }, "Rembourser l'acheteur"));
+}
+
+/* ----- Destinataire trouvé en direct ----- */
+const timers = {};
+function lookupLater(input, out) {
+  clearTimeout(timers[input]);
+  const v = $(input).value.trim();
+  if (!v) { $(out).textContent = ""; return; }
+  timers[input] = setTimeout(async () => {
+    try { const r = await api("/api/lookup", { to: v }); $(out).innerHTML = `<span class="ok">✓ ${esc(r.how)}</span> · <span class="mono">${esc(r.address)}</span>`; }
+    catch (e) { $(out).innerHTML = `<span class="warn">${esc(e.message)}</span>`; }
+  }, 400);
+}
+$("sendTo").addEventListener("input", () => lookupLater("sendTo", "sendFound"));
+$("dealTo").addEventListener("input", () => lookupLater("dealTo", "dealFound"));
+$("newName").addEventListener("input", () => {
+  clearTimeout(timers.name);
+  const n = $("newName").value.trim().toLowerCase().replace(/\.vinx$/, "");
+  if (!n) { $("nameFound").textContent = ""; return; }
+  timers.name = setTimeout(async () => {
+    try {
+      const r = await api("/api/lookup", { to: n + ".vinx" });
+      $("nameFound").innerHTML = r.address === data?.address ? `<span class="ok">Ce nom est déjà à toi.</span>` : `<span class="warn">Déjà pris.</span>`;
+    } catch (e) {
+      $("nameFound").innerHTML = /attribué à personne/.test(e.message)
+        ? `<span class="ok">✓ ${esc(n)}.vinx est libre · ${vinx(data?.network?.name_fee)} VINX par an</span>`
+        : `<span class="warn">${esc(e.message)}</span>`;
+    }
+  }, 400);
+});
+
+/* ----- Aperçu, puis exécution ----- */
+async function operate(op, title, done) {
+  op.account = current;
+  let p;
+  try { p = await api("/api/preview", op); } catch (e) { return toast(e.message, true); }
+  const mono = (l) => /^vinx1/.test(l.value) ? "mono" : "";
+  const fr = (v) => String(v).replace(/^(\d+)\.(\d+)/, "$1,$2");
+  const html = `<dl>${p.lines.map((l) => `<dt>${esc(l.label)}</dt><dd class="${mono(l)}">${esc(fr(l.value))}</dd>`).join("")}
+    <dt>Frais du réseau</dt><dd>${esc(fr(p.fee))} VINX</dd><dt><b>Total débité</b></dt><dd><b>${esc(fr(p.total))} VINX</b></dd>
+    <dt>Solde après</dt><dd>${esc(fr(p.after))} VINX</dd></dl>
+    ${p.warnings.map((w) => `<p class="warn">⚠ ${esc(w)}</p>`).join("")}`;
+  if (!await dialog(title, html, { ok: "Confirmer" })) return;
+  try {
+    await api("/api/execute", op);
+    toast("Envoyé : confirmation dans quelques secondes.");
+    done?.(); setTimeout(refresh, 800); setTimeout(refresh, 6000);
+  } catch (e) { toast(e.message, true); }
+}
+$("sendBtn").onclick = () => operate(
+  { action: "send", to: $("sendTo").value, amount: $("sendAmount").value.replace(",", "."), memo: $("sendMemo").value }, "Confirmer l'envoi",
+  () => { $("sendTo").value = $("sendAmount").value = $("sendMemo").value = ""; $("sendFound").textContent = ""; show("home"); });
+$("registerBtn").onclick = () => operate({ action: "register-name", name: $("newName").value }, "Réserver le nom",
+  () => { $("newName").value = ""; $("nameFound").textContent = ""; });
+$("dealBtn").onclick = () => operate(
+  { action: "open-deal", to: $("dealTo").value, arbiter: $("dealArbiter").value, amount: $("dealAmount").value.replace(",", "."), days: +$("dealDays").value, memo: $("dealMemo").value },
+  "Bloquer les fonds en séquestre",
+  () => { ["dealTo", "dealArbiter", "dealAmount", "dealMemo"].forEach((i) => $(i).value = ""); $("dealFound").textContent = ""; });
+$("copyAddr").onclick = async () => {
+  try { await navigator.clipboard.writeText(data.address); toast("Adresse copiée."); }
+  catch (_) { toast("Copie impossible : sélectionne l'adresse à la main.", true); }
+};
+
+setInterval(() => { if (!$("tabs").hidden) refresh(); }, 10000);
+boot().catch((e) => toast(e.message, true));
+</script>
+</body>
+</html>
