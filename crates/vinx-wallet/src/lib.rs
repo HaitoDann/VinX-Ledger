@@ -4,5 +4,7 @@ pub mod admin;
 pub mod amount;
 pub mod bench;
 pub mod client;
+pub mod cockpit;
 pub mod ops;
+pub mod params;
 pub mod preflight;

@@ -21,10 +21,14 @@ hex.workspace = true
 serde.workspace = true
 serde_json.workspace = true
 ureq.workspace = true
+# Cockpit : serveur web local.
+axum.workspace = true
+tokio.workspace = true
+rand_core.workspace = true
 
 [dev-dependencies]
 vinx-node.workspace = true
 vinx-state.workspace = true
-axum.workspace = true
 tempfile.workspace = true
-tokio.workspace = true
+http-body-util.workspace = true
+tower.workspace = true

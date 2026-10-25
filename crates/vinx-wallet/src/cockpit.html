@@ -1,0 +1,748 @@
+<!doctype html>
+<html lang="fr">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>VinX Ledger — cockpit</title>
+<link rel="icon" href="data:,">
+<style>
+  :root {
+    --bg: #f6f7f9; --card: #ffffff; --text: #17191c; --muted: #646b75;
+    --line: #e2e5ea; --accent: #2f5fd0; --ok: #1f8a4c; --warn: #b26a00; --bad: #c0362c;
+    --accent-text: #ffffff;
+  }
+  @media (prefers-color-scheme: dark) {
+    :root {
+      --bg: #111316; --card: #1a1d21; --text: #e7e9ec; --muted: #9aa1ab;
+      --line: #2a2e34; --accent: #7aa2ff; --ok: #4cc27f; --warn: #e0a440; --bad: #ef6b5f;
+      --accent-text: #0b1020;
+    }
+  }
+  * { box-sizing: border-box; }
+  body { margin: 0; background: var(--bg); color: var(--text);
+         font: 15px/1.45 system-ui, -apple-system, "Segoe UI", sans-serif; }
+  header { padding: 18px 16px 8px; max-width: 1100px; margin: 0 auto;
+           display: flex; flex-wrap: wrap; gap: 8px 16px; align-items: baseline; }
+  h1 { font-size: 20px; margin: 0; }
+  h2 { font-size: 15px; margin: 0 0 10px; color: var(--muted); font-weight: 600; }
+  h3 { font-size: 13px; margin: 14px 0 6px; color: var(--muted); font-weight: 600; }
+  nav { max-width: 1100px; margin: 0 auto; padding: 0 16px 10px; display: flex; flex-wrap: wrap; gap: 6px; }
+  nav a { padding: 5px 12px; border-radius: 99px; border: 1px solid var(--line); color: var(--text);
+          text-decoration: none; font-size: 13px; background: var(--card); }
+  nav a.active { border-color: var(--accent); color: var(--accent); font-weight: 600; }
+  nav a .count { display: inline-block; min-width: 18px; padding: 0 5px; margin-left: 4px; border-radius: 9px;
+                 background: var(--warn); color: #fff; font-size: 11px; text-align: center; }
+  nav a .count[hidden] { display: none; }
+  main { max-width: 1100px; margin: 0 auto; padding: 0 16px 32px; display: grid; gap: 14px; }
+  .card { background: var(--card); border: 1px solid var(--line); border-radius: 10px; padding: 12px 14px; min-width: 0; }
+  .grid2 { display: grid; grid-template-columns: repeat(auto-fit, minmax(320px, 1fr)); gap: 14px; }
+  .nodes { display: grid; grid-template-columns: repeat(auto-fit, minmax(220px, 1fr)); gap: 10px; }
+  table { width: 100%; border-collapse: collapse; font-variant-numeric: tabular-nums; }
+  th, td { text-align: left; padding: 6px 6px; border-bottom: 1px solid var(--line); font-size: 13px; vertical-align: middle; }
+  th { color: var(--muted); font-weight: 600; }
+  a { color: var(--accent); }
+  .mono { font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 12px; word-break: break-all; }
+  .ok { color: var(--ok); } .warn { color: var(--warn); } .bad { color: var(--bad); } .muted { color: var(--muted); }
+  .sub { color: var(--muted); font-size: 12px; }
+  .pill { display: inline-block; padding: 1px 8px; border-radius: 99px; font-size: 12px; border: 1px solid currentColor; }
+  .dot { display: inline-block; width: 9px; height: 9px; border-radius: 50%; margin-right: 6px; background: currentColor; }
+  .alert { border-left: 4px solid var(--bad); }
+  .alert.warning { border-left-color: var(--warn); }
+  .alert.info { border-left-color: var(--accent); }
+  dl { display: grid; grid-template-columns: max-content 1fr; gap: 4px 12px; margin: 0; font-size: 13px; }
+  dt { color: var(--muted); } dd { margin: 0; min-width: 0; }
+  label { display: block; font-size: 12px; color: var(--muted); margin: 8px 0 3px; }
+  input, select { width: 100%; padding: 7px 9px; border-radius: 8px; border: 1px solid var(--line);
+                  background: var(--bg); color: var(--text); font: 14px system-ui, sans-serif; }
+  input.mono { font: 13px ui-monospace, SFMono-Regular, Menlo, monospace; }
+  .row { display: flex; gap: 8px; align-items: end; flex-wrap: wrap; }
+  .row > * { flex: 1 1 140px; }
+  button { padding: 7px 14px; border-radius: 8px; border: 1px solid var(--line); background: var(--card);
+           color: var(--text); font: 600 13px system-ui, sans-serif; cursor: pointer; }
+  button.primary { background: var(--accent); border-color: var(--accent); color: var(--accent-text); }
+  button.danger { border-color: var(--bad); color: var(--bad); }
+  button:disabled { opacity: .45; cursor: default; }
+  .actions { display: flex; gap: 6px; flex-wrap: wrap; margin-top: 10px; }
+  .note { font-size: 12px; margin-top: 6px; }
+  .scroll { overflow-x: auto; }
+  .view { display: none; gap: 14px; }
+  .view.active { display: grid; }
+  dialog { border: 1px solid var(--line); border-radius: 12px; background: var(--card); color: var(--text);
+           padding: 18px; width: min(460px, calc(100vw - 32px)); }
+  dialog::backdrop { background: rgba(0, 0, 0, .45); }
+  #toast { position: fixed; right: 16px; bottom: 16px; max-width: min(420px, calc(100vw - 32px)); display: grid; gap: 8px; z-index: 10; }
+  #toast div { background: var(--card); border: 1px solid var(--line); border-left: 4px solid var(--ok);
+               border-radius: 8px; padding: 10px 12px; font-size: 13px; box-shadow: 0 4px 14px rgba(0,0,0,.15); }
+  #toast div.err { border-left-color: var(--bad); }
+</style>
+</head>
+<body>
+<header>
+  <h1>VinX Ledger — cockpit</h1>
+  <span id="chain" class="mono"></span>
+  <span id="health" class="pill"></span>
+</header>
+<nav>
+  <a href="#reseau" data-view="reseau">Réseau</a>
+  <a href="#actions" data-view="actions">Actions</a>
+  <a href="#propositions" data-view="propositions">Propositions<span id="todo" class="count" hidden></span></a>
+  <a href="#comptes" data-view="comptes">Comptes</a>
+  <a href="#journal" data-view="journal">Journal</a>
+</nav>
+<main>
+  <div id="banner" style="display:grid;gap:14px"></div>
+
+  <!-- Réseau -->
+  <section id="view-reseau" class="view">
+    <div class="nodes" id="nodes"></div>
+    <section class="card">
+      <h2>Validateurs</h2>
+      <div class="scroll"><table>
+        <thead><tr><th>Validateur</th><th>État</th><th>Dernier vote</th><th>Blocs votés (1 h)</th><th>Tours manqués</th><th></th></tr></thead>
+        <tbody id="validators"></tbody>
+      </table></div>
+      <div class="note" id="tolerance"></div>
+    </section>
+    <section class="card">
+      <h2>Nœuds suivis</h2>
+      <div class="sub">Le premier nœud joignable reçoit les envois. Depuis ton PC, ouvre un tunnel SSH par nœud :
+        <span class="mono">ssh -N -L 18541:127.0.0.1:8545 root@IP</span>, puis indique <span class="mono">http://127.0.0.1:18541</span>.</div>
+      <table style="margin-top:8px"><tbody id="node-config"></tbody></table>
+      <div class="row" style="margin-top:8px">
+        <div><label>Nom</label><input id="nc-name" placeholder="Validateur-3"></div>
+        <div><label>URL de l'API</label><input id="nc-url" class="mono" placeholder="http://127.0.0.1:18541"></div>
+        <div style="flex:0 0 auto"><button onclick="addNode()">Ajouter</button></div>
+      </div>
+    </section>
+  </section>
+
+  <!-- Actions -->
+  <section id="view-actions" class="view">
+    <div class="card alert info">Chaque action crée une <strong>proposition</strong>. Elle s'applique une fois signée par
+      deux signataires admin sur trois et envoyée, depuis l'onglet <a href="#propositions">Propositions</a>.</div>
+    <div class="grid2">
+      <section class="card">
+        <h2>Trésorerie</h2>
+        <dl><dt>Solde</dt><dd id="a-treasury">—</dd></dl>
+        <label>Destinataire</label><input id="tt-to" class="mono" placeholder="vinx1…">
+        <div class="row">
+          <div><label>Montant (VINX)</label><input id="tt-amount" inputmode="decimal" placeholder="100"></div>
+          <div><label>Mémo (facultatif)</label><input id="tt-memo" maxlength="32"></div>
+        </div>
+        <div class="actions"><button class="primary" onclick="proposeTransfer()">Proposer le transfert</button></div>
+      </section>
+      <section class="card">
+        <h2>Escrow</h2>
+        <dl>
+          <dt>En escrow</dt><dd id="a-escrow">—</dd>
+          <dt>Prochaine tranche</dt><dd id="a-next">—</dd>
+        </dl>
+        <div class="actions">
+          <button class="primary" id="btn-release" onclick="proposeRelease()" disabled>Libérer la tranche</button>
+        </div>
+        <div class="note muted">La tranche libérée va à la trésorerie. Une tranche non échue est refusée.</div>
+      </section>
+    </div>
+
+    <section class="card">
+      <h2>Paramètres du réseau</h2>
+      <div class="scroll"><table>
+        <thead><tr><th>Paramètre</th><th>Valeur actuelle</th><th>Nouvelle valeur</th><th></th></tr></thead>
+        <tbody id="params"></tbody>
+      </table></div>
+      <div class="note muted">Un paramètre change pour tous les nœuds deux blocs après l'inclusion de la proposition.</div>
+    </section>
+
+    <div class="grid2">
+      <section class="card">
+        <h2>Ajouter un validateur</h2>
+        <label>Clé publique du nouveau validateur (affichée par <span class="mono">prepare</span>)</label>
+        <input id="av-key" class="mono" placeholder="01…">
+        <label>Contrôle avant ajout : URL de l'API du nouveau nœud (facultatif)</label>
+        <input id="av-url" class="mono" placeholder="http://127.0.0.1:18545">
+        <div class="note" id="av-check"></div>
+        <div class="actions">
+          <button onclick="preflightCheck()">Contrôler le nœud</button>
+          <button class="primary" onclick="proposeAdd()">Proposer l'ajout</button>
+        </div>
+        <div class="note muted">Pour retirer un validateur : onglet Réseau, bouton « Retirer… ».</div>
+      </section>
+      <section class="card">
+        <h2>Signataires admin</h2>
+        <div id="a-signers"></div>
+        <label>Remplacer le signataire</label>
+        <div class="row">
+          <div style="flex:0 0 90px"><select id="rs-index"><option>0</option><option>1</option><option>2</option></select></div>
+          <div><input id="rs-key" class="mono" placeholder="nouvelle clé publique 01…"></div>
+        </div>
+        <div class="actions"><button class="danger" onclick="proposeReplace()">Proposer le remplacement</button></div>
+        <h3>Mise à jour du protocole</h3>
+        <div class="row">
+          <div><label>Nouvelle version</label><input id="up-version" inputmode="numeric"></div>
+          <div><label>Hauteur d'activation</label><input id="up-height" inputmode="numeric"></div>
+        </div>
+        <div class="note muted" id="up-note"></div>
+        <div class="actions"><button class="danger" onclick="proposeUpgrade()">Programmer la mise à jour</button></div>
+      </section>
+    </div>
+  </section>
+
+  <!-- Propositions -->
+  <section id="view-propositions" class="view">
+    <section class="card">
+      <h2>Propositions</h2>
+      <div class="scroll"><table>
+        <thead><tr><th>N°</th><th>Action</th><th>Détail</th><th>Signatures</th><th>État</th><th></th></tr></thead>
+        <tbody id="proposals"></tbody>
+      </table></div>
+      <div class="note muted">Les propositions s'appliquent dans l'ordre de leur numéro. Un autre signataire peut signer
+        sur sa machine : exporte le fichier, il le signe (cockpit ou <span class="mono">admin approve</span>) et te le renvoie.</div>
+      <div class="actions">
+        <label style="margin:0"><input type="file" id="import" accept=".json" style="display:none" onchange="importProposal(this)">
+          <span class="pill" style="cursor:pointer;padding:6px 12px">Importer une proposition…</span></label>
+      </div>
+    </section>
+  </section>
+
+  <!-- Comptes -->
+  <section id="view-comptes" class="view">
+    <section class="card">
+      <h2>Comptes de ce poste</h2>
+      <div class="scroll"><table>
+        <thead><tr><th>Fichier</th><th>Adresse</th><th>Solde</th></tr></thead>
+        <tbody id="accounts"></tbody>
+      </table></div>
+    </section>
+    <div class="grid2">
+      <section class="card">
+        <h2>Envoyer un paiement</h2>
+        <label>Depuis</label><select id="pay-from"></select>
+        <label>Destinataire</label><input id="pay-to" class="mono" placeholder="vinx1…">
+        <div class="row">
+          <div><label>Montant (VINX)</label><input id="pay-amount" inputmode="decimal"></div>
+          <div><label>Mémo (facultatif)</label><input id="pay-memo" maxlength="32"></div>
+        </div>
+        <div class="actions"><button class="primary" onclick="pay()">Envoyer</button></div>
+      </section>
+      <section class="card">
+        <h2>Créer un compte</h2>
+        <label>Nom (devient le nom du fichier de clé)</label><input id="na-name" placeholder="boutique">
+        <label>Mot de passe (8 caractères au moins)</label><input id="na-pass" type="password" autocomplete="new-password">
+        <div class="actions"><button onclick="newAccount()">Créer</button></div>
+        <div class="note muted">Le compte existe sur la chaîne dès qu'il reçoit au moins la réserve minimale.</div>
+      </section>
+    </div>
+  </section>
+
+  <!-- Journal -->
+  <section id="view-journal" class="view">
+    <section class="card">
+      <h2>Actions admin finalisées</h2>
+      <div class="scroll"><table>
+        <thead><tr><th>N°</th><th>Date</th><th>Action</th><th>Détail</th><th>Signataires</th><th>Bloc</th></tr></thead>
+        <tbody id="journal"></tbody>
+      </table></div>
+    </section>
+  </section>
+</main>
+
+<dialog id="dlg">
+  <h2 id="dlg-title"></h2>
+  <div id="dlg-body" style="font-size:14px"></div>
+  <div id="dlg-pass" hidden>
+    <label>Mot de passe de la clé</label><input id="dlg-password" type="password" autocomplete="off">
+  </div>
+  <div class="actions" style="justify-content:flex-end">
+    <button onclick="closeDialog(false)">Annuler</button>
+    <button class="primary" id="dlg-ok" onclick="closeDialog(true)">Confirmer</button>
+  </div>
+</dialog>
+<div id="toast"></div>
+
+<script>
+const TOKEN = "__COCKPIT_TOKEN__";
+const UNITS = 1000000000n;
+const $ = (id) => document.getElementById(id);
+const esc = (s) => String(s ?? "").replace(/[&<>"']/g, c => ({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;","'":"&#39;"}[c]));
+const short = (s, n = 12) => s ? s.slice(0, n) + "…" : "—";
+const fr = (n) => Number(n).toLocaleString("fr-FR");
+const dateTime = (ms) => new Date(ms).toLocaleString("fr-FR");
+const date = (s) => new Date(s * 1000).toLocaleString("fr-FR");
+const ago = (ms) => {
+  const s = Math.max(0, Math.round((Date.now() - ms) / 1000));
+  return s < 90 ? `il y a ${s} s` : s < 5400 ? `il y a ${Math.round(s / 60)} min` : `il y a ${Math.round(s / 3600)} h`;
+};
+function vinx(units) {
+  const v = BigInt(units);
+  const w = (v / UNITS).toString().replace(/\B(?=(\d{3})+(?!\d))/g, " ");
+  const f = v % UNITS;
+  return f === 0n ? w + " VINX" : w + "," + f.toString().padStart(9, "0").replace(/0+$/, "") + " VINX";
+}
+/* VINX saisis (virgule ou point) → unités, ou null. */
+function toUnits(s) {
+  const m = String(s).trim().replace(",", ".").match(/^(\d+)(?:\.(\d{1,9}))?$/);
+  if (!m) return null;
+  return BigInt(m[1]) * UNITS + BigInt((m[2] || "").padEnd(9, "0"));
+}
+const unitsToVinx = (u) => { const f = (BigInt(u) % UNITS).toString().padStart(9, "0").replace(/0+$/, "");
+  return (BigInt(u) / UNITS).toString() + (f ? "." + f : ""); };
+const quorum = (n) => Math.floor(2 * n / 3) + 1;
+
+async function api(path, body) {
+  const r = await fetch(path, {
+    method: body === undefined ? "GET" : "POST",
+    headers: { "x-cockpit-token": TOKEN, "content-type": "application/json" },
+    body: body === undefined ? undefined : JSON.stringify(body),
+    cache: "no-store",
+  });
+  const text = await r.text();
+  let data; try { data = JSON.parse(text); } catch (_) { data = { error: text }; }
+  if (!r.ok) throw new Error(data.error || r.status);
+  return data;
+}
+const node = (path) => api("/api/node?path=" + encodeURIComponent(path));
+
+function toast(msg, err = false) {
+  const d = document.createElement("div");
+  d.className = err ? "err" : ""; d.textContent = msg;
+  $("toast").appendChild(d); setTimeout(() => d.remove(), err ? 9000 : 5000);
+}
+
+/* Fenêtre de confirmation, avec mot de passe facultatif. Renvoie null si annulée. */
+let dlgResolve = null;
+function dialog(title, html, { password = false, ok = "Confirmer", danger = false } = {}) {
+  $("dlg-title").textContent = title;
+  $("dlg-body").innerHTML = html;
+  $("dlg-pass").hidden = !password;
+  $("dlg-password").value = "";
+  $("dlg-ok").textContent = ok;
+  $("dlg-ok").className = danger ? "danger" : "primary";
+  $("dlg").showModal();
+  if (password) setTimeout(() => $("dlg-password").focus(), 50);
+  return new Promise(res => { dlgResolve = res; });
+}
+function closeDialog(ok) {
+  const pw = $("dlg-password").value;
+  const keyEl = document.getElementById("dlg-key");
+  const key = keyEl ? keyEl.value : null;
+  $("dlg-password").value = "";
+  $("dlg").close();
+  dlgResolve && dlgResolve(ok ? { password: pw, key } : null);
+  dlgResolve = null;
+}
+$("dlg").addEventListener("cancel", () => { dlgResolve && dlgResolve(null); dlgResolve = null; });
+$("dlg-password").addEventListener("keydown", e => { if (e.key === "Enter") closeDialog(true); });
+
+/* ---------- État partagé ---------- */
+let gov = null, status = null, keys = null;
+
+async function loadCore() {
+  [status, gov, keys] = await Promise.all([node("/status"), node("/governance"), api("/api/keys")]);
+  $("chain").textContent = status.chain_id;
+  const h = $("health");
+  h.textContent = `hauteur ${fr(status.height)} · nonce admin ${gov.admin.nonce}`; h.className = "pill ok";
+  $("banner").innerHTML = keys.admins.length < 2 ? `<div class="card alert warning"><strong class="warn">${keys.admins.length} clé admin sur ce poste</strong> —
+    il en faut deux pour appliquer une action. Copie les fichiers de clé admin dans <span class="mono">${esc(keys.dir)}</span>,
+    ou fais signer l'autre signataire sur sa machine (export / import).</div>` : "";
+}
+
+/* ---------- Réseau ---------- */
+async function refreshNetwork() {
+  const [nodes, config] = await Promise.all([api("/api/nodes"), api("/api/config")]);
+  const vals = await node("/validators").catch(() => null);
+  const primary = nodes.nodes.findIndex(x => x.ok);
+  let html = nodes.nodes.map((n, i) => {
+    if (!n.ok) return `<div class="card alert"><strong>${esc(n.name)}</strong><div class="bad"><span class="dot"></span>injoignable</div>
+      <div class="sub mono">${esc(n.url)}</div><div class="sub">${esc(n.error)}</div></div>`;
+    const s = n.status;
+    const role = s.validator_index === null ? "observateur" : `validateur n° ${s.validator_index + 1}`;
+    return `<div class="card"><strong>${esc(n.name)}</strong>${i === primary ? ' <span class="pill">reçoit les envois</span>' : ""}
+      <div class="ok"><span class="dot"></span>en ligne · ${role}</div>
+      <dl style="margin-top:6px">
+        <dt>Hauteur</dt><dd>${fr(s.height)}</dd><dt>Pairs</dt><dd>${s.peers}</dd>
+        <dt>Version</dt><dd>${esc(s.node_version)}</dd><dt>En attente</dt><dd>${fr(s.pending_transactions)}</dd>
+      </dl>
+      <div class="sub"><a href="${esc(n.url)}/" target="_blank" rel="noopener">tableau de bord du nœud ↗</a></div></div>`;
+  }).join("");
+  const heights = nodes.nodes.filter(n => n.ok).map(n => n.status.height);
+  if (heights.length > 1 && Math.max(...heights) - Math.min(...heights) > 3)
+    html += `<div class="card alert warning">Écart de ${Math.max(...heights) - Math.min(...heights)} blocs entre les nœuds : l'un d'eux est en retard.</div>`;
+  $("nodes").innerHTML = html;
+
+  if (vals) {
+    const cls = { "en ligne": "ok", "en retard": "warn", "absent": "bad", "nouveau": "muted" };
+    $("validators").innerHTML = vals.validators.map(v => {
+      const pct = v.expected ? (100 * v.signed / v.expected).toFixed(1) + " %" : "—";
+      const label = v.name || "n° " + (v.index + 1);
+      return `<tr><td>${v.name ? esc(v.name) + ` <span class="muted">(n° ${v.index + 1})</span>` : "Validateur n° " + (v.index + 1)}
+        <div class="sub mono">${esc(short(v.key, 18))}</div></td>
+        <td class="${cls[v.presence] || ""}"><span class="dot"></span>${esc(v.presence)}</td>
+        <td>${v.last_signed_ms ? ago(v.last_signed_ms) : "—"}</td><td>${pct}</td>
+        <td class="${v.missed_proposals ? "warn" : ""}">${v.missed_proposals}</td>
+        <td><button class="danger" data-key="${esc(v.key)}" data-name="${esc(label)}" onclick="proposeRemove(this.dataset.key, this.dataset.name)">Retirer…</button></td></tr>`;
+    }).join("");
+    const n = vals.validators.length, absent = vals.validators.filter(v => v.presence === "absent").length;
+    const tol = n - quorum(n);
+    $("tolerance").innerHTML = `${n} validateur(s) : ${quorum(n)} doivent voter, ${tol} panne(s) tolérée(s).` +
+      (absent ? ` <strong class="${absent > tol ? "bad" : "warn"}">${absent} absent(s)${absent > tol ? " — la chaîne est arrêtée" : absent === tol ? " — plus aucune marge" : ""}</strong>` : "");
+  }
+
+  $("node-config").innerHTML = config.nodes.map((n, i) => `
+    <tr><td>${esc(n.name)}</td><td class="mono">${esc(n.url)}</td>
+    <td style="text-align:right">${i > 0 ? `<button onclick="moveNode(${i})">↑</button> ` : ""}<button onclick="removeNode(${i})">Retirer</button></td></tr>`).join("");
+}
+
+async function saveNodes(nodes) { await api("/api/config", { nodes }); refresh(); }
+async function addNode() {
+  const name = $("nc-name").value.trim(), url = $("nc-url").value.trim().replace(/\/$/, "");
+  if (!name || !/^https?:\/\//.test(url)) return toast("Nom et URL http://… requis", true);
+  try {
+    const c = await api("/api/config"); c.nodes.push({ name, url });
+    await saveNodes(c.nodes);
+    $("nc-name").value = ""; $("nc-url").value = "";
+  } catch (e) { toast(e.message, true); }
+}
+async function removeNode(i) { const c = await api("/api/config"); c.nodes.splice(i, 1); await saveNodes(c.nodes); }
+async function moveNode(i) { const c = await api("/api/config"); [c.nodes[i - 1], c.nodes[i]] = [c.nodes[i], c.nodes[i - 1]]; await saveNodes(c.nodes); }
+
+/* ---------- Actions ---------- */
+/* Paramètres : nom set-param, nom dans /governance, libellé, unité, explication, garde-fous. */
+const PARAMS = [
+  { name: "min_fee", key: "min_fee", label: "Frais minimum", unit: "vinx",
+    help: "Frais de chaque transaction, versés à la trésorerie.",
+    check: (u) => u === 0n ? ["bad", "Frais nuls : n'importe qui peut saturer le réseau gratuitement."] : u > UNITS ? ["warn", "Plus de 1 VINX par transaction : les paiements deviennent chers."] : null },
+  { name: "min_reserve", key: "min_reserve", label: "Réserve minimale", unit: "vinx",
+    help: "Solde minimal pour créer un compte : limite la création de comptes en masse.",
+    check: (u) => u > 10n * UNITS ? ["warn", "Plus de 10 VINX : ouvrir un compte devient coûteux."] : null },
+  { name: "max_memo_bytes", key: "max_memo_bytes", label: "Taille max. du mémo", unit: "octets",
+    check: (v) => v < 8 ? ["warn", "Moins de 8 octets : les références de facture ne tiennent plus."] : v > 256 ? ["warn", "Mémos longs : la chaîne grossit plus vite."] : null },
+  { name: "max_block_txs", key: "max_block_txs", label: "Transactions par bloc, max.", unit: "",
+    help: "Débit maximal = cette valeur ÷ intervalle de bloc.",
+    check: (v) => v < 100 ? ["bad", "Débit très faible : le réseau sera vite encombré."] : v > 20000 ? ["warn", "Gros blocs : finalité plus lente, stockage et rattrapage plus lourds."] : null },
+  { name: "max_block_bytes", key: "max_block_bytes", label: "Taille de bloc, max.", unit: "octets",
+    check: (v) => v < 1048576 ? ["warn", "Moins de 1 Mio : un bloc plein de transactions ne tiendra pas."] : v > 16777216 ? ["bad", "Au-delà de 16 Mio, les blocs ne passent plus sur le réseau."] : null },
+  { name: "min_block_interval", key: "min_block_interval_ms", label: "Intervalle de bloc", unit: "ms",
+    help: "Temps minimal entre deux blocs.",
+    check: (v) => v < 2000 ? ["warn", "Moins de 2 s : plus de rounds supplémentaires et une chaîne qui grossit plus vite. À faire seulement après plusieurs jours à 100 % au premier round."] : v > 60000 ? ["warn", "Plus d'une minute : les paiements attendent longtemps."] : null },
+  { name: "timeout_propose", key: "timeout_propose_ms", label: "Délai de proposition", unit: "ms",
+    help: "Attente du bloc d'un proposeur avant de passer au suivant : coût d'un validateur absent.",
+    check: (v) => v < 1000 ? ["warn", "Moins de 1 s : un proposeur présent mais un peu lent sera jugé absent (rounds supplémentaires)."] : v > 10000 ? ["warn", "Plus de 10 s : un validateur absent ralentit fortement la chaîne."] : null },
+  { name: "timeout_propose_delta", key: "timeout_propose_delta_ms", label: "… en plus par round", unit: "ms",
+    check: (v) => v < 200 ? ["warn", "Les rounds suivants ne laissent pas plus de temps : risque de rounds en série sur un réseau lent."] : null },
+  { name: "timeout_vote", key: "timeout_vote_ms", label: "Délai de vote", unit: "ms",
+    check: (v) => v < 500 ? ["warn", "Moins de 500 ms : votes jugés manquants sur un réseau un peu lent."] : null },
+  { name: "timeout_vote_delta", key: "timeout_vote_delta_ms", label: "… en plus par round", unit: "ms", check: () => null },
+];
+const fmtParam = (p, v) => p.unit === "vinx" ? vinx(v) : fr(v) + (p.unit ? " " + p.unit : "");
+
+async function refreshActions() {
+  const escrow = await node("/escrow");
+  $("a-treasury").textContent = vinx(gov.treasury.balance);
+  $("a-escrow").textContent = vinx(gov.escrow.total);
+  const next = escrow.next, due = next && next.matures_at * 1000 <= Date.now();
+  $("a-next").innerHTML = next ? `${vinx(next.amount)} — ${due ? '<span class="ok">libérable maintenant</span>' : "échéance " + esc(date(next.matures_at))}` : "aucune";
+  $("btn-release").disabled = !due;
+  $("btn-release").dataset.amount = next ? next.amount : "";
+
+  if (!$("params").dataset.ready) {
+    $("params").innerHTML = PARAMS.map((p, i) => `
+      <tr><td>${p.label}${p.help ? `<div class="sub">${p.help}</div>` : ""}<div class="sub mono">${p.name}</div></td>
+      <td id="pv-${i}"></td>
+      <td><input id="pn-${i}" class="mono" inputmode="decimal" placeholder="${p.unit === "vinx" ? "en VINX" : p.unit || ""}" oninput="checkParam(${i})">
+        <div class="note" id="pc-${i}"></div></td>
+      <td><button onclick="proposeParam(${i})">Proposer</button></td></tr>`).join("");
+    $("params").dataset.ready = "1";
+  }
+  PARAMS.forEach((p, i) => { $("pv-" + i).textContent = fmtParam(p, gov.params[p.key]); });
+
+  $("a-signers").innerHTML = gov.admin.signers.map((k, i) => {
+    const here = keys.admins.find(a => a.index === i);
+    return `<div>${i}. <span class="mono">${esc(short(k, 18))}</span> ${here ? `<span class="ok">— sur ce poste (${esc(here.file)})</span>` : '<span class="muted">— pas sur ce poste</span>'}</div>`;
+  }).join("");
+  $("up-note").textContent = `Hauteur actuelle : ${fr(status.height)}. Préavis minimal : 17 280 blocs (24 h à 5 s). Tous les nœuds doivent avoir la nouvelle version avant l'activation.`;
+}
+
+function paramValue(i) {
+  const p = PARAMS[i], raw = $("pn-" + i).value.trim();
+  if (!raw) return null;
+  if (p.unit === "vinx") { const u = toUnits(raw); return u === null ? undefined : u; }
+  return /^\d+$/.test(raw) ? Number(raw) : undefined;
+}
+function checkParam(i) {
+  const v = paramValue(i), out = $("pc-" + i);
+  if (v === null) { out.innerHTML = ""; return; }
+  if (v === undefined) { out.innerHTML = '<span class="bad">nombre attendu</span>'; return; }
+  const r = PARAMS[i].check(v);
+  out.innerHTML = r ? `<span class="${r[0]}">${r[1]}</span>` : '<span class="ok">valeur dans la plage habituelle</span>';
+}
+
+async function propose(action, title, html, { danger = false } = {}) {
+  const ok = await dialog(title, html + `<p class="sub">Une proposition sera créée, à signer par deux signataires puis à envoyer.</p>`,
+    { ok: "Créer la proposition", danger });
+  if (!ok) return;
+  try {
+    const r = await api("/api/proposals", { action });
+    toast(`Proposition n° ${r.nonce} créée`);
+    location.hash = "#propositions";
+  } catch (e) { toast(e.message, true); }
+}
+
+async function proposeTransfer() {
+  const to = $("tt-to").value.trim(), amount = $("tt-amount").value.trim(), memo = $("tt-memo").value.trim();
+  const u = toUnits(amount);
+  if (/^01[0-9a-f]{64}$/i.test(to)) return toast("C'est une clé publique, pas une adresse : utilise l'adresse vinx1…", true);
+  if (!/^vinx1[0-9a-z]{20,}$/.test(to)) return toast("Adresse vinx1… attendue", true);
+  if (!u) return toast("Montant invalide", true);
+  if (u > BigInt(gov.treasury.balance)) return toast("Montant supérieur au solde de la trésorerie", true);
+  const acct = await node("/accounts/" + to).catch(() => null);
+  const warn = !acct && u < BigInt(status.params.min_reserve) ? `<p class="bad">Ce compte n'existe pas encore : il faut lui envoyer au moins ${vinx(status.params.min_reserve)}.</p>` : "";
+  await propose({ kind: "treasury-transfer", to, amount, memo }, "Transfert de trésorerie",
+    `<dl><dt>Montant</dt><dd>${vinx(u)}</dd><dt>Vers</dt><dd class="mono">${esc(to)}</dd>
+     <dt>Compte</dt><dd>${acct ? "existant, solde " + vinx(acct.balance) : "nouveau"}</dd>${memo ? `<dt>Mémo</dt><dd>${esc(memo)}</dd>` : ""}</dl>${warn}`);
+}
+
+async function proposeRelease() {
+  const amount = $("btn-release").dataset.amount;
+  await propose({ kind: "escrow-release", amount: unitsToVinx(amount) }, "Libérer une tranche d'escrow",
+    `<p>${vinx(amount)} passeront de l'escrow à la trésorerie.</p>`);
+}
+
+async function proposeParam(i) {
+  const p = PARAMS[i], v = paramValue(i);
+  if (v === null || v === undefined) return toast("Saisis une nouvelle valeur valide pour « " + p.label + " »", true);
+  const r = p.check(v);
+  const value = String(v);
+  await propose({ kind: "set-param", param: p.name, value }, "Changer un paramètre",
+    `<dl><dt>Paramètre</dt><dd>${p.label} <span class="mono muted">${p.name}</span></dd>
+     <dt>Actuel</dt><dd>${fmtParam(p, gov.params[p.key])}</dd><dt>Nouveau</dt><dd><strong>${fmtParam(p, v)}</strong></dd></dl>
+     ${r ? `<p class="${r[0]}">${r[1]}</p>` : ""}`, { danger: !!(r && r[0] === "bad") });
+}
+
+async function preflightCheck() {
+  const url = $("av-url").value.trim(), out = $("av-check");
+  if (!url) return toast("Indique l'URL de l'API du nouveau nœud (par un tunnel SSH)", true);
+  out.textContent = "contrôle en cours…";
+  try {
+    const r = await api("/api/preflight", { urls: [url] });
+    out.innerHTML = r.errors.map(e => `<div class="bad">✗ ${esc(e)}</div>`).join("") + r.warnings.map(w => `<div class="warn">! ${esc(w)}</div>`).join("")
+      + (r.errors.length ? "" : `<div class="ok">✓ nœud prêt ; après l'ajout : ${r.final_validators} validateurs, ${r.quorum} doivent voter</div>`);
+    if (!r.errors.length && r.keys_to_add.length === 1) $("av-key").value = r.keys_to_add[0];
+  } catch (e) { out.innerHTML = `<span class="bad">${esc(e.message)}</span>`; }
+}
+
+function toleranceText(n) {
+  if (n === 0) return '<span class="bad">aucun validateur : la chaîne ne peut plus avancer</span>';
+  const t = n - quorum(n);
+  return `${n} validateur(s), ${quorum(n)} doivent voter, ${t} panne(s) tolérée(s)` + (t === 0 ? ' — <span class="warn">une seule panne arrête la chaîne</span>' : "");
+}
+
+async function proposeAdd() {
+  const key = $("av-key").value.trim().toLowerCase();
+  if (!/^01[0-9a-f]{64}$/.test(key)) return toast("Clé publique attendue : 01 suivi de 64 caractères hexadécimaux", true);
+  const n = gov.validators.active.length;
+  if (gov.validators.active.includes(key)) return toast("Ce validateur est déjà dans l'ensemble", true);
+  await propose({ kind: "add-validator", key }, "Ajouter un validateur",
+    `<p class="mono">${esc(key)}</p><p>Avant : ${toleranceText(n)}.<br>Après : ${toleranceText(n + 1)}.</p>
+     <p class="sub">Le nœud doit déjà tourner avec cette clé et suivre la chaîne : il votera deux blocs après l'inclusion.
+     S'il n'est pas prêt, le réseau perd de la marge.${n + 1 === 2 || n + 1 === 3 ? ' <strong class="warn">À 2 ou 3 validateurs, une absence bloque la chaîne : ajoute les suivants sans attendre.</strong>' : ""}</p>`);
+}
+
+async function proposeRemove(key, name) {
+  const n = gov.validators.active.length;
+  if (n <= 1) return toast("Impossible de retirer le dernier validateur", true);
+  await propose({ kind: "remove-validator", key }, "Retirer un validateur",
+    `<p>${esc(name)} <span class="mono">${esc(short(key, 18))}</span></p>
+     <p>Avant : ${toleranceText(n)}.<br>Après : ${toleranceText(n - 1)}.</p>`, { danger: true });
+}
+
+async function proposeReplace() {
+  const index = Number($("rs-index").value), key = $("rs-key").value.trim().toLowerCase();
+  if (!/^01[0-9a-f]{64}$/.test(key)) return toast("Clé publique attendue : 01 suivi de 64 caractères", true);
+  await propose({ kind: "replace-signer", index, new_key: key }, "Remplacer un signataire admin",
+    `<p>Le signataire <strong>${index}</strong> sera remplacé par <span class="mono">${esc(key)}</span>.</p>
+     <p class="warn">Vérifie que la nouvelle clé est bien sauvegardée : une erreur ici peut faire perdre le contrôle de la trésorerie.</p>`, { danger: true });
+}
+
+async function proposeUpgrade() {
+  const version = $("up-version").value.trim(), h = $("up-height").value.trim();
+  if (!/^\d+$/.test(version) || !/^\d+$/.test(h)) return toast("Version et hauteur : nombres entiers", true);
+  if (Number(h) < status.height + 17280) return toast("Hauteur trop proche : au moins " + fr(status.height + 17280), true);
+  await propose({ kind: "schedule-upgrade", version, activation_height: h }, "Programmer une mise à jour du protocole",
+    `<p>Passage à la version <strong>${esc(version)}</strong> à la hauteur <strong>${fr(h)}</strong>.</p>
+     <p class="warn">Tout nœud qui n'aura pas la nouvelle version s'arrêtera à cette hauteur.</p>`, { danger: true });
+}
+
+/* ---------- Propositions ---------- */
+function detailOf(p) {
+  if (p.kind === "treasury-transfer") return `${esc(p.amount)} VINX → <span class="mono">${esc(short(p.to, 16))}</span>${p.memo ? " — " + esc(p.memo) : ""}`;
+  if (p.amount) return esc(p.amount) + " VINX";
+  if (p.param) { const d = PARAMS.find(x => x.name === p.param); return `${esc(p.param)} = ${d ? fmtParam(d, d.unit === "vinx" ? BigInt(p.value) : p.value) : esc(p.value)}`; }
+  if (p.key) return `<span class="mono">${esc(short(p.key, 18))}</span>`;
+  if (p.new_key) return `signataire ${p.index} → <span class="mono">${esc(short(p.new_key, 18))}</span>`;
+  if (p.version) return `v${esc(p.version)} à la hauteur ${fr(p.activation_height)}`;
+  return "";
+}
+let proposals = [];
+
+async function refreshProposals() {
+  const r = await api("/api/proposals");
+  proposals = r.proposals;
+  const cls = { "à signer": "warn", "prête": "ok", "envoyée": "ok", "finalisée": "muted", "périmée": "bad", "illisible": "bad" };
+  setBadge(proposals);
+  const open = proposals.filter(p => ["à signer", "prête"].includes(p.status)).map(p => p.nonce);
+  const firstOpen = open.length ? Math.min(...open) : null;
+  $("proposals").innerHTML = proposals.length ? proposals.map((p, i) => {
+    if (p.status === "illisible") return `<tr><td colspan="5" class="bad">${esc(p.file)} : fichier illisible</td><td><button onclick="removeProposal(${i})">Supprimer</button></td></tr>`;
+    const signers = [0, 1, 2].map(k => p.approvals.includes(k) ? `<span class="ok">✓${k}</span>` : `<span class="muted">${k}</span>`).join(" ");
+    const signable = keys.admins.filter(a => !p.approvals.includes(a.index));
+    const isOpen = ["à signer", "prête"].includes(p.status);
+    const btns = [];
+    if (isOpen && signable.length) btns.push(`<button class="${p.status === "à signer" ? "primary" : ""}" onclick="sign(${i})">Signer</button>`);
+    if (p.status === "prête") btns.push(`<button class="primary" onclick="submitProposal(${i}, ${p.nonce === firstOpen})">Envoyer</button>`);
+    btns.push(`<button onclick="exportProposal(${i})">Exporter</button>`);
+    btns.push(`<button onclick="removeProposal(${i})">Supprimer</button>`);
+    return `<tr><td>${p.nonce}</td><td>${esc(p.label)}</td><td>${detailOf(p)}</td><td>${signers} <span class="sub">(${p.approvals.length}/2)</span></td>
+      <td class="${cls[p.status] || ""}">${esc(p.status)}</td><td><div class="actions" style="margin:0">${btns.join("")}</div></td></tr>`;
+  }).join("") : '<tr><td colspan="6" class="muted">aucune proposition — crée-en une dans l\'onglet Actions</td></tr>';
+}
+
+async function sign(i) {
+  const p = proposals[i];
+  const signable = keys.admins.filter(a => !p.approvals.includes(a.index));
+  if (!signable.length) return toast("Aucune clé admin de ce poste ne peut encore signer cette proposition", true);
+  const choose = signable.length > 1
+    ? `<label>Signer avec</label><select id="dlg-key">${signable.map(a => `<option value="${esc(a.file)}">signataire ${a.index} — ${esc(a.file)}</option>`).join("")}</select>`
+    : `<p>Signataire ${signable[0].index} — <span class="mono">${esc(signable[0].file)}</span></p><input type="hidden" id="dlg-key" value="${esc(signable[0].file)}">`;
+  const res = await dialog(`Signer la proposition n° ${p.nonce}`,
+    `<p><strong>${esc(p.label)}</strong> — ${detailOf(p)}</p><p class="sub">Chaîne ${esc(p.chain_id)}. Relis l'action : ta signature l'autorise.</p>${choose}`,
+    { password: true, ok: "Signer" });
+  if (!res) return;
+  try {
+    const a = await api("/api/proposals/approve", { file: p.file, key_file: res.key, password: res.password });
+    toast(`Signée (${a.approvals}/2)`);
+  } catch (e) { toast(e.message, true); }
+  refresh();
+}
+
+async function submitProposal(i, first) {
+  const p = proposals[i];
+  if (!first && !(await dialog("Envoyer hors d'ordre ?",
+    `<p>Une proposition de numéro plus petit n'est pas encore appliquée. Le nœud refusera celle-ci tant que la précédente n'est pas incluse.</p>`,
+    { ok: "Envoyer quand même" }))) return;
+  try {
+    await api("/api/proposals/submit", { file: p.file });
+    toast(`Proposition n° ${p.nonce} envoyée — appliquée dans le prochain bloc`);
+  } catch (e) { toast(e.message, true); }
+  refresh(); setTimeout(refresh, 6000);
+}
+
+async function removeProposal(i) {
+  const p = proposals[i];
+  if (!(await dialog("Supprimer la proposition ?", `<p class="mono">${esc(p.file)}</p><p class="sub">Le fichier est effacé de ce poste. Une proposition déjà envoyée n'est pas annulée.</p>`, { ok: "Supprimer", danger: true }))) return;
+  try { await api("/api/proposals/delete", { file: p.file }); } catch (e) { toast(e.message, true); }
+  refresh();
+}
+
+async function exportProposal(i) {
+  const p = proposals[i];
+  const r = await fetch("/api/proposals/export?file=" + encodeURIComponent(p.file), { headers: { "x-cockpit-token": TOKEN } });
+  if (!r.ok) return toast("Export impossible", true);
+  const url = URL.createObjectURL(await r.blob());
+  const a = document.createElement("a"); a.href = url; a.download = p.file; a.click();
+  setTimeout(() => URL.revokeObjectURL(url), 1000);
+}
+
+async function importProposal(input) {
+  const f = input.files[0]; input.value = "";
+  if (!f) return;
+  try {
+    await api("/api/proposals/import", { file: f.name.replace(/[^\w.-]/g, "_"), content: await f.text() });
+    toast("Proposition importée");
+  } catch (e) { toast(e.message, true); }
+  refresh();
+}
+
+/* ---------- Comptes ---------- */
+async function refreshAccounts() {
+  $("accounts").innerHTML = keys.accounts.length ? keys.accounts.map(a => `
+    <tr><td>${esc(a.file)}</td><td class="mono">${esc(a.address)}</td>
+    <td>${a.exists ? esc(a.balance) + " VINX" : '<span class="muted">pas encore sur la chaîne</span>'}</td></tr>`).join("")
+    : `<tr><td colspan="3" class="muted">aucun fichier de clé de compte dans ${esc(keys.dir)}</td></tr>`;
+  const sel = $("pay-from"), cur = sel.value;
+  sel.innerHTML = keys.accounts.filter(a => a.exists).map(a => `<option value="${esc(a.file)}">${esc(a.file)} — ${esc(a.balance)} VINX</option>`).join("");
+  if (cur) sel.value = cur;
+}
+
+async function pay() {
+  const from = $("pay-from").value, to = $("pay-to").value.trim(), amount = $("pay-amount").value.trim(), memo = $("pay-memo").value.trim();
+  if (!from) return toast("Aucun compte avec un solde sur ce poste", true);
+  if (/^01[0-9a-f]{64}$/i.test(to)) return toast("C'est une clé publique, pas une adresse : utilise l'adresse vinx1…", true);
+  if (!/^vinx1/.test(to)) return toast("Adresse vinx1… attendue", true);
+  const u = toUnits(amount); if (!u) return toast("Montant invalide", true);
+  const res = await dialog("Envoyer un paiement", `<dl><dt>Depuis</dt><dd>${esc(from)}</dd><dt>Vers</dt><dd class="mono">${esc(to)}</dd>
+    <dt>Montant</dt><dd>${vinx(u)}</dd>${memo ? `<dt>Mémo</dt><dd>${esc(memo)}</dd>` : ""}<dt>Frais</dt><dd>${vinx(status.params.min_fee)}</dd></dl>`,
+    { password: true, ok: "Envoyer" });
+  if (!res) return;
+  try {
+    const r = await api("/api/send", { key_file: from, password: res.password, to, amount, memo });
+    toast("Paiement envoyé : " + short(r.id, 16));
+    $("pay-amount").value = "";
+  } catch (e) { toast(e.message, true); }
+  setTimeout(refresh, 6000);
+}
+
+async function newAccount() {
+  try {
+    const r = await api("/api/accounts", { name: $("na-name").value, password: $("na-pass").value });
+    $("na-pass").value = ""; $("na-name").value = "";
+    toast("Compte créé : " + r.address);
+  } catch (e) { toast(e.message, true); }
+  refresh();
+}
+
+/* ---------- Journal ---------- */
+async function refreshJournal() {
+  const h = await node("/admin-history");
+  $("journal").innerHTML = h.actions.length ? h.actions.map(a => {
+    const d = a.detail || {};
+    const detail = d.to ? `${vinx(d.amount)} → <span class="mono">${esc(short(d.to, 16))}</span>${d.memo ? " — " + esc(d.memo) : ""}`
+      : d.amount ? vinx(d.amount) : d.param ? `${esc(d.param)} = ${fr(d.value)}` : d.key ? `<span class="mono">${esc(short(d.key, 18))}</span>`
+      : d.new_key ? `signataire ${d.index} → <span class="mono">${esc(short(d.new_key, 18))}</span>` : d.version ? `v${d.version} à ${fr(d.activation_height)}` : "";
+    return `<tr><td>${a.nonce}</td><td>${dateTime(a.timestamp)}</td><td>${esc(a.kind)}</td><td>${detail}</td><td>${a.approvals.join(", ")}</td><td>${a.height}</td></tr>`;
+  }).join("") : '<tr><td colspan="6" class="muted">aucune action finalisée connue du nœud</td></tr>';
+}
+
+/* ---------- Navigation ---------- */
+function setBadge(list) {
+  const todo = list.filter(p => p.status === "à signer" || p.status === "prête").length;
+  $("todo").hidden = !todo; $("todo").textContent = todo;
+}
+const VIEWS = { reseau: refreshNetwork, actions: refreshActions, propositions: refreshProposals, comptes: refreshAccounts, journal: refreshJournal };
+let current = "reseau", timer = null;
+async function refresh() {
+  try {
+    await loadCore();
+    await VIEWS[current]();
+    if (current !== "propositions") api("/api/proposals").then(r => setBadge(r.proposals)).catch(() => {});
+  } catch (e) {
+    $("health").textContent = "nœud injoignable"; $("health").className = "pill bad";
+    $("banner").innerHTML = `<div class="card alert"><strong class="bad">${esc(e.message)}</strong>
+      <div class="sub">Vérifie le tunnel SSH vers un nœud, puis la liste des nœuds dans l'onglet Réseau.</div></div>`;
+    if (current === "reseau") refreshNetwork().catch(() => {});
+  }
+}
+function route() {
+  const v = location.hash.slice(1);
+  current = VIEWS[v] ? v : "reseau";
+  document.querySelectorAll(".view").forEach(el => el.classList.toggle("active", el.id === "view-" + current));
+  document.querySelectorAll("nav a").forEach(a => a.classList.toggle("active", a.dataset.view === current));
+  clearInterval(timer);
+  refresh();
+  // Pas de rafraîchissement automatique pendant la saisie d'un formulaire.
+  if (current === "reseau" || current === "propositions" || current === "journal") timer = setInterval(refresh, 5000);
+}
+window.addEventListener("hashchange", route);
+route();
+</script>
+</body>
+</html>

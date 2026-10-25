@@ -209,6 +209,55 @@ serveur, relance `start` avec les mêmes options et
 `--validator-names /root/noms.json`. Les noms apparaissent aussi dans les
 métriques Prometheus (`vinx_validator_up`) et l'alerte `VinxValidateurAbsent`.
 
+### Le cockpit : administrer à la souris
+
+`vinx-wallet cockpit` ouvre sur le poste une interface web locale pour tout
+piloter sans taper de commandes : état des nœuds et des validateurs, actions
+admin par formulaires (trésorerie, escrow, paramètres avec garde-fous,
+validateurs, signataires, mise à jour du protocole), signature et envoi des
+propositions, comptes et paiements, journal des actions.
+
+🖥️ **Sur le poste**, dans un dossier qui contient tes fichiers de clé (clés
+admin et comptes) :
+
+```bash
+vinx-wallet --node http://127.0.0.1:8545 cockpit --dir .
+# Windows : .\vinx-wallet.exe --node http://127.0.0.1:8545 cockpit --dir .
+```
+
+puis ouvre <http://127.0.0.1:8600>. Le tunnel SSH vers au moins un nœud doit
+être ouvert (section 6) ; ajoute les autres nœuds dans l'onglet **Réseau**, un
+tunnel par nœud (`-L 18541:…`, `-L 18542:…`).
+
+- Les fichiers de clé du dossier sont reconnus d'eux-mêmes : ceux des
+  signataires admin de la chaîne servent à signer les propositions, les autres
+  sont des comptes.
+- Le mot de passe est demandé à chaque signature et n'est jamais enregistré.
+  Les clés ne quittent pas le poste : la page vient du cockpit, pas des
+  serveurs.
+- Une action crée une proposition dans `propositions/`, au même format que
+  `admin propose`. Si les signataires sont sur des machines différentes :
+  **Exporter**, l'autre signe dans son cockpit (ou avec `admin approve`),
+  puis **Importer**.
+- Le cockpit n'écoute que sur 127.0.0.1 et exige un jeton tiré à chaque
+  démarrage : une autre page web ouverte dans le navigateur ne peut pas agir.
+
+**Sortir les clés admin du serveur.** Si tes clés admin sont encore sur un
+validateur (comme lors du premier test), copie-les sur le poste puis
+supprime-les du serveur :
+
+```bash
+# 🖥️ sur le poste, dans le dossier du cockpit
+scp root@IP_SERVEUR_1:/root/admin/admin-1.json root@IP_SERVEUR_1:/root/admin/admin-2.json root@IP_SERVEUR_1:/root/admin/admin-3.json .
+# vérifie dans le cockpit (Actions → Signataires admin) qu'elles sont reconnues, puis
+# 🗄️ sur le serveur
+shred -u /root/admin/admin-*.json
+```
+
+Range une copie de chaque clé admin sur un support distinct (clé USB, coffre),
+dont un hors ligne : sans deux d'entre elles, plus personne ne peut agir sur la
+trésorerie ni sur les validateurs.
+
 ## 7. Passer à quatre validateurs
 
 Un validateur ne tolère aucune panne. Quatre en tolèrent une :
