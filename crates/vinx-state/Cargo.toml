@@ -16,6 +16,7 @@ vinx-core.workspace = true
 blake3.workspace = true
 borsh.workspace = true
 imbl.workspace = true
+rayon.workspace = true
 thiserror.workspace = true
 
 [dev-dependencies]

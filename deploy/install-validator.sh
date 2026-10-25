@@ -8,7 +8,7 @@
 #       publique et l'identifiant réseau à reporter dans la genèse et chez les
 #       autres nœuds. Sans effet sur ce qui existe déjà.
 #
-#   sudo ./install-validator.sh start genesis.json [--archive] [--peer ADRESSE]...
+#   sudo ./install-validator.sh start genesis.json [--archive] [--mempool-size N] [--peer ADRESSE]...
 #       Installe la genèse, les options et le service, démarre le nœud et
 #       vérifie qu'il répond. Relancer la commande remplace les options.
 #
@@ -84,6 +84,9 @@ start() {
     while [ $# -gt 0 ]; do
         case "$1" in
             --archive) options+=(--archive); shift ;;
+            --mempool-size)
+                [[ "${2:-}" =~ ^[0-9]+$ ]] || die "--mempool-size attend un nombre de transactions"
+                options+=(--mempool-size "$2"); shift 2 ;;
             --peer)
                 [ $# -ge 2 ] || die "--peer attend une adresse"
                 # Vérifiée avant de toucher au nœud : une adresse invalide
