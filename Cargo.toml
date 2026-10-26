@@ -11,7 +11,7 @@ members = [
 resolver = "3"
 
 [workspace.package]
-version = "0.8.0"
+version = "0.8.1"
 edition = "2024"
 rust-version = "1.85"
 license = "Apache-2.0"
@@ -24,7 +24,7 @@ vinx-state = { path = "crates/vinx-state" }
 vinx-consensus = { path = "crates/vinx-consensus" }
 vinx-keystore = { path = "crates/vinx-keystore" }
 vinx-node = { path = "crates/vinx-node" }
-ureq = { version = "2", default-features = false, features = ["json"] }
+ureq = { version = "2", default-features = false, features = ["json", "tls"] }
 bech32 = "0.9"
 blake3 = "1"
 borsh = { version = "1", features = ["derive", "rc"] }

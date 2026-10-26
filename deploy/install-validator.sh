@@ -2,14 +2,17 @@
 # Installe un validateur VinX Ledger sur un serveur Debian ou Ubuntu.
 # Voir docs/DEPLOYER-UN-VALIDATEUR.md.
 #
-#   sudo ./install-validator.sh prepare
+#   sudo ./install-validator.sh prepare [--observer]
 #       Crée l'utilisateur vinx, la clé du validateur (mot de passe aléatoire,
 #       stocké dans /etc/vinx/key-password) et la clé réseau. Affiche la clé
 #       publique et l'identifiant réseau à reporter dans la genèse et chez les
 #       autres nœuds. Sans effet sur ce qui existe déjà.
+#       --observer : nœud sans clé, qui suit la chaîne et sert l'API (nœud
+#       public, voir docs/NOEUD-PUBLIC.md). Il ne vote jamais.
 #
 #   sudo ./install-validator.sh start genesis.json [--archive] [--mempool-size N]
-#       [--validator-names noms.json] [--peer ADRESSE]...
+#       [--validator-names noms.json] [--peer ADRESSE]... [--allow IDENTIFIANT]...
+#       --allow : accepte un nœud qui se connecte à celui-ci (nœud public).
 #       Installe la genèse, les options et le service, démarre le nœud et
 #       vérifie qu'il répond. Relancer la commande remplace les options.
 #
@@ -42,11 +45,36 @@ install_binary() {
 }
 
 prepare() {
+    local observer=""
+    case "${1:-}" in
+        "") ;;
+        --observer) observer=1 ;;
+        *) die "usage : prepare [--observer]" ;;
+    esac
     install_binary
     id vinx >/dev/null 2>&1 ||
         useradd --system --home "$DATA" --shell /usr/sbin/nologin vinx
     install -d -m 755 "$ETC"
     install -d -o vinx -g vinx -m 700 "$DATA"
+
+    local peer_id ip
+    peer_id="$(runuser -u vinx -- "$BIN" peer-id --data-dir "$DATA")"
+    ip="$(hostname -I | awk '{print $1}')"
+    if [ -n "$observer" ]; then
+        [ -f "$ETC/validator.json" ] &&
+            die "ce serveur a déjà une clé de validateur : un observateur s'installe sur un serveur à part"
+        touch "$ETC/observer"
+        cat <<EOF
+
+Observateur prêt (aucune clé : il ne vote pas).
+  identifiant réseau  $peer_id
+
+Sur chaque validateur, relance « start » en ajoutant : --allow $peer_id
+EOF
+        return 0
+    fi
+    [ -f "$ETC/observer" ] &&
+        die "ce serveur est préparé en observateur (supprime $ETC/observer pour en faire un validateur)"
 
     if [ ! -f "$ETC/key-password" ]; then
         (umask 077; head -c 32 /dev/urandom | base64 >"$ETC/key-password")
@@ -57,10 +85,6 @@ prepare() {
         chown vinx:vinx "$ETC/validator.json"
         chmod 600 "$ETC/validator.json"
     fi
-    local peer_id
-    peer_id="$(runuser -u vinx -- "$BIN" peer-id --data-dir "$DATA")"
-    local ip
-    ip="$(hostname -I | awk '{print $1}')"
 
     cat <<EOF
 
@@ -76,9 +100,14 @@ EOF
 
 start() {
     local genesis="${1:-}"
-    [ -n "$genesis" ] && [ -f "$genesis" ] || die "usage : start genesis.json [--archive] [--peer ADRESSE]..."
+    [ -n "$genesis" ] && [ -f "$genesis" ] || die "usage : start genesis.json [--archive] [--peer ADRESSE]... [--allow ID]..."
     shift
-    [ -f "$ETC/validator.json" ] || die "lance d'abord : $0 prepare"
+    local unit=vinx-node.service
+    if [ -f "$ETC/observer" ]; then
+        unit=vinx-node-observer.service
+    else
+        [ -f "$ETC/validator.json" ] || die "lance d'abord : $0 prepare (ou prepare --observer)"
+    fi
     install_binary
 
     local options=()
@@ -99,6 +128,10 @@ start() {
                 [[ "$2" =~ ^/(ip4|ip6|dns|dns4|dns6)/[^/]+/tcp/[0-9]+/p2p/[1-9A-HJ-NP-Za-km-z]+$ ]] ||
                     die "adresse de pair invalide : « $2 » (attendu : /ip4/IP/tcp/26656/p2p/12D3KooW…, affichée par « prepare » sur l'autre nœud)"
                 options+=(--peer "$2"); shift 2 ;;
+            --allow)
+                [[ "${2:-}" =~ ^[1-9A-HJ-NP-Za-km-z]{40,60}$ ]] ||
+                    die "identifiant invalide : « ${2:-} » (attendu : 12D3KooW…, affiché par « prepare --observer » sur le nœud public)"
+                options+=(--allow "$2"); shift 2 ;;
             *) die "option inconnue : $1" ;;
         esac
     done
@@ -110,7 +143,7 @@ start() {
         install -m 644 "$genesis" "$ETC/genesis.json"
     fi
     echo "VINX_OPTIONS=\"${options[*]}\"" >"$ETC/vinx-node.env"
-    install -m 644 "$HERE/systemd/vinx-node.service" /etc/systemd/system/vinx-node.service
+    install -m 644 "$HERE/systemd/$unit" /etc/systemd/system/vinx-node.service
     systemctl daemon-reload
     systemctl enable vinx-node >/dev/null 2>&1
     systemctl restart vinx-node
@@ -201,9 +234,9 @@ rollback() {
 }
 
 case "${1:-}" in
-    prepare) prepare ;;
+    prepare) shift; prepare "$@" ;;
     start) shift; start "$@" ;;
     upgrade) shift; upgrade "$@" ;;
     rollback) rollback ;;
-    *) die "usage : $0 prepare | start genesis.json [--archive] [--peer ADRESSE]... | upgrade [binaire] | rollback" ;;
+    *) die "usage : $0 prepare [--observer] | start genesis.json [--archive] [--peer ADRESSE]... [--allow ID]... | upgrade [binaire] | rollback" ;;
 esac

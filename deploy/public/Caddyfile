@@ -1,0 +1,14 @@
+# Caddy devant un nœud public VinX Ledger : HTTPS automatique (Let's Encrypt).
+# Remplace NOEUD.EXEMPLE.FR par ton nom de domaine, puis :
+#   sudo cp Caddyfile /etc/caddy/Caddyfile && sudo systemctl reload caddy
+# Voir docs/NOEUD-PUBLIC.md.
+
+NOEUD.EXEMPLE.FR {
+	encode gzip
+
+	# Les métriques Prometheus restent internes.
+	@metrics path /metrics
+	respond @metrics 404
+
+	reverse_proxy 127.0.0.1:8545
+}

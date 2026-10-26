@@ -54,8 +54,8 @@ jobs:
           name="vinx-$VERSION-linux-x86_64"
           mkdir "$name"
           cp target/release/vinx-node target/release/vinx-wallet "$name/"
-          cp -r deploy/install-validator.sh deploy/systemd deploy/monitoring "$name/"
-          cp docs/DEPLOYER-UN-VALIDATEUR.md docs/EXPLOITATION.md docs/PORTEFEUILLE.md LICENSE "$name/"
+          cp -r deploy/install-validator.sh deploy/systemd deploy/monitoring deploy/public "$name/"
+          cp docs/DEPLOYER-UN-VALIDATEUR.md docs/EXPLOITATION.md docs/PORTEFEUILLE.md docs/NOEUD-PUBLIC.md LICENSE "$name/"
           tar czf "$name.tar.gz" "$name"
       - uses: actions/upload-artifact@v4
         with:
