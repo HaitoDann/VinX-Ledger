@@ -36,7 +36,8 @@ Windows. Sous macOS, c'est `~/Library/Application Support/VinX/`, et sous Linux
 3. **Choisis un mot de passe**, de 8 caractères au moins. Il protège le
    portefeuille sur cet ordinateur.
 4. Indique l'**adresse du nœud** donnée par l'opérateur du réseau, par exemple
-   `http://127.0.0.1:8545` à travers un tunnel SSH.
+   `https://noeud.exemple.fr` pour un nœud public, ou `http://127.0.0.1:8545`
+   à travers un tunnel SSH.
 
 À retenir :
 

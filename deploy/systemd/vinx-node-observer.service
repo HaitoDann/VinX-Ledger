@@ -1,0 +1,56 @@
+# Service systemd d'un nœud observateur VinX Ledger (nœud public) : sans clé,
+# il suit la chaîne et sert l'API. Voir docs/NOEUD-PUBLIC.md.
+#
+# Fichiers attendus :
+#   /usr/local/bin/vinx-node    binaire
+#   /etc/vinx/genesis.json      genèse du réseau
+#   /etc/vinx/vinx-node.env     options propres à ce nœud (pairs, archive…)
+
+[Unit]
+Description=Nœud observateur VinX Ledger
+Documentation=https://github.com/HaitoDann/VinX-Ledger/blob/main/docs/EXPLOITATION.md
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+User=vinx
+Group=vinx
+EnvironmentFile=/etc/vinx/vinx-node.env
+ExecStart=/usr/local/bin/vinx-node run \
+    --genesis /etc/vinx/genesis.json \
+    --data-dir /var/lib/vinx \
+    --api 127.0.0.1:8545 \
+    --listen /ip4/0.0.0.0/tcp/26656 \
+    $VINX_OPTIONS
+Restart=on-failure
+RestartSec=5
+# Laisse le temps d'écrire le dernier bloc avant l'arrêt.
+TimeoutStopSec=30
+StateDirectory=vinx
+StateDirectoryMode=0700
+LimitNOFILE=65536
+
+# Durcissement : le nœud ne peut écrire que dans /var/lib/vinx.
+NoNewPrivileges=yes
+ProtectSystem=strict
+ProtectHome=yes
+PrivateTmp=yes
+PrivateDevices=yes
+ProtectKernelTunables=yes
+ProtectKernelModules=yes
+ProtectKernelLogs=yes
+ProtectControlGroups=yes
+ProtectClock=yes
+ProtectHostname=yes
+RestrictAddressFamilies=AF_INET AF_INET6 AF_UNIX AF_NETLINK
+RestrictNamespaces=yes
+RestrictRealtime=yes
+RestrictSUIDSGID=yes
+LockPersonality=yes
+MemoryDenyWriteExecute=yes
+SystemCallArchitectures=native
+CapabilityBoundingSet=
+UMask=0077
+
+[Install]
+WantedBy=multi-user.target
