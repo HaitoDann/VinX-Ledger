@@ -418,6 +418,7 @@ fn treasury_payment_json(t: &SignedAdminTransaction) -> Value {
         "to": to.to_string(),
         "amount": amount_to_string(*amount),
         "memo": memo.as_ref().map(|m| String::from_utf8_lossy(m).into_owned()),
+            "memo_hex": memo.as_ref().map(hex::encode),
         "treasury": true,
     })
 }
@@ -633,6 +634,7 @@ fn tx_json(stx: &SignedTransaction) -> Value {
             "to": to.to_string(),
             "amount": amount_to_string(*amount),
             "memo": memo.as_ref().map(|m| String::from_utf8_lossy(m).into_owned()),
+            "memo_hex": memo.as_ref().map(hex::encode),
         }),
         TxBody::SetMemoRequired { required } => json!({
             "kind": "mémo obligatoire",
@@ -665,6 +667,7 @@ fn tx_json(stx: &SignedTransaction) -> Value {
             "amount": amount_to_string(*amount),
             "deadline": deadline,
             "memo": memo.as_ref().map(|m| String::from_utf8_lossy(m).into_owned()),
+            "memo_hex": memo.as_ref().map(hex::encode),
         }),
         TxBody::ReleaseDeal { id } => json!({
             "kind": "séquestre versé",
@@ -698,6 +701,7 @@ fn admin_json(satx: &SignedAdminTransaction) -> Value {
                 "to": to.to_string(),
                 "amount": amount_to_string(*amount),
                 "memo": memo.as_ref().map(|m| String::from_utf8_lossy(m).into_owned()),
+            "memo_hex": memo.as_ref().map(hex::encode),
             }),
         ),
         AdminAction::AddValidator { key } => {

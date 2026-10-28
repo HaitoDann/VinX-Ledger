@@ -59,7 +59,15 @@ copier.
 Un compte qui n'a encore jamais rien reçu doit d'abord recevoir au moins
 0,1 VINX : c'est la réserve minimale du réseau.
 
+**Demander un paiement.** Indique un montant, une référence et un motif : le
+portefeuille crée un lien `vinx:…` et son QR code. Envoie le lien, ou montre
+le QR. La personne qui paie colle le lien dans l'onglet Envoyer, et tout se
+remplit.
+
 ## 4. Envoyer
+
+Si tu as reçu une demande de paiement (lien `vinx:…`), colle-la dans le premier
+champ : le destinataire, le montant et la référence se remplissent.
 
 Dans l'onglet **Envoyer**, le destinataire peut être :
 
@@ -116,7 +124,31 @@ Le séquestre protège un achat entre deux personnes qui ne se connaissent pas.
 Chacun voit ses séquestres en cours dans l'onglet **Séquestres**, avec son rôle
 (acheteur, vendeur, arbitre).
 
-## 7. Plusieurs comptes
+## 7. Horodater un document
+
+L'onglet **Horodatage** prouve qu'un fichier existait à une date donnée et n'a
+pas été modifié depuis : contrat, devis, création, photo…
+
+1. Choisis le fichier. Le portefeuille calcule son empreinte (SHA-256) ; le
+   fichier ne quitte pas ton ordinateur.
+2. Valide : l'empreinte est inscrite sur la chaîne, pour le prix des frais.
+3. Une fois l'opération confirmée, télécharge le **certificat**. Garde-le avec
+   le fichier : il contient l'identifiant de la transaction.
+
+Pour vérifier, n'importe qui choisit le fichier et colle l'identifiant de
+transaction dans « Vérifier un horodatage ». La moindre modification du
+fichier change l'empreinte, et la vérification échoue.
+
+Un nœud ordinaire ne garde les blocs que 24 h : pour vérifier un horodatage
+ancien, il faut un nœud archive (`--archive`).
+
+## 8. Exporter l'historique
+
+Le bouton **Exporter en CSV** de l'onglet Historique crée un fichier lisible
+par Excel ou LibreOffice : date, type, contrepartie, montant, frais, mémo,
+bloc et transaction.
+
+## 9. Plusieurs comptes
 
 **Réglages → Nouveau compte** crée un autre compte, par exemple « Épargne ».
 
@@ -124,7 +156,7 @@ Tous les comptes viennent de la même phrase de 12 mots : une restauration les
 retrouve tous. Pour cela, recrée les comptes dans le même ordre ; ils
 reprennent les mêmes adresses.
 
-## 8. Si quelque chose ne va pas
+## 10. Si quelque chose ne va pas
 
 | Message | Que faire |
 |---|---|

@@ -13,6 +13,7 @@ Un protocole de paiement volontairement simple et minimaliste : validateurs auto
 - Déployer un validateur, puis passer de un à quatre : [`docs/DEPLOYER-UN-VALIDATEUR.md`](./docs/DEPLOYER-UN-VALIDATEUR.md)
 - Payer et recevoir des VINX avec le portefeuille : [`docs/PORTEFEUILLE.md`](./docs/PORTEFEUILLE.md)
 - Ouvrir un nœud public en HTTPS : [`docs/NOEUD-PUBLIC.md`](./docs/NOEUD-PUBLIC.md)
+- Positionnement et feuille de route : [`docs/FEUILLE-DE-ROUTE.md`](./docs/FEUILLE-DE-ROUTE.md)
 - Décisions d'architecture : [`docs/adr/`](./docs/adr/)
 - Ancien projet (archivé) : `VinX-Ledger-Legacy`
 - Licence : [Apache-2.0](./LICENSE)

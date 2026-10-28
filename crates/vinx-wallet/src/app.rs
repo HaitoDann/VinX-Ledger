@@ -43,6 +43,10 @@ const VAULT: &str = "portefeuille.json";
 const DERIVATION: &str = "VinX Ledger portefeuille v1 compte ed25519";
 /// Verrouillage automatique après cette durée sans activité.
 const LOCK_AFTER: Duration = Duration::from_secs(15 * 60);
+/// Horodatage : la plus petite somme possible (une unité) versée à la
+/// trésorerie, l'empreinte du fichier en mémo. Le protocole n'a pas encore de
+/// transaction dédiée (prévue en v3).
+const TIMESTAMP_UNITS: Amount = 1;
 /// Échéance maximale d'un séquestre, en jours (la chaîne refuse au-delà d'un an).
 const MAX_DEAL_DAYS: u64 = 365;
 
@@ -334,6 +338,9 @@ struct Operation {
     days: u64,
     #[serde(default)]
     deal: String,
+    /// Horodatage : empreinte SHA-256 du fichier, en hexadécimal.
+    #[serde(default)]
+    hash: String,
 }
 
 /// Opération prête à signer, avec ce qu'il faut montrer avant.
@@ -540,6 +547,32 @@ fn plan(app: &App, op: &Operation) -> Result<Plan> {
                 TxBody::ReleaseDeal { id }
             } else {
                 TxBody::RefundDeal { id }
+            }
+        }
+        "timestamp" => {
+            let digest: [u8; 32] = hex::decode(op.hash.trim())
+                .ok()
+                .and_then(|b| b.try_into().ok())
+                .ok_or_else(|| {
+                    anyhow!("empreinte invalide : 64 caractères hexadécimaux attendus")
+                })?;
+            if u64::try_from(digest.len()).map_or(true, |l| l > max_memo) {
+                bail!("le réseau limite le mémo à {max_memo} octets : horodatage impossible");
+            }
+            if !op.name.trim().is_empty() {
+                lines.push(("Fichier".into(), op.name.trim().to_owned()));
+            }
+            lines.push(("Empreinte SHA-256".into(), hex::encode(digest)));
+            warnings.push(
+                "Seule l'empreinte part sur la chaîne : le fichier reste sur ton ordinateur. \
+                 Garde-le intact, la moindre modification change l'empreinte."
+                    .into(),
+            );
+            spent = TIMESTAMP_UNITS;
+            TxBody::Transfer {
+                to: Address::treasury(),
+                amount: TIMESTAMP_UNITS,
+                memo: Some(digest.to_vec()),
             }
         }
         other => bail!("opération inconnue : {other}"),
@@ -894,6 +927,53 @@ async fn run(State(app): State<Shared>, Json(op): Json<Operation>) -> ApiResult 
 }
 
 #[derive(Deserialize)]
+struct QrBody {
+    text: String,
+}
+
+/// QR code d'un texte (demande de paiement), en SVG.
+async fn qr(Json(b): Json<QrBody>) -> ApiResult {
+    if b.text.len() > 1024 {
+        return Err(fail("texte trop long pour un QR code"));
+    }
+    let code = qrcode::QrCode::new(b.text.as_bytes()).map_err(fail)?;
+    let svg = code
+        .render::<qrcode::render::svg::Color>()
+        .min_dimensions(240, 240)
+        .quiet_zone(true)
+        .build();
+    Ok(Json(json!({ "svg": svg })))
+}
+
+#[derive(Deserialize)]
+struct Verify {
+    id: String,
+    hash: String,
+}
+
+/// Vérifie qu'une transaction horodate bien l'empreinte donnée.
+fn verify_timestamp(client: &Client, id: &str, hash: &str) -> Result<Value> {
+    let id = id.trim().to_lowercase();
+    let t = client
+        .get_json(&format!("/transactions/{id}"))?
+        .ok_or_else(|| anyhow!("transaction introuvable sur ce nœud (identifiant faux, ou bloc trop ancien pour un nœud non archive)"))?;
+    let on_chain = at(&t, "/memo_hex").as_str().unwrap_or_default();
+    let matches = !on_chain.is_empty() && on_chain == hash.trim().to_lowercase();
+    Ok(json!({
+        "matches": matches,
+        "status": at(&t, "/status"),
+        "height": at(&t, "/height"),
+        "timestamp": at(&t, "/timestamp"),
+        "sender": at(&t, "/sender"),
+        "memo_hex": on_chain,
+    }))
+}
+
+async fn verify(State(app): State<Shared>, Json(b): Json<Verify>) -> ApiResult {
+    blocking(move || verify_timestamp(&app.client()?, &b.id, &b.hash)).await
+}
+
+#[derive(Deserialize)]
 struct Lookup {
     to: String,
 }
@@ -933,6 +1013,8 @@ fn router_with_kdf(dir: PathBuf, token: String, port: u16, kdf: Kdf) -> Router {
         .route("/api/node", post(put_node))
         .route("/api/overview", get(get_overview))
         .route("/api/lookup", post(lookup))
+        .route("/api/qr", post(qr))
+        .route("/api/verify", post(verify))
         .route("/api/preview", post(preview))
         .route("/api/execute", post(run))
         .layer(axum::middleware::from_fn_with_state(shared.clone(), guard))
@@ -1144,6 +1226,20 @@ mod tests {
         let twice = json!({ "contacts": [{ "name": "Bob", "address": addr }, { "name": "bob", "address": addr }] });
         assert_eq!(
             call(&app, "/api/contacts", Some(twice)).await.0,
+            StatusCode::UNPROCESSABLE_ENTITY
+        );
+    }
+
+    #[tokio::test]
+    async fn payment_request_qr() {
+        let dir = tempfile::tempdir().unwrap();
+        let link = json!({ "text": "vinx:alice.vinx?amount=12.5&memo=FAC-42" });
+        let (code, r) = call(&app(dir.path()), "/api/qr", Some(link)).await;
+        assert_eq!(code, StatusCode::OK);
+        assert!(r["svg"].as_str().unwrap().contains("<svg"));
+        let long = json!({ "text": "x".repeat(2000) });
+        assert_eq!(
+            call(&app(dir.path()), "/api/qr", Some(long)).await.0,
             StatusCode::UNPROCESSABLE_ENTITY
         );
     }
