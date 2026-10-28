@@ -28,6 +28,8 @@ rand_core.workspace = true
 # Portefeuille : phrase de récupération.
 bip39 = { version = "2", default-features = false, features = ["std"] }
 blake3.workspace = true
+# Demandes de paiement : QR code en SVG.
+qrcode = { version = "0.14", default-features = false, features = ["svg"] }
 
 [dev-dependencies]
 vinx-node.workspace = true

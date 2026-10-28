@@ -21,6 +21,9 @@ textarea { width: 100%; min-height: 90px; padding: 8px 10px; border-radius: 3px;
            background: var(--bg); color: var(--text); font: 14px ui-monospace, Menlo, monospace; }
 .address { font: 15px ui-monospace, "Cascadia Mono", Menlo, monospace; word-break: break-all; padding: 12px;
            background: var(--bg); border: 1px dashed var(--accent); border-radius: 3px; margin: 8px 0; }
+.qr { display: flex; gap: 16px; align-items: flex-start; flex-wrap: wrap; margin-top: 12px; }
+.qr svg { width: 220px; height: 220px; background: #fff; padding: 6px; border-radius: 3px; flex: none; }
+.qr .link { flex: 1 1 220px; min-width: 0; }
 .found { font-size: 12px; margin-top: 6px; min-height: 18px; word-break: break-all; }
 .in { color: var(--ok); } .out { color: var(--text); }
 .check { display: flex; gap: 8px; align-items: flex-start; text-transform: none; letter-spacing: 0; font-size: 13px; color: var(--text); }
@@ -104,6 +107,7 @@ header select { width: auto; min-width: 180px; }
   <a href="#history" data-view="history">Historique</a>
   <a href="#names" data-view="names">Noms .vinx</a>
   <a href="#deals" data-view="deals">Séquestres</a>
+  <a href="#stamp" data-view="stamp">Horodatage</a>
   <a href="#contacts" data-view="contacts">Contacts</a>
   <a href="#settings" data-view="settings">Réglages</a>
 </nav>
@@ -122,6 +126,9 @@ header select { width: auto; min-width: 180px; }
 <main id="send" class="view">
   <div class="card narrow">
     <h2>Envoyer des VINX</h2>
+    <label for="sendLink">Demande de paiement reçue (facultatif)</label>
+    <input id="sendLink" class="mono" placeholder="colle ici un lien vinx:…" autocomplete="off">
+    <div class="found" id="linkFound"></div>
     <label for="sendTo">Destinataire</label>
     <input id="sendTo" class="mono" placeholder="vinx1…, nom d'un contact ou alice.vinx" list="contactList" autocomplete="off">
     <div class="found" id="sendFound"></div>
@@ -140,10 +147,28 @@ header select { width: auto; min-width: 180px; }
     <p class="sub" id="receiveNames"></p>
     <p class="note muted" id="reserveNote"></p>
   </div>
+  <div class="card narrow">
+    <h2>Demander un paiement</h2>
+    <p class="sub">Crée un lien et un QR code avec le montant et la référence : la personne qui paie n'a rien à recopier.</p>
+    <div class="row">
+      <div><label for="reqAmount">Montant (VINX, facultatif)</label><input id="reqAmount" inputmode="decimal" placeholder="12.5"></div>
+      <div><label for="reqMemo">Référence (mémo)</label><input id="reqMemo" placeholder="facture 42"></div>
+    </div>
+    <label for="reqLabel">Motif affiché au payeur (facultatif)</label><input id="reqLabel" placeholder="Pizza de vendredi">
+    <div class="actions"><button class="primary" id="reqBtn">Créer la demande</button></div>
+    <div class="qr" id="reqOut" hidden>
+      <div id="reqQr"></div>
+      <div class="link"><label>Lien à envoyer</label><div class="address" id="reqLink"></div>
+        <div class="actions"><button id="copyReq">Copier le lien</button></div>
+        <p class="note muted">Le payeur le colle dans l'onglet Envoyer de son portefeuille. Sur téléphone, il scannera le QR (prochaine version).</p></div>
+    </div>
+  </div>
 </main>
 
 <main id="history" class="view">
-  <div class="card"><h2>Historique</h2><div class="scroll" id="historyTable"></div>
+  <div class="card"><h2>Historique</h2>
+  <div class="actions" style="margin:0 0 10px"><button id="csvBtn">Exporter en CSV</button></div>
+  <div class="scroll" id="historyTable"></div>
   <p class="note muted">Le nœud ne garde que les blocs récents : les opérations plus anciennes n'apparaissent plus ici, mais restent comptées dans le solde.</p></div>
 </main>
 
@@ -178,6 +203,28 @@ header select { width: auto; min-width: 180px; }
     </div>
     <label for="dealMemo">Mémo (facultatif)</label><input id="dealMemo" placeholder="commande n°…">
     <div class="actions"><button class="primary" id="dealBtn">Vérifier avant de bloquer les fonds</button></div>
+  </div>
+</main>
+
+<main id="stamp" class="view">
+  <div class="card narrow">
+    <h2>Horodater un document</h2>
+    <p class="sub">Prouve qu'un fichier existait à une date donnée et n'a pas été modifié depuis : contrat, devis, création, photo… Seule son empreinte (SHA-256) est inscrite sur la chaîne ; le fichier ne quitte pas ton ordinateur.</p>
+    <label for="stampFile">Fichier</label><input id="stampFile" type="file">
+    <div class="found mono" id="stampHash"></div>
+    <div class="actions"><button class="primary" id="stampBtn" disabled>Vérifier avant d'horodater</button></div>
+  </div>
+  <div class="card">
+    <h2>Mes horodatages</h2>
+    <div class="scroll" id="stampTable"></div>
+    <p class="note muted">Garde le certificat avec le fichier : il contient l'identifiant de la transaction, nécessaire pour la vérification.</p>
+  </div>
+  <div class="card narrow">
+    <h2>Vérifier un horodatage</h2>
+    <label for="verifyFile">Fichier</label><input id="verifyFile" type="file">
+    <label for="verifyId">Identifiant de la transaction (dans le certificat)</label><input id="verifyId" class="mono" autocomplete="off">
+    <div class="actions"><button id="verifyBtn">Vérifier</button></div>
+    <div class="found" id="verifyOut"></div>
   </div>
 </main>
 
@@ -428,13 +475,125 @@ async function refresh() {
   const rows = (list) => list.length ? `<table><thead><tr><th>Date</th><th>Opération</th><th>Avec</th><th style="text-align:right">Montant</th><th>Statut</th></tr></thead><tbody>${list.map(txRow).join("")}</tbody></table>` : `<p class="muted">Aucune opération pour l'instant.</p>`;
   $("recent").innerHTML = rows(data.history.slice(0, 6));
   $("historyTable").innerHTML = rows(data.history);
-  renderNames(); renderDeals();
+  renderNames(); renderDeals(); renderStamps();
 }
+const isStamp = (t) => t.kind === "paiement" && t.amount === "1" && (t.memo_hex || "").length === 64 && t.sender === data?.address;
+function renderStamps() {
+  const list = data.history.filter(isStamp);
+  $("stampTable").innerHTML = list.length ? `<table><thead><tr><th>Date</th><th>Empreinte</th><th>Bloc</th><th></th></tr></thead><tbody>${list.map((t, i) =>
+    `<tr><td>${t.status === "en attente" ? "en attente" : date(t.timestamp)}</td><td class="mono">${esc(t.memo_hex)}</td><td>${esc(t.height ?? "—")}</td>
+     <td>${t.height ? `<button data-cert="${i}">Certificat</button>` : ""}</td></tr>`).join("")}</tbody></table>`
+    : `<p class="muted">Aucun horodatage pour ce compte.</p>`;
+  document.querySelectorAll("[data-cert]").forEach((b) => b.onclick = () => {
+    const t = list[+b.dataset.cert];
+    download(`certificat-${t.memo_hex.slice(0, 12)}.txt`, [
+      "CERTIFICAT D'HORODATAGE VINX LEDGER", "",
+      `Empreinte SHA-256 du fichier : ${t.memo_hex}`,
+      `Inscrite le                  : ${new Date(t.timestamp).toISOString()} (${date(t.timestamp)})`,
+      `Bloc                         : ${t.height}`,
+      `Réseau                       : ${data.network.chain_id}`,
+      `Transaction                  : ${t.id}`,
+      `Compte                       : ${t.sender}`, "",
+      "Vérification : portefeuille VinX, onglet Horodatage, « Vérifier un horodatage »,",
+      "avec le fichier d'origine et l'identifiant de transaction ci-dessus.",
+      "Ou : SHA-256 du fichier = champ memo_hex de GET /transactions/<transaction> sur un nœud.",
+    ].join("\n"), "text/plain");
+  });
+}
+function download(name, text, type) {
+  const a = document.createElement("a");
+  a.href = URL.createObjectURL(new Blob([text], { type: type + ";charset=utf-8" }));
+  a.download = name; a.click(); setTimeout(() => URL.revokeObjectURL(a.href), 1000);
+}
+async function sha256(file) {
+  const buf = await crypto.subtle.digest("SHA-256", await file.arrayBuffer());
+  return [...new Uint8Array(buf)].map((b) => b.toString(16).padStart(2, "0")).join("");
+}
+
+/* ----- Horodatage ----- */
+let stampDigest = null;
+$("stampFile").onchange = async () => {
+  const f = $("stampFile").files[0]; stampDigest = null; $("stampBtn").disabled = true;
+  if (!f) { $("stampHash").textContent = ""; return; }
+  $("stampHash").textContent = "calcul de l'empreinte…";
+  stampDigest = await sha256(f);
+  $("stampHash").textContent = "SHA-256 : " + stampDigest;
+  $("stampBtn").disabled = false;
+};
+$("stampBtn").onclick = () => operate({ action: "timestamp", hash: stampDigest, name: $("stampFile").files[0]?.name || "" }, "Horodater ce fichier",
+  () => { $("stampFile").value = ""; $("stampHash").textContent = ""; $("stampBtn").disabled = true; });
+$("verifyBtn").onclick = async () => {
+  const f = $("verifyFile").files[0]; const id = $("verifyId").value.trim();
+  if (!f || !id) return toast("Choisis le fichier et colle l'identifiant de transaction.", true);
+  $("verifyOut").textContent = "vérification…";
+  try {
+    const r = await api("/api/verify", { id, hash: await sha256(f) });
+    $("verifyOut").innerHTML = r.matches
+      ? `<span class="ok">✓ Authentique : ce fichier est identique à celui horodaté le ${esc(date(r.timestamp))}, bloc ${esc(r.height)}, par <span class="mono">${esc(r.sender)}</span>.</span>`
+      : `<span class="bad">✗ Ne correspond pas : le fichier a été modifié, ou ce n'est pas la bonne transaction.</span>`;
+  } catch (e) { $("verifyOut").innerHTML = `<span class="warn">${esc(e.message)}</span>`; }
+};
+
+/* ----- Demandes de paiement ----- */
+$("reqBtn").onclick = async () => {
+  if (!data) return;
+  const q = new URLSearchParams();
+  const amount = $("reqAmount").value.trim().replace(",", ".");
+  if (amount && !/^\d+(\.\d{1,9})?$/.test(amount)) return toast("Montant invalide (exemple : 12.5).", true);
+  if (amount) q.set("amount", amount);
+  if ($("reqMemo").value.trim()) q.set("memo", $("reqMemo").value.trim());
+  if ($("reqLabel").value.trim()) q.set("label", $("reqLabel").value.trim());
+  const link = "vinx:" + data.address + (q.toString() ? "?" + q.toString() : "");
+  try {
+    $("reqQr").innerHTML = (await api("/api/qr", { text: link })).svg;
+    $("reqLink").textContent = link; $("reqOut").hidden = false;
+  } catch (e) { toast(e.message, true); }
+};
+$("copyReq").onclick = async () => {
+  try { await navigator.clipboard.writeText($("reqLink").textContent); toast("Lien copié."); }
+  catch (_) { toast("Copie impossible : sélectionne le lien à la main.", true); }
+};
+function parseRequest(text) {
+  const m = /^vinx:([^?\s]+)(?:\?(\S*))?$/i.exec(text.trim());
+  if (!m) return null;
+  const q = new URLSearchParams(m[2] || "");
+  return { to: decodeURIComponent(m[1]), amount: q.get("amount") || "", memo: q.get("memo") || "", label: q.get("label") || "" };
+}
+$("sendLink").addEventListener("input", () => {
+  const v = $("sendLink").value.trim();
+  if (!v) { $("linkFound").textContent = ""; return; }
+  const r = parseRequest(v);
+  if (!r) { $("linkFound").innerHTML = `<span class="warn">Ce n'est pas un lien vinx: valide.</span>`; return; }
+  $("sendTo").value = r.to; $("sendAmount").value = r.amount; $("sendMemo").value = r.memo;
+  $("linkFound").innerHTML = `<span class="ok">✓ Demande lue${r.label ? ` : « ${esc(r.label)} »` : ""}.</span> Vérifie les champs ci-dessous.`;
+  lookupLater("sendTo", "sendFound");
+});
+
+/* ----- Export CSV ----- */
+$("csvBtn").onclick = () => {
+  if (!data) return;
+  const cell = (v) => `"${String(v ?? "").replace(/"/g, '""')}"`;
+  const dec = (u) => vinx(u).replace(/\u202f/g, "");
+  const rows = [["date", "statut", "type", "sens", "contrepartie", "montant_vinx", "frais_vinx", "memo", "bloc", "transaction"]];
+  for (const t of data.history) {
+    const out = t.sender === data.address;
+    rows.push([t.timestamp ? new Date(t.timestamp).toISOString() : "", t.status, isStamp(t) ? "horodatage" : t.kind,
+      out ? "sortie" : "entrée", out ? (t.to || "") : t.sender, t.amount ? dec(t.amount) : "",
+      out && t.fee ? dec(t.fee) : "", isStamp(t) ? t.memo_hex : (t.memo || ""), t.height ?? "", t.id]);
+  }
+  download(`vinx-${data.label.replace(/\W+/g, "-")}-${new Date().toISOString().slice(0, 10)}.csv`,
+    "\ufeff" + rows.map((r) => r.map(cell).join(";")).join("\r\n"), "text/csv");
+};
 function txRow(t) {
   const out = t.sender === data.address;
   const kinds = { "paiement": out ? "Envoi" : "Réception", "nom": "Nom " + (t.name || ""), "cession de nom": "Cession " + (t.name || ""),
     "séquestre": out ? "Séquestre ouvert" : "Séquestre en votre faveur", "séquestre versé": "Séquestre versé", "séquestre remboursé": "Séquestre remboursé",
     "mémo obligatoire": "Réglage du mémo", "rotation de clé": "Changement de clé" };
+  if (isStamp(t)) {
+    return `<tr><td>${t.status === "en attente" ? "à l'instant" : date(t.timestamp)}</td><td>Horodatage<div class="sub mono">${esc(t.memo_hex.slice(0, 16))}…</div></td>
+      <td></td><td style="text-align:right"><div class="sub">frais ${vinx(t.fee)}</div></td>
+      <td>${t.status === "en attente" ? `<span class="pill warn">en attente</span>` : `<span class="pill ok">confirmée</span>`}</td></tr>`;
+  }
   const other = out ? t.to : t.sender;
   const from = t.treasury && !out ? "Trésorerie VinX" : null;
   const amount = t.amount ? `<span class="${out ? "out" : "in"}">${out ? "−" : "+"} ${vinx(t.amount)}</span>` : "";
@@ -519,7 +678,7 @@ async function operate(op, title, done) {
 }
 $("sendBtn").onclick = () => operate(
   { action: "send", to: $("sendTo").value, amount: $("sendAmount").value.replace(",", "."), memo: $("sendMemo").value }, "Confirmer l'envoi",
-  () => { $("sendTo").value = $("sendAmount").value = $("sendMemo").value = ""; $("sendFound").textContent = ""; show("home"); });
+  () => { $("sendLink").value = $("sendTo").value = $("sendAmount").value = $("sendMemo").value = ""; $("sendFound").textContent = $("linkFound").textContent = ""; show("home"); });
 $("registerBtn").onclick = () => operate({ action: "register-name", name: $("newName").value }, "Réserver le nom",
   () => { $("newName").value = ""; $("nameFound").textContent = ""; });
 $("dealBtn").onclick = () => operate(
