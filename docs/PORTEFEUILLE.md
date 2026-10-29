@@ -236,6 +236,8 @@ points de fidélité, bons d'achat, monnaies.
   plafond éventuel et les pouvoirs que tu gardes. La création coûte 100 VINX.
 - **Jetons que j'émets** : émettre, geler ou dégeler un compte (ou tout le
   jeton), reprise forcée, abandon définitif d'un pouvoir.
+- **Séquestres et mandats en jetons** : dans les onglets Séquestres et
+  Mandats, choisis la monnaie (VINX ou un jeton accepté) à côté du montant.
 
 Si le compte émetteur a des règles (multisig), émettre, geler, reprendre ou
 abandonner un pouvoir passe par `vinx-wallet account propose`. Guide complet de

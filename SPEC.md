@@ -93,6 +93,8 @@ Assets {
     fee:      u64,                                // §11, asset_fee
     assets:   Map<String, Asset>,                 // par symbole
     holdings: Map<(String, Address), Holding>,    // par (symbole, compte)
+    deals:    Map<Hash, AssetDeal { symbol, deal: Deal }>,               // séquestres en actifs
+    mandates: Map<(String, Address, Address), AssetMandate { mandate }>, // (symbole, payeur, bénéficiaire)
 }
 Registry {
     now:      u64,                         // horodatage du bloc, en secondes
@@ -111,7 +113,7 @@ puis :
 | 2 et 3 | `borsh(registry)` (tables entières) |
 | 3 et plus | `borsh(emission)` |
 | 4 et plus | `borsh(registry.now, registry.name_fee, racine(names), racine(deals))`, puis `borsh(racine(policies), racine(mandates))` (§4.5) |
-| 5 et plus | `borsh(assets.fee, racine(assets), racine(holdings))` |
+| 5 et plus | `borsh(assets.fee, racine(assets), racine(holdings), racine(assets.deals), racine(assets.mandates))` |
 
 **Arbre des comptes (SMT).** Arbre binaire compact indexé par les 160 bits de
 l'adresse, du bit de poids fort au bit de poids faible :
@@ -198,6 +200,8 @@ pour engagement un arbre de même forme que celui des comptes (§4.1) :
 | `mandates` | `(payeur, bénéficiaire)` | 4 |
 | `assets` (protocole 5) | `String` (symbole) | 5 |
 | `holdings` (protocole 5) | `(symbole, compte)` | 6 |
+| `assets.deals` (protocole 5) | `Hash` | 7 |
+| `assets.mandates` (protocole 5) | `(symbole, payeur, bénéficiaire)` | 8 |
 
 Une modification ne recalcule que le chemin de sa ligne. L'encodage borsh d'une
 table, utilisé jusqu'au protocole 3, est celui d'une table triée : nombre de
@@ -273,6 +277,10 @@ SignedTransaction {
 | `0x16` | `ClawbackAsset` | `symbol`, `from`, `amount` | Reprise forcée vers l'émetteur |
 | `0x17` | `RenounceAssetPowers` | `symbol`, `powers` | Abandonne définitivement les pouvoirs marqués |
 | `0x18` | `AcceptAsset` | `symbol`, `accept: bool` | Accepte l'actif, ou le retire (solde nul) |
+| `0x19` | `OpenAssetDeal` | `symbol`, `seller`, `arbiter`, `amount`, `deadline`, `memo` | Séquestre en actif |
+| `0x1A` | `GrantAssetMandate` | `symbol`, `payee`, `max_per_period`, `period`, `expires_at` | Mandat de prélèvement en actif |
+| `0x1B` | `RevokeAssetMandate` | `symbol`, `payee` | Révoque un mandat en actif |
+| `0x1C` | `CollectAsset` | `symbol`, `payer`, `amount`, `memo` | Prélève en actif |
 
 `RotateKey` est aussi la voie de migration post-quantique : quand `0x02` sera
 actif, chaque compte pourra passer à une clé ML-DSA sans changer d'adresse.
@@ -452,7 +460,7 @@ Holding { amount: u64, frozen: bool }
   sa ligne, vide. `accept: false` la supprime si le solde est nul et que le
   compte n'est pas gelé. L'émetteur accepte son actif à la création.
 - **Supply.** `MintAsset` augmente `supply` sans dépasser `max_supply` ;
-  `BurnAsset` la diminue. `supply` est toujours la somme des soldes.
+  `BurnAsset` la diminue.
 - **Gel.** Un compte gelé n'envoie, ne reçoit ni ne détruit plus l'actif ; un
   actif gelé (`account` absent) ne circule plus du tout. Le gel d'un compte
   exige qu'il ait accepté l'actif. La reprise forcée fonctionne même sur un
@@ -465,6 +473,19 @@ Holding { amount: u64, frozen: bool }
   `FreezeAsset`, `ClawbackAsset` et `RenounceAssetPowers` exigent ses
   approbations, même sous le plafond. `CreateAsset` compte `asset_fee` dans
   la dépense du jour.
+- **Séquestres en actifs.** `OpenAssetDeal` suit les règles de §5.5, en
+  unités de l'actif, débitées du solde de l'acheteur. Le vendeur doit avoir
+  accepté l'actif. `ReleaseDeal` et `RefundDeal` s'appliquent aussi à ces
+  séquestres (les identifiants `deal_id` sont communs). Le bénéficiaire du
+  versement accepte l'actif d'office s'il l'avait retiré ; le versement est
+  refusé si l'actif ou son compte est gelé. La reprise forcée ne touche pas
+  un séquestre.
+- **Mandats en actifs.** `GrantAssetMandate`, `RevokeAssetMandate` et
+  `CollectAsset` suivent §5.9, par actif : un mandat en VINX ne permet pas de
+  prélever un actif, ni l'inverse. Le bénéficiaire doit avoir accepté
+  l'actif ; le gel bloque le prélèvement. Avec une politique (§5.8),
+  `GrantAssetMandate` exige les approbations.
+- `supply` est la somme des soldes et des séquestres en cours.
 - Les actifs ne font pas partie de l'invariant de supply du VINX (§4.3).
 
 ## 6. Blocs
@@ -658,7 +679,7 @@ hauteur `H + 2`. `validators_hash` du bloc `H + 1` reflète déjà le nouvel ens
 | 2 | Noms `.vinx` (§5.4), séquestres (§5.5), paramètre `name_fee` |
 | 3 | Émission des validateurs et frais aux validateurs (§4.4, ADR 0002) |
 | 4 | Paiements groupés (§5.6), horodatage natif (§5.7), règles de compte (§5.8), mandats (§5.9), frais payés par un parrain (§5.10) |
-| 5 | Actifs natifs (§5.11), paramètre `asset_fee` |
+| 5 | Actifs natifs (§5.11), séquestres et mandats en actifs, paramètre `asset_fee` |
 
 ## 10. Étiquettes de domaine
 

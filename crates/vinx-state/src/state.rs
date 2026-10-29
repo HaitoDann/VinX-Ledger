@@ -2,7 +2,8 @@
 
 use crate::accounts::Accounts;
 use crate::assets::{
-    Asset, AssetChanges, AssetError, Assets, Holding, MAX_ASSET_DECIMALS, MAX_ASSET_NAME,
+    Asset, AssetChanges, AssetDeal, AssetError, AssetMandate, Assets, Holding, MAX_ASSET_DECIMALS,
+    MAX_ASSET_NAME,
 };
 use crate::emission::Emission;
 use crate::escrow::{Escrow, EscrowError};
@@ -470,6 +471,8 @@ impl State {
         out.extend(rows(&mut self.mandates));
         out.extend(rows(&mut self.assets.assets));
         out.extend(rows(&mut self.assets.holdings));
+        out.extend(rows(&mut self.assets.deals));
+        out.extend(rows(&mut self.assets.mandates));
         out
     }
 
@@ -493,6 +496,8 @@ impl State {
             t if t == <Mandate as Row>::TAG => load(&mut self.mandates, key, value),
             t if t == <Asset as Row>::TAG => load(&mut self.assets.assets, key, value),
             t if t == <Holding as Row>::TAG => load(&mut self.assets.holdings, key, value),
+            t if t == <AssetDeal as Row>::TAG => load(&mut self.assets.deals, key, value),
+            t if t == <AssetMandate as Row>::TAG => load(&mut self.assets.mandates, key, value),
             _ => None,
         }
     }
@@ -505,6 +510,8 @@ impl State {
         self.mandates.mark_all_dirty();
         self.assets.assets.mark_all_dirty();
         self.assets.holdings.mark_all_dirty();
+        self.assets.deals.mark_all_dirty();
+        self.assets.mandates.mark_all_dirty();
     }
 
     /// Reconstitue un état à partir de [`Self::globals_bytes`] et des comptes.
@@ -583,7 +590,13 @@ impl State {
         }
         if self.protocol_version >= 5 {
             let a = &self.assets;
-            globals.extend_from_slice(&encode(&(a.fee, a.assets.root(), a.holdings.root())));
+            globals.extend_from_slice(&encode(&(
+                a.fee,
+                a.assets.root(),
+                a.holdings.root(),
+                a.deals.root(),
+                a.mandates.root(),
+            )));
         }
         hash_tagged_parts(
             Domain::State,
@@ -714,6 +727,9 @@ impl State {
         account.key = Some(key);
         let mut set_policy = None;
         let mut assets = AssetChanges::default();
+        let mut asset_deal_write: Option<(Hash, Option<AssetDeal>)> = None;
+        let mut asset_mandate_write: Option<((String, Address, Address), Option<AssetMandate>)> =
+            None;
         match body {
             TxBody::Transfer { to, amount, memo } => {
                 self.check_payment(tx.sender, *to, *amount, memo)?;
@@ -1019,6 +1035,138 @@ impl State {
                 };
                 registry = Some(Write::OpenDeal(deal_id(&tx.sender, tx.nonce), deal));
             }
+            TxBody::ReleaseDeal { id } if !self.registry.deals.contains_key(id) => {
+                let ad = self.assets.deals.get(id).ok_or(TxError::UnknownDeal)?;
+                let deal = &ad.deal;
+                if tx.sender != deal.buyer && deal.arbiter != Some(tx.sender) {
+                    return Err(TxError::DealForbidden);
+                }
+                self.pay_from_deal(&mut assets, &ad.symbol, deal.seller, deal.amount)?;
+                asset_deal_write = Some((*id, None));
+            }
+            TxBody::RefundDeal { id } if !self.registry.deals.contains_key(id) => {
+                let ad = self.assets.deals.get(id).ok_or(TxError::UnknownDeal)?;
+                let deal = &ad.deal;
+                let expired = now >= deal.deadline;
+                let allowed = tx.sender == deal.seller
+                    || deal.arbiter == Some(tx.sender)
+                    || (tx.sender == deal.buyer && expired);
+                if !allowed {
+                    return Err(TxError::DealForbidden);
+                }
+                self.pay_from_deal(&mut assets, &ad.symbol, deal.buyer, deal.amount)?;
+                asset_deal_write = Some((*id, None));
+            }
+            TxBody::OpenAssetDeal {
+                symbol,
+                seller,
+                arbiter,
+                amount,
+                deadline,
+                memo,
+            } => {
+                let asset = self.asset(symbol)?;
+                let latest = now
+                    .checked_add(MAX_DEAL_DURATION)
+                    .ok_or(TxError::Overflow)?;
+                let bad_arbiter = arbiter.is_some_and(|a| a == tx.sender || a == *seller);
+                if bad_arbiter || *deadline <= now || *deadline > latest {
+                    return Err(TxError::InvalidDeal);
+                }
+                self.check_asset_payment(tx.sender, *seller, *amount, memo)?;
+                // Le vendeur doit accepter l'actif : il sera payé dans cet actif.
+                if !assets.accepted(&self.assets, symbol, *seller) {
+                    return Err(TxError::Asset(AssetError::NotAccepted));
+                }
+                if asset.frozen || assets.is_frozen(&self.assets, symbol, tx.sender) {
+                    return Err(TxError::Asset(AssetError::Frozen));
+                }
+                assets
+                    .debit(&self.assets, symbol, tx.sender, *amount)
+                    .map_err(TxError::Asset)?;
+                let deal = Deal {
+                    buyer: tx.sender,
+                    seller: *seller,
+                    arbiter: *arbiter,
+                    amount: *amount,
+                    deadline: *deadline,
+                    memo: memo.clone(),
+                };
+                asset_deal_write = Some((
+                    deal_id(&tx.sender, tx.nonce),
+                    Some(AssetDeal {
+                        symbol: symbol.clone(),
+                        deal,
+                    }),
+                ));
+            }
+            TxBody::GrantAssetMandate {
+                symbol,
+                payee,
+                max_per_period,
+                period,
+                expires_at,
+            } => {
+                self.asset(symbol)?;
+                let valid = *payee != tx.sender
+                    && *max_per_period > 0
+                    && (vinx_core::MIN_MANDATE_PERIOD..=vinx_core::MAX_MANDATE_PERIOD)
+                        .contains(period)
+                    && expires_at.is_none_or(|e| e > now);
+                if !valid {
+                    return Err(TxError::Mandate(MandateError::Invalid));
+                }
+                asset_mandate_write = Some((
+                    (symbol.clone(), tx.sender, *payee),
+                    Some(AssetMandate {
+                        mandate: Mandate {
+                            max_per_period: *max_per_period,
+                            period: *period,
+                            start: now,
+                            expires_at: *expires_at,
+                            period_index: 0,
+                            used: 0,
+                        },
+                    }),
+                ));
+            }
+            TxBody::RevokeAssetMandate { symbol, payee } => {
+                let key = (symbol.clone(), tx.sender, *payee);
+                if !self.assets.mandates.contains_key(&key) {
+                    return Err(TxError::Mandate(MandateError::Unknown));
+                }
+                asset_mandate_write = Some((key, None));
+            }
+            TxBody::CollectAsset {
+                symbol,
+                payer,
+                amount,
+                memo,
+            } => {
+                let asset = self.asset(symbol)?;
+                let key = (symbol.clone(), *payer, tx.sender);
+                let mut m = self
+                    .assets
+                    .mandates
+                    .get(&key)
+                    .cloned()
+                    .ok_or(TxError::Mandate(MandateError::Unknown))?;
+                m.mandate.collect(now, *amount).map_err(TxError::Mandate)?;
+                self.check_asset_payment(*payer, tx.sender, *amount, memo)?;
+                let frozen = asset.frozen
+                    || assets.is_frozen(&self.assets, symbol, *payer)
+                    || assets.is_frozen(&self.assets, symbol, tx.sender);
+                if frozen {
+                    return Err(TxError::Asset(AssetError::Frozen));
+                }
+                assets
+                    .debit(&self.assets, symbol, *payer, *amount)
+                    .map_err(TxError::Asset)?;
+                assets
+                    .credit(&self.assets, symbol, tx.sender, *amount)
+                    .map_err(TxError::Asset)?;
+                asset_mandate_write = Some((key, Some(m)));
+            }
             TxBody::ReleaseDeal { id } => {
                 let deal = self.registry.deals.get(id).ok_or(TxError::UnknownDeal)?;
                 if tx.sender != deal.buyer && deal.arbiter != Some(tx.sender) {
@@ -1059,6 +1207,20 @@ impl State {
         };
         changes.commit(&mut self.accounts);
         assets.commit(&mut self.assets);
+        match asset_deal_write {
+            Some((id, Some(d))) => self.assets.deals.insert(id, d),
+            Some((id, None)) => {
+                self.assets.deals.remove(&id);
+            }
+            None => {}
+        }
+        match asset_mandate_write {
+            Some((key, Some(m))) => self.assets.mandates.insert(key, m),
+            Some((key, None)) => {
+                self.assets.mandates.remove(&key);
+            }
+            None => {}
+        }
         self.emission.pot = pot;
         match mandate_write {
             Some((key, Some(m))) => {
@@ -1127,6 +1289,7 @@ impl State {
             TxBody::SetPolicy { .. }
                 | TxBody::RotateKey { .. }
                 | TxBody::GrantMandate { .. }
+                | TxBody::GrantAssetMandate { .. }
                 | TxBody::MintAsset { .. }
                 | TxBody::FreezeAsset { .. }
                 | TxBody::ClawbackAsset { .. }
@@ -1157,6 +1320,26 @@ impl State {
             .get(symbol)
             .cloned()
             .ok_or(TxError::Asset(AssetError::Unknown))
+    }
+
+    /// Verse `amount` d'un séquestre en actif à `to`, qui l'accepte d'office :
+    /// il y a consenti en ouvrant le séquestre ou en l'acceptant comme vendeur.
+    /// Refusé si l'actif ou le compte est gelé.
+    fn pay_from_deal(
+        &self,
+        assets: &mut AssetChanges,
+        symbol: &str,
+        to: Address,
+        amount: Amount,
+    ) -> Result<(), TxError> {
+        let asset = self.asset(symbol)?;
+        if asset.frozen || assets.is_frozen(&self.assets, symbol, to) {
+            return Err(TxError::Asset(AssetError::Frozen));
+        }
+        assets.accept(&self.assets, symbol, to);
+        assets
+            .credit(&self.assets, symbol, to, amount)
+            .map_err(TxError::Asset)
     }
 
     /// L'actif `symbol`, si `sender` en est l'émetteur.

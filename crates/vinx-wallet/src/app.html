@@ -207,7 +207,8 @@ header select { width: auto; min-width: 180px; }
     <div class="found" id="dealFound"></div>
     <label for="dealArbiter">Arbitre (facultatif)</label><input id="dealArbiter" class="mono" placeholder="tiers de confiance" list="contactList" autocomplete="off">
     <div class="row">
-      <div><label for="dealAmount">Montant (VINX)</label><input id="dealAmount" inputmode="decimal"></div>
+      <div><label for="dealAmount">Montant</label><input id="dealAmount" inputmode="decimal"></div>
+      <div><label for="dealCurrency">Monnaie</label><select id="dealCurrency" data-currency></select></div>
       <div><label for="dealDays">Échéance (jours)</label><input id="dealDays" type="number" min="1" max="365" value="14"></div>
     </div>
     <label for="dealMemo">Mémo (facultatif)</label><input id="dealMemo" placeholder="commande n°…">
@@ -247,7 +248,8 @@ header select { width: auto; min-width: 180px; }
     <h2>Accorder un mandat</h2>
     <label for="mandateTo">Bénéficiaire</label><input id="mandateTo" class="mono" placeholder="vinx1…, contact ou nom.vinx" list="contactList" autocomplete="off">
     <div class="row">
-      <div><label for="mandateMax">Maximum par période (VINX)</label><input id="mandateMax" inputmode="decimal"></div>
+      <div><label for="mandateMax">Maximum par période</label><input id="mandateMax" inputmode="decimal"></div>
+      <div><label for="mandateCurrency">Monnaie</label><select id="mandateCurrency" data-currency></select></div>
       <div><label for="mandateDays">Période</label><select id="mandateDays"><option value="7">semaine</option><option value="30" selected>mois (30 jours)</option><option value="365">an</option></select></div>
     </div>
     <div class="actions"><button class="primary" id="mandateBtn">Vérifier avant d'accorder</button></div>
@@ -605,25 +607,37 @@ const periodText = (s) => s % 86400 === 0 ? `${s / 86400} jour(s)` : `${s} s`;
 function renderMandates() {
   const m = data.mandates || { granted: [], received: [] };
   $("grantedTable").innerHTML = m.granted.length ? `<table><thead><tr><th>Bénéficiaire</th><th style="text-align:right">Maximum</th><th>Période</th><th style="text-align:right">Reste</th><th></th></tr></thead><tbody>${m.granted.map((g) =>
-    `<tr><td>${who(g.payee)}</td><td style="text-align:right">${vinx(g.max_per_period)}</td><td>${periodText(g.period)}</td><td style="text-align:right">${vinx(g.available)}</td>
-     <td><button class="danger" data-revoke="${esc(g.payee)}">Révoquer</button></td></tr>`).join("")}</tbody></table>`
+    `<tr><td>${who(g.payee)}</td><td style="text-align:right">${money(g, "max_per_period")}</td><td>${periodText(g.period)}</td><td style="text-align:right">${money(g, "available")}</td>
+     <td><button class="danger" data-revoke="${esc(g.payee)}" data-asset="${esc(g.asset || "")}">Révoquer</button></td></tr>`).join("")}</tbody></table>`
     : `<p class="muted">Aucun mandat accordé.</p>`;
   $("receivedTable").innerHTML = m.received.length ? `<table><thead><tr><th>Payeur</th><th style="text-align:right">Maximum</th><th>Période</th><th style="text-align:right">Reste</th><th></th></tr></thead><tbody>${m.received.map((r) =>
-    `<tr><td>${who(r.payer)}</td><td style="text-align:right">${vinx(r.max_per_period)}</td><td>${periodText(r.period)}</td><td style="text-align:right">${vinx(r.available)}</td>
-     <td>${r.expired ? `<span class="pill warn">expiré</span>` : `<button class="primary" data-collect="${esc(r.payer)}">Prélever</button>`}</td></tr>`).join("")}</tbody></table>`
+    `<tr><td>${who(r.payer)}</td><td style="text-align:right">${money(r, "max_per_period")}</td><td>${periodText(r.period)}</td><td style="text-align:right">${money(r, "available")}</td>
+     <td>${r.expired ? `<span class="pill warn">expiré</span>` : `<button class="primary" data-collect="${esc(r.payer)}" data-asset="${esc(r.asset || "")}">Prélever</button>`}</td></tr>`).join("")}</tbody></table>`
     : `<p class="muted">Aucun mandat reçu.</p>`;
-  document.querySelectorAll("[data-revoke]").forEach((b) => b.onclick = () => operate({ action: "revoke-mandate", to: b.dataset.revoke }, "Révoquer le mandat"));
+  document.querySelectorAll("[data-revoke]").forEach((b) => b.onclick = () => operate(b.dataset.asset
+    ? { action: "unmandate-asset", symbol: b.dataset.asset, to: b.dataset.revoke }
+    : { action: "revoke-mandate", to: b.dataset.revoke }, "Révoquer le mandat"));
   document.querySelectorAll("[data-collect]").forEach((b) => b.onclick = () => {
-    const amount = prompt("Montant à prélever (VINX)"); if (!amount) return;
+    const symbol = b.dataset.asset;
+    const amount = prompt(`Montant à prélever (${symbol || "VINX"})`); if (!amount) return;
     const memo = prompt("Mémo (facultatif, par exemple la référence de facture)") || "";
-    operate({ action: "collect", to: b.dataset.collect, amount: amount.replace(",", "."), memo }, "Prélever");
+    operate(symbol ? { action: "collect-asset", symbol, to: b.dataset.collect, amount: amount.replace(",", "."), memo }
+      : { action: "collect", to: b.dataset.collect, amount: amount.replace(",", "."), memo }, "Prélever");
   });
 }
 $("mandateBtn").onclick = () => operate(
-  { action: "grant-mandate", to: $("mandateTo").value, amount: $("mandateMax").value.replace(",", "."), days: +$("mandateDays").value },
+  { action: $("mandateCurrency").value ? "mandate-asset" : "grant-mandate", symbol: $("mandateCurrency").value,
+    to: $("mandateTo").value, amount: $("mandateMax").value.replace(",", "."), days: +$("mandateDays").value },
   "Accorder un mandat", () => { $("mandateTo").value = $("mandateMax").value = ""; });
 
 /* ----- Jetons ----- */
+/* Montant d'un séquestre ou d'un mandat : en VINX, ou en unités de son jeton. */
+function money(x, field = "amount") {
+  if (!x.asset) return vinx(x[field]) + " VINX";
+  const a = [...(data.assets || []), ...(data.issued || [])].find((y) => y.symbol === x.asset);
+  const u = field === "amount" ? x.units : x[field];
+  return `${a ? units(u, a.decimals) : u} ${esc(x.asset)}`;
+}
 function units(u, d) {
   let n; try { n = BigInt(u || "0"); } catch (_) { return "—"; }
   const one = 10n ** BigInt(d || 0);
@@ -641,6 +655,11 @@ function renderAssets() {
      <td style="text-align:right">${units(x.units, x.decimals)}${x.frozen ? ` <span class="pill warn">gelé</span>` : ""}</td>
      <td>${x.units === "0" ? `<button data-leave="${esc(x.symbol)}">Retirer</button>` : `<button data-burn="${esc(x.symbol)}">Détruire</button>`}</td></tr>`).join("")}</tbody></table>`
     : `<p class="muted">Aucun jeton accepté sur ce compte.</p>`;
+  document.querySelectorAll("[data-currency]").forEach((c) => {
+    const k = c.value;
+    c.innerHTML = `<option value="">VINX</option>` + h.map((x) => `<option value="${esc(x.symbol)}">${esc(x.symbol)}</option>`).join("");
+    c.value = h.some((x) => x.symbol === k) ? k : "";
+  });
   const sel = $("assetSendSymbol"), keep = sel.value;
   sel.innerHTML = h.map((x) => `<option value="${esc(x.symbol)}">${esc(x.symbol)}</option>`).join("");
   if (keep) sel.value = keep;
@@ -790,12 +809,13 @@ function txRow(t) {
   if (t.asset && t.units) {
     // Montant en jeton : les décimales viennent des soldes ou des jetons émis.
     const a = [...(data.assets || []), ...(data.issued || [])].find((x) => x.symbol === t.asset);
-    const inbound = t.to === data.address || (t.kind === "reprise forcée" && t.sender === data.address);
-    const moves = t.kind === "paiement en actif" || t.kind === "reprise forcée";
+    const collector = t.kind === "prélèvement" || t.kind === "reprise forcée";
+    const inbound = collector ? t.sender === data.address : t.to === data.address;
+    const moves = ["paiement en actif", "reprise forcée", "prélèvement", "séquestre"].includes(t.kind);
     const sign = inbound ? "+" : moves || t.kind === "destruction d'actif" ? "−" : "";
     const shown = a ? units(t.units, a.decimals) : t.units;
     return `<tr><td>${t.status === "en attente" ? "à l'instant" : date(t.timestamp)}</td><td>${esc(kinds[t.kind] || t.kind)}${t.memo ? `<div class="sub">${esc(t.memo)}</div>` : ""}</td>
-      <td>${t.to && t.to !== data.address ? who(t.to) : t.from && t.from !== data.address ? who(t.from) : t.sender !== data.address ? who(t.sender) : ""}</td>
+      <td>${t.to && t.to !== data.address ? who(t.to) : t.from && t.from !== data.address ? who(t.from) : t.payer && t.payer !== data.address ? who(t.payer) : t.sender !== data.address ? who(t.sender) : ""}</td>
       <td style="text-align:right"><span class="${inbound ? "in" : "out"}">${sign} ${shown} ${esc(t.asset)}</span>${out ? `<div class="sub">frais ${vinx(t.fee)}</div>` : ""}</td>
       <td>${t.status === "en attente" ? `<span class="pill warn">en attente</span>` : `<span class="pill ok">confirmée</span>`}</td></tr>`;
   }
@@ -845,7 +865,7 @@ function renderDeals() {
     const canRelease = r !== "vendeur";
     const canRefund = r !== "acheteur" || d.expired;
     return `<tr><td>${r}</td><td>${who(d.buyer)} → ${who(d.seller)}${d.memo ? `<div class="sub">${esc(d.memo)}</div>` : ""}</td>
-      <td style="text-align:right">${vinx(d.amount)}</td><td>${day(d.deadline)}${d.expired ? ` <span class="pill warn">échue</span>` : ""}</td>
+      <td style="text-align:right">${money(d)}</td><td>${day(d.deadline)}${d.expired ? ` <span class="pill warn">échue</span>` : ""}</td>
       <td>${canRelease ? `<button class="primary" data-release="${esc(d.id)}">Verser au vendeur</button> ` : ""}${canRefund ? `<button data-refund="${esc(d.id)}">Rembourser l'acheteur</button>` : ""}</td></tr>`;
   }).join("")}</tbody></table>` : `<p class="muted">Aucun séquestre en cours.</p>`;
   document.querySelectorAll("[data-release]").forEach((b) => b.onclick = () => operate({ action: "release-deal", deal: b.dataset.release }, "Verser au vendeur"));
@@ -907,7 +927,7 @@ $("sendBtn").onclick = () => operate(
 $("registerBtn").onclick = () => operate({ action: "register-name", name: $("newName").value }, "Réserver le nom",
   () => { $("newName").value = ""; $("nameFound").textContent = ""; });
 $("dealBtn").onclick = () => operate(
-  { action: "open-deal", to: $("dealTo").value, arbiter: $("dealArbiter").value, amount: $("dealAmount").value.replace(",", "."), days: +$("dealDays").value, memo: $("dealMemo").value },
+  { action: $("dealCurrency").value ? "deal-asset" : "open-deal", symbol: $("dealCurrency").value, to: $("dealTo").value, arbiter: $("dealArbiter").value, amount: $("dealAmount").value.replace(",", "."), days: +$("dealDays").value, memo: $("dealMemo").value },
   "Bloquer les fonds en séquestre",
   () => { ["dealTo", "dealArbiter", "dealAmount", "dealMemo"].forEach((i) => $(i).value = ""); $("dealFound").textContent = ""; });
 $("copyAddr").onclick = async () => {

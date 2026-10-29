@@ -423,6 +423,74 @@ enum AssetCommand {
         #[arg(long)]
         amount: String,
     },
+    /// Bloque des unités en séquestre au profit d'un vendeur, qui a accepté l'actif.
+    DealOpen {
+        #[arg(long)]
+        key: PathBuf,
+        #[arg(long)]
+        symbol: String,
+        #[arg(long)]
+        seller: Address,
+        #[arg(long)]
+        amount: String,
+        /// Échéance, en jours (1 à 365) : ensuite, l'acheteur peut se rembourser.
+        #[arg(long, default_value_t = 30)]
+        days: u64,
+        #[arg(long)]
+        arbiter: Option<Address>,
+        #[arg(long)]
+        memo: Option<String>,
+    },
+    /// Verse un séquestre (en VINX ou en actif) au vendeur : acheteur ou arbitre.
+    DealRelease {
+        #[arg(long)]
+        key: PathBuf,
+        /// Identifiant du séquestre, en hexadécimal.
+        id: String,
+    },
+    /// Rend un séquestre à l'acheteur : vendeur, arbitre, ou acheteur après l'échéance.
+    DealRefund {
+        #[arg(long)]
+        key: PathBuf,
+        id: String,
+    },
+    /// Autorise un bénéficiaire à prélever des unités de l'actif sur ce compte.
+    MandateGrant {
+        #[arg(long)]
+        key: PathBuf,
+        #[arg(long)]
+        symbol: String,
+        #[arg(long)]
+        payee: Address,
+        /// Maximum par période, en unités de l'actif (avec ses décimales).
+        #[arg(long)]
+        max: String,
+        #[arg(long, default_value_t = 30)]
+        period_days: u64,
+        #[arg(long)]
+        expires_at: Option<u64>,
+    },
+    MandateRevoke {
+        #[arg(long)]
+        key: PathBuf,
+        #[arg(long)]
+        symbol: String,
+        #[arg(long)]
+        payee: Address,
+    },
+    /// Prélève des unités sur un payeur qui a accordé un mandat à ce compte.
+    Collect {
+        #[arg(long)]
+        key: PathBuf,
+        #[arg(long)]
+        symbol: String,
+        #[arg(long)]
+        payer: Address,
+        #[arg(long)]
+        amount: String,
+        #[arg(long)]
+        memo: Option<String>,
+    },
     /// Abandonne définitivement des pouvoirs de l'émetteur.
     Renounce {
         #[arg(long)]
@@ -436,6 +504,13 @@ enum AssetCommand {
         #[arg(long)]
         clawback: bool,
     },
+}
+
+fn deal_id_from_hex(id: &str) -> Result<[u8; 32]> {
+    hex::decode(id.trim())
+        .ok()
+        .and_then(|b| <[u8; 32]>::try_from(b).ok())
+        .ok_or_else(|| anyhow!("identifiant de séquestre invalide : 64 caractères hexadécimaux"))
 }
 
 /// Décimales d'un actif, lues sur le nœud.
@@ -1195,6 +1270,84 @@ fn main() -> Result<()> {
                         symbol: symbol.to_ascii_uppercase(),
                         from,
                         amount,
+                    };
+                    send(&key, body)?;
+                }
+                AssetCommand::DealOpen {
+                    key,
+                    symbol,
+                    seller,
+                    amount,
+                    days,
+                    arbiter,
+                    memo,
+                } => {
+                    if days == 0 || days > 365 {
+                        bail!("échéance : entre 1 et 365 jours");
+                    }
+                    let amount = parse_units(&amount, asset_decimals(&client, &symbol)?)?;
+                    let now = std::time::SystemTime::now()
+                        .duration_since(std::time::UNIX_EPOCH)
+                        .map(|d| d.as_secs())
+                        .unwrap_or(0);
+                    let body = vinx_core::TxBody::OpenAssetDeal {
+                        symbol: symbol.to_ascii_uppercase(),
+                        seller,
+                        arbiter,
+                        amount,
+                        deadline: now.saturating_add(days.saturating_mul(86_400)),
+                        memo: memo.map(String::into_bytes),
+                    };
+                    send(&key, body)?;
+                }
+                AssetCommand::DealRelease { key, id } => {
+                    let id = deal_id_from_hex(&id)?;
+                    send(&key, vinx_core::TxBody::ReleaseDeal { id })?;
+                }
+                AssetCommand::DealRefund { key, id } => {
+                    let id = deal_id_from_hex(&id)?;
+                    send(&key, vinx_core::TxBody::RefundDeal { id })?;
+                }
+                AssetCommand::MandateGrant {
+                    key,
+                    symbol,
+                    payee,
+                    max,
+                    period_days,
+                    expires_at,
+                } => {
+                    let max = parse_units(&max, asset_decimals(&client, &symbol)?)?;
+                    let body = vinx_core::TxBody::GrantAssetMandate {
+                        symbol: symbol.to_ascii_uppercase(),
+                        payee,
+                        max_per_period: max,
+                        period: period_days
+                            .checked_mul(86_400)
+                            .ok_or_else(|| anyhow!("période trop longue"))?,
+                        expires_at,
+                    };
+                    send(&key, body)?;
+                }
+                AssetCommand::MandateRevoke { key, symbol, payee } => {
+                    let body = vinx_core::TxBody::RevokeAssetMandate {
+                        symbol: symbol.to_ascii_uppercase(),
+                        payee,
+                    };
+                    send(&key, body)?;
+                }
+                AssetCommand::Collect {
+                    key,
+                    symbol,
+                    payer,
+                    amount,
+                    memo,
+                } => {
+                    let amount = parse_units(&amount, asset_decimals(&client, &symbol)?)?;
+                    let body = vinx_core::TxBody::CollectAsset {
+                        symbol: symbol.to_ascii_uppercase(),
+                        payer,
+                        amount,
+                        memo: memo.map(String::into_bytes),
                     };
                     send(&key, body)?;
                 }
