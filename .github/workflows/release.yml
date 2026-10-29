@@ -6,6 +6,7 @@ name: Release
 #                                     service systemd, supervision, guides
 #   vinx-X.Y.Z-windows-x86_64.zip     poste d'administration : vinx-wallet et
 #   vinx-X.Y.Z-macos-arm64.tar.gz     vinx-node (genèse, clés), guides
+#   vinx-X.Y.Z-android.apk           portefeuille mobile (android.yml)
 #   SHA256SUMS
 # Voir docs/DEPLOYER-UN-VALIDATEUR.md.
 on:
@@ -113,9 +114,14 @@ jobs:
             vinx-*.zip
             vinx-*.tar.gz
 
+  android:
+    name: Android
+    needs: version
+    uses: ./.github/workflows/android.yml
+
   publish:
     name: Publication
-    needs: [version, linux, poste]
+    needs: [version, linux, poste, android]
     runs-on: ubuntu-22.04
     env:
       VERSION: ${{ needs.version.outputs.version }}

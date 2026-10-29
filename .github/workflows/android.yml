@@ -1,0 +1,71 @@
+name: Android
+
+# Compile l'application Android du portefeuille mobile (crates/vinx-mobile) :
+#   vinx-X.Y.Z-android.apk
+# - sur une pull request qui touche au portefeuille mobile : l'APK est un
+#   artefact de l'exécution, à télécharger depuis l'onglet Actions ;
+# - depuis release.yml, pour une version publiée ;
+# - à la demande (onglet Actions → Android → Run workflow).
+#
+# L'APK est signée avec une clé de débogage, différente à chaque compilation :
+# pour passer d'une version à l'autre, désinstaller puis réinstaller, et
+# restaurer le portefeuille avec ses 12 mots.
+
+on:
+  pull_request:
+    paths:
+      - "crates/vinx-mobile/**"
+      - "crates/vinx-core/**"
+      - "crates/vinx-crypto/**"
+      - ".github/workflows/android.yml"
+  workflow_dispatch:
+  workflow_call:
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  apk:
+    name: APK Android
+    runs-on: ubuntu-22.04
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: wasm32-unknown-unknown
+      - uses: Swatinem/rust-cache@v2
+      - name: wasm-bindgen (même version que Cargo.lock)
+        run: |
+          v="$(cargo metadata --format-version 1 --locked \
+            | jq -r '.packages[] | select(.name == "wasm-bindgen") | .version')"
+          echo "WASM_BINDGEN=$v" >>"$GITHUB_ENV"
+      - uses: taiki-e/install-action@v2
+        with:
+          tool: wasm-bindgen@${{ env.WASM_BINDGEN }}
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: "17"
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+      - name: Version
+        run: |
+          v="$(cargo metadata --no-deps --format-version 1 \
+            | jq -r '.packages[] | select(.name == "vinx-mobile") | .version')"
+          echo "VERSION=$v" >>"$GITHUB_ENV"
+      - name: Projet Android
+        run: crates/vinx-mobile/capacitor/prepare.sh "$VERSION"
+      - name: Compilation de l'APK
+        working-directory: crates/vinx-mobile/capacitor/android
+        run: ./gradlew --no-daemon assembleDebug
+      - name: Renomme l'APK
+        run: |
+          mkdir dist
+          cp crates/vinx-mobile/capacitor/android/app/build/outputs/apk/debug/app-debug.apk \
+            "dist/vinx-$VERSION-android.apk"
+          ls -la dist
+      - uses: actions/upload-artifact@v4
+        with:
+          name: android
+          path: dist/*.apk
