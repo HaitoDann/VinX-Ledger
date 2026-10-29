@@ -20,6 +20,40 @@ pub const MAX_BODY_BYTES: usize = 64 * 1024;
 /// Requêtes traitées simultanément au plus.
 pub const MAX_CONCURRENT_REQUESTS: usize = 64;
 
+/// Autorise les appels d'autres origines (portefeuille mobile, sites). L'API
+/// est publique et sans cookie : n'importe quelle origine peut lire et
+/// soumettre des transactions déjà signées, comme avec `curl`.
+async fn cors(
+    req: axum::extract::Request,
+    next: axum::middleware::Next,
+) -> axum::response::Response {
+    use axum::http::{HeaderValue, Method, header};
+    use axum::response::IntoResponse;
+    let mut res = if req.method() == Method::OPTIONS {
+        StatusCode::NO_CONTENT.into_response()
+    } else {
+        next.run(req).await
+    };
+    let h = res.headers_mut();
+    h.insert(
+        header::ACCESS_CONTROL_ALLOW_ORIGIN,
+        HeaderValue::from_static("*"),
+    );
+    h.insert(
+        header::ACCESS_CONTROL_ALLOW_METHODS,
+        HeaderValue::from_static("GET, POST, OPTIONS"),
+    );
+    h.insert(
+        header::ACCESS_CONTROL_ALLOW_HEADERS,
+        HeaderValue::from_static("content-type"),
+    );
+    h.insert(
+        header::ACCESS_CONTROL_MAX_AGE,
+        HeaderValue::from_static("86400"),
+    );
+    res
+}
+
 type ApiResult = Result<Json<Value>, (StatusCode, Json<Value>)>;
 
 fn error(status: StatusCode, message: impl std::fmt::Display) -> (StatusCode, Json<Value>) {
@@ -57,6 +91,8 @@ pub fn router(shared: SharedRef) -> Router {
         .layer(tower::limit::ConcurrencyLimitLayer::new(
             MAX_CONCURRENT_REQUESTS,
         ))
+        // Le portefeuille mobile appelle l'API depuis sa propre origine.
+        .layer(axum::middleware::from_fn(cors))
         .with_state(shared)
 }
 

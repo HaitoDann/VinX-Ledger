@@ -65,6 +65,7 @@ compte à créer : tes clés restent sur ton ordinateur.
 | Je veux… | Guide |
 |---|---|
 | Utiliser le portefeuille | [Portefeuille](./docs/PORTEFEUILLE.md) |
+| Payer depuis un téléphone | [Portefeuille mobile](./docs/MOBILE.md) |
 | Créer un jeton | [Jetons](./docs/JETONS.md) |
 | Comprendre où va le projet | [Feuille de route](./docs/FEUILLE-DE-ROUTE.md) |
 | Faire tourner un validateur | [Déployer un validateur](./docs/DEPLOYER-UN-VALIDATEUR.md), [Exploitation](./docs/EXPLOITATION.md) |
