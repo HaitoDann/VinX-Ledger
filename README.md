@@ -37,10 +37,13 @@ passe, ainsi que la genèse. Le tableau de bord du nœud est sur
 `/evidence` (preuves de validateurs fautifs), `/validators` (état de chaque
 validateur), `/history`, `/mempool`, `/admin-history`, `/transactions/{id}`,
 `/accounts/{adresse}/transactions`, `/names/{nom}`, `/deals/{id}`,
-`/attestations/{empreinte}`,
+`/attestations/{empreinte}`, `/assets`, `/assets/{symbole}`,
 et en `POST`
 `/transactions` et `/admin-transactions`.
 
+
+Pour émettre un jeton (points, bons, monnaie stable) : voir
+[`docs/JETONS.md`](./docs/JETONS.md).
 
 ## Plusieurs validateurs
 

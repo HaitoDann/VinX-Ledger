@@ -37,6 +37,8 @@ pub fn router(shared: SharedRef) -> Router {
         .route("/accounts/{address}/transactions", get(account_history))
         .route("/names/{name}", get(name))
         .route("/deals/{id}", get(deal))
+        .route("/assets", get(assets))
+        .route("/assets/{symbol}", get(asset))
         .route("/attestations/{digest}", get(attestation))
         .route("/blocks/{height}", get(block))
         .route("/escrow", get(escrow))
@@ -253,6 +255,7 @@ async fn governance(State(shared): State<SharedRef>) -> ApiResult {
             "timeout_vote_delta_ms": p.timeout_vote_delta_ms,
             "min_block_interval_ms": p.min_block_interval_ms,
             "name_fee": amount_to_string(st.registry.name_fee),
+            "asset_fee": amount_to_string(st.assets.fee),
         },
         "protocol_version": st.protocol_version,
         "upgrade": st.upgrade.as_ref().map(|u| json!({
@@ -341,6 +344,7 @@ async fn status(State(shared): State<SharedRef>) -> ApiResult {
             "max_memo_bytes": st.params.max_memo_bytes,
             "min_block_interval_ms": st.params.min_block_interval_ms,
             "name_fee": amount_to_string(st.registry.name_fee),
+            "asset_fee": amount_to_string(st.assets.fee),
         },
     })))
 }
@@ -374,6 +378,16 @@ async fn account(State(shared): State<SharedRef>, Path(address): Path<String>) -
         "public_key": account.key.as_ref().map(key_to_hex),
         "names": names,
         "deals": deals,
+        "assets": st.assets.holdings_of(&address).iter().map(|(symbol, h)| {
+            let asset = st.assets.assets.get(symbol.as_str());
+            json!({
+                "symbol": symbol,
+                "name": asset.map(|a| a.name.clone()),
+                "decimals": asset.map(|a| a.decimals),
+                "units": amount_to_string(h.amount),
+                "frozen": h.frozen || asset.is_some_and(|a| a.frozen),
+            })
+        }).collect::<Vec<_>>(),
         "mandates": {
             "granted": st.mandates.iter()
                 .filter(|((payer, _), _)| *payer == address)
@@ -524,6 +538,48 @@ async fn name(State(shared): State<SharedRef>, Path(name): Path<String>) -> ApiR
         "fee": amount_to_string(reg.name_fee),
         "active": s.chain.state.protocol_version >= 2,
     })))
+}
+
+/// Actif lisible ; montants en unités de l'actif (`decimals` décimales).
+fn asset_json(symbol: &str, a: &vinx_state::Asset) -> Value {
+    json!({
+        "symbol": symbol,
+        "name": a.name,
+        "issuer": a.issuer.to_string(),
+        "decimals": a.decimals,
+        "supply_units": amount_to_string(a.supply),
+        "max_supply_units": a.max_supply.map(amount_to_string),
+        "powers": {
+            "mint": a.powers.mint,
+            "freeze": a.powers.freeze,
+            "clawback": a.powers.clawback,
+        },
+        "frozen": a.frozen,
+    })
+}
+
+async fn assets(State(shared): State<SharedRef>) -> ApiResult {
+    let s = lock(&shared);
+    let st = &s.chain.state;
+    Ok(Json(json!({
+        "active": st.protocol_version >= 5,
+        "fee": amount_to_string(st.assets.fee),
+        "assets": st.assets.assets.iter()
+            .map(|(symbol, a)| asset_json(symbol, a))
+            .collect::<Vec<_>>(),
+    })))
+}
+
+async fn asset(State(shared): State<SharedRef>, Path(symbol): Path<String>) -> ApiResult {
+    let symbol = symbol.trim().to_ascii_uppercase();
+    let s = lock(&shared);
+    let st = &s.chain.state;
+    let a = st
+        .assets
+        .assets
+        .get(symbol.as_str())
+        .ok_or_else(|| error(StatusCode::NOT_FOUND, "actif inconnu"))?;
+    Ok(Json(asset_json(&symbol, a)))
 }
 
 async fn deal(State(shared): State<SharedRef>, Path(id): Path<String>) -> ApiResult {
