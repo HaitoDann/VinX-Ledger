@@ -37,6 +37,7 @@ pub fn router(shared: SharedRef) -> Router {
         .route("/accounts/{address}/transactions", get(account_history))
         .route("/names/{name}", get(name))
         .route("/deals/{id}", get(deal))
+        .route("/attestations/{digest}", get(attestation))
         .route("/blocks/{height}", get(block))
         .route("/escrow", get(escrow))
         .route("/fees", get(fees))
@@ -441,6 +442,44 @@ fn treasury_payment_json(t: &SignedAdminTransaction) -> Value {
     })
 }
 
+/// Horodatages d'une empreinte (`Attest`, protocole 4) encore dans les blocs conservés.
+async fn attestation(State(shared): State<SharedRef>, Path(digest): Path<String>) -> ApiResult {
+    let digest = hex::decode(digest.trim())
+        .ok()
+        .and_then(|b| <[u8; 32]>::try_from(b).ok())
+        .ok_or_else(|| {
+            error(
+                StatusCode::BAD_REQUEST,
+                "empreinte invalide : 64 caractères hexadécimaux",
+            )
+        })?;
+    let s = lock(&shared);
+    let found = s
+        .store
+        .attestations(&digest)
+        .map_err(|e| error(StatusCode::INTERNAL_SERVER_ERROR, e))?;
+    if found.is_empty() {
+        return Err(error(
+            StatusCode::NOT_FOUND,
+            "aucun horodatage de cette empreinte dans les blocs conservés par ce nœud",
+        ));
+    }
+    let list: Vec<Value> = found
+        .into_iter()
+        .map(|(height, timestamp, t)| {
+            json!({
+                "height": height,
+                "timestamp": timestamp,
+                "id": hash_to_hex(&t.id()),
+                "sender": t.tx.sender.to_string(),
+            })
+        })
+        .collect();
+    Ok(Json(
+        json!({ "digest": hex::encode(digest), "attestations": list }),
+    ))
+}
+
 /// Titulaire d'un nom (`alice` ou `alice.vinx`) ; `available` s'il peut être enregistré.
 async fn name(State(shared): State<SharedRef>, Path(name): Path<String>) -> ApiResult {
     let name = name.trim().to_lowercase();
@@ -694,6 +733,21 @@ fn tx_json(stx: &SignedTransaction) -> Value {
         TxBody::RefundDeal { id } => json!({
             "kind": "séquestre remboursé",
             "deal": hash_to_hex(id),
+        }),
+        TxBody::BatchTransfer { payments } => json!({
+            "kind": "paiement groupé",
+            "amount": amount_to_string(
+                payments.iter().fold(0u64, |s, p| s.saturating_add(p.amount))
+            ),
+            "payments": payments.iter().map(|p| json!({
+                "to": p.to.to_string(),
+                "amount": amount_to_string(p.amount),
+                "memo": p.memo.as_ref().map(|m| String::from_utf8_lossy(m).into_owned()),
+            })).collect::<Vec<_>>(),
+        }),
+        TxBody::Attest { digest } => json!({
+            "kind": "horodatage",
+            "digest": hex::encode(digest),
         }),
     };
     if let (Some(o), Some(b)) = (v.as_object_mut(), body.as_object()) {

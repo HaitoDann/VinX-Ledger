@@ -53,13 +53,13 @@ référence pour toute nouvelle proposition.
 | Protocole 2 | Noms `.vinx` | Un nom à la place d'une adresse, un an renouvelable | Activé au bloc 70 000 du testnet |
 | Protocole 2 | Séquestre | Fonds bloqués, versés ou remboursés, arbitre, échéance | Activé au bloc 70 000 du testnet |
 | **Protocole 3** | Émission des validateurs | 100 M sur une courbe à demi-vie de 10 ans, répartis par époque selon les blocs proposés ; frais aux validateurs (ADR 0002) | Testnet remis à zéro en 0.10 |
-| **Protocole 4** | Comptes multisig | « 2 signatures sur 3 » pour dépenser, pour tous | Prévu |
-| | Paiements groupés | Jusqu'à 100 destinataires en une transaction | Prévu |
+| **Protocole 4** | Paiements groupés | Jusqu'à 100 destinataires en une transaction, frais par tranche de 10 | Fait (0.11, lot 4a) |
+| | Horodatage natif | Transaction dédiée, retrouvée par sa seule empreinte | Fait (0.11, lot 4a) |
+| | Comptes multisig | « 2 signatures sur 3 » pour dépenser, pour tous | Prévu |
 | | Mandats de prélèvement | Un tiers prélève jusqu'à X par période, révocable | Prévu |
 | | Frais payés par un tiers | Le commerçant paie les frais du client | Prévu |
 | | Plafonds de dépense | Clé « téléphone » limitée, clé « coffre » sans limite | Prévu |
 | | Récupération sociale | Des proches remplacent une clé perdue, avec délai d'opposition | Prévu |
-| | Horodatage natif | Une transaction dédiée à l'empreinte d'un document | Prévu |
 | | Arbres pour tout l'état | Noms et séquestres rangés comme les comptes (voir §6) | Prévu |
 | **Protocole 5** | Jetons de tiers | Monnaies, points, crédits : accord préalable, gel déclaré, émetteur visible, création payante | Prévu |
 | | Titres (non fongibles) | Collections d'objets uniques : billets, certificats, cartes de membre | Prévu |
@@ -131,8 +131,9 @@ référence pour toute nouvelle proposition.
 | 0.8.x | Logiciel et protocole 2 | Portefeuille, noms, séquestres, nœud public (fait) |
 | **0.9** | Logiciel | Demandes de paiement (lien `vinx:` et QR), export CSV, horodatage de documents |
 | **0.10** | Protocole 3, nouvelle genèse | Émission des validateurs, frais aux validateurs, trésorerie de genèse supprimée (ADR 0002) |
-| 0.11 | Logiciel | Portefeuille Android (`.apk`), scan de QR |
-| Protocole 4 | Règles | Comptes et paiements, horodatage natif, arbres pour tout l'état |
+| **0.11** | Protocole 4, lot 4a | Paiements groupés, horodatage natif |
+| Protocole 4, lots 4b à 4d | Règles | Multisig et plafonds, mandats et frais payés par un tiers, arbres pour tout l'état |
+| Ensuite | Logiciel | Portefeuille Android (`.apk`), scan de QR |
 | Protocole 5 | Règles | Jetons et titres, réserve par objet |
 | Protocole 6 | Règles | Canaux de paiement |
 | En parallèle | Hors chaîne | Pilote VinX Ping (premier subnet), conception des subnets |

@@ -57,7 +57,30 @@ pub enum TxBody {
     RefundDeal {
         id: Hash,
     } = 0x08,
+    // Protocole 4 et suivants.
+    /// Plusieurs paiements en une transaction (SPEC §5.6).
+    BatchTransfer {
+        payments: Vec<Payment>,
+    } = 0x09,
+    /// Horodatage : inscrit l'empreinte d'un document (SPEC §5.7).
+    Attest {
+        digest: Hash,
+    } = 0x0A,
 }
+
+/// Un paiement d'un [`TxBody::BatchTransfer`].
+#[derive(Clone, Debug, PartialEq, Eq, BorshSerialize, BorshDeserialize)]
+pub struct Payment {
+    pub to: Address,
+    pub amount: Amount,
+    pub memo: Option<Vec<u8>>,
+}
+
+/// Nombre maximal de paiements d'un paiement groupé.
+pub const MAX_BATCH_PAYMENTS: usize = 100;
+
+/// Paiements couverts par un frais minimal dans un paiement groupé.
+pub const PAYMENTS_PER_FEE: usize = 10;
 
 impl TxBody {
     /// Version du protocole à partir de laquelle ce type de transaction est accepté.
@@ -66,7 +89,20 @@ impl TxBody {
             TxBody::Transfer { .. } | TxBody::SetMemoRequired { .. } | TxBody::RotateKey { .. } => {
                 1
             }
+            TxBody::BatchTransfer { .. } | TxBody::Attest { .. } => 4,
             _ => 2,
+        }
+    }
+
+    /// Frais minimaux pour ce corps, `min_fee` étant celui du réseau : un
+    /// paiement groupé paie un frais minimal par tranche de 10 paiements.
+    pub fn min_fee(&self, min_fee: Amount) -> Amount {
+        match self {
+            TxBody::BatchTransfer { payments } => {
+                let units = payments.len().div_ceil(PAYMENTS_PER_FEE).max(1);
+                min_fee.saturating_mul(Amount::try_from(units).unwrap_or(Amount::MAX))
+            }
+            _ => min_fee,
         }
     }
 }
@@ -149,7 +185,7 @@ mod tests {
         .map(|b| encode(&b)[0]);
         assert_eq!(codes, [0x01, 0x02, 0x03]);
         assert!(decode::<TxBody>(&[0x00, 1]).is_err());
-        assert!(decode::<TxBody>(&[0x09, 1]).is_err());
+        assert!(decode::<TxBody>(&[0x0B, 1]).is_err());
     }
 
     #[test]
