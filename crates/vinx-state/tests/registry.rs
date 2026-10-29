@@ -76,7 +76,7 @@ fn register_renew_and_expire() {
     );
     let reg = &net.state.registry;
     assert_eq!(reg.resolve("alice", T0), Some(addr(&alice)));
-    assert_eq!(reg.names["alice"].expires_at, T0 + NAME_PERIOD);
+    assert_eq!(reg.names.get("alice").unwrap().expires_at, T0 + NAME_PERIOD);
 
     // Pris par Alice, même pendant le délai de grâce après expiration.
     let late = T0 + NAME_PERIOD + NAME_GRACE - 1;
@@ -90,7 +90,7 @@ fn register_renew_and_expire() {
     net.block(T0 + 10, &[], &[register(&alice, 2, "alice", false)])
         .unwrap();
     assert_eq!(
-        net.state.registry.names["alice"].expires_at,
+        net.state.registry.names.get("alice").unwrap().expires_at,
         T0 + 2 * NAME_PERIOD
     );
 

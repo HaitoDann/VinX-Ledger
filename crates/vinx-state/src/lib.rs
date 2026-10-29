@@ -10,6 +10,7 @@ pub mod registry;
 pub mod sigcache;
 pub mod smt;
 pub mod state;
+pub mod table;
 pub mod validators;
 
 pub use accounts::Accounts;

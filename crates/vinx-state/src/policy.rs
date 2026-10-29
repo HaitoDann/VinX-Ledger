@@ -7,9 +7,8 @@
 //!   `daily_limit` par jour UTC, mais pas changer la politique ni la clé ;
 //! - sans plafond, toute transaction exige les approbations (multisig pur).
 
+use crate::table::{Row, Table};
 use borsh::{BorshDeserialize, BorshSerialize};
-use std::collections::BTreeMap;
-use std::sync::Arc;
 use vinx_core::{Amount, Approval, MAX_POLICY_SIGNERS, PolicyConfig};
 use vinx_crypto::Address;
 
@@ -22,8 +21,12 @@ pub struct Policy {
     pub spent: Amount,
 }
 
-/// Politiques des comptes qui en ont une, derrière un `Arc` comme le registre.
-pub type Policies = Arc<BTreeMap<Address, Policy>>;
+/// Politiques des comptes qui en ont une.
+pub type Policies = Table<Address, Policy>;
+
+impl Row for Policy {
+    const TAG: u8 = 3;
+}
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, thiserror::Error)]
 pub enum PolicyError {

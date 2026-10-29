@@ -8,10 +8,10 @@ use crate::policy::{Policies, Policy, PolicyError};
 use crate::registry::{
     Deal, MAX_DEAL_DURATION, NAME_GRACE, NAME_PERIOD, NameRecord, Registry, valid_name,
 };
+use crate::table::{Row, Table};
 use crate::validators::{ValidatorChange, ValidatorError, ValidatorSet, validators_hash};
 use borsh::{BorshDeserialize, BorshSerialize};
 use std::collections::BTreeMap;
-use std::sync::Arc;
 use thiserror::Error;
 use vinx_core::params::MIN_UPGRADE_DELAY;
 use vinx_core::{
@@ -373,6 +373,80 @@ impl State {
         })
     }
 
+    /// Comme [`Self::globals_bytes`], sans les lignes des tables : le stockage
+    /// les écrit à part, ligne par ligne ([`Self::take_dirty_rows`]).
+    pub fn globals_bytes_light(&self) -> Vec<u8> {
+        let mut registry = self.registry.clone();
+        registry.names = Table::new();
+        registry.deals = Table::new();
+        encode(&Globals {
+            chain_id: self.chain_id.clone(),
+            protocol_version: self.protocol_version,
+            height: self.height,
+            escrow: self.escrow.clone(),
+            admin: self.admin.clone(),
+            validators: self.validators.clone(),
+            params: self.params.clone(),
+            upgrade: self.upgrade.clone(),
+            registry,
+            emission: self.emission.clone(),
+            policies: Table::new(),
+            mandates: Table::new(),
+        })
+    }
+
+    /// Lignes des tables modifiées depuis le dernier appel : clé
+    /// `étiquette ‖ borsh(clé)`, valeur `borsh(valeur)` ou `None` si supprimée.
+    pub fn take_dirty_rows(&mut self) -> Vec<(Vec<u8>, Option<Vec<u8>>)> {
+        fn rows<K: crate::table::Key, V: Row>(
+            t: &mut Table<K, V>,
+        ) -> Vec<(Vec<u8>, Option<Vec<u8>>)> {
+            t.take_dirty()
+                .into_iter()
+                .map(|(k, v)| {
+                    let mut key = vec![V::TAG];
+                    key.extend_from_slice(&encode(&k));
+                    (key, v.map(|v| encode(&v)))
+                })
+                .collect()
+        }
+        let mut out = rows(&mut self.registry.names);
+        out.extend(rows(&mut self.registry.deals));
+        out.extend(rows(&mut self.policies));
+        out.extend(rows(&mut self.mandates));
+        out
+    }
+
+    /// Recharge une ligne écrite par [`Self::take_dirty_rows`].
+    pub fn load_row(&mut self, key: &[u8], value: &[u8]) -> Option<()> {
+        fn load<K: crate::table::Key, V: Row>(
+            t: &mut Table<K, V>,
+            key: &[u8],
+            value: &[u8],
+        ) -> Option<()> {
+            let k = vinx_core::decode(key).ok()?;
+            let v = vinx_core::decode(value).ok()?;
+            t.load(k, v);
+            Some(())
+        }
+        let (tag, key) = key.split_first()?;
+        match *tag {
+            t if t == <NameRecord as Row>::TAG => load(&mut self.registry.names, key, value),
+            t if t == <Deal as Row>::TAG => load(&mut self.registry.deals, key, value),
+            t if t == <Policy as Row>::TAG => load(&mut self.policies, key, value),
+            t if t == <Mandate as Row>::TAG => load(&mut self.mandates, key, value),
+            _ => None,
+        }
+    }
+
+    /// Note toutes les lignes des tables comme modifiées (installation d'un instantané).
+    pub fn mark_all_rows_dirty(&mut self) {
+        self.registry.names.mark_all_dirty();
+        self.registry.deals.mark_all_dirty();
+        self.policies.mark_all_dirty();
+        self.mandates.mark_all_dirty();
+    }
+
     /// Reconstitue un état à partir de [`Self::globals_bytes`] et des comptes.
     pub fn from_parts(globals: &[u8], accounts: Accounts) -> Option<Self> {
         let g: Globals = vinx_core::decode(globals)
@@ -427,15 +501,23 @@ impl State {
             &self.upgrade,
             self.protocol_version,
         ));
-        if self.protocol_version >= 2 {
+        if self.protocol_version >= 4 {
+            // Les tables par leur racine (§4.5) : coût proportionnel aux lignes modifiées.
+            let r = &self.registry;
+            globals.extend_from_slice(&encode(&(
+                r.now,
+                r.name_fee,
+                r.names.root(),
+                r.deals.root(),
+            )));
+        } else if self.protocol_version >= 2 {
             globals.extend_from_slice(&encode(&self.registry));
         }
         if self.protocol_version >= 3 {
             globals.extend_from_slice(&encode(&self.emission));
         }
         if self.protocol_version >= 4 {
-            globals.extend_from_slice(&encode(&self.policies));
-            globals.extend_from_slice(&encode(&self.mandates));
+            globals.extend_from_slice(&encode(&(self.policies.root(), self.mandates.root())));
         }
         hash_tagged_parts(
             Domain::State,
@@ -751,34 +833,34 @@ impl State {
         self.emission.pot = pot;
         match mandate_write {
             Some((key, Some(m))) => {
-                Arc::make_mut(&mut self.mandates).insert(key, m);
+                self.mandates.insert(key, m);
             }
             Some((key, None)) => {
-                Arc::make_mut(&mut self.mandates).remove(&key);
+                self.mandates.remove(&key);
             }
             None => {}
         }
         if let Some(p) = policy_write {
-            Arc::make_mut(&mut self.policies).insert(tx.sender, p);
+            self.policies.insert(tx.sender, p);
         }
         match set_policy {
             Some(Some(p)) => {
-                Arc::make_mut(&mut self.policies).insert(tx.sender, p);
+                self.policies.insert(tx.sender, p);
             }
             Some(None) => {
-                Arc::make_mut(&mut self.policies).remove(&tx.sender);
+                self.policies.remove(&tx.sender);
             }
             None => {}
         }
         match registry {
             Some(Write::Name(name, record)) => {
-                Arc::make_mut(&mut self.registry.names).insert(name, record);
+                self.registry.names.insert(name, record);
             }
             Some(Write::OpenDeal(id, deal)) => {
-                Arc::make_mut(&mut self.registry.deals).insert(id, deal);
+                self.registry.deals.insert(id, deal);
             }
             Some(Write::CloseDeal(id)) => {
-                Arc::make_mut(&mut self.registry.deals).remove(&id);
+                self.registry.deals.remove(&id);
             }
             None => {}
         }

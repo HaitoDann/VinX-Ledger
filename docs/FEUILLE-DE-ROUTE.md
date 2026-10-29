@@ -60,7 +60,7 @@ référence pour toute nouvelle proposition.
 | | Frais payés par un tiers | Le commerçant paie les frais du client | Fait (0.13, lot 4c) |
 | | Plafonds de dépense | Clé « téléphone » limitée, clé « coffre » sans limite | Fait (0.12, lot 4b) |
 | | Récupération sociale | Des proches remplacent une clé perdue, avec délai d'opposition | Prévu |
-| | Arbres pour tout l'état | Noms et séquestres rangés comme les comptes (voir §6) | Prévu |
+| | Arbres pour tout l'état | Noms, séquestres, règles et mandats rangés comme les comptes (voir §6) | Fait (0.14, lot 4d) |
 | **Protocole 5** | Jetons de tiers | Monnaies, points, crédits : accord préalable, gel déclaré, émetteur visible, création payante | Prévu |
 | | Titres (non fongibles) | Collections d'objets uniques : billets, certificats, cartes de membre | Prévu |
 | | Réserve par objet | Chaque ligne de jeton ou titre immobilise un dépôt | Prévu |
@@ -121,7 +121,7 @@ référence pour toute nouvelle proposition.
 |---|---|---|
 | Historique des blocs | Élagué après 24 h ; ~17 Go par jour au maximum théorique (1 000 tx/s en continu) | Un seul nœud archive facultatif |
 | Comptes | ~150 à 200 Mo pour 1 million | Réserve minimale de 0,1 VINX |
-| Noms et séquestres | Recalculés en entier à chaque bloc aujourd'hui | **À ranger dans des arbres avant le protocole 5** |
+| Noms, séquestres, règles, mandats | Arbres et écriture ligne par ligne depuis le protocole 4 : 0,2 ms par bloc avec 200 000 noms, contre 500 ms avant | Fait (0.14) |
 | Jetons et titres | Une ligne par détenteur, un enregistrement par titre | Réserve par objet, accord préalable, nettoyage des noms expirés |
 
 ## 7. Ordre des versions
@@ -134,7 +134,7 @@ référence pour toute nouvelle proposition.
 | **0.11** | Protocole 4, lot 4a | Paiements groupés, horodatage natif |
 | **0.12** | Protocole 4, lot 4b | Comptes multisig, plafonds journaliers et clé coffre |
 | **0.13** | Protocole 4, lot 4c | Mandats de prélèvement, frais payés par un parrain |
-| Protocole 4, lot 4d | Règles | Arbres pour tout l'état (noms, séquestres, règles, mandats) |
+| **0.14** | Protocole 4, lot 4d | Arbres pour tout l'état : une modification ne recalcule et n'écrit que sa ligne |
 | Ensuite | Logiciel | Portefeuille Android (`.apk`), scan de QR |
 | Protocole 5 | Règles | Jetons et titres, réserve par objet |
 | Protocole 6 | Règles | Canaux de paiement |

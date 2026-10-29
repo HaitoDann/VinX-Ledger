@@ -96,9 +96,13 @@ Registry {
 
 `state_root = H("vinx/state" ‖ racine_SMT(accounts) ‖ H(G))`, avec
 `G = borsh(escrow, admin, validators, params, upgrade, protocol_version)`,
-suivi de `borsh(registry)` à partir du protocole 2, de `borsh(emission)` à
-partir du protocole 3, puis de `borsh(policies)` et `borsh(mandates)` à partir
-du protocole 4.
+puis :
+
+| Protocole | Ajouté à `G` |
+|---|---|
+| 2 et 3 | `borsh(registry)` (tables entières) |
+| 3 et plus | `borsh(emission)` |
+| 4 et plus | `borsh(registry.now, registry.name_fee, racine(names), racine(deals))`, puis `borsh(racine(policies), racine(mandates))` (§4.5) |
 
 **Arbre des comptes (SMT).** Arbre binaire compact indexé par les 160 bits de
 l'adresse, du bit de poids fort au bit de poids faible :
@@ -168,6 +172,25 @@ Emission {
      `⌊pot × n / N⌋`, crédité à l'adresse de sa clé ;
   3. `pot` garde le reliquat ; les compteurs repartent de zéro.
   Si aucun bloc n'a été compté, rien n'est versé et `pot` est conservé.
+
+### 4.5 Tables (protocole 4)
+
+Les noms, séquestres, règles de compte et mandats sont des tables. Chacune a
+pour engagement un arbre de même forme que celui des comptes (§4.1) :
+
+- clé de 20 octets d'une ligne : `H("vinx/table/key" ‖ étiquette ‖ borsh(clé))[0..20]` ;
+- feuille : `H("vinx/smt/leaf" ‖ clé de 20 octets ‖ H(borsh(clé, valeur)))`.
+
+| Table | Clé | Étiquette |
+|---|---|---|
+| `names` | `String` | 1 |
+| `deals` | `Hash` | 2 |
+| `policies` | `Address` | 3 |
+| `mandates` | `(payeur, bénéficiaire)` | 4 |
+
+Une modification ne recalcule que le chemin de sa ligne. L'encodage borsh d'une
+table, utilisé jusqu'au protocole 3, est celui d'une table triée : nombre de
+lignes, puis paires dans l'ordre des clés.
 
 ## 5. Transactions
 
@@ -589,6 +612,7 @@ hauteur `H + 2`. `validators_hash` du bloc `H + 1` reflète déjà le nouvel ens
 | Approbation d'une transaction de compte | `vinx/tx/approval` |
 | Signature du parrain des frais | `vinx/tx/sponsor` |
 | Arbre des comptes (feuille / nœud) | `vinx/smt/leaf`, `vinx/smt/node` |
+| Clé d'une ligne de table | `vinx/table/key` |
 | Merkle (feuille / nœud / liste vide) | `vinx/merkle/leaf`, `vinx/merkle/node`, `vinx/merkle/empty` |
 
 ### 10.1 Arbre de Merkle (`tx_root`)
