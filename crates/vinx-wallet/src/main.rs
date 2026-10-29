@@ -7,7 +7,7 @@ use vinx_core::{AdminAction, Amount};
 use vinx_crypto::{Address, KeyPair};
 use vinx_keystore::encoding::{key_from_hex, key_to_hex};
 use vinx_keystore::keyfile::{DEFAULT_KDF, KeyFile, password};
-use vinx_wallet::amount::{format_vinx, parse_vinx};
+use vinx_wallet::amount::{format_units, format_vinx, parse_units, parse_vinx};
 use vinx_wallet::client::Client;
 use vinx_wallet::{admin, bench, ops, preflight};
 
@@ -89,6 +89,12 @@ enum Command {
     /// Mandats de prélèvement (protocole 4).
     #[command(subcommand)]
     Mandate(MandateCommand),
+    /// Noms .vinx (protocole 2).
+    #[command(subcommand)]
+    Name(NameCommand),
+    /// Actifs natifs : jetons créés par les utilisateurs (protocole 5).
+    #[command(subcommand)]
+    Asset(AssetCommand),
     /// Vérifie que de futurs validateurs sont prêts, avant de les ajouter.
     ///
     /// `--node` désigne un nœud du réseau actuel (la référence) ; chaque
@@ -277,6 +283,170 @@ enum MandateCommand {
         #[arg(long)]
         memo: Option<String>,
     },
+}
+
+#[derive(Subcommand)]
+enum NameCommand {
+    /// Titulaire, échéance et prix d'un nom.
+    Show { name: String },
+    /// Enregistre un nom pour un an, ou le renouvelle.
+    Register {
+        #[arg(long)]
+        key: PathBuf,
+        name: String,
+    },
+    /// Cède un nom à une autre adresse.
+    Transfer {
+        #[arg(long)]
+        key: PathBuf,
+        name: String,
+        #[arg(long)]
+        to: Address,
+    },
+}
+
+/// `Eurv.vinx` → `eurv`.
+fn bare_name(name: &str) -> String {
+    let name = name.trim().to_lowercase();
+    name.strip_suffix(".vinx").unwrap_or(&name).to_owned()
+}
+
+#[derive(Subcommand)]
+enum AssetCommand {
+    /// Tous les actifs du réseau.
+    List,
+    /// Détail d'un actif.
+    Show { symbol: String },
+    /// Soldes en actifs d'une adresse.
+    Balances { address: Address },
+    /// Crée un actif ; le symbole doit être un nom .vinx du compte (eurv.vinx → EURV).
+    Create {
+        #[arg(long)]
+        key: PathBuf,
+        #[arg(long)]
+        symbol: String,
+        /// Nom affiché, par exemple « Euro VinX ».
+        #[arg(long)]
+        name: String,
+        /// Décimales, de 0 à 9.
+        #[arg(long, default_value_t = 2)]
+        decimals: u8,
+        /// Supply initiale, créditée à l'émetteur.
+        #[arg(long, default_value = "0")]
+        supply: String,
+        /// Supply maximale ; sans elle, pas de plafond.
+        #[arg(long)]
+        max_supply: Option<String>,
+        /// Garder le pouvoir d'émettre de nouvelles unités.
+        #[arg(long)]
+        mintable: bool,
+        /// Garder le pouvoir de geler un compte ou tout l'actif.
+        #[arg(long)]
+        freezable: bool,
+        /// Garder le pouvoir de reprise forcée.
+        #[arg(long)]
+        clawback: bool,
+    },
+    /// Émet de nouvelles unités (émetteur).
+    Mint {
+        #[arg(long)]
+        key: PathBuf,
+        #[arg(long)]
+        symbol: String,
+        #[arg(long)]
+        to: Address,
+        #[arg(long)]
+        amount: String,
+    },
+    /// Détruit des unités de son propre solde.
+    Burn {
+        #[arg(long)]
+        key: PathBuf,
+        #[arg(long)]
+        symbol: String,
+        #[arg(long)]
+        amount: String,
+    },
+    /// Envoie des unités d'un actif ; le destinataire doit l'avoir accepté.
+    Send {
+        #[arg(long)]
+        key: PathBuf,
+        #[arg(long)]
+        symbol: String,
+        #[arg(long)]
+        to: Address,
+        #[arg(long)]
+        amount: String,
+        #[arg(long)]
+        memo: Option<String>,
+    },
+    /// Accepte un actif, pour pouvoir le recevoir.
+    Accept {
+        #[arg(long)]
+        key: PathBuf,
+        #[arg(long)]
+        symbol: String,
+    },
+    /// Retire un actif de son compte (solde nul).
+    Leave {
+        #[arg(long)]
+        key: PathBuf,
+        #[arg(long)]
+        symbol: String,
+    },
+    /// Gèle un compte, ou tout l'actif sans --account (émetteur).
+    Freeze {
+        #[arg(long)]
+        key: PathBuf,
+        #[arg(long)]
+        symbol: String,
+        #[arg(long)]
+        account: Option<Address>,
+    },
+    /// Dégèle un compte, ou tout l'actif sans --account (émetteur).
+    Unfreeze {
+        #[arg(long)]
+        key: PathBuf,
+        #[arg(long)]
+        symbol: String,
+        #[arg(long)]
+        account: Option<Address>,
+    },
+    /// Reprend des unités d'un compte (émetteur, pouvoir de reprise forcée).
+    Clawback {
+        #[arg(long)]
+        key: PathBuf,
+        #[arg(long)]
+        symbol: String,
+        #[arg(long)]
+        from: Address,
+        #[arg(long)]
+        amount: String,
+    },
+    /// Abandonne définitivement des pouvoirs de l'émetteur.
+    Renounce {
+        #[arg(long)]
+        key: PathBuf,
+        #[arg(long)]
+        symbol: String,
+        #[arg(long)]
+        mint: bool,
+        #[arg(long)]
+        freeze: bool,
+        #[arg(long)]
+        clawback: bool,
+    },
+}
+
+/// Décimales d'un actif, lues sur le nœud.
+fn asset_decimals(client: &Client, symbol: &str) -> Result<usize> {
+    let v = client
+        .get_json(&format!("/assets/{symbol}"))?
+        .ok_or_else(|| anyhow!("actif inconnu : {symbol}"))?;
+    v.get("decimals")
+        .and_then(serde_json::Value::as_u64)
+        .and_then(|d| usize::try_from(d).ok())
+        .ok_or_else(|| anyhow!("réponse du nœud invalide"))
 }
 
 #[derive(Args)]
@@ -824,6 +994,232 @@ fn main() -> Result<()> {
                 );
             }
         },
+        Command::Name(cmd) => {
+            let submit = |key: &Path, body: vinx_core::TxBody| -> Result<()> {
+                println!(
+                    "transaction {}",
+                    ops::submit(&client, &load_key(key, pwf)?, None, body, None)?
+                );
+                Ok(())
+            };
+            match cmd {
+                NameCommand::Show { name } => {
+                    let v = client
+                        .get_json(&format!("/names/{}", bare_name(&name)))?
+                        .ok_or_else(|| anyhow!("nom introuvable"))?;
+                    println!("{}", serde_json::to_string_pretty(&v)?);
+                }
+                NameCommand::Register { key, name } => {
+                    let name = bare_name(&name);
+                    submit(&key, vinx_core::TxBody::RegisterName { name })?;
+                }
+                NameCommand::Transfer { key, name, to } => {
+                    let name = bare_name(&name);
+                    submit(&key, vinx_core::TxBody::TransferName { name, to })?;
+                }
+            }
+        }
+        Command::Asset(cmd) => {
+            let send = |key: &Path, body: vinx_core::TxBody| -> Result<()> {
+                println!(
+                    "transaction {}",
+                    ops::submit(&client, &load_key(key, pwf)?, None, body, None)?
+                );
+                Ok(())
+            };
+            match cmd {
+                AssetCommand::List => {
+                    let v = client.get_json("/assets")?.unwrap_or_default();
+                    let empty = Vec::new();
+                    let list = v
+                        .get("assets")
+                        .and_then(serde_json::Value::as_array)
+                        .unwrap_or(&empty);
+                    if list.is_empty() {
+                        println!("aucun actif");
+                    }
+                    for a in list {
+                        let field = |k: &str| a.get(k).and_then(|x| x.as_str()).unwrap_or("?");
+                        let decimals = a.get("decimals").and_then(|d| d.as_u64()).unwrap_or(0);
+                        let supply = field("supply_units").parse().unwrap_or(0);
+                        println!(
+                            "{:<10} {:<24} supply {:>20}  émetteur {}",
+                            field("symbol"),
+                            field("name"),
+                            format_units(supply, usize::try_from(decimals).unwrap_or(0)),
+                            field("issuer"),
+                        );
+                    }
+                }
+                AssetCommand::Show { symbol } => {
+                    let v = client
+                        .get_json(&format!("/assets/{symbol}"))?
+                        .ok_or_else(|| anyhow!("actif inconnu"))?;
+                    println!("{}", serde_json::to_string_pretty(&v)?);
+                }
+                AssetCommand::Balances { address } => {
+                    let v = client
+                        .get_json(&format!("/accounts/{address}"))?
+                        .ok_or_else(|| anyhow!("compte inconnu"))?;
+                    let empty = Vec::new();
+                    let list = v
+                        .get("assets")
+                        .and_then(serde_json::Value::as_array)
+                        .unwrap_or(&empty);
+                    if list.is_empty() {
+                        println!("aucun actif accepté");
+                    }
+                    for h in list {
+                        let decimals = h.get("decimals").and_then(|d| d.as_u64()).unwrap_or(0);
+                        let units = h
+                            .get("units")
+                            .and_then(|x| x.as_str())
+                            .and_then(|x| x.parse().ok())
+                            .unwrap_or(0);
+                        let frozen = h.get("frozen").and_then(|f| f.as_bool()) == Some(true);
+                        println!(
+                            "{:<10} {:>20}{}",
+                            h.get("symbol").and_then(|x| x.as_str()).unwrap_or("?"),
+                            format_units(units, usize::try_from(decimals).unwrap_or(0)),
+                            if frozen { "  (gelé)" } else { "" },
+                        );
+                    }
+                }
+                AssetCommand::Create {
+                    key,
+                    symbol,
+                    name,
+                    decimals,
+                    supply,
+                    max_supply,
+                    mintable,
+                    freezable,
+                    clawback,
+                } => {
+                    let d = usize::from(decimals);
+                    let body = vinx_core::TxBody::CreateAsset {
+                        symbol: symbol.to_ascii_uppercase(),
+                        name,
+                        decimals,
+                        initial_supply: parse_units(&supply, d)?,
+                        max_supply: max_supply.map(|m| parse_units(&m, d)).transpose()?,
+                        powers: vinx_core::AssetPowers {
+                            mint: mintable,
+                            freeze: freezable,
+                            clawback,
+                        },
+                    };
+                    send(&key, body)?;
+                }
+                AssetCommand::Mint {
+                    key,
+                    symbol,
+                    to,
+                    amount,
+                } => {
+                    let amount = parse_units(&amount, asset_decimals(&client, &symbol)?)?;
+                    let symbol = symbol.to_ascii_uppercase();
+                    send(&key, vinx_core::TxBody::MintAsset { symbol, to, amount })?;
+                }
+                AssetCommand::Burn {
+                    key,
+                    symbol,
+                    amount,
+                } => {
+                    let amount = parse_units(&amount, asset_decimals(&client, &symbol)?)?;
+                    let symbol = symbol.to_ascii_uppercase();
+                    send(&key, vinx_core::TxBody::BurnAsset { symbol, amount })?;
+                }
+                AssetCommand::Send {
+                    key,
+                    symbol,
+                    to,
+                    amount,
+                    memo,
+                } => {
+                    let amount = parse_units(&amount, asset_decimals(&client, &symbol)?)?;
+                    let body = vinx_core::TxBody::TransferAsset {
+                        symbol: symbol.to_ascii_uppercase(),
+                        to,
+                        amount,
+                        memo: memo.map(String::into_bytes),
+                    };
+                    send(&key, body)?;
+                }
+                AssetCommand::Accept { key, symbol } => {
+                    let body = vinx_core::TxBody::AcceptAsset {
+                        symbol: symbol.to_ascii_uppercase(),
+                        accept: true,
+                    };
+                    send(&key, body)?;
+                }
+                AssetCommand::Leave { key, symbol } => {
+                    let body = vinx_core::TxBody::AcceptAsset {
+                        symbol: symbol.to_ascii_uppercase(),
+                        accept: false,
+                    };
+                    send(&key, body)?;
+                }
+                AssetCommand::Freeze {
+                    key,
+                    symbol,
+                    account,
+                } => {
+                    let body = vinx_core::TxBody::FreezeAsset {
+                        symbol: symbol.to_ascii_uppercase(),
+                        account,
+                        frozen: true,
+                    };
+                    send(&key, body)?;
+                }
+                AssetCommand::Unfreeze {
+                    key,
+                    symbol,
+                    account,
+                } => {
+                    let body = vinx_core::TxBody::FreezeAsset {
+                        symbol: symbol.to_ascii_uppercase(),
+                        account,
+                        frozen: false,
+                    };
+                    send(&key, body)?;
+                }
+                AssetCommand::Clawback {
+                    key,
+                    symbol,
+                    from,
+                    amount,
+                } => {
+                    let amount = parse_units(&amount, asset_decimals(&client, &symbol)?)?;
+                    let body = vinx_core::TxBody::ClawbackAsset {
+                        symbol: symbol.to_ascii_uppercase(),
+                        from,
+                        amount,
+                    };
+                    send(&key, body)?;
+                }
+                AssetCommand::Renounce {
+                    key,
+                    symbol,
+                    mint,
+                    freeze,
+                    clawback,
+                } => {
+                    if !(mint || freeze || clawback) {
+                        bail!("indiquez au moins un pouvoir : --mint, --freeze ou --clawback");
+                    }
+                    let body = vinx_core::TxBody::RenounceAssetPowers {
+                        symbol: symbol.to_ascii_uppercase(),
+                        powers: vinx_core::AssetPowers {
+                            mint,
+                            freeze,
+                            clawback,
+                        },
+                    };
+                    send(&key, body)?;
+                }
+            }
+        }
         Command::Admin(cmd) => match cmd {
             AdminCommand::Status => print_governance(&client.governance()?),
             AdminCommand::Propose {
