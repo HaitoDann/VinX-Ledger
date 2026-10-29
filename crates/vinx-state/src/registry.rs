@@ -1,11 +1,10 @@
 //! Noms `.vinx` et séquestres entre utilisateurs (protocole 2, SPEC §5.4, §5.5).
 //!
-//! Les tables sont derrière un `Arc` : copier l'état pour exécuter un bloc ne
-//! les copie que si le bloc les modifie.
+//! Les tables sont des [`Table`] : copie quasi gratuite, racine incrémentale
+//! à partir du protocole 4 (SPEC §4.5).
 
+use crate::table::{Row, Table};
 use borsh::{BorshDeserialize, BorshSerialize};
-use std::collections::BTreeMap;
-use std::sync::Arc;
 use vinx_core::{Amount, UNITS_PER_VINX};
 use vinx_crypto::{Address, Hash};
 
@@ -38,13 +37,24 @@ pub struct Deal {
     pub memo: Option<Vec<u8>>,
 }
 
+impl Row for NameRecord {
+    const TAG: u8 = 1;
+}
+
+impl Row for Deal {
+    const TAG: u8 = 2;
+    fn locked(&self) -> u128 {
+        u128::from(self.amount)
+    }
+}
+
 #[derive(Clone, Debug, PartialEq, Eq, BorshSerialize, BorshDeserialize)]
 pub struct Registry {
     /// Horodatage (secondes) du bloc en cours, ou du dernier bloc appliqué.
     pub now: u64,
     pub name_fee: Amount,
-    pub names: Arc<BTreeMap<String, NameRecord>>,
-    pub deals: Arc<BTreeMap<Hash, Deal>>,
+    pub names: Table<String, NameRecord>,
+    pub deals: Table<Hash, Deal>,
 }
 
 impl Default for Registry {
@@ -52,8 +62,8 @@ impl Default for Registry {
         Self {
             now: 0,
             name_fee: DEFAULT_NAME_FEE,
-            names: Arc::default(),
-            deals: Arc::default(),
+            names: Table::new(),
+            deals: Table::new(),
         }
     }
 }
@@ -70,7 +80,7 @@ pub fn valid_name(name: &str) -> bool {
 impl Registry {
     /// Montant total bloqué en séquestre.
     pub fn locked(&self) -> u128 {
-        self.deals.values().map(|d| u128::from(d.amount)).sum()
+        self.deals.locked()
     }
 
     /// Titulaire actuel d'un nom, s'il n'a pas expiré à `now`.

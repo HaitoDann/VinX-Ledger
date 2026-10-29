@@ -27,6 +27,7 @@ pub enum Domain {
     Deal,
     TxApproval,
     TxSponsor,
+    TableKey,
 }
 
 impl Domain {
@@ -50,6 +51,7 @@ impl Domain {
             Domain::Deal => "vinx/deal",
             Domain::TxApproval => "vinx/tx/approval",
             Domain::TxSponsor => "vinx/tx/sponsor",
+            Domain::TableKey => "vinx/table/key",
         }
     }
 }

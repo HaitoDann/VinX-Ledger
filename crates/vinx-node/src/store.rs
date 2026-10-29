@@ -35,6 +35,9 @@ const ADMIN_LOG: TableDefinition<u64, &[u8]> = TableDefinition::new("admin_log")
 const ADDR_INDEX: TableDefinition<(&[u8; 20], u64, u32), ()> = TableDefinition::new("addr_index");
 /// (empreinte, hauteur, rang) des horodatages (`Attest`), pour les vérifier
 /// sans identifiant de transaction. Suit l'élagage des blocs.
+/// Lignes des tables de l'état (noms, séquestres, règles, mandats) :
+/// `étiquette ‖ borsh(clé)` → `borsh(valeur)`. Écrites ligne par ligne.
+const ROWS: TableDefinition<&[u8], &[u8]> = TableDefinition::new("rows");
 const ATTEST_INDEX: TableDefinition<(&[u8; 32], u64, u32), ()> =
     TableDefinition::new("attest_index");
 
@@ -137,6 +140,32 @@ fn attest_keys(block: &Block) -> Result<Vec<(Hash, u32)>> {
     Ok(keys)
 }
 
+/// Écrit les comptes et les lignes modifiés, puis le reste de l'état.
+fn write_state(tx: &redb::WriteTransaction, state: &mut State) -> Result<()> {
+    {
+        let mut table = tx.open_table(ACCOUNTS)?;
+        for (address, account) in state.accounts.take_dirty() {
+            table.insert(address.as_bytes(), encode(&account).as_slice())?;
+        }
+    }
+    {
+        let mut rows = tx.open_table(ROWS)?;
+        for (key, value) in state.take_dirty_rows() {
+            match value {
+                Some(v) => {
+                    rows.insert(key.as_slice(), v.as_slice())?;
+                }
+                None => {
+                    rows.remove(key.as_slice())?;
+                }
+            }
+        }
+    }
+    tx.open_table(META)?
+        .insert(GLOBALS, state.globals_bytes_light().as_slice())?;
+    Ok(())
+}
+
 /// Indexe les transactions d'un bloc et journalise ses actions admin.
 fn index_block(tx: &redb::WriteTransaction, block: &Block) -> Result<()> {
     let height = block.header.height;
@@ -180,6 +209,7 @@ impl Store {
             tx.open_table(ADMIN_LOG)?;
             tx.open_table(ADDR_INDEX)?;
             tx.open_table(ATTEST_INDEX)?;
+            tx.open_table(ROWS)?;
             let mut meta = tx.open_table(META)?;
             if meta.get(LEGACY_STATE)?.is_some() {
                 bail!(
@@ -241,8 +271,14 @@ impl Store {
                 decode::<Account>(account.value(), "compte")?,
             ));
         }
-        let state = State::from_parts(globals.value(), accounts.into_iter().collect())
+        let mut state = State::from_parts(globals.value(), accounts.into_iter().collect())
             .context("état corrompu sur le disque")?;
+        for entry in tx.open_table(ROWS)?.iter()? {
+            let (key, value) = entry?;
+            state
+                .load_row(key.value(), value.value())
+                .context("ligne de table corrompue sur le disque")?;
+        }
         Ok(Some(state))
     }
 
@@ -261,14 +297,7 @@ impl Store {
         tx.open_table(CERTS)?
             .insert(height, encode(cert).as_slice())?;
         index_block(&tx, block)?;
-        {
-            let mut table = tx.open_table(ACCOUNTS)?;
-            for (address, account) in state.accounts.take_dirty() {
-                table.insert(address.as_bytes(), encode(&account).as_slice())?;
-            }
-        }
-        tx.open_table(META)?
-            .insert(GLOBALS, state.globals_bytes().as_slice())?;
+        write_state(&tx, state)?;
         tx.commit()?;
         Ok(())
     }
@@ -283,11 +312,13 @@ impl Store {
     ) -> Result<()> {
         let height = block.header.height;
         state.accounts.mark_all_dirty();
+        state.mark_all_rows_dirty();
         let tx = self.db.begin_write()?;
         for table in [BLOCKS, CERTS] {
             tx.delete_table(table)?;
         }
         tx.delete_table(ACCOUNTS)?;
+        tx.delete_table(ROWS)?;
         // Les blocs effacés ne sont plus consultables : leur index non plus.
         tx.delete_table(TX_INDEX)?;
         tx.delete_table(ADDR_INDEX)?;
@@ -297,14 +328,7 @@ impl Store {
         tx.open_table(CERTS)?
             .insert(height, encode(cert).as_slice())?;
         index_block(&tx, block)?;
-        {
-            let mut table = tx.open_table(ACCOUNTS)?;
-            for (address, account) in state.accounts.take_dirty() {
-                table.insert(address.as_bytes(), encode(&account).as_slice())?;
-            }
-        }
-        tx.open_table(META)?
-            .insert(GLOBALS, state.globals_bytes().as_slice())?;
+        write_state(&tx, state)?;
         tx.commit()?;
         Ok(())
     }
@@ -614,6 +638,69 @@ mod tests {
         assert_eq!(reloaded, state);
         assert_eq!(reloaded.state_root(), state.state_root());
         assert!(reloaded.check_invariant().is_ok());
+    }
+
+    #[test]
+    fn table_rows_are_written_one_by_one_and_reload() {
+        use vinx_core::BlockHeader;
+        use vinx_crypto::{Address, KeyPair};
+        use vinx_state::registry::NameRecord;
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("db");
+        let k = || KeyPair::generate().public_key();
+        let mut state = vinx_state::Genesis::standard("vinx-test", 1, [k(), k(), k()], vec![k()])
+            .unwrap()
+            .into_state()
+            .unwrap();
+        let store = Store::open(&path, [1; 32]).unwrap();
+        let block = |height| Block {
+            header: BlockHeader {
+                protocol_version: 4,
+                chain_id: "vinx-test".into(),
+                height,
+                timestamp: height,
+                prev_hash: [0; 32],
+                tx_root: [0; 32],
+                state_root: [0; 32],
+                validators_hash: [0; 32],
+                proposer: 0,
+            },
+            admin_txs: vec![],
+            txs: vec![],
+        };
+        let cert = CommitCertificate {
+            height: 1,
+            round: 0,
+            block_hash: [0; 32],
+            signatures: vec![],
+        };
+        let record = |n: u8| NameRecord {
+            owner: Address::from_bytes([n; 20]),
+            expires_at: u64::from(n),
+        };
+        for n in 0..20u8 {
+            state.registry.names.insert(format!("nom-{n}"), record(n));
+        }
+        state.height = 1;
+        store.commit_block(&block(1), &cert, &mut state).unwrap();
+        // Un nom modifié, un autre supprimé : seules ces lignes sont réécrites.
+        state.registry.names.insert("nom-3".into(), record(99));
+        state.registry.names.remove(&"nom-4".to_string());
+        assert_eq!(state.clone().take_dirty_rows().len(), 2);
+        state.height = 2;
+        store.commit_block(&block(2), &cert, &mut state).unwrap();
+        drop(store);
+
+        let reloaded = Store::open(&path, [1; 32])
+            .unwrap()
+            .load_state()
+            .unwrap()
+            .unwrap();
+        assert_eq!(reloaded, state);
+        assert_eq!(reloaded.state_root(), state.state_root());
+        assert_eq!(reloaded.registry.names.len(), 19);
+        assert!(reloaded.registry.names.get("nom-4").is_none());
+        assert_eq!(reloaded.registry.names.get("nom-3"), Some(&record(99)));
     }
 
     #[test]

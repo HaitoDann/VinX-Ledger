@@ -4,9 +4,8 @@
 //! période. Le bénéficiaire prélève lui-même (`Collect`) ; le payeur peut
 //! révoquer le mandat à tout moment.
 
+use crate::table::{Row, Table};
 use borsh::{BorshDeserialize, BorshSerialize};
-use std::collections::BTreeMap;
-use std::sync::Arc;
 use vinx_core::Amount;
 use vinx_crypto::Address;
 
@@ -25,7 +24,11 @@ pub struct Mandate {
 }
 
 /// Mandats par (payeur, bénéficiaire).
-pub type Mandates = Arc<BTreeMap<(Address, Address), Mandate>>;
+pub type Mandates = Table<(Address, Address), Mandate>;
+
+impl Row for Mandate {
+    const TAG: u8 = 4;
+}
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, thiserror::Error)]
 pub enum MandateError {

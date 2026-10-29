@@ -64,8 +64,9 @@ fn leaf(address: &Address, account: &Account) -> Hash {
     hash_tagged_parts(Domain::SmtLeaf, &[address.as_bytes(), &encode(account)])
 }
 
-fn subtree(
-    accounts: &OrdMap<Address, Account>,
+fn subtree<V>(
+    accounts: &OrdMap<Address, V>,
+    leaf: &dyn Fn(&Address, &V) -> Hash,
     cache: &mut SmtCache,
     prefix: [u8; ADDRESS_LEN],
     depth: usize,
@@ -89,8 +90,8 @@ fn subtree(
             hash_tagged_parts(
                 Domain::SmtNode,
                 &[
-                    &subtree(accounts, cache, prefix, next),
-                    &subtree(accounts, cache, right, next),
+                    &subtree(accounts, leaf, cache, prefix, next),
+                    &subtree(accounts, leaf, cache, right, next),
                 ],
             )
         }
@@ -103,7 +104,17 @@ fn subtree(
 
 /// Racine des comptes, en réutilisant et complétant `cache`.
 pub fn root(accounts: &OrdMap<Address, Account>, cache: &mut SmtCache) -> Hash {
-    subtree(accounts, cache, [0; ADDRESS_LEN], 0)
+    subtree(accounts, &leaf, cache, [0; ADDRESS_LEN], 0)
+}
+
+/// Racine d'un arbre de même forme dont chaque feuille est
+/// `H("vinx/smt/leaf" ‖ clé ‖ empreinte)` : celui des tables du protocole 4
+/// (SPEC §4.5), où la clé de 20 octets dérive de la clé de la ligne.
+pub fn root_of_digests(entries: &OrdMap<Address, Hash>, cache: &mut SmtCache) -> Hash {
+    let digest_leaf = |key: &Address, digest: &Hash| -> Hash {
+        hash_tagged_parts(Domain::SmtLeaf, &[key.as_bytes(), digest])
+    };
+    subtree(entries, &digest_leaf, cache, [0; ADDRESS_LEN], 0)
 }
 
 /// Invalide le chemin d'un compte modifié.

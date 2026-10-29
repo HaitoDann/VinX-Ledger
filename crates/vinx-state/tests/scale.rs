@@ -107,3 +107,50 @@ fn one_million_accounts() {
         full / 1_000_000
     );
 }
+
+/// Protocole 4 : avec 200 000 noms, un bloc qui modifie un nom ne copie et ne
+/// recalcule que son chemin.
+/// `cargo test --release -p vinx-state --test scale -- --ignored --nocapture`
+#[test]
+#[ignore]
+fn table_root_stays_fast_with_many_names() {
+    use vinx_state::registry::NameRecord;
+    let k = || KeyPair::generate().public_key();
+    let mut state = Genesis::standard("vinx-scale", 1_800_000_000, [k(), k(), k()], vec![k()])
+        .unwrap()
+        .into_state()
+        .unwrap();
+    let record = |expires_at| NameRecord {
+        owner: Address::treasury(),
+        expires_at,
+    };
+    for i in 0..200_000u32 {
+        state
+            .registry
+            .names
+            .insert(format!("nom-{i}"), record(u64::from(i)));
+    }
+    let t = Instant::now();
+    state.state_root();
+    println!("première racine, 200 000 noms : {:?}", t.elapsed());
+    // Comme un nœud : le bloc est écrit, les lignes modifiées sont vidées.
+    state.take_dirty_rows();
+    // Un premier bloc chauffe les caches ; on mesure le suivant.
+    for (i, name) in ["nom-41", "nom-42"].iter().enumerate() {
+        let t = Instant::now();
+        let mut next = state.clone();
+        next.registry.names.insert((*name).into(), record(1));
+        let root = next.state_root();
+        let elapsed = t.elapsed();
+        assert_ne!(root, state.state_root());
+        next.take_dirty_rows();
+        state = next;
+        if i == 1 {
+            println!("bloc qui modifie un nom (copie, écriture, racine) : {elapsed:?}");
+            assert!(
+                elapsed < std::time::Duration::from_millis(10),
+                "{elapsed:?}"
+            );
+        }
+    }
+}
