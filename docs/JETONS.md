@@ -6,9 +6,9 @@ monnaie stable. Il n'y a pas de contrat intelligent à écrire : le jeton est un
 fonction native de la chaîne, avec des règles connues et vérifiées par tous les
 nœuds (SPEC §5.11).
 
-Les frais de chaque opération restent payés en VINX. Les exemples utilisent la
-ligne de commande `vinx-wallet` ; l'onglet « Jetons » du portefeuille arrive au
-lot 5c.
+Les frais de chaque opération restent payés en VINX. Tout se fait dans
+l'onglet « Jetons » du portefeuille ; les exemples ci-dessous utilisent la
+ligne de commande `vinx-wallet`, utile pour automatiser.
 
 ## 1. Réserver le symbole
 

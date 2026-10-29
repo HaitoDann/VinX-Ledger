@@ -61,7 +61,7 @@ référence pour toute nouvelle proposition.
 | | Plafonds de dépense | Clé « téléphone » limitée, clé « coffre » sans limite | Fait (0.12, lot 4b) |
 | | Récupération sociale | Des proches remplacent une clé perdue, avec délai d'opposition | Prévu |
 | | Arbres pour tout l'état | Noms, séquestres, règles et mandats rangés comme les comptes (voir §6) | Fait (0.14, lot 4d) |
-| **Protocole 5** | Jetons de tiers | Monnaies, points, crédits : symbole lié à un nom `.vinx`, accord préalable, pouvoirs déclarés (émission, gel, reprise forcée) et abandonnables, création payante (100 VINX) | Règles faites (0.15, lot 5a), API et ligne de commande faites (0.16, lot 5b) ; portefeuille (5c), séquestres et mandats en jetons (5d) prévus |
+| **Protocole 5** | Jetons de tiers | Monnaies, points, crédits : symbole lié à un nom `.vinx`, accord préalable, pouvoirs déclarés (émission, gel, reprise forcée) et abandonnables, création payante (100 VINX) | Règles faites (0.15, lot 5a), API et ligne de commande faites (0.16, lot 5b) ; portefeuille fait (0.17, lot 5c) ; séquestres et mandats en jetons (5d) prévus |
 | | Titres (non fongibles) | Collections d'objets uniques : billets, certificats, cartes de membre | Prévu |
 | | Réserve par objet | Chaque ligne de jeton ou titre immobilise un dépôt | Prévu |
 | **Protocole 6** | Canaux de paiement | Un dépôt, des reçus signés hors chaîne, un règlement : micropaiements | Prévu |
@@ -137,6 +137,7 @@ référence pour toute nouvelle proposition.
 | **0.14** | Protocole 4, lot 4d | Arbres pour tout l'état : une modification ne recalcule et n'écrit que sa ligne |
 | **0.15** | Protocole 5, lot 5a | Actifs natifs : création, émission, transferts, gel, reprise forcée, accord préalable |
 | **0.16** | Logiciel, lot 5b | API des actifs, commandes `vinx-wallet asset` et `vinx-wallet name`, guide de l'émetteur |
+| **0.17** | Logiciel, lot 5c | Onglet Jetons du portefeuille : accepter, envoyer, créer, émettre, geler, reprendre |
 | Ensuite | Logiciel | Portefeuille Android (`.apk`), scan de QR |
 | Protocole 5 | Règles | Jetons et titres, réserve par objet |
 | Protocole 6 | Règles | Canaux de paiement |

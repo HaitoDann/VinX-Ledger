@@ -109,6 +109,7 @@ header select { width: auto; min-width: 180px; }
   <a href="#deals" data-view="deals">Séquestres</a>
   <a href="#stamp" data-view="stamp">Horodatage</a>
   <a href="#mandates" data-view="mandates">Mandats</a>
+  <a href="#assets" data-view="assets">Jetons</a>
   <a href="#contacts" data-view="contacts">Contacts</a>
   <a href="#settings" data-view="settings">Réglages</a>
 </nav>
@@ -255,6 +256,52 @@ header select { width: auto; min-width: 180px; }
     <h2>Mandats reçus</h2>
     <p class="sub">Les comptes qui t'autorisent à prélever, et ce qu'il reste sur la période en cours.</p>
     <div class="scroll" id="receivedTable"></div>
+  </div>
+</main>
+
+<main id="assets" class="view">
+  <div class="card">
+    <h2>Mes jetons</h2>
+    <p class="sub">Jetons émis sur VinX Ledger par ses utilisateurs : points, bons, monnaies. On ne reçoit un jeton qu'après l'avoir accepté. Les frais restent payés en VINX.</p>
+    <div class="scroll" id="holdingsTable"></div>
+  </div>
+  <div class="card narrow">
+    <h2>Envoyer un jeton</h2>
+    <div class="row">
+      <div><label for="assetSendSymbol">Jeton</label><select id="assetSendSymbol"></select></div>
+      <div><label for="assetSendAmount">Montant</label><input id="assetSendAmount" inputmode="decimal"></div>
+    </div>
+    <label for="assetSendTo">Destinataire</label><input id="assetSendTo" class="mono" placeholder="vinx1…, contact ou nom.vinx" list="contactList" autocomplete="off">
+    <label for="assetSendMemo">Mémo (facultatif)</label><input id="assetSendMemo" maxlength="32">
+    <div class="actions"><button class="primary" id="assetSendBtn">Vérifier avant d'envoyer</button></div>
+  </div>
+  <div class="card narrow">
+    <h2>Accepter un jeton</h2>
+    <p class="sub">Indique son symbole : l'aperçu montre son émetteur et ses pouvoirs avant que tu confirmes.</p>
+    <label for="acceptSymbol">Symbole</label><input id="acceptSymbol" class="mono" placeholder="EURV" autocomplete="off">
+    <div class="actions"><button class="primary" id="acceptBtn">Vérifier avant d'accepter</button></div>
+  </div>
+  <div class="card">
+    <h2>Jetons que j'émets</h2>
+    <div class="scroll" id="issuedTable"></div>
+  </div>
+  <div class="card narrow">
+    <h2>Créer un jeton</h2>
+    <p class="sub">Le symbole est un nom .vinx de ce compte, en majuscules : <span class="mono">eurv.vinx</span> donne <span class="mono">EURV</span>. Création : <span id="assetFee">—</span> VINX.</p>
+    <div class="row">
+      <div><label for="newAssetSymbol">Symbole</label><select id="newAssetSymbol"></select></div>
+      <div><label for="newAssetDecimals">Décimales</label><input id="newAssetDecimals" type="number" min="0" max="9" value="2"></div>
+    </div>
+    <label for="newAssetName">Nom affiché</label><input id="newAssetName" maxlength="64" placeholder="Euro VinX, Points Boulangerie…">
+    <div class="row">
+      <div><label for="newAssetSupply">Supply initiale</label><input id="newAssetSupply" inputmode="decimal" placeholder="0"></div>
+      <div><label for="newAssetMax">Plafond (facultatif)</label><input id="newAssetMax" inputmode="decimal" placeholder="aucun"></div>
+    </div>
+    <label class="check"><input type="checkbox" id="newAssetMint"> Garder le pouvoir d'émettre de nouvelles unités</label>
+    <label class="check"><input type="checkbox" id="newAssetFreeze"> Garder le pouvoir de geler des comptes</label>
+    <label class="check"><input type="checkbox" id="newAssetClawback"> Garder le pouvoir de reprise forcée</label>
+    <p class="sub">Ces pouvoirs sont visibles par tous et pourront être abandonnés, jamais ajoutés. Sans aucun pouvoir, la supply est fixe pour toujours.</p>
+    <div class="actions"><button class="primary" id="newAssetBtn">Vérifier avant de créer</button></div>
   </div>
 </main>
 
@@ -509,7 +556,7 @@ async function refresh() {
   const rows = (list) => list.length ? `<table><thead><tr><th>Date</th><th>Opération</th><th>Avec</th><th style="text-align:right">Montant</th><th>Statut</th></tr></thead><tbody>${list.map(txRow).join("")}</tbody></table>` : `<p class="muted">Aucune opération pour l'instant.</p>`;
   $("recent").innerHTML = rows(data.history.slice(0, 6));
   $("historyTable").innerHTML = rows(data.history);
-  renderNames(); renderDeals(); renderStamps(); renderMandates();
+  renderNames(); renderDeals(); renderStamps(); renderMandates(); renderAssets();
   const pol = data.policy;
   $("policyInfo").innerHTML = !pol
     ? "Aucune règle : la clé de ce compte suffit pour dépenser."
@@ -575,6 +622,82 @@ function renderMandates() {
 $("mandateBtn").onclick = () => operate(
   { action: "grant-mandate", to: $("mandateTo").value, amount: $("mandateMax").value.replace(",", "."), days: +$("mandateDays").value },
   "Accorder un mandat", () => { $("mandateTo").value = $("mandateMax").value = ""; });
+
+/* ----- Jetons ----- */
+function units(u, d) {
+  let n; try { n = BigInt(u || "0"); } catch (_) { return "—"; }
+  const one = 10n ** BigInt(d || 0);
+  const whole = (n / one).toString().replace(/\B(?=(\d{3})+(?!\d))/g, " ");
+  const frac = d ? (n % one).toString().padStart(d, "0").replace(/0+$/, "") : "";
+  return whole + (frac ? "," + frac : "");
+}
+const powersOf = (p) => [p.mint && "émission", p.freeze && "gel", p.clawback && "reprise forcée"].filter(Boolean).join(", ") || "aucun (supply fixe)";
+const num = (v) => String(v || "").trim().replace(",", ".");
+function renderAssets() {
+  const h = data.assets || [], issued = data.issued || [];
+  $("assetFee").textContent = vinx(data.network.asset_fee);
+  $("holdingsTable").innerHTML = h.length ? `<table><thead><tr><th>Jeton</th><th style="text-align:right">Solde</th><th></th></tr></thead><tbody>${h.map((x) =>
+    `<tr><td><b class="mono">${esc(x.symbol)}</b><div class="sub">${esc(x.name || "")}</div></td>
+     <td style="text-align:right">${units(x.units, x.decimals)}${x.frozen ? ` <span class="pill warn">gelé</span>` : ""}</td>
+     <td>${x.units === "0" ? `<button data-leave="${esc(x.symbol)}">Retirer</button>` : `<button data-burn="${esc(x.symbol)}">Détruire</button>`}</td></tr>`).join("")}</tbody></table>`
+    : `<p class="muted">Aucun jeton accepté sur ce compte.</p>`;
+  const sel = $("assetSendSymbol"), keep = sel.value;
+  sel.innerHTML = h.map((x) => `<option value="${esc(x.symbol)}">${esc(x.symbol)}</option>`).join("");
+  if (keep) sel.value = keep;
+  const owned = (data.names || []).map((n) => n.name.replace(/\.vinx$/, "").toUpperCase()).filter((n) => !issued.some((a) => a.symbol === n));
+  const ns = $("newAssetSymbol"), keepN = ns.value;
+  ns.innerHTML = owned.length ? owned.map((n) => `<option>${esc(n)}</option>`).join("") : `<option value="">— réserve d'abord un nom .vinx —</option>`;
+  if (keepN) ns.value = keepN;
+  $("issuedTable").innerHTML = issued.length ? `<table><thead><tr><th>Jeton</th><th style="text-align:right">En circulation</th><th>Pouvoirs</th><th></th></tr></thead><tbody>${issued.map((a) =>
+    `<tr><td><b class="mono">${esc(a.symbol)}</b><div class="sub">${esc(a.name)}${a.frozen ? ` <span class="pill warn">gelé</span>` : ""}</div></td>
+     <td style="text-align:right">${units(a.supply_units, a.decimals)}${a.max_supply_units ? `<div class="sub">plafond ${units(a.max_supply_units, a.decimals)}</div>` : ""}</td>
+     <td>${powersOf(a.powers)}</td>
+     <td>${a.powers.mint ? `<button data-mint="${esc(a.symbol)}">Émettre</button> ` : ""}${a.powers.freeze ? `<button data-freeze="${esc(a.symbol)}">Geler</button> ` : ""}${a.powers.freeze || a.frozen ? `<button data-unfreeze="${esc(a.symbol)}">Dégeler</button> ` : ""}
+       ${a.powers.clawback ? `<button class="danger" data-clawback="${esc(a.symbol)}">Reprendre</button> ` : ""}${a.powers.mint || a.powers.freeze || a.powers.clawback ? `<button data-renounce="${esc(a.symbol)}">Abandonner un pouvoir</button>` : ""}</td></tr>`).join("")}</tbody></table>`
+    : `<p class="muted">Ce compte n'émet aucun jeton.</p>`;
+  const each = (attr, f) => document.querySelectorAll(`[data-${attr}]`).forEach((b) => b.onclick = () => f(b.dataset[attr]));
+  each("leave", (symbol) => operate({ action: "leave-asset", symbol }, `Retirer ${symbol}`));
+  each("burn", (symbol) => {
+    const amount = prompt(`Quantité de ${symbol} à détruire définitivement`); if (!amount) return;
+    operate({ action: "burn-asset", symbol, amount: num(amount) }, `Détruire des ${symbol}`);
+  });
+  each("mint", (symbol) => {
+    const amount = prompt(`Quantité de ${symbol} à émettre`); if (!amount) return;
+    const to = prompt("Bénéficiaire (adresse, contact ou nom .vinx ; vide : ce compte)") || "";
+    operate({ action: "mint-asset", symbol, amount: num(amount), to }, `Émettre des ${symbol}`);
+  });
+  const freeze = (action, verb) => (symbol) => {
+    const to = prompt(`${verb} quel compte ? (adresse, contact ou nom .vinx ; vide : tout le jeton)`);
+    if (to === null) return;
+    operate({ action, symbol, to }, `${verb} ${symbol}`);
+  };
+  each("freeze", freeze("freeze-asset", "Geler"));
+  each("unfreeze", freeze("unfreeze-asset", "Dégeler"));
+  each("clawback", (symbol) => {
+    const to = prompt("Reprendre sur quel compte ? (adresse, contact ou nom .vinx)"); if (!to) return;
+    const amount = prompt(`Quantité de ${symbol} à reprendre`); if (!amount) return;
+    operate({ action: "clawback-asset", symbol, to, amount: num(amount) }, `Reprise forcée de ${symbol}`);
+  });
+  each("renounce", (symbol) => {
+    const which = prompt("Pouvoir à abandonner définitivement : emission, gel ou reprise"); if (!which) return;
+    const w = which.trim().toLowerCase();
+    const op = { action: "renounce-asset", symbol, mint: w.startsWith("é") || w.startsWith("e"), freeze: w.startsWith("g"), clawback: w.startsWith("r") };
+    operate(op, `Abandonner un pouvoir sur ${symbol}`);
+  });
+}
+$("assetSendBtn").onclick = () => operate(
+  { action: "send-asset", symbol: $("assetSendSymbol").value, to: $("assetSendTo").value, amount: num($("assetSendAmount").value), memo: $("assetSendMemo").value },
+  "Envoyer un jeton", () => { $("assetSendTo").value = $("assetSendAmount").value = $("assetSendMemo").value = ""; });
+$("acceptBtn").onclick = () => operate({ action: "accept-asset", symbol: $("acceptSymbol").value }, "Accepter un jeton",
+  () => { $("acceptSymbol").value = ""; });
+$("newAssetBtn").onclick = () => operate({
+  action: "create-asset", symbol: $("newAssetSymbol").value, name: $("newAssetName").value, decimals: +$("newAssetDecimals").value,
+  amount: num($("newAssetSupply").value), max_supply: num($("newAssetMax").value),
+  mint: $("newAssetMint").checked, freeze: $("newAssetFreeze").checked, clawback: $("newAssetClawback").checked,
+}, "Créer un jeton", () => {
+  ["newAssetName", "newAssetSupply", "newAssetMax"].forEach((i) => $(i).value = "");
+  ["newAssetMint", "newAssetFreeze", "newAssetClawback"].forEach((i) => $(i).checked = false);
+});
 
 /* ----- Horodatage ----- */
 let stampDigest = null;
@@ -659,7 +782,23 @@ function txRow(t) {
     "mémo obligatoire": "Réglage du mémo", "rotation de clé": "Changement de clé",
     "paiement groupé": out ? `Envoi groupé (${(t.payments || []).length})` : "Réception (envoi groupé)",
     "mandat accordé": "Mandat accordé", "mandat révoqué": "Mandat révoqué",
-    "prélèvement": out ? "Prélèvement encaissé" : "Prélèvement (mandat)" };
+    "prélèvement": out ? "Prélèvement encaissé" : "Prélèvement (mandat)",
+    "création d'actif": `Création de ${t.asset}`, "émission d'actif": `Émission de ${t.asset}`, "destruction d'actif": `Destruction de ${t.asset}`,
+    "paiement en actif": out ? `Envoi de ${t.asset}` : `Réception de ${t.asset}`, "gel d'actif": `Gel de ${t.asset}`, "dégel d'actif": `Dégel de ${t.asset}`,
+    "reprise forcée": `Reprise forcée de ${t.asset}`, "abandon de pouvoirs": `Pouvoirs abandonnés sur ${t.asset}`,
+    "actif accepté": `${t.asset} accepté`, "actif retiré": `${t.asset} retiré` };
+  if (t.asset && t.units) {
+    // Montant en jeton : les décimales viennent des soldes ou des jetons émis.
+    const a = [...(data.assets || []), ...(data.issued || [])].find((x) => x.symbol === t.asset);
+    const inbound = t.to === data.address || (t.kind === "reprise forcée" && t.sender === data.address);
+    const moves = t.kind === "paiement en actif" || t.kind === "reprise forcée";
+    const sign = inbound ? "+" : moves || t.kind === "destruction d'actif" ? "−" : "";
+    const shown = a ? units(t.units, a.decimals) : t.units;
+    return `<tr><td>${t.status === "en attente" ? "à l'instant" : date(t.timestamp)}</td><td>${esc(kinds[t.kind] || t.kind)}${t.memo ? `<div class="sub">${esc(t.memo)}</div>` : ""}</td>
+      <td>${t.to && t.to !== data.address ? who(t.to) : t.from && t.from !== data.address ? who(t.from) : t.sender !== data.address ? who(t.sender) : ""}</td>
+      <td style="text-align:right"><span class="${inbound ? "in" : "out"}">${sign} ${shown} ${esc(t.asset)}</span>${out ? `<div class="sub">frais ${vinx(t.fee)}</div>` : ""}</td>
+      <td>${t.status === "en attente" ? `<span class="pill warn">en attente</span>` : `<span class="pill ok">confirmée</span>`}</td></tr>`;
+  }
   if (t.kind === "prélèvement") {
     // L'émetteur est le bénéficiaire : le sens se lit côté payeur.
     const payer = t.payer === data.address;

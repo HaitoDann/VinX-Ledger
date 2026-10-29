@@ -20,7 +20,7 @@
 //! l'opération et mises en garde (adresse inconnue, réserve minimale…). Les
 //! mêmes vérifications sont refaites au moment de signer.
 
-use crate::amount::{format_vinx, parse_vinx};
+use crate::amount::{format_units, format_vinx, parse_units, parse_vinx};
 use crate::client::Client;
 use anyhow::{Context, Result, anyhow, bail};
 use axum::extract::{Request, State};
@@ -344,6 +344,63 @@ struct Operation {
     /// Paiement groupé : une ligne « destinataire ; montant ; mémo » par paiement.
     #[serde(default)]
     lines: String,
+    /// Actifs natifs (protocole 5) : symbole, et pour la création ses réglages.
+    #[serde(default)]
+    symbol: String,
+    #[serde(default)]
+    decimals: u8,
+    #[serde(default)]
+    max_supply: String,
+    #[serde(default)]
+    mint: bool,
+    #[serde(default)]
+    freeze: bool,
+    #[serde(default)]
+    clawback: bool,
+}
+
+/// Pouvoirs d'un émetteur, en clair.
+fn powers_text(mint: bool, freeze: bool, clawback: bool) -> String {
+    let list: Vec<&str> = [
+        (mint, "émettre de nouvelles unités"),
+        (freeze, "geler des comptes ou tout le jeton"),
+        (clawback, "reprendre des unités sur un compte"),
+    ]
+    .iter()
+    .filter(|(on, _)| *on)
+    .map(|(_, t)| *t)
+    .collect();
+    if list.is_empty() {
+        "aucun : supply fixe, l'émetteur ne peut plus rien changer".into()
+    } else {
+        list.join(", ")
+    }
+}
+
+/// Fiche d'un actif sur le nœud, et ses décimales.
+fn asset_info(client: &Client, symbol: &str) -> Result<(Value, usize)> {
+    let symbol = symbol.trim().to_ascii_uppercase();
+    if symbol.is_empty() {
+        bail!("indique le symbole du jeton");
+    }
+    let v = client
+        .get_json(&format!("/assets/{symbol}"))?
+        .ok_or_else(|| anyhow!("aucun jeton {symbol} sur ce réseau"))?;
+    let decimals = at(&v, "/decimals")
+        .as_u64()
+        .and_then(|d| usize::try_from(d).ok())
+        .unwrap_or(0);
+    Ok((v, decimals))
+}
+
+/// Ligne de `holder` pour l'actif `symbol` dans `/accounts/{a}` : `None` si
+/// l'actif n'est pas accepté.
+fn holding(account: &Value, symbol: &str) -> Option<Value> {
+    at(account, "/assets")
+        .as_array()?
+        .iter()
+        .find(|h| at(h, "/symbol").as_str() == Some(symbol))
+        .cloned()
 }
 
 /// Opération prête à signer, avec ce qu'il faut montrer avant.
@@ -762,6 +819,303 @@ fn plan(app: &App, op: &Operation) -> Result<Plan> {
                 }
             }
         }
+        action if action.ends_with("-asset") => {
+            if protocol < 5 {
+                bail!("jetons pas encore actifs sur ce réseau : ils arrivent avec le protocole 5");
+            }
+            let me_json = client
+                .get_json(&format!("/accounts/{me}"))?
+                .unwrap_or(Value::Null);
+            let symbol = op.symbol.trim().to_ascii_uppercase();
+            if action == "create-asset" {
+                let name = symbol.to_lowercase();
+                let owner = client
+                    .get_json(&format!("/names/{name}"))?
+                    .and_then(|n| at(&n, "/owner").as_str().map(str::to_owned));
+                if owner.as_deref() != Some(me.to_string().as_str()) {
+                    bail!(
+                        "le symbole {symbol} exige de posséder le nom {name}.vinx sur ce compte                          (onglet Noms .vinx)"
+                    );
+                }
+                if client.get_json(&format!("/assets/{symbol}"))?.is_some() {
+                    bail!("le symbole {symbol} est déjà utilisé par un jeton");
+                }
+                let title = op.name.trim();
+                if title.is_empty() || title.len() > 64 {
+                    bail!("nom affiché : 1 à 64 caractères");
+                }
+                if op.decimals > 9 {
+                    bail!("décimales : de 0 à 9");
+                }
+                let d = usize::from(op.decimals);
+                let supply = if op.amount.trim().is_empty() {
+                    0
+                } else {
+                    parse_units(&op.amount, d)?
+                };
+                let max = if op.max_supply.trim().is_empty() {
+                    None
+                } else {
+                    Some(parse_units(&op.max_supply, d)?)
+                };
+                if max.is_some_and(|m| m == 0 || supply > m) {
+                    bail!("la supply initiale dépasse le plafond");
+                }
+                if supply == 0 && !op.mint {
+                    bail!("sans supply initiale, il faut garder le pouvoir d'émettre");
+                }
+                let fee = at(&status, "/params/asset_fee")
+                    .as_str()
+                    .and_then(|f| f.parse().ok())
+                    .unwrap_or(0);
+                spent = fee;
+                lines.push(("Jeton".into(), format!("{symbol} — {title}")));
+                lines.push(("Décimales".into(), op.decimals.to_string()));
+                lines.push((
+                    "Supply initiale".into(),
+                    format!("{} {symbol}", format_units(supply, d)),
+                ));
+                lines.push((
+                    "Plafond".into(),
+                    max.map_or("aucun".into(), |m| {
+                        format!("{} {symbol}", format_units(m, d))
+                    }),
+                ));
+                lines.push((
+                    "Pouvoirs de l'émetteur".into(),
+                    powers_text(op.mint, op.freeze, op.clawback),
+                ));
+                lines.push((
+                    "Prix de création".into(),
+                    format!("{} VINX", format_vinx(fee)),
+                ));
+                warnings.push(
+                    "Ces pouvoirs sont affichés à tous les détenteurs. Tu pourras les abandonner \
+                     plus tard, jamais en ajouter."
+                        .into(),
+                );
+                TxBody::CreateAsset {
+                    symbol,
+                    name: title.to_owned(),
+                    decimals: op.decimals,
+                    initial_supply: supply,
+                    max_supply: max,
+                    powers: vinx_core::AssetPowers {
+                        mint: op.mint,
+                        freeze: op.freeze,
+                        clawback: op.clawback,
+                    },
+                }
+            } else {
+                let (asset, d) = asset_info(&client, &symbol)?;
+                let issuer = at(&asset, "/issuer").as_str() == Some(me.to_string().as_str());
+                let power = |p: &str| at(&asset, &format!("/powers/{p}")) == &Value::Bool(true);
+                let title = at(&asset, "/name").as_str().unwrap_or("").to_owned();
+                lines.push(("Jeton".into(), format!("{symbol} — {title}")));
+                let mine = holding(&me_json, &symbol);
+                let my_units: Amount = mine
+                    .as_ref()
+                    .and_then(|h| at(h, "/units").as_str()?.parse().ok())
+                    .unwrap_or(0);
+                let amount = || -> Result<Amount> {
+                    let a = parse_units(&op.amount, d)?;
+                    if a == 0 {
+                        bail!("montant nul");
+                    }
+                    Ok(a)
+                };
+                let only_issuer = |what: &str| -> Result<()> {
+                    if !issuer {
+                        bail!("seul l'émetteur du jeton peut {what}");
+                    }
+                    Ok(())
+                };
+                match action {
+                    "accept-asset" => {
+                        if mine.is_some() {
+                            bail!("ce compte a déjà accepté {symbol}");
+                        }
+                        lines.push((
+                            "Émetteur".into(),
+                            at(&asset, "/issuer").as_str().unwrap_or("").to_owned(),
+                        ));
+                        lines.push((
+                            "Pouvoirs de l'émetteur".into(),
+                            powers_text(power("mint"), power("freeze"), power("clawback")),
+                        ));
+                        if power("clawback") || power("freeze") {
+                            warnings.push(
+                                "L'émetteur de ce jeton peut geler ton solde ou le reprendre : \
+                                 n'accepte que des jetons d'émetteurs en qui tu as confiance."
+                                    .into(),
+                            );
+                        }
+                        TxBody::AcceptAsset {
+                            symbol,
+                            accept: true,
+                        }
+                    }
+                    "leave-asset" => {
+                        if mine.is_none() {
+                            bail!("ce compte n'a pas accepté {symbol}");
+                        }
+                        if my_units > 0 {
+                            bail!(
+                                "il reste des {symbol} sur ce compte : envoie-les ou détruis-les d'abord"
+                            );
+                        }
+                        lines.push((
+                            "Effet".into(),
+                            "le compte ne pourra plus recevoir ce jeton".into(),
+                        ));
+                        TxBody::AcceptAsset {
+                            symbol,
+                            accept: false,
+                        }
+                    }
+                    "send-asset" | "burn-asset" => {
+                        let amount = amount()?;
+                        if mine
+                            .as_ref()
+                            .is_some_and(|h| at(h, "/frozen") == &Value::Bool(true))
+                        {
+                            bail!("{symbol} est gelé sur ce compte");
+                        }
+                        if amount > my_units {
+                            bail!(
+                                "solde insuffisant : {} {symbol} disponibles",
+                                format_units(my_units, d)
+                            );
+                        }
+                        let shown = format!("{} {symbol}", format_units(amount, d));
+                        if action == "burn-asset" {
+                            lines.push(("Détruit".into(), shown));
+                            warnings
+                                .push("Les unités détruites disparaissent définitivement.".into());
+                            TxBody::BurnAsset { symbol, amount }
+                        } else {
+                            let (to, how) = resolve(app, &client, &op.to)?;
+                            if to == me {
+                                bail!("c'est l'adresse de ce compte");
+                            }
+                            let theirs = client
+                                .get_json(&format!("/accounts/{to}"))?
+                                .unwrap_or(Value::Null);
+                            if holding(&theirs, &symbol).is_none() {
+                                bail!(
+                                    "ce destinataire n'a pas encore accepté {symbol} : il doit \
+                                     l'accepter dans son onglet Jetons"
+                                );
+                            }
+                            if at(&theirs, "/memo_required") == &Value::Bool(true)
+                                && memo_bytes(&op.memo).is_none()
+                            {
+                                bail!(
+                                    "ce destinataire exige un mémo (référence de facture, de client…)"
+                                );
+                            }
+                            lines.push(("Destinataire".into(), to.to_string()));
+                            lines.push(("Trouvé par".into(), how.clone()));
+                            lines.push(("Montant".into(), shown));
+                            if how == "adresse" {
+                                warnings.push(
+                                    "Cette adresse n'est pas dans tes contacts : vérifie-la \
+                                     caractère par caractère."
+                                        .into(),
+                                );
+                            }
+                            TxBody::TransferAsset {
+                                symbol,
+                                to,
+                                amount,
+                                memo: memo_bytes(&op.memo),
+                            }
+                        }
+                    }
+                    "mint-asset" => {
+                        only_issuer("émettre de nouvelles unités")?;
+                        if !power("mint") {
+                            bail!("l'émetteur a renoncé au pouvoir d'émettre ce jeton");
+                        }
+                        let amount = amount()?;
+                        let to = if op.to.trim().is_empty() {
+                            me
+                        } else {
+                            resolve(app, &client, &op.to)?.0
+                        };
+                        lines.push(("Bénéficiaire".into(), to.to_string()));
+                        lines.push((
+                            "Émis".into(),
+                            format!("{} {symbol}", format_units(amount, d)),
+                        ));
+                        TxBody::MintAsset { symbol, to, amount }
+                    }
+                    "freeze-asset" | "unfreeze-asset" => {
+                        only_issuer("geler ou dégeler")?;
+                        let frozen = action == "freeze-asset";
+                        if frozen && !power("freeze") {
+                            bail!("l'émetteur a renoncé au pouvoir de geler ce jeton");
+                        }
+                        let account = if op.to.trim().is_empty() {
+                            lines.push((
+                                "Portée".into(),
+                                format!("tout le jeton : plus aucun {symbol} ne circule"),
+                            ));
+                            None
+                        } else {
+                            let (a, how) = resolve(app, &client, &op.to)?;
+                            lines.push(("Compte".into(), format!("{a} ({how})")));
+                            Some(a)
+                        };
+                        lines.push(("Effet".into(), if frozen { "gel" } else { "dégel" }.into()));
+                        TxBody::FreezeAsset {
+                            symbol,
+                            account,
+                            frozen,
+                        }
+                    }
+                    "clawback-asset" => {
+                        only_issuer("reprendre des unités")?;
+                        if !power("clawback") {
+                            bail!("l'émetteur a renoncé à la reprise forcée sur ce jeton");
+                        }
+                        let amount = amount()?;
+                        let (from, how) = resolve(app, &client, &op.to)?;
+                        lines.push(("Repris sur".into(), format!("{from} ({how})")));
+                        lines.push((
+                            "Montant".into(),
+                            format!("{} {symbol}", format_units(amount, d)),
+                        ));
+                        TxBody::ClawbackAsset {
+                            symbol,
+                            from,
+                            amount,
+                        }
+                    }
+                    "renounce-asset" => {
+                        only_issuer("abandonner ses pouvoirs")?;
+                        if !(op.mint || op.freeze || op.clawback) {
+                            bail!("choisis au moins un pouvoir à abandonner");
+                        }
+                        lines.push((
+                            "Pouvoirs abandonnés".into(),
+                            powers_text(op.mint, op.freeze, op.clawback),
+                        ));
+                        warnings
+                            .push("C'est définitif : aucun pouvoir ne peut être rajouté.".into());
+                        TxBody::RenounceAssetPowers {
+                            symbol,
+                            powers: vinx_core::AssetPowers {
+                                mint: op.mint,
+                                freeze: op.freeze,
+                                clawback: op.clawback,
+                            },
+                        }
+                    }
+                    other => bail!("opération inconnue : {other}"),
+                }
+            }
+        }
         other => bail!("opération inconnue : {other}"),
     };
     // Règles du compte (protocole 4) : refuser ici ce que le réseau refuserait.
@@ -769,6 +1123,19 @@ fn plan(app: &App, op: &Operation) -> Result<Plan> {
         .get_json(&format!("/accounts/{me}"))?
         .unwrap_or(Value::Null);
     let policy = at(&account_json, "/policy");
+    let needs_approval = matches!(
+        body,
+        TxBody::MintAsset { .. }
+            | TxBody::FreezeAsset { .. }
+            | TxBody::ClawbackAsset { .. }
+            | TxBody::RenounceAssetPowers { .. }
+    );
+    if !policy.is_null() && needs_approval {
+        bail!(
+            "ce compte a des règles : émettre, geler, reprendre ou abandonner un pouvoir exige \
+             l'approbation de ses signataires (« vinx-wallet account propose »)"
+        );
+    }
     if !policy.is_null() {
         let threshold = at(policy, "/threshold").as_u64().unwrap_or(0);
         match at(policy, "/daily_limit").as_str() {
@@ -897,6 +1264,14 @@ fn overview(app: &App, index: u32) -> Result<Value> {
         ))?
         .map(|h| at(&h, "/transactions").clone())
         .unwrap_or(Value::Array(Vec::new()));
+    let me = entry.address.to_string();
+    let issued: Vec<Value> = client
+        .get_json("/assets")?
+        .and_then(|v| at(&v, "/assets").as_array().cloned())
+        .unwrap_or_default()
+        .into_iter()
+        .filter(|a| at(a, "/issuer").as_str() == Some(me.as_str()))
+        .collect();
     Ok(json!({
         "address": entry.address,
         "label": entry.label,
@@ -906,6 +1281,8 @@ fn overview(app: &App, index: u32) -> Result<Value> {
         "deals": account.as_ref().map_or(Value::Array(Vec::new()), |a| at(a, "/deals").clone()),
         "policy": account.as_ref().map_or(Value::Null, |a| at(a, "/policy").clone()),
         "mandates": account.as_ref().map_or(Value::Null, |a| at(a, "/mandates").clone()),
+        "assets": account.as_ref().map_or(Value::Array(Vec::new()), |a| at(a, "/assets").clone()),
+        "issued": issued,
         "history": history,
         "network": {
             "chain_id": at(&status, "/chain_id"),
@@ -913,6 +1290,7 @@ fn overview(app: &App, index: u32) -> Result<Value> {
             "protocol_version": at(&status, "/protocol_version"),
             "min_reserve": at(&status, "/params/min_reserve"),
             "name_fee": at(&status, "/params/name_fee"),
+            "asset_fee": at(&status, "/params/asset_fee"),
         },
     }))
 }
