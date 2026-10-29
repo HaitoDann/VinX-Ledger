@@ -78,6 +78,11 @@ pub fn parties(t: &SignedTransaction) -> Vec<Address> {
         TxBody::BatchTransfer { payments } => out.extend(payments.iter().map(|p| p.to)),
         TxBody::GrantMandate { payee, .. } | TxBody::RevokeMandate { payee } => out.push(*payee),
         TxBody::Collect { payer, .. } => out.push(*payer),
+        TxBody::MintAsset { to, .. } | TxBody::TransferAsset { to, .. } => out.push(*to),
+        TxBody::ClawbackAsset { from, .. } => out.push(*from),
+        TxBody::FreezeAsset {
+            account: Some(a), ..
+        } => out.push(*a),
         TxBody::OpenDeal {
             seller, arbiter, ..
         } => {

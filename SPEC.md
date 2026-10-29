@@ -85,6 +85,14 @@ State {
     upgrade:    Option<PendingUpgrade>,
     registry:   Registry,          // protocole 2 : noms et séquestres (§5.4, §5.5)
     emission:   Emission,          // protocole 3 : émission des validateurs (§4.4)
+    policies:   Map<Address, Policy>,          // protocole 4 (§5.8)
+    mandates:   Map<(Address, Address), Mandate>, // protocole 4 (§5.9)
+    assets:     Assets,            // protocole 5 : actifs natifs (§5.11)
+}
+Assets {
+    fee:      u64,                                // §11, asset_fee
+    assets:   Map<String, Asset>,                 // par symbole
+    holdings: Map<(String, Address), Holding>,    // par (symbole, compte)
 }
 Registry {
     now:      u64,                         // horodatage du bloc, en secondes
@@ -103,6 +111,7 @@ puis :
 | 2 et 3 | `borsh(registry)` (tables entières) |
 | 3 et plus | `borsh(emission)` |
 | 4 et plus | `borsh(registry.now, registry.name_fee, racine(names), racine(deals))`, puis `borsh(racine(policies), racine(mandates))` (§4.5) |
+| 5 et plus | `borsh(assets.fee, racine(assets), racine(holdings))` |
 
 **Arbre des comptes (SMT).** Arbre binaire compact indexé par les 160 bits de
 l'adresse, du bit de poids fort au bit de poids faible :
@@ -187,6 +196,8 @@ pour engagement un arbre de même forme que celui des comptes (§4.1) :
 | `deals` | `Hash` | 2 |
 | `policies` | `Address` | 3 |
 | `mandates` | `(payeur, bénéficiaire)` | 4 |
+| `assets` (protocole 5) | `String` (symbole) | 5 |
+| `holdings` (protocole 5) | `(symbole, compte)` | 6 |
 
 Une modification ne recalcule que le chemin de sa ligne. L'encodage borsh d'une
 table, utilisé jusqu'au protocole 3, est celui d'une table triée : nombre de
@@ -249,6 +260,19 @@ SignedTransaction {
 | `0x0E` | `RevokeMandate` | `payee` | Révoque le mandat accordé à `payee` |
 | `0x0F` | `Collect` | `payer`, `amount`, `memo` | Prélève sur `payer` (§5.9) |
 | `0x10` | `Sponsored` | `body`, `sponsor: Address`, `signature` | Frais payés par `sponsor` (§5.10) |
+
+À partir du protocole 5 (actifs natifs, §5.11) :
+
+| Code | Transaction | Champs | Effet |
+|---|---|---|---|
+| `0x11` | `CreateAsset` | `symbol`, `name`, `decimals: u8`, `initial_supply`, `max_supply: Option<u64>`, `powers: AssetPowers { mint, freeze, clawback }` | Crée un actif |
+| `0x12` | `MintAsset` | `symbol`, `to`, `amount` | Émet des unités (émetteur, pouvoir `mint`) |
+| `0x13` | `BurnAsset` | `symbol`, `amount` | Détruit des unités de l'émetteur de la transaction |
+| `0x14` | `TransferAsset` | `symbol`, `to`, `amount`, `memo` | Paiement en actif |
+| `0x15` | `FreezeAsset` | `symbol`, `account: Option<Address>`, `frozen: bool` | Gèle ou dégèle un compte, ou tout l'actif |
+| `0x16` | `ClawbackAsset` | `symbol`, `from`, `amount` | Reprise forcée vers l'émetteur |
+| `0x17` | `RenounceAssetPowers` | `symbol`, `powers` | Abandonne définitivement les pouvoirs marqués |
+| `0x18` | `AcceptAsset` | `symbol`, `accept: bool` | Accepte l'actif, ou le retire (solde nul) |
 
 `RotateKey` est aussi la voie de migration post-quantique : quand `0x02` sera
 actif, chaque compte pourra passer à une clé ML-DSA sans changer d'adresse.
@@ -401,6 +425,47 @@ Mandate { max_per_period, period, start, expires_at: Option<u64>, period_index, 
   `min_reserve`.
 - Enveloppes admises : `Sponsored { Approved { corps } }`, `Sponsored { corps }`,
   `Approved { corps }`. Tout autre emboîtement est refusé.
+
+### 5.11 Actifs natifs (protocole 5)
+
+Un actif est un jeton émis par un utilisateur : monnaie stable, points de
+fidélité, crédits. Les montants sont en unités de l'actif, avec ses propres
+`decimals` (0 à 9).
+
+```
+Asset   { issuer, name, decimals: u8, supply: u64, max_supply: Option<u64>,
+          powers: AssetPowers, frozen: bool }
+Holding { amount: u64, frozen: bool }
+```
+
+- **Symbole.** `CreateAsset` exige que `symbol` soit, en majuscules, un nom
+  `.vinx` non expiré de l'émetteur (`eurv.vinx` → `EURV`). Un symbole ne sert
+  qu'une fois, même si le nom change ensuite de mains. La création coûte
+  `asset_fee` (§11), versé à la trésorerie. `name` fait de 1 à 64 octets ;
+  `initial_supply ≤ max_supply` ; une supply initiale nulle exige `mint`.
+- **Pouvoirs.** `mint` (émettre), `freeze` (geler), `clawback` (reprise
+  forcée) sont choisis à la création. `RenounceAssetPowers` les abandonne
+  définitivement ; aucune transaction ne les rajoute. Dégeler reste permis
+  après l'abandon de `freeze`.
+- **Accord préalable.** Un compte ne reçoit un actif (`TransferAsset`,
+  `MintAsset`) qu'après l'avoir accepté : `AcceptAsset { accept: true }` crée
+  sa ligne, vide. `accept: false` la supprime si le solde est nul et que le
+  compte n'est pas gelé. L'émetteur accepte son actif à la création.
+- **Supply.** `MintAsset` augmente `supply` sans dépasser `max_supply` ;
+  `BurnAsset` la diminue. `supply` est toujours la somme des soldes.
+- **Gel.** Un compte gelé n'envoie, ne reçoit ni ne détruit plus l'actif ; un
+  actif gelé (`account` absent) ne circule plus du tout. Le gel d'un compte
+  exige qu'il ait accepté l'actif. La reprise forcée fonctionne même sur un
+  compte gelé.
+- **Transfert.** `amount > 0`, `to ≠ sender`, règles de mémo de §5.2 (y compris
+  le mémo obligatoire du destinataire). Pas de réserve minimale sur les
+  actifs ; les frais restent payés en VINX, éventuellement par un parrain
+  (§5.10).
+- **Règles de compte.** Si l'émetteur a une politique (§5.8), `MintAsset`,
+  `FreezeAsset`, `ClawbackAsset` et `RenounceAssetPowers` exigent ses
+  approbations, même sous le plafond. `CreateAsset` compte `asset_fee` dans
+  la dépense du jour.
+- Les actifs ne font pas partie de l'invariant de supply du VINX (§4.3).
 
 ## 6. Blocs
 
@@ -593,6 +658,7 @@ hauteur `H + 2`. `validators_hash` du bloc `H + 1` reflète déjà le nouvel ens
 | 2 | Noms `.vinx` (§5.4), séquestres (§5.5), paramètre `name_fee` |
 | 3 | Émission des validateurs et frais aux validateurs (§4.4, ADR 0002) |
 | 4 | Paiements groupés (§5.6), horodatage natif (§5.7), règles de compte (§5.8), mandats (§5.9), frais payés par un parrain (§5.10) |
+| 5 | Actifs natifs (§5.11), paramètre `asset_fee` |
 
 ## 10. Étiquettes de domaine
 
@@ -644,6 +710,7 @@ premier round, de façon soutenue, en conditions réelles.
 | `0x09` | `timeout_vote_delta` | 500 | ms par round |
 | `0x0A` | `min_block_interval` | 5 000 | ms |
 | `0x0B` | `name_fee` | 10 000 000 000 (10 VINX) | unités par an ; protocole 2 |
+| `0x0C` | `asset_fee` | 100 000 000 000 (100 VINX) | unités par actif créé ; protocole 5 |
 
 Paramètres non modifiables par `SetParam` :
 

@@ -102,6 +102,71 @@ pub enum TxBody {
         sponsor: Address,
         signature: Signature,
     } = 0x10,
+    // Protocole 5 et suivants : actifs natifs (SPEC §5.11).
+    /// Crée l'actif `symbol`, qui doit être un nom `.vinx` de l'émetteur, en
+    /// majuscules ; `initial_supply` est crédité à l'émetteur.
+    CreateAsset {
+        symbol: String,
+        name: String,
+        decimals: u8,
+        initial_supply: Amount,
+        max_supply: Option<Amount>,
+        powers: AssetPowers,
+    } = 0x11,
+    /// Émet de nouvelles unités : émetteur, avec le pouvoir `mint`.
+    MintAsset {
+        symbol: String,
+        to: Address,
+        amount: Amount,
+    } = 0x12,
+    /// Détruit des unités détenues par l'émetteur de la transaction.
+    BurnAsset {
+        symbol: String,
+        amount: Amount,
+    } = 0x13,
+    TransferAsset {
+        symbol: String,
+        to: Address,
+        amount: Amount,
+        memo: Option<Vec<u8>>,
+    } = 0x14,
+    /// Gèle ou dégèle un compte, ou tout l'actif si `account` est absent :
+    /// émetteur, avec le pouvoir `freeze`.
+    FreezeAsset {
+        symbol: String,
+        account: Option<Address>,
+        frozen: bool,
+    } = 0x15,
+    /// Reprend des unités d'un compte vers l'émetteur : émetteur, avec le
+    /// pouvoir `clawback`.
+    ClawbackAsset {
+        symbol: String,
+        from: Address,
+        amount: Amount,
+    } = 0x16,
+    /// Abandonne définitivement les pouvoirs marqués de l'émetteur.
+    RenounceAssetPowers {
+        symbol: String,
+        powers: AssetPowers,
+    } = 0x17,
+    /// Accepte l'actif (`accept`) pour pouvoir le recevoir, ou le retire de
+    /// son compte, solde nul.
+    AcceptAsset {
+        symbol: String,
+        accept: bool,
+    } = 0x18,
+}
+
+/// Pouvoirs de l'émetteur d'un actif, choisis à la création. Ils peuvent
+/// ensuite être abandonnés, jamais ajoutés.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, BorshSerialize, BorshDeserialize)]
+pub struct AssetPowers {
+    /// Émettre de nouvelles unités.
+    pub mint: bool,
+    /// Geler un compte ou tout l'actif.
+    pub freeze: bool,
+    /// Reprendre des unités sur un compte.
+    pub clawback: bool,
 }
 
 /// Durée minimale d'une période de mandat : un jour.
@@ -153,6 +218,14 @@ impl TxBody {
             | TxBody::RevokeMandate { .. }
             | TxBody::Collect { .. }
             | TxBody::Sponsored { .. } => 4,
+            TxBody::CreateAsset { .. }
+            | TxBody::MintAsset { .. }
+            | TxBody::BurnAsset { .. }
+            | TxBody::TransferAsset { .. }
+            | TxBody::FreezeAsset { .. }
+            | TxBody::ClawbackAsset { .. }
+            | TxBody::RenounceAssetPowers { .. }
+            | TxBody::AcceptAsset { .. } => 5,
             _ => 2,
         }
     }
@@ -324,7 +397,7 @@ mod tests {
         .map(|b| encode(&b)[0]);
         assert_eq!(codes, [0x01, 0x02, 0x03]);
         assert!(decode::<TxBody>(&[0x00, 1]).is_err());
-        assert!(decode::<TxBody>(&[0x11, 1]).is_err());
+        assert!(decode::<TxBody>(&[0x19, 1]).is_err());
     }
 
     #[test]

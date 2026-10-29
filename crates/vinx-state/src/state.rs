@@ -1,6 +1,9 @@
 //! État global et application des transactions et des blocs (SPEC §4, §5, §6, §9).
 
 use crate::accounts::Accounts;
+use crate::assets::{
+    Asset, AssetChanges, AssetError, Assets, Holding, MAX_ASSET_DECIMALS, MAX_ASSET_NAME,
+};
 use crate::emission::Emission;
 use crate::escrow::{Escrow, EscrowError};
 use crate::mandate::{Mandate, MandateError, Mandates};
@@ -22,7 +25,7 @@ use vinx_crypto::{Address, Domain, Hash, PublicKey, hash_tagged_parts, merkle_ro
 
 /// Dernière version du protocole que ce code sait exécuter. Un nœud plus
 /// ancien qu'une mise à jour activée s'arrête au lieu de diverger.
-pub const SUPPORTED_PROTOCOL: u32 = 4;
+pub const SUPPORTED_PROTOCOL: u32 = 5;
 
 #[derive(Clone, Debug, PartialEq, Eq, BorshSerialize, BorshDeserialize)]
 pub struct AdminSet {
@@ -58,10 +61,14 @@ pub struct State {
     pub policies: Policies,
     /// Mandats de prélèvement (protocole 4).
     pub mandates: Mandates,
+    /// Actifs natifs et soldes (protocole 5).
+    pub assets: Assets,
 }
 
 #[derive(Debug, Error, PartialEq, Eq)]
 pub enum TxError {
+    #[error("{0}")]
+    Asset(AssetError),
     #[error(
         "type de transaction pas encore actif sur ce réseau (mise à jour du protocole requise)"
     )]
@@ -218,6 +225,44 @@ struct Globals {
     emission: Emission,
     policies: Policies,
     mandates: Mandates,
+    assets: Assets,
+}
+
+/// [`Globals`] des versions 0.13 et 0.14, sans actifs.
+#[derive(BorshDeserialize)]
+struct GlobalsV4M {
+    chain_id: String,
+    protocol_version: u32,
+    height: u64,
+    escrow: Escrow,
+    admin: AdminSet,
+    validators: ValidatorSet,
+    params: Params,
+    upgrade: Option<PendingUpgrade>,
+    registry: Registry,
+    emission: Emission,
+    policies: Policies,
+    mandates: Mandates,
+}
+
+impl From<GlobalsV4M> for Globals {
+    fn from(g: GlobalsV4M) -> Self {
+        Self {
+            chain_id: g.chain_id,
+            protocol_version: g.protocol_version,
+            height: g.height,
+            escrow: g.escrow,
+            admin: g.admin,
+            validators: g.validators,
+            params: g.params,
+            upgrade: g.upgrade,
+            registry: g.registry,
+            emission: g.emission,
+            policies: g.policies,
+            mandates: g.mandates,
+            assets: Assets::default(),
+        }
+    }
 }
 
 /// [`Globals`] de la version 0.12, sans mandats.
@@ -251,6 +296,7 @@ impl From<GlobalsV4> for Globals {
             emission: g.emission,
             policies: g.policies,
             mandates: Mandates::default(),
+            assets: Assets::default(),
         }
     }
 }
@@ -285,6 +331,7 @@ impl From<GlobalsV3> for Globals {
             emission: g.emission,
             policies: Policies::default(),
             mandates: Mandates::default(),
+            assets: Assets::default(),
         }
     }
 }
@@ -318,6 +365,7 @@ impl From<GlobalsV2> for Globals {
             emission: Emission::default(),
             policies: Policies::default(),
             mandates: Mandates::default(),
+            assets: Assets::default(),
         }
     }
 }
@@ -350,6 +398,7 @@ impl From<LegacyGlobals> for Globals {
             emission: Emission::default(),
             policies: Policies::default(),
             mandates: Mandates::default(),
+            assets: Assets::default(),
         }
     }
 }
@@ -370,6 +419,7 @@ impl State {
             emission: self.emission.clone(),
             policies: self.policies.clone(),
             mandates: self.mandates.clone(),
+            assets: self.assets.clone(),
         })
     }
 
@@ -392,6 +442,10 @@ impl State {
             emission: self.emission.clone(),
             policies: Table::new(),
             mandates: Table::new(),
+            assets: Assets {
+                fee: self.assets.fee,
+                ..Assets::default()
+            },
         })
     }
 
@@ -414,6 +468,8 @@ impl State {
         out.extend(rows(&mut self.registry.deals));
         out.extend(rows(&mut self.policies));
         out.extend(rows(&mut self.mandates));
+        out.extend(rows(&mut self.assets.assets));
+        out.extend(rows(&mut self.assets.holdings));
         out
     }
 
@@ -435,6 +491,8 @@ impl State {
             t if t == <Deal as Row>::TAG => load(&mut self.registry.deals, key, value),
             t if t == <Policy as Row>::TAG => load(&mut self.policies, key, value),
             t if t == <Mandate as Row>::TAG => load(&mut self.mandates, key, value),
+            t if t == <Asset as Row>::TAG => load(&mut self.assets.assets, key, value),
+            t if t == <Holding as Row>::TAG => load(&mut self.assets.holdings, key, value),
             _ => None,
         }
     }
@@ -445,11 +503,14 @@ impl State {
         self.registry.deals.mark_all_dirty();
         self.policies.mark_all_dirty();
         self.mandates.mark_all_dirty();
+        self.assets.assets.mark_all_dirty();
+        self.assets.holdings.mark_all_dirty();
     }
 
     /// Reconstitue un état à partir de [`Self::globals_bytes`] et des comptes.
     pub fn from_parts(globals: &[u8], accounts: Accounts) -> Option<Self> {
         let g: Globals = vinx_core::decode(globals)
+            .or_else(|_| vinx_core::decode::<GlobalsV4M>(globals).map(Globals::from))
             .or_else(|_| vinx_core::decode::<GlobalsV4>(globals).map(Globals::from))
             .or_else(|_| vinx_core::decode::<GlobalsV3>(globals).map(Globals::from))
             .or_else(|_| vinx_core::decode::<GlobalsV2>(globals).map(Globals::from))
@@ -471,6 +532,7 @@ impl State {
             emission: g.emission,
             policies: g.policies,
             mandates: g.mandates,
+            assets: g.assets,
         })
     }
 
@@ -518,6 +580,10 @@ impl State {
         }
         if self.protocol_version >= 4 {
             globals.extend_from_slice(&encode(&(self.policies.root(), self.mandates.root())));
+        }
+        if self.protocol_version >= 5 {
+            let a = &self.assets;
+            globals.extend_from_slice(&encode(&(a.fee, a.assets.root(), a.holdings.root())));
         }
         hash_tagged_parts(
             Domain::State,
@@ -647,6 +713,7 @@ impl State {
         account.nonce = tx.nonce;
         account.key = Some(key);
         let mut set_policy = None;
+        let mut assets = AssetChanges::default();
         match body {
             TxBody::Transfer { to, amount, memo } => {
                 self.check_payment(tx.sender, *to, *amount, memo)?;
@@ -731,6 +798,167 @@ impl State {
                     return Err(TxError::BelowReserve);
                 }
                 mandate_write = Some(((*payer, tx.sender), Some(mandate)));
+            }
+            TxBody::CreateAsset {
+                symbol,
+                name,
+                decimals,
+                initial_supply,
+                max_supply,
+                powers,
+            } => {
+                let owner = self.registry.resolve(&symbol.to_ascii_lowercase(), now);
+                if *symbol != crate::assets::symbol_of(symbol) || owner != Some(tx.sender) {
+                    return Err(TxError::Asset(AssetError::NotSymbolOwner));
+                }
+                if self.assets.assets.contains_key(symbol.as_str()) {
+                    return Err(TxError::Asset(AssetError::SymbolTaken));
+                }
+                let valid = !name.trim().is_empty()
+                    && name.len() <= MAX_ASSET_NAME
+                    && *decimals <= MAX_ASSET_DECIMALS
+                    && max_supply.is_none_or(|m| m > 0 && *initial_supply <= m)
+                    && (*initial_supply > 0 || powers.mint);
+                if !valid {
+                    return Err(TxError::Asset(AssetError::Invalid));
+                }
+                let fee = self.assets.fee;
+                if fee > 0 {
+                    changes.debit(&self.accounts, tx.sender, fee)?;
+                    changes.credit(&self.accounts, Address::treasury(), fee)?;
+                }
+                assets.accept(&self.assets, symbol, tx.sender);
+                if *initial_supply > 0 {
+                    assets
+                        .credit(&self.assets, symbol, tx.sender, *initial_supply)
+                        .map_err(TxError::Asset)?;
+                }
+                assets.assets.push((
+                    symbol.clone(),
+                    Asset {
+                        issuer: tx.sender,
+                        name: name.clone(),
+                        decimals: *decimals,
+                        supply: *initial_supply,
+                        max_supply: *max_supply,
+                        powers: *powers,
+                        frozen: false,
+                    },
+                ));
+            }
+            TxBody::MintAsset { symbol, to, amount } => {
+                let mut asset = self.issued_asset(symbol, tx.sender)?;
+                if !asset.powers.mint {
+                    return Err(TxError::Asset(AssetError::PowerMissing));
+                }
+                if *amount == 0 {
+                    return Err(TxError::ZeroAmount);
+                }
+                asset.supply = asset
+                    .supply
+                    .checked_add(*amount)
+                    .filter(|s| asset.max_supply.is_none_or(|m| *s <= m))
+                    .ok_or(TxError::Asset(AssetError::MaxSupply))?;
+                assets
+                    .credit(&self.assets, symbol, *to, *amount)
+                    .map_err(TxError::Asset)?;
+                assets.assets.push((symbol.clone(), asset));
+            }
+            TxBody::BurnAsset { symbol, amount } => {
+                let mut asset = self.asset(symbol)?;
+                if *amount == 0 {
+                    return Err(TxError::ZeroAmount);
+                }
+                if asset.frozen || assets.is_frozen(&self.assets, symbol, tx.sender) {
+                    return Err(TxError::Asset(AssetError::Frozen));
+                }
+                assets
+                    .debit(&self.assets, symbol, tx.sender, *amount)
+                    .map_err(TxError::Asset)?;
+                asset.supply = asset.supply.checked_sub(*amount).ok_or(TxError::Overflow)?;
+                assets.assets.push((symbol.clone(), asset));
+            }
+            TxBody::TransferAsset {
+                symbol,
+                to,
+                amount,
+                memo,
+            } => {
+                let asset = self.asset(symbol)?;
+                self.check_asset_payment(tx.sender, *to, *amount, memo)?;
+                let frozen = asset.frozen
+                    || assets.is_frozen(&self.assets, symbol, tx.sender)
+                    || assets.is_frozen(&self.assets, symbol, *to);
+                if frozen {
+                    return Err(TxError::Asset(AssetError::Frozen));
+                }
+                assets
+                    .debit(&self.assets, symbol, tx.sender, *amount)
+                    .map_err(TxError::Asset)?;
+                assets
+                    .credit(&self.assets, symbol, *to, *amount)
+                    .map_err(TxError::Asset)?;
+            }
+            TxBody::FreezeAsset {
+                symbol,
+                account,
+                frozen,
+            } => {
+                let mut asset = self.issued_asset(symbol, tx.sender)?;
+                // Dégeler reste possible après avoir abandonné le pouvoir de gel.
+                if *frozen && !asset.powers.freeze {
+                    return Err(TxError::Asset(AssetError::PowerMissing));
+                }
+                match account {
+                    Some(who) => assets
+                        .set_frozen(&self.assets, symbol, *who, *frozen)
+                        .map_err(TxError::Asset)?,
+                    None => {
+                        asset.frozen = *frozen;
+                        assets.assets.push((symbol.clone(), asset));
+                    }
+                }
+            }
+            TxBody::ClawbackAsset {
+                symbol,
+                from,
+                amount,
+            } => {
+                let asset = self.issued_asset(symbol, tx.sender)?;
+                if !asset.powers.clawback {
+                    return Err(TxError::Asset(AssetError::PowerMissing));
+                }
+                if *amount == 0 {
+                    return Err(TxError::ZeroAmount);
+                }
+                if *from == tx.sender {
+                    return Err(TxError::SelfTransfer);
+                }
+                assets
+                    .debit(&self.assets, symbol, *from, *amount)
+                    .map_err(TxError::Asset)?;
+                assets.accept(&self.assets, symbol, tx.sender);
+                assets
+                    .credit(&self.assets, symbol, tx.sender, *amount)
+                    .map_err(TxError::Asset)?;
+            }
+            TxBody::AcceptAsset { symbol, accept } => {
+                self.asset(symbol)?;
+                if *accept {
+                    assets.accept(&self.assets, symbol, tx.sender);
+                } else {
+                    assets
+                        .leave(&self.assets, symbol, tx.sender)
+                        .map_err(TxError::Asset)?;
+                }
+            }
+            TxBody::RenounceAssetPowers { symbol, powers } => {
+                let mut asset = self.issued_asset(symbol, tx.sender)?;
+                let p = &mut asset.powers;
+                p.mint &= !powers.mint;
+                p.freeze &= !powers.freeze;
+                p.clawback &= !powers.clawback;
+                assets.assets.push((symbol.clone(), asset));
             }
             TxBody::SetMemoRequired { required } => {
                 changes.get(&self.accounts, tx.sender).memo_required = *required;
@@ -830,6 +1058,7 @@ impl State {
             self.emission.pot
         };
         changes.commit(&mut self.accounts);
+        assets.commit(&mut self.assets);
         self.emission.pot = pot;
         match mandate_write {
             Some((key, Some(m))) => {
@@ -895,7 +1124,13 @@ impl State {
         // la politique ou la clé.
         if matches!(
             body,
-            TxBody::SetPolicy { .. } | TxBody::RotateKey { .. } | TxBody::GrantMandate { .. }
+            TxBody::SetPolicy { .. }
+                | TxBody::RotateKey { .. }
+                | TxBody::GrantMandate { .. }
+                | TxBody::MintAsset { .. }
+                | TxBody::FreezeAsset { .. }
+                | TxBody::ClawbackAsset { .. }
+                | TxBody::RenounceAssetPowers { .. }
         ) {
             return Err(TxError::Policy(PolicyError::ApprovalsMissing));
         }
@@ -906,6 +1141,7 @@ impl State {
                 .try_fold(0 as Amount, |s, p| s.checked_add(p.amount))
                 .ok_or(TxError::Overflow)?,
             TxBody::RegisterName { .. } => self.registry.name_fee,
+            TxBody::CreateAsset { .. } => self.assets.fee,
             _ => 0,
         };
         let mut updated = policy.clone();
@@ -913,6 +1149,50 @@ impl State {
             .spend_unapproved(self.registry.now / 86_400, spend)
             .map_err(TxError::Policy)?;
         Ok(Some(updated))
+    }
+
+    fn asset(&self, symbol: &str) -> Result<Asset, TxError> {
+        self.assets
+            .assets
+            .get(symbol)
+            .cloned()
+            .ok_or(TxError::Asset(AssetError::Unknown))
+    }
+
+    /// L'actif `symbol`, si `sender` en est l'émetteur.
+    fn issued_asset(&self, symbol: &str, sender: Address) -> Result<Asset, TxError> {
+        let asset = self.asset(symbol)?;
+        if asset.issuer != sender {
+            return Err(TxError::Asset(AssetError::NotIssuer));
+        }
+        Ok(asset)
+    }
+
+    /// Règles d'un transfert d'actif : montant, mémo et exigence de mémo du
+    /// destinataire. Pas de réserve : le destinataire n'a pas besoin de compte.
+    fn check_asset_payment(
+        &self,
+        from: Address,
+        to: Address,
+        amount: Amount,
+        memo: &Option<Vec<u8>>,
+    ) -> Result<(), TxError> {
+        if amount == 0 {
+            return Err(TxError::ZeroAmount);
+        }
+        if to == from {
+            return Err(TxError::SelfTransfer);
+        }
+        if let Some(m) = memo {
+            let too_long = u64::try_from(m.len()).map_or(true, |l| l > self.params.max_memo_bytes);
+            if m.is_empty() || too_long {
+                return Err(TxError::InvalidMemo);
+            }
+        }
+        if memo.is_none() && self.accounts.get(&to).is_some_and(|a| a.memo_required) {
+            return Err(TxError::MemoRequired);
+        }
+        Ok(())
     }
 
     /// Enregistrement ou renouvellement de `name` par `sender` : renvoie la fiche à écrire.
@@ -993,6 +1273,15 @@ impl State {
                     return Err(TxError::NotYetActive);
                 }
                 self.registry.name_fee = *value;
+            }
+            AdminAction::SetParam {
+                param: ParamId::AssetFee,
+                value,
+            } => {
+                if self.protocol_version < 5 {
+                    return Err(TxError::NotYetActive);
+                }
+                self.assets.fee = *value;
             }
             AdminAction::SetParam { param, value } => {
                 let may_be_zero = matches!(param, ParamId::MinFee | ParamId::MinReserve);

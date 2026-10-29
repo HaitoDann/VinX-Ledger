@@ -798,6 +798,75 @@ fn tx_json(stx: &SignedTransaction) -> Value {
             "amount": amount_to_string(*amount),
             "memo": memo.as_ref().map(|m| String::from_utf8_lossy(m).into_owned()),
         }),
+        // Montants d'actifs en unités de l'actif : leurs décimales sont propres à chacun.
+        TxBody::CreateAsset {
+            symbol,
+            name,
+            decimals,
+            initial_supply,
+            max_supply,
+            powers,
+        } => json!({
+            "kind": "création d'actif",
+            "asset": symbol,
+            "name": name,
+            "decimals": decimals,
+            "units": initial_supply.to_string(),
+            "max_supply_units": max_supply.map(|m| m.to_string()),
+            "powers": { "mint": powers.mint, "freeze": powers.freeze, "clawback": powers.clawback },
+        }),
+        TxBody::MintAsset { symbol, to, amount } => json!({
+            "kind": "émission d'actif",
+            "asset": symbol,
+            "to": to.to_string(),
+            "units": amount.to_string(),
+        }),
+        TxBody::BurnAsset { symbol, amount } => json!({
+            "kind": "destruction d'actif",
+            "asset": symbol,
+            "units": amount.to_string(),
+        }),
+        TxBody::TransferAsset {
+            symbol,
+            to,
+            amount,
+            memo,
+        } => json!({
+            "kind": "paiement en actif",
+            "asset": symbol,
+            "to": to.to_string(),
+            "units": amount.to_string(),
+            "memo": memo.as_ref().map(|m| String::from_utf8_lossy(m).into_owned()),
+            "memo_hex": memo.as_ref().map(hex::encode),
+        }),
+        TxBody::FreezeAsset {
+            symbol,
+            account,
+            frozen,
+        } => json!({
+            "kind": if *frozen { "gel d'actif" } else { "dégel d'actif" },
+            "asset": symbol,
+            "account": account.map(|a| a.to_string()),
+        }),
+        TxBody::ClawbackAsset {
+            symbol,
+            from,
+            amount,
+        } => json!({
+            "kind": "reprise forcée",
+            "asset": symbol,
+            "from": from.to_string(),
+            "units": amount.to_string(),
+        }),
+        TxBody::RenounceAssetPowers { symbol, powers } => json!({
+            "kind": "abandon de pouvoirs",
+            "asset": symbol,
+            "powers": { "mint": powers.mint, "freeze": powers.freeze, "clawback": powers.clawback },
+        }),
+        TxBody::AcceptAsset { symbol, accept } => json!({
+            "kind": if *accept { "actif accepté" } else { "actif retiré" },
+            "asset": symbol,
+        }),
         // `inner()` ne renvoie jamais une enveloppe.
         TxBody::Approved { .. } | TxBody::Sponsored { .. } => json!({ "kind": "enveloppe" }),
     };
@@ -906,6 +975,7 @@ pub fn param_name(p: ParamId) -> &'static str {
         ParamId::TimeoutVoteDelta => "timeout_vote_delta",
         ParamId::MinBlockInterval => "min_block_interval",
         ParamId::NameFee => "name_fee",
+        ParamId::AssetFee => "asset_fee",
     }
 }
 
