@@ -678,6 +678,41 @@ fn plan(app: &App, op: &Operation) -> Result<Plan> {
         }
         other => bail!("opération inconnue : {other}"),
     };
+    // Règles du compte (protocole 4) : refuser ici ce que le réseau refuserait.
+    let account_json = client
+        .get_json(&format!("/accounts/{me}"))?
+        .unwrap_or(Value::Null);
+    let policy = at(&account_json, "/policy");
+    if !policy.is_null() {
+        let threshold = at(policy, "/threshold").as_u64().unwrap_or(0);
+        match at(policy, "/daily_limit").as_str() {
+            None => bail!(
+                "ce compte exige {threshold} approbation(s) de ses signataires : la transaction \
+                 se prépare avec « vinx-wallet account propose », puis chaque signataire \
+                 l'approuve (guide du portefeuille, comptes à plusieurs signatures)"
+            ),
+            Some(limit) => {
+                let limit: Amount = limit.parse().unwrap_or(0);
+                let used = units(at(policy, "/spent_today")).unwrap_or(0);
+                let left = limit.saturating_sub(used);
+                if spent > left {
+                    bail!(
+                        "plafond journalier dépassé : il reste {} VINX aujourd'hui sur {} ; au-delà, \
+                         il faut l'approbation de la clé coffre (« vinx-wallet account propose »)",
+                        format_vinx(left),
+                        format_vinx(limit)
+                    );
+                }
+                lines.push((
+                    "Plafond du jour".into(),
+                    format!(
+                        "{} VINX restants après l'opération",
+                        format_vinx(left.saturating_sub(spent))
+                    ),
+                ));
+            }
+        }
+    }
     let total = spent
         .checked_add(fee)
         .ok_or_else(|| anyhow!("montant trop grand"))?;
@@ -783,6 +818,7 @@ fn overview(app: &App, index: u32) -> Result<Value> {
         "balance": account.as_ref().map_or_else(|| "0".to_owned(), |a| at(a, "/balance").as_str().unwrap_or("0").to_owned()),
         "names": account.as_ref().map_or(Value::Array(Vec::new()), |a| at(a, "/names").clone()),
         "deals": account.as_ref().map_or(Value::Array(Vec::new()), |a| at(a, "/deals").clone()),
+        "policy": account.as_ref().map_or(Value::Null, |a| at(a, "/policy").clone()),
         "history": history,
         "network": {
             "chain_id": at(&status, "/chain_id"),

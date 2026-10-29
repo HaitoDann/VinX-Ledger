@@ -70,7 +70,7 @@ pub struct AdminLogEntry {
 /// destinataire, le vendeur ou l'arbitre.
 pub fn parties(t: &SignedTransaction) -> Vec<Address> {
     let mut out = vec![t.tx.sender];
-    match &t.tx.body {
+    match t.tx.body.inner() {
         TxBody::Transfer { to, .. } | TxBody::TransferName { to, .. } => out.push(*to),
         TxBody::BatchTransfer { payments } => out.extend(payments.iter().map(|p| p.to)),
         TxBody::OpenDeal {
@@ -125,7 +125,7 @@ fn address_keys(block: &Block) -> Result<Vec<(Address, u32)>> {
 fn attest_keys(block: &Block) -> Result<Vec<(Hash, u32)>> {
     let mut keys = Vec::new();
     for (rank, t) in block.txs.iter().enumerate() {
-        if let TxBody::Attest { digest } = &t.tx.body {
+        if let TxBody::Attest { digest } = t.tx.body.inner() {
             keys.push((*digest, u32::try_from(rank)?));
         }
     }

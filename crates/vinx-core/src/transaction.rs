@@ -66,7 +66,31 @@ pub enum TxBody {
     Attest {
         digest: Hash,
     } = 0x0A,
+    /// Règles du compte : signataires, seuil, plafond journalier (SPEC §5.8).
+    SetPolicy {
+        policy: PolicyConfig,
+    } = 0x0B,
+    /// `body`, approuvé par des signataires de la politique du compte (SPEC §5.8).
+    Approved {
+        body: Box<TxBody>,
+        approvals: Vec<crate::Approval>,
+    } = 0x0C,
 }
+
+/// Règles d'un compte (SPEC §5.8). Tout à zéro : pas de règle.
+#[derive(Clone, Debug, Default, PartialEq, Eq, BorshSerialize, BorshDeserialize)]
+pub struct PolicyConfig {
+    /// Clés qui peuvent approuver, au plus [`MAX_POLICY_SIGNERS`].
+    pub signers: Vec<PublicKey>,
+    /// Approbations exigées ; 0 : aucune.
+    pub threshold: u8,
+    /// Sans approbation, dépenses permises par jour (UTC) ; `None` : toute
+    /// transaction exige `threshold` approbations.
+    pub daily_limit: Option<Amount>,
+}
+
+/// Nombre maximal de signataires d'une politique de compte.
+pub const MAX_POLICY_SIGNERS: usize = 10;
 
 /// Un paiement d'un [`TxBody::BatchTransfer`].
 #[derive(Clone, Debug, PartialEq, Eq, BorshSerialize, BorshDeserialize)]
@@ -89,7 +113,10 @@ impl TxBody {
             TxBody::Transfer { .. } | TxBody::SetMemoRequired { .. } | TxBody::RotateKey { .. } => {
                 1
             }
-            TxBody::BatchTransfer { .. } | TxBody::Attest { .. } => 4,
+            TxBody::BatchTransfer { .. }
+            | TxBody::Attest { .. }
+            | TxBody::SetPolicy { .. }
+            | TxBody::Approved { .. } => 4,
             _ => 2,
         }
     }
@@ -102,7 +129,16 @@ impl TxBody {
                 let units = payments.len().div_ceil(PAYMENTS_PER_FEE).max(1);
                 min_fee.saturating_mul(Amount::try_from(units).unwrap_or(Amount::MAX))
             }
+            TxBody::Approved { body, .. } => body.min_fee(min_fee),
             _ => min_fee,
+        }
+    }
+
+    /// Corps effectif : celui qu'enveloppe un [`TxBody::Approved`].
+    pub fn inner(&self) -> &TxBody {
+        match self {
+            TxBody::Approved { body, .. } => body,
+            other => other,
         }
     }
 }
@@ -121,6 +157,25 @@ pub struct SignedTransaction {
 }
 
 impl Transaction {
+    /// Message approuvé par un signataire de la politique du compte :
+    /// `"vinx/tx/approval" ‖ borsh(chaîne, émetteur, nonce, frais, corps)`, où
+    /// le corps est celui qu'enveloppe [`TxBody::Approved`].
+    pub fn approval_message(&self) -> Vec<u8> {
+        let inner = self.body.inner();
+        tagged(
+            Domain::TxApproval,
+            &encode(&(&self.chain_id, &self.sender, self.nonce, self.fee, inner)),
+        )
+    }
+
+    /// Approbation de `keypair`, signataire `index` de la politique du compte.
+    pub fn approve(&self, index: u8, keypair: &KeyPair) -> crate::Approval {
+        crate::Approval {
+            signer_index: index,
+            signature: keypair.sign(&self.approval_message()),
+        }
+    }
+
     /// Message signé : `"vinx/tx" ‖ borsh(tx)`.
     pub fn signing_message(&self) -> Vec<u8> {
         tagged(Domain::Tx, &encode(self))
@@ -185,7 +240,7 @@ mod tests {
         .map(|b| encode(&b)[0]);
         assert_eq!(codes, [0x01, 0x02, 0x03]);
         assert!(decode::<TxBody>(&[0x00, 1]).is_err());
-        assert!(decode::<TxBody>(&[0x0B, 1]).is_err());
+        assert!(decode::<TxBody>(&[0x0D, 1]).is_err());
     }
 
     #[test]

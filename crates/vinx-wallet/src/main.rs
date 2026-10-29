@@ -82,6 +82,10 @@ enum Command {
     /// Transactions admin multisig.
     #[command(subcommand)]
     Admin(AdminCommand),
+    /// Règles d'un compte (protocole 4) : multisig, plafond journalier, et
+    /// propositions approuvées par ses signataires.
+    #[command(subcommand)]
+    Account(AccountCommand),
     /// Vérifie que de futurs validateurs sont prêts, avant de les ajouter.
     ///
     /// `--node` désigne un nœud du réseau actuel (la référence) ; chaque
@@ -175,6 +179,99 @@ enum AdminCommand {
     Submit {
         #[arg(long)]
         file: PathBuf,
+    },
+}
+
+#[derive(Subcommand)]
+enum AccountCommand {
+    /// Affiche les règles d'un compte.
+    Policy { address: Address },
+    /// Fixe les règles d'un compte qui n'en a pas encore, avec sa seule clé.
+    /// Pour changer des règles existantes, passer par `propose set-policy`.
+    SetPolicy {
+        #[arg(long)]
+        key: PathBuf,
+        /// Compte émetteur, si la clé a été changée par rotation.
+        #[arg(long)]
+        from: Option<Address>,
+        #[command(flatten)]
+        policy: PolicyArgs,
+    },
+    /// Prépare une transaction du compte, à faire approuver par ses signataires.
+    Propose {
+        #[arg(long)]
+        from: Address,
+        #[arg(long)]
+        out: PathBuf,
+        #[command(subcommand)]
+        action: AccountAction,
+    },
+    /// Ajoute l'approbation d'un signataire (indice trouvé d'après sa clé).
+    Approve {
+        #[arg(long)]
+        file: PathBuf,
+        #[arg(long)]
+        key: PathBuf,
+    },
+    /// Affiche une proposition et ses approbations.
+    Show {
+        #[arg(long)]
+        file: PathBuf,
+    },
+    /// Envoie une proposition approuvée, signée par la clé du compte.
+    Submit {
+        #[arg(long)]
+        file: PathBuf,
+        /// Clé du compte (celle qui signe ses transactions).
+        #[arg(long)]
+        key: PathBuf,
+    },
+}
+
+#[derive(Args)]
+struct PolicyArgs {
+    /// Clé publique d'un signataire, en hexadécimal (répétable, 10 au plus).
+    #[arg(long = "signer", num_args = 1)]
+    signers: Vec<String>,
+    /// Approbations exigées.
+    #[arg(long, default_value_t = 0)]
+    threshold: u8,
+    /// Plafond journalier sans approbation, en VINX.
+    #[arg(long)]
+    daily_limit: Option<String>,
+}
+
+impl PolicyArgs {
+    fn config(&self) -> Result<vinx_core::PolicyConfig> {
+        Ok(vinx_core::PolicyConfig {
+            signers: self
+                .signers
+                .iter()
+                .map(|k| key_from_hex(k))
+                .collect::<Result<_>>()?,
+            threshold: self.threshold,
+            daily_limit: self.daily_limit.as_deref().map(parse_vinx).transpose()?,
+        })
+    }
+}
+
+#[derive(Subcommand)]
+enum AccountAction {
+    /// Paiement.
+    Send {
+        #[arg(long)]
+        to: Address,
+        #[arg(long)]
+        amount: String,
+        #[arg(long)]
+        memo: Option<String>,
+    },
+    /// Nouvelles règles ; sans aucune option, retire les règles.
+    SetPolicy(PolicyArgs),
+    /// Nouvelle clé de compte (fichier de clé).
+    RotateKey {
+        #[arg(long)]
+        new_key: PathBuf,
     },
 }
 
@@ -515,6 +612,102 @@ fn main() -> Result<()> {
             }
             println!("  puis, pour chaque fichier : deux « admin approve », et « admin submit »");
         }
+        Command::Account(cmd) => match cmd {
+            AccountCommand::Policy { address } => {
+                match vinx_wallet::multisig::policy(&client, &address)? {
+                    None => println!("aucune règle : la clé du compte suffit"),
+                    Some(p) => {
+                        println!("seuil       {} approbation(s)", p.threshold);
+                        for (i, k) in p.signers.iter().enumerate() {
+                            println!(
+                                "signataire  {i}  {}  {}",
+                                key_to_hex(k),
+                                Address::from_public_key(k)
+                            );
+                        }
+                        match p.daily_limit {
+                            Some(l) => println!(
+                                "plafond     {} VINX par jour sans approbation",
+                                format_vinx(l)
+                            ),
+                            None => println!(
+                                "plafond     aucun : toute transaction exige les approbations"
+                            ),
+                        }
+                    }
+                }
+            }
+            AccountCommand::SetPolicy { key, from, policy } => {
+                let keypair = load_key(&key, pwf)?;
+                let body = vinx_core::TxBody::SetPolicy {
+                    policy: policy.config()?,
+                };
+                println!(
+                    "transaction {}",
+                    ops::submit(&client, &keypair, from, body, None)?
+                );
+            }
+            AccountCommand::Propose { from, out, action } => {
+                let body = match action {
+                    AccountAction::Send { to, amount, memo } => vinx_core::TxBody::Transfer {
+                        to,
+                        amount: parse_vinx(&amount)?,
+                        memo: memo.map(String::into_bytes),
+                    },
+                    AccountAction::SetPolicy(p) => vinx_core::TxBody::SetPolicy {
+                        policy: p.config()?,
+                    },
+                    AccountAction::RotateKey { new_key } => vinx_core::TxBody::RotateKey {
+                        new_key: key_from_hex(&KeyFile::load(&new_key)?.public_key)?,
+                    },
+                };
+                let p = vinx_wallet::multisig::propose(&client, from, body)?;
+                vinx_wallet::multisig::save(&p, &out)?;
+                println!("proposition : nonce {} → {}", p.tx.nonce, out.display());
+            }
+            AccountCommand::Approve { file, key } => {
+                let mut p = vinx_wallet::multisig::load(&file)?;
+                let policy = vinx_wallet::multisig::policy(&client, &p.tx.sender)?
+                    .ok_or_else(|| anyhow!("ce compte n'a pas de règles : rien à approuver"))?;
+                vinx_wallet::multisig::approve(&mut p, &policy.signers, &load_key(&key, pwf)?)?;
+                vinx_wallet::multisig::save(&p, &file)?;
+                println!(
+                    "{} approbation(s) sur {} exigée(s)",
+                    p.approvals.len(),
+                    policy.threshold
+                );
+            }
+            AccountCommand::Show { file } => {
+                let p = vinx_wallet::multisig::load(&file)?;
+                println!("compte      {}", p.tx.sender);
+                println!("nonce       {}", p.tx.nonce);
+                println!("frais       {} VINX", format_vinx(p.tx.fee));
+                println!("transaction {:?}", p.tx.body);
+                let idx: Vec<String> = p
+                    .approvals
+                    .iter()
+                    .map(|a| a.signer_index.to_string())
+                    .collect();
+                println!(
+                    "approuvée par les signataires : {}",
+                    if idx.is_empty() {
+                        "aucun".into()
+                    } else {
+                        idx.join(", ")
+                    }
+                );
+            }
+            AccountCommand::Submit { file, key } => {
+                let p = vinx_wallet::multisig::load(&file)?;
+                let has_key = client
+                    .account(&p.tx.sender)?
+                    .ok_or_else(|| anyhow!("compte inconnu"))?
+                    .has_key;
+                let id =
+                    vinx_wallet::multisig::submit(&client, &p, &load_key(&key, pwf)?, has_key)?;
+                println!("transaction {id}");
+            }
+        },
         Command::Admin(cmd) => match cmd {
             AdminCommand::Status => print_governance(&client.governance()?),
             AdminCommand::Propose {

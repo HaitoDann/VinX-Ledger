@@ -374,6 +374,15 @@ async fn account(State(shared): State<SharedRef>, Path(address): Path<String>) -
         "public_key": account.key.as_ref().map(key_to_hex),
         "names": names,
         "deals": deals,
+        "policy": st.policies.get(&address).map(|p| {
+            let mut v = policy_json(&p.config);
+            if let Some(o) = v.as_object_mut() {
+                let today = st.registry.now / 86_400;
+                let spent = if p.day == today { p.spent } else { 0 };
+                o.insert("spent_today".into(), json!(amount_to_string(spent)));
+            }
+            v
+        }),
     })))
 }
 
@@ -685,7 +694,7 @@ fn tx_json(stx: &SignedTransaction) -> Value {
         "nonce": t.nonce,
         "fee": amount_to_string(t.fee),
     });
-    let body = match &t.body {
+    let body = match t.body.inner() {
         TxBody::Transfer { to, amount, memo } => json!({
             "kind": "paiement",
             "to": to.to_string(),
@@ -749,11 +758,34 @@ fn tx_json(stx: &SignedTransaction) -> Value {
             "kind": "horodatage",
             "digest": hex::encode(digest),
         }),
+        TxBody::SetPolicy { policy } => json!({
+            "kind": "règles du compte",
+            "policy": policy_json(policy),
+        }),
+        // `inner()` ne renvoie jamais une enveloppe.
+        TxBody::Approved { .. } => json!({ "kind": "approuvée" }),
     };
+    if let TxBody::Approved { approvals, .. } = &t.body {
+        if let Some(o) = v.as_object_mut() {
+            o.insert("approvals".into(), json!(approvals.len()));
+        }
+    }
     if let (Some(o), Some(b)) = (v.as_object_mut(), body.as_object()) {
         o.extend(b.clone());
     }
     v
+}
+
+/// Règles d'un compte, lisibles.
+fn policy_json(p: &vinx_core::PolicyConfig) -> Value {
+    json!({
+        "signers": p.signers.iter().map(|k| json!({
+            "key": key_to_hex(k),
+            "address": Address::from_public_key(k).to_string(),
+        })).collect::<Vec<_>>(),
+        "threshold": p.threshold,
+        "daily_limit": p.daily_limit.map(amount_to_string),
+    })
 }
 
 /// Action admin lisible.

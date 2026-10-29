@@ -3,6 +3,7 @@
 use crate::accounts::Accounts;
 use crate::emission::Emission;
 use crate::escrow::{Escrow, EscrowError};
+use crate::policy::{Policies, Policy, PolicyError};
 use crate::registry::{
     Deal, MAX_DEAL_DURATION, NAME_GRACE, NAME_PERIOD, NameRecord, Registry, valid_name,
 };
@@ -52,6 +53,8 @@ pub struct State {
     pub registry: Registry,
     /// Émission vers les validateurs et cagnotte des frais (protocole 3).
     pub emission: Emission,
+    /// Règles des comptes : multisig, plafonds (protocole 4).
+    pub policies: Policies,
 }
 
 #[derive(Debug, Error, PartialEq, Eq)]
@@ -66,6 +69,8 @@ pub enum TxError {
     NameTaken,
     #[error("ce nom n'appartient pas à l'émetteur, ou a expiré")]
     NotNameOwner,
+    #[error("{0}")]
+    Policy(PolicyError),
     #[error("paiement groupé vide ou de plus de 100 paiements")]
     InvalidBatch,
     #[error("séquestre inconnu")]
@@ -202,6 +207,40 @@ struct Globals {
     upgrade: Option<PendingUpgrade>,
     registry: Registry,
     emission: Emission,
+    policies: Policies,
+}
+
+/// [`Globals`] des versions 0.10 et 0.11, sans politiques de compte.
+#[derive(BorshDeserialize)]
+struct GlobalsV3 {
+    chain_id: String,
+    protocol_version: u32,
+    height: u64,
+    escrow: Escrow,
+    admin: AdminSet,
+    validators: ValidatorSet,
+    params: Params,
+    upgrade: Option<PendingUpgrade>,
+    registry: Registry,
+    emission: Emission,
+}
+
+impl From<GlobalsV3> for Globals {
+    fn from(g: GlobalsV3) -> Self {
+        Self {
+            chain_id: g.chain_id,
+            protocol_version: g.protocol_version,
+            height: g.height,
+            escrow: g.escrow,
+            admin: g.admin,
+            validators: g.validators,
+            params: g.params,
+            upgrade: g.upgrade,
+            registry: g.registry,
+            emission: g.emission,
+            policies: Policies::default(),
+        }
+    }
 }
 
 /// [`Globals`] des versions 0.8 et 0.9, sans émission.
@@ -231,6 +270,7 @@ impl From<GlobalsV2> for Globals {
             upgrade: g.upgrade,
             registry: g.registry,
             emission: Emission::default(),
+            policies: Policies::default(),
         }
     }
 }
@@ -261,6 +301,7 @@ impl From<LegacyGlobals> for Globals {
             upgrade: g.upgrade,
             registry: Registry::default(),
             emission: Emission::default(),
+            policies: Policies::default(),
         }
     }
 }
@@ -279,12 +320,14 @@ impl State {
             upgrade: self.upgrade.clone(),
             registry: self.registry.clone(),
             emission: self.emission.clone(),
+            policies: self.policies.clone(),
         })
     }
 
     /// Reconstitue un état à partir de [`Self::globals_bytes`] et des comptes.
     pub fn from_parts(globals: &[u8], accounts: Accounts) -> Option<Self> {
         let g: Globals = vinx_core::decode(globals)
+            .or_else(|_| vinx_core::decode::<GlobalsV3>(globals).map(Globals::from))
             .or_else(|_| vinx_core::decode::<GlobalsV2>(globals).map(Globals::from))
             .or_else(|_| vinx_core::decode::<LegacyGlobals>(globals).map(Globals::from))
             .ok()?;
@@ -302,6 +345,7 @@ impl State {
             upgrade: g.upgrade,
             registry: g.registry,
             emission: g.emission,
+            policies: g.policies,
         })
     }
 
@@ -337,6 +381,9 @@ impl State {
         }
         if self.protocol_version >= 3 {
             globals.extend_from_slice(&encode(&self.emission));
+        }
+        if self.protocol_version >= 4 {
+            globals.extend_from_slice(&encode(&self.policies));
         }
         hash_tagged_parts(
             Domain::State,
@@ -425,6 +472,11 @@ impl State {
         if tx.body.min_protocol() > self.protocol_version {
             return Err(TxError::NotYetActive);
         }
+        let body = tx.body.inner();
+        if body.min_protocol() > self.protocol_version {
+            return Err(TxError::NotYetActive);
+        }
+        let policy_write = self.check_policy(tx, body)?;
 
         let mut changes = Changes::default();
         let mut registry = None;
@@ -437,7 +489,8 @@ impl State {
         let account = changes.get(&self.accounts, tx.sender);
         account.nonce = tx.nonce;
         account.key = Some(key);
-        match &tx.body {
+        let mut set_policy = None;
+        match body {
             TxBody::Transfer { to, amount, memo } => {
                 self.check_payment(tx.sender, *to, *amount, memo)?;
                 changes.debit(&self.accounts, tx.sender, *amount)?;
@@ -455,6 +508,18 @@ impl State {
             }
             // L'empreinte n'est que dans le bloc : rien à changer dans l'état.
             TxBody::Attest { .. } => {}
+            TxBody::SetPolicy { policy } => {
+                let keep = crate::policy::validate(policy).map_err(TxError::Policy)?;
+                set_policy = Some(keep.map(|()| Policy {
+                    config: policy.clone(),
+                    day: 0,
+                    spent: 0,
+                }));
+            }
+            // Un seul niveau d'enveloppe.
+            TxBody::Approved { .. } => {
+                return Err(TxError::Policy(PolicyError::InvalidApprovals));
+            }
             TxBody::SetMemoRequired { required } => {
                 changes.get(&self.accounts, tx.sender).memo_required = *required;
             }
@@ -552,6 +617,18 @@ impl State {
         };
         changes.commit(&mut self.accounts);
         self.emission.pot = pot;
+        if let Some(p) = policy_write {
+            Arc::make_mut(&mut self.policies).insert(tx.sender, p);
+        }
+        match set_policy {
+            Some(Some(p)) => {
+                Arc::make_mut(&mut self.policies).insert(tx.sender, p);
+            }
+            Some(None) => {
+                Arc::make_mut(&mut self.policies).remove(&tx.sender);
+            }
+            None => {}
+        }
         match registry {
             Some(Write::Name(name, record)) => {
                 Arc::make_mut(&mut self.registry.names).insert(name, record);
@@ -565,6 +642,54 @@ impl State {
             None => {}
         }
         Ok(())
+    }
+
+    /// Applique la politique du compte émetteur à `tx`, dont `body` est le corps
+    /// effectif. Renvoie la politique mise à jour (dépense du jour) à écrire.
+    fn check_policy(
+        &self,
+        tx: &vinx_core::Transaction,
+        body: &TxBody,
+    ) -> Result<Option<Policy>, TxError> {
+        let approvals = match &tx.body {
+            TxBody::Approved { approvals, .. } => Some(approvals),
+            _ => None,
+        };
+        let Some(policy) = self.policies.get(&tx.sender) else {
+            return match approvals {
+                Some(_) => Err(TxError::Policy(PolicyError::InvalidApprovals)),
+                None => Ok(None),
+            };
+        };
+        if let Some(approvals) = approvals {
+            let count =
+                crate::policy::count_approvals(&policy.config, approvals, &tx.approval_message())
+                    .map_err(TxError::Policy)?;
+            return if count >= policy.config.threshold {
+                Ok(None)
+            } else {
+                Err(TxError::Policy(PolicyError::ApprovalsMissing))
+            };
+        }
+        // Sans approbation : seulement sous le plafond, et jamais pour changer
+        // la politique ou la clé.
+        if matches!(body, TxBody::SetPolicy { .. } | TxBody::RotateKey { .. }) {
+            return Err(TxError::Policy(PolicyError::ApprovalsMissing));
+        }
+        let spend = match body {
+            TxBody::Transfer { amount, .. } | TxBody::OpenDeal { amount, .. } => *amount,
+            TxBody::BatchTransfer { payments } => payments
+                .iter()
+                .try_fold(0 as Amount, |s, p| s.checked_add(p.amount))
+                .ok_or(TxError::Overflow)?,
+            TxBody::RegisterName { .. } => self.registry.name_fee,
+            _ => 0,
+        };
+        let mut updated = policy.clone();
+        updated
+            .spend_unapproved(self.registry.now / 86_400, spend)
+            .map_err(TxError::Policy)?;
+        Ok(Some(updated))
     }
 
     /// Enregistrement ou renouvellement de `name` par `sender` : renvoie la fiche à écrire.
