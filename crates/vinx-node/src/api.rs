@@ -365,11 +365,44 @@ async fn account(State(shared): State<SharedRef>, Path(address): Path<String>) -
         .into_iter()
         .map(|(n, expires_at)| json!({ "name": format!("{n}.vinx"), "expires_at": expires_at }))
         .collect();
-    let deals: Vec<Value> = reg
+    let mut deals: Vec<Value> = reg
         .deals_of(&address)
         .iter()
         .map(|(id, d)| deal_json(id, d, reg.now))
         .collect();
+    deals.extend(
+        st.assets
+            .deals
+            .iter()
+            .filter(|(_, d)| {
+                let d = &d.deal;
+                d.buyer == address || d.seller == address || d.arbiter == Some(address)
+            })
+            .map(|(id, d)| asset_deal_json(id, d, reg.now)),
+    );
+    // Mandats en actifs : mêmes champs, montants en unités de `asset`.
+    let in_asset = |mut v: Value, symbol: &str| {
+        if let Some(o) = v.as_object_mut() {
+            o.insert("asset".into(), json!(symbol));
+        }
+        v
+    };
+    let granted_assets = st
+        .assets
+        .mandates
+        .iter()
+        .filter(|((_, payer, _), _)| *payer == address)
+        .map(|((sym, _, payee), m)| {
+            in_asset(mandate_json(payee, &m.mandate, reg.now, "payee"), sym)
+        });
+    let received_assets = st
+        .assets
+        .mandates
+        .iter()
+        .filter(|((_, _, payee), _)| *payee == address)
+        .map(|((sym, payer, _), m)| {
+            in_asset(mandate_json(payer, &m.mandate, reg.now, "payer"), sym)
+        });
     Ok(Json(json!({
         "address": address.to_string(),
         "balance": amount_to_string(account.balance),
@@ -392,10 +425,12 @@ async fn account(State(shared): State<SharedRef>, Path(address): Path<String>) -
             "granted": st.mandates.iter()
                 .filter(|((payer, _), _)| *payer == address)
                 .map(|((_, payee), m)| mandate_json(payee, m, st.registry.now, "payee"))
+                .chain(granted_assets)
                 .collect::<Vec<_>>(),
             "received": st.mandates.iter()
                 .filter(|((_, payee), _)| *payee == address)
                 .map(|((payer, _), m)| mandate_json(payer, m, st.registry.now, "payer"))
+                .chain(received_assets)
                 .collect::<Vec<_>>(),
         },
         "policy": st.policies.get(&address).map(|p| {
@@ -588,12 +623,28 @@ async fn deal(State(shared): State<SharedRef>, Path(id): Path<String>) -> ApiRes
         .and_then(|b| <[u8; 32]>::try_from(b).ok())
         .ok_or_else(|| error(StatusCode::BAD_REQUEST, "identifiant invalide"))?;
     let s = lock(&shared);
-    let reg = &s.chain.state.registry;
-    let d = reg
+    let st = &s.chain.state;
+    let now = st.registry.now;
+    if let Some(d) = st.registry.deals.get(&id) {
+        return Ok(Json(deal_json(&id, d, now)));
+    }
+    let d = st
+        .assets
         .deals
         .get(&id)
         .ok_or_else(|| error(StatusCode::NOT_FOUND, "séquestre inconnu ou clos"))?;
-    Ok(Json(deal_json(&id, d, reg.now)))
+    Ok(Json(asset_deal_json(&id, d, now)))
+}
+
+/// Séquestre en actif : `units` en unités de l'actif, au lieu de `amount`.
+fn asset_deal_json(id: &vinx_crypto::Hash, d: &vinx_state::assets::AssetDeal, now: u64) -> Value {
+    let mut v = deal_json(id, &d.deal, now);
+    if let Some(o) = v.as_object_mut() {
+        o.remove("amount");
+        o.insert("asset".into(), json!(d.symbol));
+        o.insert("units".into(), json!(amount_to_string(d.deal.amount)));
+    }
+    v
 }
 
 fn deal_json(id: &vinx_crypto::Hash, d: &vinx_state::Deal, now: u64) -> Value {
@@ -918,6 +969,55 @@ fn tx_json(stx: &SignedTransaction) -> Value {
             "kind": "abandon de pouvoirs",
             "asset": symbol,
             "powers": { "mint": powers.mint, "freeze": powers.freeze, "clawback": powers.clawback },
+        }),
+        TxBody::OpenAssetDeal {
+            symbol,
+            seller,
+            arbiter,
+            amount,
+            deadline,
+            memo,
+        } => json!({
+            "kind": "séquestre",
+            "asset": symbol,
+            "deal": hash_to_hex(&vinx_core::deal_id(&t.sender, t.nonce)),
+            "to": seller.to_string(),
+            "arbiter": arbiter.map(|a| a.to_string()),
+            "units": amount.to_string(),
+            "deadline": deadline,
+            "memo": memo.as_ref().map(|m| String::from_utf8_lossy(m).into_owned()),
+            "memo_hex": memo.as_ref().map(hex::encode),
+        }),
+        TxBody::GrantAssetMandate {
+            symbol,
+            payee,
+            max_per_period,
+            period,
+            expires_at,
+        } => json!({
+            "kind": "mandat accordé",
+            "asset": symbol,
+            "to": payee.to_string(),
+            "max_per_period_units": max_per_period.to_string(),
+            "period": period,
+            "expires_at": expires_at,
+        }),
+        TxBody::RevokeAssetMandate { symbol, payee } => json!({
+            "kind": "mandat révoqué",
+            "asset": symbol,
+            "to": payee.to_string(),
+        }),
+        TxBody::CollectAsset {
+            symbol,
+            payer,
+            amount,
+            memo,
+        } => json!({
+            "kind": "prélèvement",
+            "asset": symbol,
+            "payer": payer.to_string(),
+            "units": amount.to_string(),
+            "memo": memo.as_ref().map(|m| String::from_utf8_lossy(m).into_owned()),
         }),
         TxBody::AcceptAsset { symbol, accept } => json!({
             "kind": if *accept { "actif accepté" } else { "actif retiré" },

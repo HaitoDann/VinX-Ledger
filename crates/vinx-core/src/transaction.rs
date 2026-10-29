@@ -155,6 +155,35 @@ pub enum TxBody {
         symbol: String,
         accept: bool,
     } = 0x18,
+    /// Séquestre en actif : comme `OpenDeal`, en unités de `symbol`. Se
+    /// verse ou se rembourse avec `ReleaseDeal` et `RefundDeal`.
+    OpenAssetDeal {
+        symbol: String,
+        seller: Address,
+        arbiter: Option<Address>,
+        amount: Amount,
+        deadline: u64,
+        memo: Option<Vec<u8>>,
+    } = 0x19,
+    /// Mandat de prélèvement en actif : comme `GrantMandate`, en unités de `symbol`.
+    GrantAssetMandate {
+        symbol: String,
+        payee: Address,
+        max_per_period: Amount,
+        period: u64,
+        expires_at: Option<u64>,
+    } = 0x1A,
+    RevokeAssetMandate {
+        symbol: String,
+        payee: Address,
+    } = 0x1B,
+    /// Prélève des unités de `symbol` sur `payer`, dans les limites du mandat.
+    CollectAsset {
+        symbol: String,
+        payer: Address,
+        amount: Amount,
+        memo: Option<Vec<u8>>,
+    } = 0x1C,
 }
 
 /// Pouvoirs de l'émetteur d'un actif, choisis à la création. Ils peuvent
@@ -225,7 +254,11 @@ impl TxBody {
             | TxBody::FreezeAsset { .. }
             | TxBody::ClawbackAsset { .. }
             | TxBody::RenounceAssetPowers { .. }
-            | TxBody::AcceptAsset { .. } => 5,
+            | TxBody::AcceptAsset { .. }
+            | TxBody::OpenAssetDeal { .. }
+            | TxBody::GrantAssetMandate { .. }
+            | TxBody::RevokeAssetMandate { .. }
+            | TxBody::CollectAsset { .. } => 5,
             _ => 2,
         }
     }
@@ -397,7 +430,7 @@ mod tests {
         .map(|b| encode(&b)[0]);
         assert_eq!(codes, [0x01, 0x02, 0x03]);
         assert!(decode::<TxBody>(&[0x00, 1]).is_err());
-        assert!(decode::<TxBody>(&[0x19, 1]).is_err());
+        assert!(decode::<TxBody>(&[0x1D, 1]).is_err());
     }
 
     #[test]

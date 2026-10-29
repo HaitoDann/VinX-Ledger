@@ -80,7 +80,24 @@ API du nœud : `/assets`, `/assets/{symbole}`, et le champ `assets` de
 `/accounts/{adresse}`. Les montants y sont en unités du jeton (`units`,
 `supply_units`) : divisez par 10^`decimals`.
 
-## 5. Sécuriser l'émission
+## 5. Séquestres et abonnements en jetons
+
+Les séquestres et les mandats de prélèvement fonctionnent aussi en jetons,
+avec les mêmes règles qu'en VINX (guide du portefeuille, §6 et §10) : dans le
+portefeuille, choisis la monnaie dans le formulaire.
+
+```bash
+vinx-wallet asset deal-open --key acheteur.json --symbol EURV --seller vinx1… --amount 49.90 --days 14
+vinx-wallet asset deal-release --key acheteur.json ID-DU-SÉQUESTRE
+vinx-wallet asset mandate-grant --key client.json --symbol EURV --payee vinx1… --max 9.99
+vinx-wallet asset collect --key boutique.json --symbol EURV --payer vinx1… --amount 9.99
+```
+
+Le vendeur ou le bénéficiaire doit avoir accepté le jeton. Les unités en
+séquestre restent comptées dans la supply du jeton ; la reprise forcée ne
+peut pas les atteindre.
+
+## 6. Sécuriser l'émission
 
 Une seule clé qui peut émettre sans limite, c'est un risque. Mettez des règles
 de compte (§9 du guide du portefeuille) sur le compte émetteur : avec une
@@ -92,7 +109,7 @@ vinx-wallet account set-policy --key emetteur.json \
   --signer CLÉ-1 --signer CLÉ-2 --signer CLÉ-3 --threshold 2
 ```
 
-## 6. Monnaie stable : ce que la chaîne fait, et ce qu'elle ne fait pas
+## 7. Monnaie stable : ce que la chaîne fait, et ce qu'elle ne fait pas
 
 La chaîne fournit les outils : émission et destruction contrôlées, gel,
 reprise forcée, compte émetteur multisig, et preuves de réserves publiées par

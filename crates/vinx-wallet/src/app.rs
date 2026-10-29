@@ -574,7 +574,14 @@ fn plan(app: &App, op: &Operation) -> Result<Plan> {
                 .ok()
                 .and_then(|b| b.try_into().ok())
                 .ok_or_else(|| anyhow!("identifiant de séquestre invalide"))?;
-            let amount = units(at(&d, "/amount"))?;
+            // Séquestre en actif : montant en unités de l'actif.
+            let shown = match at(&d, "/asset").as_str() {
+                Some(symbol) => {
+                    let (_, dec) = asset_info(&client, symbol)?;
+                    format!("{} {symbol}", format_units(units(at(&d, "/units"))?, dec))
+                }
+                None => format!("{} VINX", format_vinx(units(at(&d, "/amount"))?)),
+            };
             let me_s = me.to_string();
             let is = |k: &str| at(&d, k).as_str() == Some(me_s.as_str());
             let release = op.action == "release-deal";
@@ -602,7 +609,7 @@ fn plan(app: &App, op: &Operation) -> Result<Plan> {
                 .into(),
                 at(&d, who).as_str().unwrap_or_default().to_owned(),
             ));
-            lines.push(("Montant".into(), format!("{} VINX", format_vinx(amount))));
+            lines.push(("Montant".into(), shown));
             if release {
                 TxBody::ReleaseDeal { id }
             } else {
@@ -1090,6 +1097,115 @@ fn plan(app: &App, op: &Operation) -> Result<Plan> {
                             symbol,
                             from,
                             amount,
+                        }
+                    }
+                    "deal-asset" => {
+                        let amount = amount()?;
+                        if amount > my_units {
+                            bail!(
+                                "solde insuffisant : {} {symbol} disponibles",
+                                format_units(my_units, d)
+                            );
+                        }
+                        let (seller, how) = resolve(app, &client, &op.to)?;
+                        if seller == me {
+                            bail!("c'est l'adresse de ce compte");
+                        }
+                        let theirs = client
+                            .get_json(&format!("/accounts/{seller}"))?
+                            .unwrap_or(Value::Null);
+                        if holding(&theirs, &symbol).is_none() {
+                            bail!(
+                                "ce vendeur n'a pas accepté {symbol} : il ne peut pas être payé dans ce jeton"
+                            );
+                        }
+                        if op.days == 0 || op.days > MAX_DEAL_DAYS {
+                            bail!("échéance : entre 1 et {MAX_DEAL_DAYS} jours");
+                        }
+                        let arbiter = if op.arbiter.trim().is_empty() {
+                            None
+                        } else {
+                            let (a, how) = resolve(app, &client, &op.arbiter)?;
+                            if a == me || a == seller {
+                                bail!("l'arbitre doit être une troisième personne");
+                            }
+                            lines.push(("Arbitre".into(), format!("{a} ({how})")));
+                            Some(a)
+                        };
+                        lines.push(("Vendeur".into(), format!("{seller} ({how})")));
+                        lines.push((
+                            "Montant bloqué".into(),
+                            format!("{} {symbol}", format_units(amount, d)),
+                        ));
+                        lines.push(("Échéance".into(), format!("dans {} jour(s)", op.days)));
+                        warnings.push(
+                            "Les jetons restent bloqués jusqu'à ce que tu les verses au vendeur, \
+                             qu'il te rembourse, que l'arbitre tranche, ou jusqu'à l'échéance."
+                                .into(),
+                        );
+                        TxBody::OpenAssetDeal {
+                            symbol,
+                            seller,
+                            arbiter,
+                            amount,
+                            deadline: now_secs().saturating_add(op.days.saturating_mul(86_400)),
+                            memo: memo_bytes(&op.memo),
+                        }
+                    }
+                    "mandate-asset" => {
+                        let max = amount()?;
+                        if op.days == 0 || op.days > 366 {
+                            bail!("période : entre 1 et 366 jours");
+                        }
+                        let (payee, how) = resolve(app, &client, &op.to)?;
+                        if payee == me {
+                            bail!("c'est l'adresse de ce compte");
+                        }
+                        lines.push(("Bénéficiaire".into(), format!("{payee} ({how})")));
+                        lines.push((
+                            "Autorisation".into(),
+                            format!(
+                                "jusqu'à {} {symbol} tous les {} jour(s)",
+                                format_units(max, d),
+                                op.days
+                            ),
+                        ));
+                        warnings.push(
+                            "Ce bénéficiaire pourra prélever sans te redemander ton accord, dans \
+                             cette limite, jusqu'à ce que tu révoques le mandat."
+                                .into(),
+                        );
+                        TxBody::GrantAssetMandate {
+                            symbol,
+                            payee,
+                            max_per_period: max,
+                            period: op.days.saturating_mul(86_400),
+                            expires_at: None,
+                        }
+                    }
+                    "unmandate-asset" => {
+                        let (payee, how) = resolve(app, &client, &op.to)?;
+                        lines.push(("Mandat révoqué".into(), format!("{payee} ({how})")));
+                        TxBody::RevokeAssetMandate { symbol, payee }
+                    }
+                    "collect-asset" => {
+                        let amount = amount()?;
+                        let (payer, how) = resolve(app, &client, &op.to)?;
+                        if mine.is_none() {
+                            bail!(
+                                "accepte d'abord {symbol} sur ce compte pour pouvoir le prélever"
+                            );
+                        }
+                        lines.push(("Payeur".into(), format!("{payer} ({how})")));
+                        lines.push((
+                            "Prélèvement".into(),
+                            format!("{} {symbol}", format_units(amount, d)),
+                        ));
+                        TxBody::CollectAsset {
+                            symbol,
+                            payer,
+                            amount,
+                            memo: memo_bytes(&op.memo),
                         }
                     }
                     "renounce-asset" => {

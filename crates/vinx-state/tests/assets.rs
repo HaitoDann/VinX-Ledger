@@ -549,3 +549,208 @@ fn asset_rows_reload_to_the_same_state_root() {
     assert_eq!(reloaded.state_root(), root);
     assert_eq!(reloaded.assets.balance("EURV", &addr(&bob)), 4);
 }
+
+/// Émetteur de EURV (1 000 unités) et deux comptes qui l'ont accepté, avec
+/// 100 unités chacun. Prochains nonces : émetteur 5, a et b 2.
+fn eurv_with_two_holders(net: &mut Net) -> (KeyPair, KeyPair, KeyPair) {
+    let issuer = issuer_with_name(net, "eurv");
+    let a = net.funded(10 * VINX);
+    let b = net.funded(10 * VINX);
+    net.block(
+        T0,
+        &[],
+        &[
+            user_tx(&issuer, 2, create("EURV", 1_000, None, ALL), false),
+            accept(&a, 1, "EURV", true),
+            accept(&b, 1, "EURV", true),
+            user_tx(&issuer, 3, send("EURV", addr(&a), 100), false),
+            user_tx(&issuer, 4, send("EURV", addr(&b), 100), false),
+        ],
+    )
+    .unwrap();
+    (issuer, a, b)
+}
+
+fn open_deal(buyer: &KeyPair, nonce: u64, seller: Address, amount: u64) -> SignedTransaction {
+    user_tx(
+        buyer,
+        nonce,
+        TxBody::OpenAssetDeal {
+            symbol: "EURV".into(),
+            seller,
+            arbiter: None,
+            amount,
+            deadline: T0 + 86_400,
+            memo: Some(b"commande 7".to_vec()),
+        },
+        false,
+    )
+}
+
+#[test]
+fn asset_deal_locks_units_until_release_or_refund() {
+    let mut net = Net::current();
+    let (issuer, a, b) = eurv_with_two_holders(&mut net);
+    let stranger = net.funded(VINX);
+    let refused = user_tx(
+        &a,
+        2,
+        TxBody::OpenAssetDeal {
+            symbol: "EURV".into(),
+            seller: addr(&stranger),
+            arbiter: None,
+            amount: 10,
+            deadline: T0 + 86_400,
+            memo: None,
+        },
+        false,
+    );
+    assert_eq!(
+        tx_err(net.block(T0, &[], &[refused])),
+        TxError::Asset(AssetError::NotAccepted),
+        "le vendeur doit accepter l'actif"
+    );
+
+    net.block(T0, &[], &[open_deal(&a, 2, addr(&b), 40)])
+        .unwrap();
+    let id = vinx_core::deal_id(&addr(&a), 2);
+    assert_eq!(bal(&net.state, "EURV", &a), 60);
+    assert_eq!(net.state.assets.deals.get(&id).unwrap().deal.amount, 40);
+    // Le vendeur ne peut pas se verser le séquestre lui-même.
+    let grab = user_tx(&b, 2, TxBody::ReleaseDeal { id }, false);
+    assert_eq!(tx_err(net.block(T0, &[], &[grab])), TxError::DealForbidden);
+    // Gel du vendeur : versement impossible tant qu'il dure.
+    let freeze = |nonce, frozen| {
+        user_tx(
+            &issuer,
+            nonce,
+            TxBody::FreezeAsset {
+                symbol: "EURV".into(),
+                account: Some(addr(&b)),
+                frozen,
+            },
+            false,
+        )
+    };
+    net.block(T0, &[], &[freeze(5, true)]).unwrap();
+    let release = |nonce| user_tx(&a, nonce, TxBody::ReleaseDeal { id }, false);
+    assert_eq!(
+        tx_err(net.block(T0, &[], &[release(3)])),
+        TxError::Asset(AssetError::Frozen)
+    );
+    net.block(T0, &[], &[freeze(6, false), release(3)]).unwrap();
+    assert_eq!(bal(&net.state, "EURV", &b), 140);
+    assert!(net.state.assets.deals.get(&id).is_none());
+    assert_eq!(
+        net.state.assets.assets.get("EURV").unwrap().supply,
+        1_000,
+        "un séquestre ne change pas la supply"
+    );
+
+    // Remboursement par le vendeur, vers un acheteur qui a retiré l'actif entre-temps.
+    net.block(T0, &[], &[open_deal(&a, 4, addr(&b), 60)])
+        .unwrap();
+    let id2 = vinx_core::deal_id(&addr(&a), 4);
+    let leave = user_tx(
+        &a,
+        5,
+        TxBody::AcceptAsset {
+            symbol: "EURV".into(),
+            accept: false,
+        },
+        false,
+    );
+    net.block(T0, &[], &[leave]).unwrap();
+    let refund = user_tx(&b, 2, TxBody::RefundDeal { id: id2 }, false);
+    net.block(T0, &[], &[refund]).unwrap();
+    assert_eq!(bal(&net.state, "EURV", &a), 60);
+}
+
+#[test]
+fn asset_mandate_collects_within_its_limit() {
+    let mut net = Net::current();
+    let (_issuer, payer, shop) = eurv_with_two_holders(&mut net);
+    let grant = user_tx(
+        &payer,
+        2,
+        TxBody::GrantAssetMandate {
+            symbol: "EURV".into(),
+            payee: addr(&shop),
+            max_per_period: 30,
+            period: 30 * 86_400,
+            expires_at: None,
+        },
+        false,
+    );
+    net.block(T0, &[], &[grant]).unwrap();
+    let collect = |nonce, amount| {
+        user_tx(
+            &shop,
+            nonce,
+            TxBody::CollectAsset {
+                symbol: "EURV".into(),
+                payer: addr(&payer),
+                amount,
+                memo: None,
+            },
+            false,
+        )
+    };
+    net.block(T0, &[], &[collect(2, 20)]).unwrap();
+    assert_eq!(bal(&net.state, "EURV", &shop), 120);
+    assert_eq!(
+        tx_err(net.block(T0, &[], &[collect(3, 11)])),
+        TxError::Mandate(vinx_state::MandateError::Exceeded)
+    );
+    // Période suivante : la limite repart.
+    net.block(T0 + 31 * 86_400, &[], &[collect(3, 30)]).unwrap();
+    assert_eq!(bal(&net.state, "EURV", &payer), 50);
+    // Révoqué : plus aucun prélèvement.
+    let revoke = user_tx(
+        &payer,
+        3,
+        TxBody::RevokeAssetMandate {
+            symbol: "EURV".into(),
+            payee: addr(&shop),
+        },
+        false,
+    );
+    net.block(T0 + 31 * 86_400, &[], &[revoke]).unwrap();
+    assert_eq!(
+        tx_err(net.block(T0 + 31 * 86_400, &[], &[collect(4, 1)])),
+        TxError::Mandate(vinx_state::MandateError::Unknown)
+    );
+}
+
+#[test]
+fn asset_rows_of_deals_and_mandates_reload() {
+    let mut net = Net::current();
+    let (_issuer, a, b) = eurv_with_two_holders(&mut net);
+    let grant = user_tx(
+        &b,
+        2,
+        TxBody::GrantAssetMandate {
+            symbol: "EURV".into(),
+            payee: addr(&a),
+            max_per_period: 5,
+            period: 86_400,
+            expires_at: None,
+        },
+        false,
+    );
+    net.block(T0, &[], &[open_deal(&a, 2, addr(&b), 7), grant])
+        .unwrap();
+    let root = net.state.state_root();
+    let mut state = net.state.clone();
+    let rows = state.take_dirty_rows();
+    let mut reloaded =
+        State::from_parts(&state.globals_bytes_light(), state.accounts.clone()).unwrap();
+    for (key, value) in rows {
+        if let Some(v) = value {
+            reloaded.load_row(&key, &v).unwrap();
+        }
+    }
+    assert_eq!(reloaded.state_root(), root);
+    assert_eq!(reloaded.assets.deals.len(), 1);
+    assert_eq!(reloaded.assets.mandates.len(), 1);
+}

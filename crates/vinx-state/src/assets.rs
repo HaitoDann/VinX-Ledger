@@ -9,11 +9,13 @@
 //! On ne reçoit un actif qu'après l'avoir accepté (`AcceptAsset`) : personne
 //! ne peut remplir un compte, ni l'état, de jetons non sollicités.
 
+use crate::mandate::Mandate;
+use crate::registry::Deal;
 use crate::table::{Row, Table};
 use borsh::{BorshDeserialize, BorshSerialize};
 use std::collections::BTreeMap;
 use vinx_core::{Amount, AssetPowers, UNITS_PER_VINX};
-use vinx_crypto::Address;
+use vinx_crypto::{Address, Hash};
 
 /// Prix initial de la création d'un actif.
 pub const DEFAULT_ASSET_FEE: Amount = 100 * UNITS_PER_VINX;
@@ -55,6 +57,28 @@ impl Row for Holding {
     const TAG: u8 = 6;
 }
 
+/// Séquestre en actif : les unités bloquées sont retirées du solde de
+/// l'acheteur (SPEC §5.11).
+#[derive(Clone, Debug, PartialEq, Eq, BorshSerialize, BorshDeserialize)]
+pub struct AssetDeal {
+    pub symbol: String,
+    pub deal: Deal,
+}
+
+/// Mandat de prélèvement en actif.
+#[derive(Clone, Debug, PartialEq, Eq, BorshSerialize, BorshDeserialize)]
+pub struct AssetMandate {
+    pub mandate: Mandate,
+}
+
+impl Row for AssetDeal {
+    const TAG: u8 = 7;
+}
+
+impl Row for AssetMandate {
+    const TAG: u8 = 8;
+}
+
 #[derive(Clone, Debug, PartialEq, Eq, BorshSerialize, BorshDeserialize)]
 pub struct Assets {
     /// Prix de la création d'un actif, versé à la trésorerie.
@@ -64,6 +88,10 @@ pub struct Assets {
     /// Soldes par (symbole, compte). Une ligne, même vide, vaut accord du
     /// compte pour recevoir l'actif : on ne reçoit que ce qu'on a accepté.
     pub holdings: Table<(String, Address), Holding>,
+    /// Séquestres en actifs, par identifiant (même espace que les séquestres en VINX).
+    pub deals: Table<Hash, AssetDeal>,
+    /// Mandats en actifs, par (symbole, payeur, bénéficiaire).
+    pub mandates: Table<(String, Address, Address), AssetMandate>,
 }
 
 impl Default for Assets {
@@ -72,6 +100,8 @@ impl Default for Assets {
             fee: DEFAULT_ASSET_FEE,
             assets: Table::new(),
             holdings: Table::new(),
+            deals: Table::new(),
+            mandates: Table::new(),
         }
     }
 }
