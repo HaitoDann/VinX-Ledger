@@ -301,6 +301,10 @@ fn list_proposals(c: &Cockpit) -> Result<Value> {
     let node = c.primary().ok();
     let gov = node.as_ref().and_then(|n| n.governance().ok());
     let node_nonce = gov.as_ref().and_then(|g| at(g, "/admin/nonce").as_u64());
+    let chain_id = node
+        .as_ref()
+        .and_then(|n| n.status().ok())
+        .map(|s| s.chain_id);
     let history: Vec<String> = node
         .as_ref()
         .and_then(|n| n.get_json("/admin-history").ok().flatten())
@@ -338,7 +342,12 @@ fn list_proposals(c: &Cockpit) -> Result<Value> {
         };
         let id = hex::encode(tx.id());
         let approvals: Vec<u8> = tx.approvals.iter().map(|a| a.signer_index).collect();
-        let status = if history.contains(&id) {
+        // Proposition d'un autre réseau (par exemple d'avant une remise à zéro) :
+        // elle ne passera jamais, et ne doit pas compter dans la numérotation.
+        let other_chain = chain_id.as_ref().is_some_and(|c| *c != tx.tx.chain_id);
+        let status = if other_chain {
+            "autre chaîne"
+        } else if history.contains(&id) {
             "finalisée"
         } else if pending.contains(&id) {
             "envoyée"
@@ -396,10 +405,17 @@ fn create_proposal(c: &Cockpit, body: &Value) -> Result<Value> {
         .as_str()
         .unwrap_or("action")
         .to_owned();
-    let file = format!("{nonce:05}-{kind}.json");
-    let path = c.proposal_path(&file)?;
-    if path.exists() {
-        bail!("{file} existe déjà");
+    // Un fichier du même nom peut rester d'un autre réseau (remise à zéro) :
+    // on numérote le nouveau au lieu de l'écraser.
+    let mut file = format!("{nonce:05}-{kind}.json");
+    let mut path = c.proposal_path(&file)?;
+    let mut n = 1u32;
+    while path.exists() {
+        n = n
+            .checked_add(1)
+            .context("trop de propositions du même nom")?;
+        file = format!("{nonce:05}-{kind}-{n}.json");
+        path = c.proposal_path(&file)?;
     }
     admin::save(&tx, &path)?;
     Ok(json!({ "file": file, "nonce": nonce }))

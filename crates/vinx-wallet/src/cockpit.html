@@ -521,7 +521,7 @@ let proposals = [];
 async function refreshProposals() {
   const r = await api("/api/proposals");
   proposals = r.proposals;
-  const cls = { "à signer": "warn", "prête": "ok", "envoyée": "ok", "finalisée": "muted", "périmée": "bad", "illisible": "bad" };
+  const cls = { "à signer": "warn", "prête": "ok", "envoyée": "ok", "finalisée": "muted", "périmée": "bad", "autre chaîne": "bad", "illisible": "bad" };
   setBadge(proposals);
   const open = proposals.filter(p => ["à signer", "prête"].includes(p.status)).map(p => p.nonce);
   const firstOpen = open.length ? Math.min(...open) : null;
