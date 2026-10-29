@@ -3,6 +3,7 @@
 use crate::accounts::Accounts;
 use crate::emission::Emission;
 use crate::escrow::{Escrow, EscrowError};
+use crate::mandate::{Mandate, MandateError, Mandates};
 use crate::policy::{Policies, Policy, PolicyError};
 use crate::registry::{
     Deal, MAX_DEAL_DURATION, NAME_GRACE, NAME_PERIOD, NameRecord, Registry, valid_name,
@@ -55,6 +56,8 @@ pub struct State {
     pub emission: Emission,
     /// Règles des comptes : multisig, plafonds (protocole 4).
     pub policies: Policies,
+    /// Mandats de prélèvement (protocole 4).
+    pub mandates: Mandates,
 }
 
 #[derive(Debug, Error, PartialEq, Eq)]
@@ -71,6 +74,12 @@ pub enum TxError {
     NotNameOwner,
     #[error("{0}")]
     Policy(PolicyError),
+    #[error("{0}")]
+    Mandate(MandateError),
+    #[error("enveloppes de transaction dans un ordre invalide")]
+    BadEnvelope,
+    #[error("parrain des frais invalide (compte, clé ou signature)")]
+    BadSponsor,
     #[error("paiement groupé vide ou de plus de 100 paiements")]
     InvalidBatch,
     #[error("séquestre inconnu")]
@@ -208,6 +217,42 @@ struct Globals {
     registry: Registry,
     emission: Emission,
     policies: Policies,
+    mandates: Mandates,
+}
+
+/// [`Globals`] de la version 0.12, sans mandats.
+#[derive(BorshDeserialize)]
+struct GlobalsV4 {
+    chain_id: String,
+    protocol_version: u32,
+    height: u64,
+    escrow: Escrow,
+    admin: AdminSet,
+    validators: ValidatorSet,
+    params: Params,
+    upgrade: Option<PendingUpgrade>,
+    registry: Registry,
+    emission: Emission,
+    policies: Policies,
+}
+
+impl From<GlobalsV4> for Globals {
+    fn from(g: GlobalsV4) -> Self {
+        Self {
+            chain_id: g.chain_id,
+            protocol_version: g.protocol_version,
+            height: g.height,
+            escrow: g.escrow,
+            admin: g.admin,
+            validators: g.validators,
+            params: g.params,
+            upgrade: g.upgrade,
+            registry: g.registry,
+            emission: g.emission,
+            policies: g.policies,
+            mandates: Mandates::default(),
+        }
+    }
 }
 
 /// [`Globals`] des versions 0.10 et 0.11, sans politiques de compte.
@@ -239,6 +284,7 @@ impl From<GlobalsV3> for Globals {
             registry: g.registry,
             emission: g.emission,
             policies: Policies::default(),
+            mandates: Mandates::default(),
         }
     }
 }
@@ -271,6 +317,7 @@ impl From<GlobalsV2> for Globals {
             registry: g.registry,
             emission: Emission::default(),
             policies: Policies::default(),
+            mandates: Mandates::default(),
         }
     }
 }
@@ -302,6 +349,7 @@ impl From<LegacyGlobals> for Globals {
             registry: Registry::default(),
             emission: Emission::default(),
             policies: Policies::default(),
+            mandates: Mandates::default(),
         }
     }
 }
@@ -321,12 +369,14 @@ impl State {
             registry: self.registry.clone(),
             emission: self.emission.clone(),
             policies: self.policies.clone(),
+            mandates: self.mandates.clone(),
         })
     }
 
     /// Reconstitue un état à partir de [`Self::globals_bytes`] et des comptes.
     pub fn from_parts(globals: &[u8], accounts: Accounts) -> Option<Self> {
         let g: Globals = vinx_core::decode(globals)
+            .or_else(|_| vinx_core::decode::<GlobalsV4>(globals).map(Globals::from))
             .or_else(|_| vinx_core::decode::<GlobalsV3>(globals).map(Globals::from))
             .or_else(|_| vinx_core::decode::<GlobalsV2>(globals).map(Globals::from))
             .or_else(|_| vinx_core::decode::<LegacyGlobals>(globals).map(Globals::from))
@@ -346,6 +396,7 @@ impl State {
             registry: g.registry,
             emission: g.emission,
             policies: g.policies,
+            mandates: g.mandates,
         })
     }
 
@@ -384,6 +435,7 @@ impl State {
         }
         if self.protocol_version >= 4 {
             globals.extend_from_slice(&encode(&self.policies));
+            globals.extend_from_slice(&encode(&self.mandates));
         }
         hash_tagged_parts(
             Domain::State,
@@ -472,15 +524,38 @@ impl State {
         if tx.body.min_protocol() > self.protocol_version {
             return Err(TxError::NotYetActive);
         }
+        if !tx.body.well_wrapped() {
+            return Err(TxError::BadEnvelope);
+        }
         let body = tx.body.inner();
         if body.min_protocol() > self.protocol_version {
             return Err(TxError::NotYetActive);
         }
         let policy_write = self.check_policy(tx, body)?;
+        let fee_payer = match &tx.body {
+            TxBody::Sponsored {
+                sponsor, signature, ..
+            } => {
+                let key = self
+                    .accounts
+                    .get(sponsor)
+                    .and_then(|a| a.key.clone())
+                    .ok_or(TxError::BadSponsor)?;
+                if *sponsor == tx.sender
+                    || key.verify(&tx.sponsor_message(sponsor), signature).is_err()
+                {
+                    return Err(TxError::BadSponsor);
+                }
+                *sponsor
+            }
+            _ => tx.sender,
+        };
+        let now = self.registry.now;
+        let mut mandate_write: Option<((Address, Address), Option<Mandate>)> = None;
 
         let mut changes = Changes::default();
         let mut registry = None;
-        changes.debit(&self.accounts, tx.sender, tx.fee)?;
+        changes.debit(&self.accounts, fee_payer, tx.fee)?;
         // Protocole 3 : les frais vont aux validateurs, via la cagnotte d'époque.
         let fee_to_pot = self.protocol_version >= 3;
         if !fee_to_pot {
@@ -516,9 +591,64 @@ impl State {
                     spent: 0,
                 }));
             }
-            // Un seul niveau d'enveloppe.
-            TxBody::Approved { .. } => {
-                return Err(TxError::Policy(PolicyError::InvalidApprovals));
+            // `inner()` ne renvoie jamais une enveloppe.
+            TxBody::Approved { .. } | TxBody::Sponsored { .. } => {
+                return Err(TxError::BadEnvelope);
+            }
+            TxBody::GrantMandate {
+                payee,
+                max_per_period,
+                period,
+                expires_at,
+            } => {
+                let valid = *payee != tx.sender
+                    && *max_per_period > 0
+                    && (vinx_core::MIN_MANDATE_PERIOD..=vinx_core::MAX_MANDATE_PERIOD)
+                        .contains(period)
+                    && expires_at.is_none_or(|e| e > now);
+                if !valid {
+                    return Err(TxError::Mandate(MandateError::Invalid));
+                }
+                mandate_write = Some((
+                    (tx.sender, *payee),
+                    Some(Mandate {
+                        max_per_period: *max_per_period,
+                        period: *period,
+                        start: now,
+                        expires_at: *expires_at,
+                        period_index: 0,
+                        used: 0,
+                    }),
+                ));
+            }
+            TxBody::RevokeMandate { payee } => {
+                if !self.mandates.contains_key(&(tx.sender, *payee)) {
+                    return Err(TxError::Mandate(MandateError::Unknown));
+                }
+                mandate_write = Some(((tx.sender, *payee), None));
+            }
+            TxBody::Collect {
+                payer,
+                amount,
+                memo,
+            } => {
+                if *amount == 0 {
+                    return Err(TxError::ZeroAmount);
+                }
+                let mut mandate = self
+                    .mandates
+                    .get(&(*payer, tx.sender))
+                    .cloned()
+                    .ok_or(TxError::Mandate(MandateError::Unknown))?;
+                mandate.collect(now, *amount).map_err(TxError::Mandate)?;
+                self.check_payment(*payer, tx.sender, *amount, memo)?;
+                changes.debit(&self.accounts, *payer, *amount)?;
+                changes.credit(&self.accounts, tx.sender, *amount)?;
+                let left = changes.get(&self.accounts, *payer).balance;
+                if left != 0 && left < self.params.min_reserve {
+                    return Err(TxError::BelowReserve);
+                }
+                mandate_write = Some(((*payer, tx.sender), Some(mandate)));
             }
             TxBody::SetMemoRequired { required } => {
                 changes.get(&self.accounts, tx.sender).memo_required = *required;
@@ -603,9 +733,11 @@ impl State {
         // Un compte peut être vidé entièrement. Il est conservé avec son nonce :
         // le supprimer permettrait de rejouer ses anciennes transactions s'il
         // était recréé.
-        let remaining = changes.get(&self.accounts, tx.sender).balance;
-        if remaining != 0 && remaining < self.params.min_reserve {
-            return Err(TxError::BelowReserve);
+        for who in [tx.sender, fee_payer] {
+            let remaining = changes.get(&self.accounts, who).balance;
+            if remaining != 0 && remaining < self.params.min_reserve {
+                return Err(TxError::BelowReserve);
+            }
         }
         let pot = if fee_to_pot {
             self.emission
@@ -617,6 +749,15 @@ impl State {
         };
         changes.commit(&mut self.accounts);
         self.emission.pot = pot;
+        match mandate_write {
+            Some((key, Some(m))) => {
+                Arc::make_mut(&mut self.mandates).insert(key, m);
+            }
+            Some((key, None)) => {
+                Arc::make_mut(&mut self.mandates).remove(&key);
+            }
+            None => {}
+        }
         if let Some(p) = policy_write {
             Arc::make_mut(&mut self.policies).insert(tx.sender, p);
         }
@@ -651,10 +792,7 @@ impl State {
         tx: &vinx_core::Transaction,
         body: &TxBody,
     ) -> Result<Option<Policy>, TxError> {
-        let approvals = match &tx.body {
-            TxBody::Approved { approvals, .. } => Some(approvals),
-            _ => None,
-        };
+        let approvals = tx.body.approvals();
         let Some(policy) = self.policies.get(&tx.sender) else {
             return match approvals {
                 Some(_) => Err(TxError::Policy(PolicyError::InvalidApprovals)),
@@ -673,7 +811,10 @@ impl State {
         }
         // Sans approbation : seulement sous le plafond, et jamais pour changer
         // la politique ou la clé.
-        if matches!(body, TxBody::SetPolicy { .. } | TxBody::RotateKey { .. }) {
+        if matches!(
+            body,
+            TxBody::SetPolicy { .. } | TxBody::RotateKey { .. } | TxBody::GrantMandate { .. }
+        ) {
             return Err(TxError::Policy(PolicyError::ApprovalsMissing));
         }
         let spend = match body {

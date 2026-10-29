@@ -676,6 +676,92 @@ fn plan(app: &App, op: &Operation) -> Result<Plan> {
             }
             body
         }
+        "grant-mandate" | "revoke-mandate" | "collect" => {
+            if protocol < 4 {
+                bail!("mandats pas encore actifs sur ce réseau : ils arrivent avec le protocole 4");
+            }
+            let (other, how) = resolve(app, &client, &op.to)?;
+            if other == me {
+                bail!("c'est l'adresse de ce compte");
+            }
+            match op.action.as_str() {
+                "grant-mandate" => {
+                    let max = parse_vinx(&op.amount)?;
+                    if max == 0 {
+                        bail!("montant maximal nul");
+                    }
+                    if op.days == 0 || op.days > 366 {
+                        bail!("période : entre 1 et 366 jours");
+                    }
+                    lines.push(("Bénéficiaire".into(), format!("{other} ({how})")));
+                    lines.push((
+                        "Autorisation".into(),
+                        format!(
+                            "jusqu'à {} VINX tous les {} jour(s)",
+                            format_vinx(max),
+                            op.days
+                        ),
+                    ));
+                    warnings.push(
+                        "Ce bénéficiaire pourra prélever sans te redemander ton accord, dans cette \
+                         limite, jusqu'à ce que tu révoques le mandat (onglet Mandats). Un nouveau \
+                         mandat pour le même bénéficiaire remplace l'ancien."
+                            .into(),
+                    );
+                    TxBody::GrantMandate {
+                        payee: other,
+                        max_per_period: max,
+                        period: op.days.saturating_mul(86_400),
+                        expires_at: None,
+                    }
+                }
+                "revoke-mandate" => {
+                    lines.push(("Mandat révoqué".into(), format!("{other} ({how})")));
+                    TxBody::RevokeMandate { payee: other }
+                }
+                _ => {
+                    let amount = parse_vinx(&op.amount)?;
+                    if amount == 0 {
+                        bail!("montant nul");
+                    }
+                    let payer = client
+                        .get_json(&format!("/accounts/{other}"))?
+                        .ok_or_else(|| anyhow!("ce payeur n'existe pas"))?;
+                    let me_s = me.to_string();
+                    let mandate = at(&payer, "/mandates/granted")
+                        .as_array()
+                        .and_then(|l| {
+                            l.iter()
+                                .find(|m| at(m, "/payee").as_str() == Some(me_s.as_str()))
+                        })
+                        .ok_or_else(|| anyhow!("ce payeur ne t'a accordé aucun mandat"))?;
+                    let available = units(at(mandate, "/available"))?;
+                    if at(mandate, "/expired") == &Value::Bool(true) {
+                        bail!("ce mandat a expiré");
+                    }
+                    if amount > available {
+                        bail!(
+                            "le mandat permet encore {} VINX sur cette période",
+                            format_vinx(available)
+                        );
+                    }
+                    lines.push(("Payeur".into(), format!("{other} ({how})")));
+                    lines.push((
+                        "Prélèvement".into(),
+                        format!("{} VINX", format_vinx(amount)),
+                    ));
+                    lines.push((
+                        "Reste sur la période".into(),
+                        format!("{} VINX", format_vinx(available.saturating_sub(amount))),
+                    ));
+                    TxBody::Collect {
+                        payer: other,
+                        amount,
+                        memo: memo_bytes(&op.memo),
+                    }
+                }
+            }
+        }
         other => bail!("opération inconnue : {other}"),
     };
     // Règles du compte (protocole 4) : refuser ici ce que le réseau refuserait.
@@ -819,6 +905,7 @@ fn overview(app: &App, index: u32) -> Result<Value> {
         "names": account.as_ref().map_or(Value::Array(Vec::new()), |a| at(a, "/names").clone()),
         "deals": account.as_ref().map_or(Value::Array(Vec::new()), |a| at(a, "/deals").clone()),
         "policy": account.as_ref().map_or(Value::Null, |a| at(a, "/policy").clone()),
+        "mandates": account.as_ref().map_or(Value::Null, |a| at(a, "/mandates").clone()),
         "history": history,
         "network": {
             "chain_id": at(&status, "/chain_id"),

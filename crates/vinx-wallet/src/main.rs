@@ -86,6 +86,9 @@ enum Command {
     /// propositions approuvées par ses signataires.
     #[command(subcommand)]
     Account(AccountCommand),
+    /// Mandats de prélèvement (protocole 4).
+    #[command(subcommand)]
+    Mandate(MandateCommand),
     /// Vérifie que de futurs validateurs sont prêts, avant de les ajouter.
     ///
     /// `--node` désigne un nœud du réseau actuel (la référence) ; chaque
@@ -218,13 +221,61 @@ enum AccountCommand {
         #[arg(long)]
         file: PathBuf,
     },
-    /// Envoie une proposition approuvée, signée par la clé du compte.
+    /// Le parrain signe : son compte paiera les frais de la proposition.
+    Sponsor {
+        #[arg(long)]
+        file: PathBuf,
+        /// Clé du compte parrain.
+        #[arg(long)]
+        key: PathBuf,
+    },
+    /// Envoie une proposition (approuvée et parrainée s'il y a lieu), signée par la clé du compte.
     Submit {
         #[arg(long)]
         file: PathBuf,
         /// Clé du compte (celle qui signe ses transactions).
         #[arg(long)]
         key: PathBuf,
+    },
+}
+
+#[derive(Subcommand)]
+enum MandateCommand {
+    /// Mandats accordés et reçus par une adresse.
+    List { address: Address },
+    /// Autorise un bénéficiaire à prélever sur ce compte.
+    Grant {
+        #[arg(long)]
+        key: PathBuf,
+        #[arg(long)]
+        payee: Address,
+        /// Montant maximal par période, en VINX.
+        #[arg(long)]
+        max: String,
+        /// Durée d'une période, en jours (1 à 366).
+        #[arg(long, default_value_t = 30)]
+        period_days: u64,
+        /// Fin du mandat, horodatage Unix en secondes.
+        #[arg(long)]
+        expires_at: Option<u64>,
+    },
+    /// Révoque le mandat accordé à un bénéficiaire.
+    Revoke {
+        #[arg(long)]
+        key: PathBuf,
+        #[arg(long)]
+        payee: Address,
+    },
+    /// Prélève sur un payeur qui a accordé un mandat à ce compte.
+    Collect {
+        #[arg(long)]
+        key: PathBuf,
+        #[arg(long)]
+        payer: Address,
+        #[arg(long)]
+        amount: String,
+        #[arg(long)]
+        memo: Option<String>,
     },
 }
 
@@ -697,6 +748,15 @@ fn main() -> Result<()> {
                     }
                 );
             }
+            AccountCommand::Sponsor { file, key } => {
+                let mut p = vinx_wallet::multisig::load(&file)?;
+                vinx_wallet::multisig::sponsor(&mut p, &load_key(&key, pwf)?);
+                vinx_wallet::multisig::save(&p, &file)?;
+                println!(
+                    "parrainée : les frais ({} VINX) seront payés par ce compte",
+                    format_vinx(p.tx.fee)
+                );
+            }
             AccountCommand::Submit { file, key } => {
                 let p = vinx_wallet::multisig::load(&file)?;
                 let has_key = client
@@ -706,6 +766,62 @@ fn main() -> Result<()> {
                 let id =
                     vinx_wallet::multisig::submit(&client, &p, &load_key(&key, pwf)?, has_key)?;
                 println!("transaction {id}");
+            }
+        },
+        Command::Mandate(cmd) => match cmd {
+            MandateCommand::List { address } => {
+                let v = client
+                    .get_json(&format!("/accounts/{address}"))?
+                    .ok_or_else(|| anyhow!("compte inconnu"))?;
+                println!(
+                    "{}",
+                    serde_json::to_string_pretty(
+                        v.get("mandates").unwrap_or(&serde_json::Value::Null)
+                    )?
+                );
+            }
+            MandateCommand::Grant {
+                key,
+                payee,
+                max,
+                period_days,
+                expires_at,
+            } => {
+                let body = vinx_core::TxBody::GrantMandate {
+                    payee,
+                    max_per_period: parse_vinx(&max)?,
+                    period: period_days
+                        .checked_mul(86_400)
+                        .ok_or_else(|| anyhow!("période trop longue"))?,
+                    expires_at,
+                };
+                println!(
+                    "transaction {}",
+                    ops::submit(&client, &load_key(&key, pwf)?, None, body, None)?
+                );
+            }
+            MandateCommand::Revoke { key, payee } => {
+                let body = vinx_core::TxBody::RevokeMandate { payee };
+                println!(
+                    "transaction {}",
+                    ops::submit(&client, &load_key(&key, pwf)?, None, body, None)?
+                );
+            }
+            MandateCommand::Collect {
+                key,
+                payer,
+                amount,
+                memo,
+            } => {
+                let body = vinx_core::TxBody::Collect {
+                    payer,
+                    amount: parse_vinx(&amount)?,
+                    memo: memo.map(String::into_bytes),
+                };
+                println!(
+                    "transaction {}",
+                    ops::submit(&client, &load_key(&key, pwf)?, None, body, None)?
+                );
             }
         },
         Command::Admin(cmd) => match cmd {

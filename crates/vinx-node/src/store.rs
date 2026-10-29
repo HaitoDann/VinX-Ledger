@@ -73,6 +73,8 @@ pub fn parties(t: &SignedTransaction) -> Vec<Address> {
     match t.tx.body.inner() {
         TxBody::Transfer { to, .. } | TxBody::TransferName { to, .. } => out.push(*to),
         TxBody::BatchTransfer { payments } => out.extend(payments.iter().map(|p| p.to)),
+        TxBody::GrantMandate { payee, .. } | TxBody::RevokeMandate { payee } => out.push(*payee),
+        TxBody::Collect { payer, .. } => out.push(*payer),
         TxBody::OpenDeal {
             seller, arbiter, ..
         } => {
@@ -80,6 +82,9 @@ pub fn parties(t: &SignedTransaction) -> Vec<Address> {
             out.extend(*arbiter);
         }
         _ => {}
+    }
+    if let TxBody::Sponsored { sponsor, .. } = &t.tx.body {
+        out.push(*sponsor);
     }
     out.sort();
     out.dedup();

@@ -21,6 +21,9 @@ struct ProposalFile {
     tx: String,
     /// Approbations réunies, en borsh puis hexadécimal.
     approvals: String,
+    /// Parrain qui paie les frais et sa signature, en borsh puis hexadécimal.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    sponsor: Option<String>,
     /// Description lisible, pour relecture (non signée).
     description: String,
 }
@@ -29,6 +32,8 @@ struct ProposalFile {
 pub struct Proposal {
     pub tx: Transaction,
     pub approvals: Vec<Approval>,
+    /// Parrain qui paie les frais, et sa signature.
+    pub sponsor: Option<(Address, vinx_crypto::Signature)>,
 }
 
 /// Politique du compte `address` selon le nœud.
@@ -87,7 +92,38 @@ pub fn propose(client: &Client, from: Address, body: TxBody) -> Result<Proposal>
             body,
         },
         approvals: Vec::new(),
+        sponsor: None,
     })
+}
+
+/// Signature du parrain `keypair`, qui paiera les frais de la proposition.
+pub fn sponsor(p: &mut Proposal, keypair: &KeyPair) {
+    let address = Address::from_public_key(&keypair.public_key());
+    let signature = keypair.sign(&p.tx.sponsor_message(&address));
+    p.sponsor = Some((address, signature));
+}
+
+/// Transaction à envoyer : corps, approuvé s'il y a des approbations, parrainé
+/// s'il y a un parrain.
+pub fn envelope(p: &Proposal) -> Transaction {
+    let mut body = p.tx.body.clone();
+    if !p.approvals.is_empty() {
+        body = TxBody::Approved {
+            body: Box::new(body),
+            approvals: p.approvals.clone(),
+        };
+    }
+    if let Some((sponsor, signature)) = &p.sponsor {
+        body = TxBody::Sponsored {
+            body: Box::new(body),
+            sponsor: *sponsor,
+            signature: signature.clone(),
+        };
+    }
+    Transaction {
+        body,
+        ..p.tx.clone()
+    }
 }
 
 /// Ajoute l'approbation de `keypair`, dont l'indice est lu dans `signers`.
@@ -115,18 +151,14 @@ pub fn submit(
     account_key: &KeyPair,
     has_key: bool,
 ) -> Result<String> {
-    let mut tx = p.tx.clone();
-    tx.body = TxBody::Approved {
-        body: Box::new(p.tx.body.clone()),
-        approvals: p.approvals.clone(),
-    };
-    client.submit(&tx.sign(account_key, !has_key))
+    client.submit(&envelope(p).sign(account_key, !has_key))
 }
 
 pub fn save(p: &Proposal, path: &Path) -> Result<()> {
     let file = ProposalFile {
         tx: hex::encode(encode(&p.tx)),
         approvals: hex::encode(encode(&p.approvals)),
+        sponsor: p.sponsor.as_ref().map(|s| hex::encode(encode(s))),
         description: format!(
             "{:?} (compte {}, nonce {}, chaîne {})",
             p.tx.body, p.tx.sender, p.tx.nonce, p.tx.chain_id
@@ -145,7 +177,18 @@ pub fn load(path: &Path) -> Result<Proposal> {
         .map_err(|_| anyhow!("transaction mal encodée"))?;
     let approvals = decode(&hex::decode(&file.approvals).context("hexadécimal invalide")?)
         .map_err(|_| anyhow!("approbations mal encodées"))?;
-    Ok(Proposal { tx, approvals })
+    let sponsor = match &file.sponsor {
+        Some(h) => Some(
+            decode(&hex::decode(h).context("hexadécimal invalide")?)
+                .map_err(|_| anyhow!("parrain mal encodé"))?,
+        ),
+        None => None,
+    };
+    Ok(Proposal {
+        tx,
+        approvals,
+        sponsor,
+    })
 }
 
 #[cfg(test)]
@@ -167,8 +210,10 @@ mod tests {
                 body: TxBody::Attest { digest: [1; 32] },
             },
             approvals: Vec::new(),
+            sponsor: None,
         };
         approve(&mut p, &signers, &keys[2]).unwrap();
+        sponsor(&mut p, &KeyPair::generate());
         approve(&mut p, &signers, &keys[0]).unwrap();
         assert!(approve(&mut p, &signers, &keys[0]).is_err());
         assert!(approve(&mut p, &signers, &KeyPair::generate()).is_err());

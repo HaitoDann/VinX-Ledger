@@ -195,7 +195,31 @@ compte. La clé d'un membre s'obtient avec `vinx-wallet address --key membre.jso
 Une proposition utilise le prochain nonce du compte : si le compte fait une
 autre opération entre-temps, il faut la refaire.
 
-## 10. Plusieurs comptes
+## 10. Mandats de prélèvement
+
+L'onglet **Mandats** sert aux abonnements, loyers et cotisations.
+
+- **Accorder un mandat** : choisis le bénéficiaire, le montant maximal et la
+  période (semaine, mois, an). Le bénéficiaire pourra prélever lui-même dans
+  cette limite, sans te redemander ton accord.
+- **Révoquer** : un clic, et plus aucun prélèvement n'est possible.
+- **Mandats reçus** : si quelqu'un t'a accordé un mandat, « Prélever » encaisse
+  un montant, dans la limite restante de la période. C'est toi qui paies les
+  frais du prélèvement.
+
+En ligne de commande : `vinx-wallet mandate list | grant | revoke | collect`.
+
+**Frais payés par un parrain.** Un commerçant ou une application peut payer
+les frais d'une transaction à ta place : tu peux alors envoyer exactement ton
+solde. Pour l'instant, cela passe par la ligne de commande :
+
+```bash
+vinx-wallet account propose --from TON-ADRESSE --out p.json send --to BOUTIQUE --amount 10
+vinx-wallet account sponsor --file p.json --key boutique.json   # le parrain signe
+vinx-wallet account submit  --file p.json --key toi.json
+```
+
+## 11. Plusieurs comptes
 
 **Réglages → Nouveau compte** crée un autre compte, par exemple « Épargne ».
 
@@ -203,7 +227,7 @@ Tous les comptes viennent de la même phrase de 12 mots : une restauration les
 retrouve tous. Pour cela, recrée les comptes dans le même ordre ; ils
 reprennent les mêmes adresses.
 
-## 11. Si quelque chose ne va pas
+## 12. Si quelque chose ne va pas
 
 | Message | Que faire |
 |---|---|

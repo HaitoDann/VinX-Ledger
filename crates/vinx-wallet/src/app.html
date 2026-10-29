@@ -108,6 +108,7 @@ header select { width: auto; min-width: 180px; }
   <a href="#names" data-view="names">Noms .vinx</a>
   <a href="#deals" data-view="deals">Séquestres</a>
   <a href="#stamp" data-view="stamp">Horodatage</a>
+  <a href="#mandates" data-view="mandates">Mandats</a>
   <a href="#contacts" data-view="contacts">Contacts</a>
   <a href="#settings" data-view="settings">Réglages</a>
 </nav>
@@ -232,6 +233,28 @@ header select { width: auto; min-width: 180px; }
     <label for="verifyId">Identifiant de la transaction (facultatif : seulement pour les horodatages faits avant le protocole 4)</label><input id="verifyId" class="mono" autocomplete="off">
     <div class="actions"><button id="verifyBtn">Vérifier</button></div>
     <div class="found" id="verifyOut"></div>
+  </div>
+</main>
+
+<main id="mandates" class="view">
+  <div class="card">
+    <h2>Mandats que j'ai accordés</h2>
+    <p class="sub">Un mandat autorise un bénéficiaire (abonnement, loyer, cotisation) à prélever lui-même jusqu'à un montant par période. Tu peux le révoquer à tout moment.</p>
+    <div class="scroll" id="grantedTable"></div>
+  </div>
+  <div class="card narrow">
+    <h2>Accorder un mandat</h2>
+    <label for="mandateTo">Bénéficiaire</label><input id="mandateTo" class="mono" placeholder="vinx1…, contact ou nom.vinx" list="contactList" autocomplete="off">
+    <div class="row">
+      <div><label for="mandateMax">Maximum par période (VINX)</label><input id="mandateMax" inputmode="decimal"></div>
+      <div><label for="mandateDays">Période</label><select id="mandateDays"><option value="7">semaine</option><option value="30" selected>mois (30 jours)</option><option value="365">an</option></select></div>
+    </div>
+    <div class="actions"><button class="primary" id="mandateBtn">Vérifier avant d'accorder</button></div>
+  </div>
+  <div class="card">
+    <h2>Mandats reçus</h2>
+    <p class="sub">Les comptes qui t'autorisent à prélever, et ce qu'il reste sur la période en cours.</p>
+    <div class="scroll" id="receivedTable"></div>
   </div>
 </main>
 
@@ -486,7 +509,7 @@ async function refresh() {
   const rows = (list) => list.length ? `<table><thead><tr><th>Date</th><th>Opération</th><th>Avec</th><th style="text-align:right">Montant</th><th>Statut</th></tr></thead><tbody>${list.map(txRow).join("")}</tbody></table>` : `<p class="muted">Aucune opération pour l'instant.</p>`;
   $("recent").innerHTML = rows(data.history.slice(0, 6));
   $("historyTable").innerHTML = rows(data.history);
-  renderNames(); renderDeals(); renderStamps();
+  renderNames(); renderDeals(); renderStamps(); renderMandates();
   const pol = data.policy;
   $("policyInfo").innerHTML = !pol
     ? "Aucune règle : la clé de ce compte suffit pour dépenser."
@@ -529,6 +552,29 @@ async function sha256(file) {
   const buf = await crypto.subtle.digest("SHA-256", await file.arrayBuffer());
   return [...new Uint8Array(buf)].map((b) => b.toString(16).padStart(2, "0")).join("");
 }
+
+/* ----- Mandats ----- */
+const periodText = (s) => s % 86400 === 0 ? `${s / 86400} jour(s)` : `${s} s`;
+function renderMandates() {
+  const m = data.mandates || { granted: [], received: [] };
+  $("grantedTable").innerHTML = m.granted.length ? `<table><thead><tr><th>Bénéficiaire</th><th style="text-align:right">Maximum</th><th>Période</th><th style="text-align:right">Reste</th><th></th></tr></thead><tbody>${m.granted.map((g) =>
+    `<tr><td>${who(g.payee)}</td><td style="text-align:right">${vinx(g.max_per_period)}</td><td>${periodText(g.period)}</td><td style="text-align:right">${vinx(g.available)}</td>
+     <td><button class="danger" data-revoke="${esc(g.payee)}">Révoquer</button></td></tr>`).join("")}</tbody></table>`
+    : `<p class="muted">Aucun mandat accordé.</p>`;
+  $("receivedTable").innerHTML = m.received.length ? `<table><thead><tr><th>Payeur</th><th style="text-align:right">Maximum</th><th>Période</th><th style="text-align:right">Reste</th><th></th></tr></thead><tbody>${m.received.map((r) =>
+    `<tr><td>${who(r.payer)}</td><td style="text-align:right">${vinx(r.max_per_period)}</td><td>${periodText(r.period)}</td><td style="text-align:right">${vinx(r.available)}</td>
+     <td>${r.expired ? `<span class="pill warn">expiré</span>` : `<button class="primary" data-collect="${esc(r.payer)}">Prélever</button>`}</td></tr>`).join("")}</tbody></table>`
+    : `<p class="muted">Aucun mandat reçu.</p>`;
+  document.querySelectorAll("[data-revoke]").forEach((b) => b.onclick = () => operate({ action: "revoke-mandate", to: b.dataset.revoke }, "Révoquer le mandat"));
+  document.querySelectorAll("[data-collect]").forEach((b) => b.onclick = () => {
+    const amount = prompt("Montant à prélever (VINX)"); if (!amount) return;
+    const memo = prompt("Mémo (facultatif, par exemple la référence de facture)") || "";
+    operate({ action: "collect", to: b.dataset.collect, amount: amount.replace(",", "."), memo }, "Prélever");
+  });
+}
+$("mandateBtn").onclick = () => operate(
+  { action: "grant-mandate", to: $("mandateTo").value, amount: $("mandateMax").value.replace(",", "."), days: +$("mandateDays").value },
+  "Accorder un mandat", () => { $("mandateTo").value = $("mandateMax").value = ""; });
 
 /* ----- Horodatage ----- */
 let stampDigest = null;
@@ -611,7 +657,18 @@ function txRow(t) {
   const kinds = { "paiement": out ? "Envoi" : "Réception", "nom": "Nom " + (t.name || ""), "cession de nom": "Cession " + (t.name || ""),
     "séquestre": out ? "Séquestre ouvert" : "Séquestre en votre faveur", "séquestre versé": "Séquestre versé", "séquestre remboursé": "Séquestre remboursé",
     "mémo obligatoire": "Réglage du mémo", "rotation de clé": "Changement de clé",
-    "paiement groupé": out ? `Envoi groupé (${(t.payments || []).length})` : "Réception (envoi groupé)" };
+    "paiement groupé": out ? `Envoi groupé (${(t.payments || []).length})` : "Réception (envoi groupé)",
+    "mandat accordé": "Mandat accordé", "mandat révoqué": "Mandat révoqué",
+    "prélèvement": out ? "Prélèvement encaissé" : "Prélèvement (mandat)" };
+  if (t.kind === "prélèvement") {
+    // L'émetteur est le bénéficiaire : le sens se lit côté payeur.
+    const payer = t.payer === data.address;
+    t = { ...t, to: payer ? t.sender : t.payer };
+    const amount = `<span class="${payer ? "out" : "in"}">${payer ? "−" : "+"} ${vinx(t.amount)}</span>`;
+    return `<tr><td>${t.status === "en attente" ? "à l'instant" : date(t.timestamp)}</td><td>${payer ? "Prélèvement (mandat)" : "Prélèvement encaissé"}${t.memo ? `<div class="sub">${esc(t.memo)}</div>` : ""}</td>
+      <td>${who(t.to)}</td><td style="text-align:right">${amount}${payer ? "" : `<div class="sub">frais ${vinx(t.fee)}</div>`}</td>
+      <td>${t.status === "en attente" ? `<span class="pill warn">en attente</span>` : `<span class="pill ok">confirmée</span>`}</td></tr>`;
+  }
   if (t.kind === "paiement groupé" && !out) {
     const mine = (t.payments || []).filter((p) => p.to === data.address);
     t = { ...t, amount: mine.reduce((s, p) => (BigInt(s) + BigInt(p.amount)).toString(), "0"), memo: mine.map((p) => p.memo).filter(Boolean).join(", ") };

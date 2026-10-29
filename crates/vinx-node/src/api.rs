@@ -374,6 +374,16 @@ async fn account(State(shared): State<SharedRef>, Path(address): Path<String>) -
         "public_key": account.key.as_ref().map(key_to_hex),
         "names": names,
         "deals": deals,
+        "mandates": {
+            "granted": st.mandates.iter()
+                .filter(|((payer, _), _)| *payer == address)
+                .map(|((_, payee), m)| mandate_json(payee, m, st.registry.now, "payee"))
+                .collect::<Vec<_>>(),
+            "received": st.mandates.iter()
+                .filter(|((_, payee), _)| *payee == address)
+                .map(|((payer, _), m)| mandate_json(payer, m, st.registry.now, "payer"))
+                .collect::<Vec<_>>(),
+        },
         "policy": st.policies.get(&address).map(|p| {
             let mut v = policy_json(&p.config);
             if let Some(o) = v.as_object_mut() {
@@ -762,10 +772,41 @@ fn tx_json(stx: &SignedTransaction) -> Value {
             "kind": "règles du compte",
             "policy": policy_json(policy),
         }),
+        TxBody::GrantMandate {
+            payee,
+            max_per_period,
+            period,
+            expires_at,
+        } => json!({
+            "kind": "mandat accordé",
+            "to": payee.to_string(),
+            "max_per_period": amount_to_string(*max_per_period),
+            "period": period,
+            "expires_at": expires_at,
+        }),
+        TxBody::RevokeMandate { payee } => json!({
+            "kind": "mandat révoqué",
+            "to": payee.to_string(),
+        }),
+        TxBody::Collect {
+            payer,
+            amount,
+            memo,
+        } => json!({
+            "kind": "prélèvement",
+            "payer": payer.to_string(),
+            "amount": amount_to_string(*amount),
+            "memo": memo.as_ref().map(|m| String::from_utf8_lossy(m).into_owned()),
+        }),
         // `inner()` ne renvoie jamais une enveloppe.
-        TxBody::Approved { .. } => json!({ "kind": "approuvée" }),
+        TxBody::Approved { .. } | TxBody::Sponsored { .. } => json!({ "kind": "enveloppe" }),
     };
-    if let TxBody::Approved { approvals, .. } = &t.body {
+    if let TxBody::Sponsored { sponsor, .. } = &t.body {
+        if let Some(o) = v.as_object_mut() {
+            o.insert("sponsor".into(), json!(sponsor.to_string()));
+        }
+    }
+    if let Some(approvals) = t.body.approvals() {
         if let Some(o) = v.as_object_mut() {
             o.insert("approvals".into(), json!(approvals.len()));
         }
@@ -774,6 +815,18 @@ fn tx_json(stx: &SignedTransaction) -> Value {
         o.extend(b.clone());
     }
     v
+}
+
+/// Mandat lisible ; `other` est l'autre partie, nommée `role`.
+fn mandate_json(other: &Address, m: &vinx_state::Mandate, now: u64, role: &str) -> Value {
+    json!({
+        role: other.to_string(),
+        "max_per_period": amount_to_string(m.max_per_period),
+        "period": m.period,
+        "expires_at": m.expires_at,
+        "available": amount_to_string(m.available(now)),
+        "expired": m.expires_at.is_some_and(|e| now >= e),
+    })
 }
 
 /// Règles d'un compte, lisibles.
