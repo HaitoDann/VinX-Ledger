@@ -14,6 +14,8 @@ workspace = true
 vinx-crypto.workspace = true
 vinx-core.workspace = true
 vinx-keystore.workspace = true
+# Dérivation des comptes, commune au portefeuille mobile.
+vinx-mobile.workspace = true
 anyhow.workspace = true
 borsh.workspace = true
 clap.workspace = true

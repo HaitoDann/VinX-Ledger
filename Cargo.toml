@@ -7,6 +7,7 @@ members = [
     "crates/vinx-keystore",
     "crates/vinx-node",
     "crates/vinx-wallet",
+    "crates/vinx-mobile",
 ]
 resolver = "3"
 
@@ -24,6 +25,7 @@ vinx-state = { path = "crates/vinx-state" }
 vinx-consensus = { path = "crates/vinx-consensus" }
 vinx-keystore = { path = "crates/vinx-keystore" }
 vinx-node = { path = "crates/vinx-node" }
+vinx-mobile = { path = "crates/vinx-mobile" }
 ureq = { version = "2", default-features = false, features = ["json", "tls"] }
 bech32 = "0.9"
 blake3 = "1"

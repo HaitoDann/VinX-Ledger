@@ -9,7 +9,7 @@
 //! - Une phrase de récupération de 12 mots (BIP-39) est créée à la première
 //!   ouverture. Elle seule permet de tout restaurer sur un autre poste.
 //! - Les comptes en sont dérivés : compte `i` = clé Ed25519 de
-//!   `BLAKE3-derive_key(DERIVATION, graine ‖ i)`, `graine` étant la graine
+//!   `BLAKE3-derive_key(vinx_mobile::DERIVATION, graine ‖ i)`, `graine` étant la graine
 //!   BIP-39 de la phrase, sans phrase secrète.
 //! - `portefeuille.json` garde la phrase chiffrée (Argon2id +
 //!   XChaCha20-Poly1305), les libellés des comptes, les contacts et l'URL du
@@ -39,8 +39,6 @@ use vinx_crypto::{Address, KeyPair};
 use vinx_keystore::keyfile::{DEFAULT_KDF, Kdf, Sealed};
 
 const VAULT: &str = "portefeuille.json";
-/// Contexte de dérivation des comptes : ne jamais le changer.
-const DERIVATION: &str = "VinX Ledger portefeuille v1 compte ed25519";
 /// Verrouillage automatique après cette durée sans activité.
 const LOCK_AFTER: Duration = Duration::from_secs(15 * 60);
 /// Horodatage : la plus petite somme possible (une unité) versée à la
@@ -108,11 +106,9 @@ where
     }
 }
 
-/// Clé du compte `index` dérivée de la graine.
+/// Clé du compte `index` dérivée de la graine : celle du portefeuille mobile.
 fn derive_account(seed: &[u8; 64], index: u32) -> KeyPair {
-    let mut input = seed.to_vec();
-    input.extend_from_slice(&index.to_le_bytes());
-    KeyPair::from_secret_bytes(&blake3::derive_key(DERIVATION, &input))
+    vinx_mobile::derive_account(seed, index)
 }
 
 fn address_of(seed: &[u8; 64], index: u32) -> Address {
@@ -121,17 +117,7 @@ fn address_of(seed: &[u8; 64], index: u32) -> Address {
 
 /// Graine d'une phrase de 12 mots ; refuse une phrase mal recopiée.
 fn seed_of(words: &str) -> Result<[u8; 64]> {
-    let normalized = words
-        .split_whitespace()
-        .collect::<Vec<_>>()
-        .join(" ")
-        .to_lowercase();
-    let mnemonic = bip39::Mnemonic::parse_normalized(&normalized)
-        .map_err(|_| anyhow!("phrase invalide : vérifie l'orthographe et l'ordre des 12 mots"))?;
-    if mnemonic.word_count() != 12 {
-        bail!("la phrase doit compter 12 mots");
-    }
-    Ok(mnemonic.to_seed(""))
+    vinx_mobile::seed_of(words).map_err(|e| anyhow!(e))
 }
 
 fn now_secs() -> u64 {
