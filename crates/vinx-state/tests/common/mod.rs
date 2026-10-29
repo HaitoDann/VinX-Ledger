@@ -25,8 +25,8 @@ impl Net {
         Self::with(Genesis::legacy)
     }
 
-    /// Réseau d'une genèse standard (protocole 3), avec un robinet de 7 M.
-    pub fn v3() -> Self {
+    /// Réseau d'une genèse standard (dernier protocole), avec un robinet de 7 M.
+    pub fn current() -> Self {
         Self::with(|c, t, a, v| {
             Genesis::standard(c, t, a, v).map(|g| g.with_faucet(7_000_000 * VINX).unwrap())
         })

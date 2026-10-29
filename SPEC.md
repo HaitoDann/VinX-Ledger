@@ -213,6 +213,13 @@ SignedTransaction {
 | `0x07` | `ReleaseDeal` | `id: Hash` | Verse le séquestre au vendeur |
 | `0x08` | `RefundDeal` | `id: Hash` | Rend le séquestre à l'acheteur |
 
+À partir du protocole 4 :
+
+| Code | Transaction | Champs | Effet |
+|---|---|---|---|
+| `0x09` | `BatchTransfer` | `payments: Vec<Payment { to, amount, memo }>` | Plusieurs paiements (§5.6) |
+| `0x0A` | `Attest` | `digest: Hash` | Horodate une empreinte (§5.7) |
+
 `RotateKey` est aussi la voie de migration post-quantique : quand `0x02` sera
 actif, chaque compte pourra passer à une clé ML-DSA sans changer d'adresse.
 
@@ -284,6 +291,23 @@ Deal { buyer, seller: Address, arbiter: Option<Address>, amount, deadline: u64, 
 - `RefundDeal` : par le vendeur ou l'arbitre à tout moment, par l'acheteur si
   `now ≥ deadline` ; `amount` est recrédité à l'acheteur.
 - Le séquestre est alors supprimé. Rien ne se dénoue sans transaction.
+
+### 5.6 Paiements groupés (protocole 4)
+
+- De 1 à 100 paiements. Chacun suit les règles d'un `Transfer` (§5.2) : montant
+  non nul, destinataire différent de l'émetteur, mémo valide, mémo exigé par
+  le destinataire, réserve d'un nouveau compte. L'existence du destinataire est
+  jugée avant la transaction.
+- Frais minimaux : `min_fee × ⌈n / 10⌉` pour `n` paiements.
+- Un seul paiement invalide invalide toute la transaction.
+
+### 5.7 Horodatage (protocole 4)
+
+- `Attest` inscrit une empreinte de 32 octets (par exemple SHA-256 d'un
+  fichier) dans le bloc. Il ne change rien d'autre à l'état que les frais.
+- Les nœuds indexent les empreintes des blocs conservés
+  (`GET /attestations/{empreinte}`). Pour vérifier un horodatage plus ancien que
+  l'élagage, il faut un nœud archive.
 
 ## 6. Blocs
 
@@ -475,6 +499,7 @@ hauteur `H + 2`. `validators_hash` du bloc `H + 1` reflète déjà le nouvel ens
 | 1 | Paiements, mémo obligatoire, rotation de clé, gouvernance |
 | 2 | Noms `.vinx` (§5.4), séquestres (§5.5), paramètre `name_fee` |
 | 3 | Émission des validateurs et frais aux validateurs (§4.4, ADR 0002) |
+| 4 | Paiements groupés (§5.6), horodatage natif (§5.7) ; suite en cours (feuille de route) |
 
 ## 10. Étiquettes de domaine
 

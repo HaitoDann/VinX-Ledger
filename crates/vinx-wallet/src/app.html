@@ -136,6 +136,13 @@ header select { width: auto; min-width: 180px; }
     <label for="sendMemo">Mémo (facultatif)</label><input id="sendMemo" placeholder="référence de facture…">
     <div class="actions"><button class="primary" id="sendBtn">Vérifier avant d'envoyer</button></div>
   </div>
+  <div class="card narrow">
+    <h2>Envoi groupé</h2>
+    <p class="sub">Paie jusqu'à 100 personnes en une seule opération (salaires, remboursements, cagnotte…). Une ligne par paiement : <span class="mono">destinataire ; montant ; mémo</span>. Le destinataire peut être une adresse, un contact ou un nom .vinx ; le mémo est facultatif. Tu peux coller les colonnes d'un tableur.</p>
+    <label for="batchLines">Paiements</label>
+    <textarea id="batchLines" spellcheck="false" placeholder="alice.vinx ; 12,5 ; loyer octobre&#10;Bob ; 3&#10;vinx1… ; 0,8 ; remboursement"></textarea>
+    <div class="actions"><button class="primary" id="batchBtn">Vérifier avant d'envoyer</button></div>
+  </div>
 </main>
 
 <main id="receive" class="view">
@@ -222,7 +229,7 @@ header select { width: auto; min-width: 180px; }
   <div class="card narrow">
     <h2>Vérifier un horodatage</h2>
     <label for="verifyFile">Fichier</label><input id="verifyFile" type="file">
-    <label for="verifyId">Identifiant de la transaction (dans le certificat)</label><input id="verifyId" class="mono" autocomplete="off">
+    <label for="verifyId">Identifiant de la transaction (facultatif : seulement pour les horodatages faits avant le protocole 4)</label><input id="verifyId" class="mono" autocomplete="off">
     <div class="actions"><button id="verifyBtn">Vérifier</button></div>
     <div class="found" id="verifyOut"></div>
   </div>
@@ -477,18 +484,19 @@ async function refresh() {
   $("historyTable").innerHTML = rows(data.history);
   renderNames(); renderDeals(); renderStamps();
 }
-const isStamp = (t) => t.kind === "paiement" && t.amount === "1" && (t.memo_hex || "").length === 64 && t.sender === data?.address;
+const isStamp = (t) => t.sender === data?.address && (t.kind === "horodatage" || (t.kind === "paiement" && t.amount === "1" && (t.memo_hex || "").length === 64));
+const stampDigestOf = (t) => t.digest || t.memo_hex;
 function renderStamps() {
   const list = data.history.filter(isStamp);
   $("stampTable").innerHTML = list.length ? `<table><thead><tr><th>Date</th><th>Empreinte</th><th>Bloc</th><th></th></tr></thead><tbody>${list.map((t, i) =>
-    `<tr><td>${t.status === "en attente" ? "en attente" : date(t.timestamp)}</td><td class="mono">${esc(t.memo_hex)}</td><td>${esc(t.height ?? "—")}</td>
+    `<tr><td>${t.status === "en attente" ? "en attente" : date(t.timestamp)}</td><td class="mono">${esc(stampDigestOf(t))}</td><td>${esc(t.height ?? "—")}</td>
      <td>${t.height ? `<button data-cert="${i}">Certificat</button>` : ""}</td></tr>`).join("")}</tbody></table>`
     : `<p class="muted">Aucun horodatage pour ce compte.</p>`;
   document.querySelectorAll("[data-cert]").forEach((b) => b.onclick = () => {
     const t = list[+b.dataset.cert];
-    download(`certificat-${t.memo_hex.slice(0, 12)}.txt`, [
+    download(`certificat-${stampDigestOf(t).slice(0, 12)}.txt`, [
       "CERTIFICAT D'HORODATAGE VINX LEDGER", "",
-      `Empreinte SHA-256 du fichier : ${t.memo_hex}`,
+      `Empreinte SHA-256 du fichier : ${stampDigestOf(t)}`,
       `Inscrite le                  : ${new Date(t.timestamp).toISOString()} (${date(t.timestamp)})`,
       `Bloc                         : ${t.height}`,
       `Réseau                       : ${data.network.chain_id}`,
@@ -496,7 +504,8 @@ function renderStamps() {
       `Compte                       : ${t.sender}`, "",
       "Vérification : portefeuille VinX, onglet Horodatage, « Vérifier un horodatage »,",
       "avec le fichier d'origine et l'identifiant de transaction ci-dessus.",
-      "Ou : SHA-256 du fichier = champ memo_hex de GET /transactions/<transaction> sur un nœud.",
+      "Ou : GET /attestations/<empreinte> sur un nœud (protocole 4 et suivants),",
+      "ou champ digest / memo_hex de GET /transactions/<transaction>.",
     ].join("\n"), "text/plain");
   });
 }
@@ -524,13 +533,15 @@ $("stampBtn").onclick = () => operate({ action: "timestamp", hash: stampDigest, 
   () => { $("stampFile").value = ""; $("stampHash").textContent = ""; $("stampBtn").disabled = true; });
 $("verifyBtn").onclick = async () => {
   const f = $("verifyFile").files[0]; const id = $("verifyId").value.trim();
-  if (!f || !id) return toast("Choisis le fichier et colle l'identifiant de transaction.", true);
+  if (!f) return toast("Choisis le fichier à vérifier.", true);
   $("verifyOut").textContent = "vérification…";
   try {
     const r = await api("/api/verify", { id, hash: await sha256(f) });
     $("verifyOut").innerHTML = r.matches
       ? `<span class="ok">✓ Authentique : ce fichier est identique à celui horodaté le ${esc(date(r.timestamp))}, bloc ${esc(r.height)}, par <span class="mono">${esc(r.sender)}</span>.</span>`
-      : `<span class="bad">✗ Ne correspond pas : le fichier a été modifié, ou ce n'est pas la bonne transaction.</span>`;
+      : r.not_found
+        ? `<span class="bad">✗ Aucun horodatage de ce fichier sur ce nœud : il a été modifié, n'a jamais été horodaté, ou date d'avant les blocs conservés (il faut un nœud archive).</span>`
+        : `<span class="bad">✗ Ne correspond pas : le fichier a été modifié, ou ce n'est pas la bonne transaction.</span>`;
   } catch (e) { $("verifyOut").innerHTML = `<span class="warn">${esc(e.message)}</span>`; }
 };
 
@@ -579,7 +590,7 @@ $("csvBtn").onclick = () => {
     const out = t.sender === data.address;
     rows.push([t.timestamp ? new Date(t.timestamp).toISOString() : "", t.status, isStamp(t) ? "horodatage" : t.kind,
       out ? "sortie" : "entrée", out ? (t.to || "") : t.sender, t.amount ? dec(t.amount) : "",
-      out && t.fee ? dec(t.fee) : "", isStamp(t) ? t.memo_hex : (t.memo || ""), t.height ?? "", t.id]);
+      out && t.fee ? dec(t.fee) : "", isStamp(t) ? stampDigestOf(t) : (t.memo || ""), t.height ?? "", t.id]);
   }
   download(`vinx-${data.label.replace(/\W+/g, "-")}-${new Date().toISOString().slice(0, 10)}.csv`,
     "\ufeff" + rows.map((r) => r.map(cell).join(";")).join("\r\n"), "text/csv");
@@ -588,14 +599,19 @@ function txRow(t) {
   const out = t.sender === data.address;
   const kinds = { "paiement": out ? "Envoi" : "Réception", "nom": "Nom " + (t.name || ""), "cession de nom": "Cession " + (t.name || ""),
     "séquestre": out ? "Séquestre ouvert" : "Séquestre en votre faveur", "séquestre versé": "Séquestre versé", "séquestre remboursé": "Séquestre remboursé",
-    "mémo obligatoire": "Réglage du mémo", "rotation de clé": "Changement de clé" };
+    "mémo obligatoire": "Réglage du mémo", "rotation de clé": "Changement de clé",
+    "paiement groupé": out ? `Envoi groupé (${(t.payments || []).length})` : "Réception (envoi groupé)" };
+  if (t.kind === "paiement groupé" && !out) {
+    const mine = (t.payments || []).filter((p) => p.to === data.address);
+    t = { ...t, amount: mine.reduce((s, p) => (BigInt(s) + BigInt(p.amount)).toString(), "0"), memo: mine.map((p) => p.memo).filter(Boolean).join(", ") };
+  }
   if (isStamp(t)) {
-    return `<tr><td>${t.status === "en attente" ? "à l'instant" : date(t.timestamp)}</td><td>Horodatage<div class="sub mono">${esc(t.memo_hex.slice(0, 16))}…</div></td>
+    return `<tr><td>${t.status === "en attente" ? "à l'instant" : date(t.timestamp)}</td><td>Horodatage<div class="sub mono">${esc(stampDigestOf(t).slice(0, 16))}…</div></td>
       <td></td><td style="text-align:right"><div class="sub">frais ${vinx(t.fee)}</div></td>
       <td>${t.status === "en attente" ? `<span class="pill warn">en attente</span>` : `<span class="pill ok">confirmée</span>`}</td></tr>`;
   }
   const other = out ? t.to : t.sender;
-  const from = t.treasury && !out ? "Trésorerie VinX" : null;
+  const from = t.treasury && !out ? "Trésorerie VinX" : t.kind === "paiement groupé" && out ? `${(t.payments || []).length} destinataires` : null;
   const amount = t.amount ? `<span class="${out ? "out" : "in"}">${out ? "−" : "+"} ${vinx(t.amount)}</span>` : "";
   const fee = out ? `<div class="sub">frais ${vinx(t.fee)}</div>` : "";
   return `<tr><td>${t.status === "en attente" ? "à l'instant" : date(t.timestamp)}</td><td>${esc(kinds[t.kind] || t.kind)}${t.memo ? `<div class="sub">${esc(t.memo)}</div>` : ""}</td>
@@ -676,6 +692,8 @@ async function operate(op, title, done) {
     done?.(); setTimeout(refresh, 800); setTimeout(refresh, 6000);
   } catch (e) { toast(e.message, true); }
 }
+$("batchBtn").onclick = () => operate({ action: "batch", lines: $("batchLines").value }, "Confirmer l'envoi groupé",
+  () => { $("batchLines").value = ""; show("home"); });
 $("sendBtn").onclick = () => operate(
   { action: "send", to: $("sendTo").value, amount: $("sendAmount").value.replace(",", "."), memo: $("sendMemo").value }, "Confirmer l'envoi",
   () => { $("sendLink").value = $("sendTo").value = $("sendAmount").value = $("sendMemo").value = ""; $("sendFound").textContent = $("linkFound").textContent = ""; show("home"); });

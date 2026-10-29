@@ -33,6 +33,10 @@ const ADMIN_LOG: TableDefinition<u64, &[u8]> = TableDefinition::new("admin_log")
 /// adresse, pour l'historique du portefeuille. Suit l'élagage des blocs. Les
 /// paiements de la trésorerie (admin) ont un rang marqué par [`ADMIN_RANK`].
 const ADDR_INDEX: TableDefinition<(&[u8; 20], u64, u32), ()> = TableDefinition::new("addr_index");
+/// (empreinte, hauteur, rang) des horodatages (`Attest`), pour les vérifier
+/// sans identifiant de transaction. Suit l'élagage des blocs.
+const ATTEST_INDEX: TableDefinition<(&[u8; 32], u64, u32), ()> =
+    TableDefinition::new("attest_index");
 
 /// Preuves d'équivoque conservées au plus.
 pub const MAX_EVIDENCE: u64 = 1_000;
@@ -68,6 +72,7 @@ pub fn parties(t: &SignedTransaction) -> Vec<Address> {
     let mut out = vec![t.tx.sender];
     match &t.tx.body {
         TxBody::Transfer { to, .. } | TxBody::TransferName { to, .. } => out.push(*to),
+        TxBody::BatchTransfer { payments } => out.extend(payments.iter().map(|p| p.to)),
         TxBody::OpenDeal {
             seller, arbiter, ..
         } => {
@@ -76,6 +81,7 @@ pub fn parties(t: &SignedTransaction) -> Vec<Address> {
         }
         _ => {}
     }
+    out.sort();
     out.dedup();
     out
 }
@@ -115,6 +121,17 @@ fn address_keys(block: &Block) -> Result<Vec<(Address, u32)>> {
     Ok(keys)
 }
 
+/// Clés de [`ATTEST_INDEX`] d'un bloc.
+fn attest_keys(block: &Block) -> Result<Vec<(Hash, u32)>> {
+    let mut keys = Vec::new();
+    for (rank, t) in block.txs.iter().enumerate() {
+        if let TxBody::Attest { digest } = &t.tx.body {
+            keys.push((*digest, u32::try_from(rank)?));
+        }
+    }
+    Ok(keys)
+}
+
 /// Indexe les transactions d'un bloc et journalise ses actions admin.
 fn index_block(tx: &redb::WriteTransaction, block: &Block) -> Result<()> {
     let height = block.header.height;
@@ -125,6 +142,10 @@ fn index_block(tx: &redb::WriteTransaction, block: &Block) -> Result<()> {
     let mut by_addr = tx.open_table(ADDR_INDEX)?;
     for (a, rank) in address_keys(block)? {
         by_addr.insert((a.as_bytes(), height, rank), ())?;
+    }
+    let mut attests = tx.open_table(ATTEST_INDEX)?;
+    for (digest, rank) in attest_keys(block)? {
+        attests.insert((&digest, height, rank), ())?;
     }
     let mut log = tx.open_table(ADMIN_LOG)?;
     for t in &block.admin_txs {
@@ -153,6 +174,7 @@ impl Store {
             tx.open_table(TX_INDEX)?;
             tx.open_table(ADMIN_LOG)?;
             tx.open_table(ADDR_INDEX)?;
+            tx.open_table(ATTEST_INDEX)?;
             let mut meta = tx.open_table(META)?;
             if meta.get(LEGACY_STATE)?.is_some() {
                 bail!(
@@ -264,6 +286,7 @@ impl Store {
         // Les blocs effacés ne sont plus consultables : leur index non plus.
         tx.delete_table(TX_INDEX)?;
         tx.delete_table(ADDR_INDEX)?;
+        tx.delete_table(ATTEST_INDEX)?;
         tx.open_table(BLOCKS)?
             .insert(height, encode(block).as_slice())?;
         tx.open_table(CERTS)?
@@ -317,6 +340,10 @@ impl Store {
                 let mut by_addr = tx.open_table(ADDR_INDEX)?;
                 for (a, rank) in address_keys(&block)? {
                     by_addr.remove((a.as_bytes(), height, rank))?;
+                }
+                let mut attests = tx.open_table(ATTEST_INDEX)?;
+                for (digest, rank) in attest_keys(&block)? {
+                    attests.remove((&digest, height, rank))?;
                 }
                 for t in &block.admin_txs {
                     index.remove(&t.id())?;
@@ -421,6 +448,27 @@ impl Store {
             };
             if let Some(e) = entry {
                 out.push((height, block.header.timestamp, e));
+            }
+        }
+        Ok(out)
+    }
+
+    /// Horodatages de `digest` encore dans les blocs conservés : hauteur,
+    /// horodatage du bloc et transaction.
+    pub fn attestations(&self, digest: &Hash) -> Result<Vec<(u64, u64, SignedTransaction)>> {
+        let tx = self.db.begin_read()?;
+        let index = tx.open_table(ATTEST_INDEX)?;
+        let blocks = tx.open_table(BLOCKS)?;
+        let mut out = Vec::new();
+        for entry in index.range((digest, 0, 0)..=(digest, u64::MAX, u32::MAX))? {
+            let (k, _) = entry?;
+            let (_, height, rank) = k.value();
+            let Some(bytes) = blocks.get(height)? else {
+                continue;
+            };
+            let block: Block = decode(bytes.value(), "bloc")?;
+            if let Some(t) = block.txs.get(usize::try_from(rank)?) {
+                out.push((height, block.header.timestamp, t.clone()));
             }
         }
         Ok(out)

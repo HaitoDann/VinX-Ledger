@@ -20,7 +20,7 @@ use vinx_crypto::{Address, Domain, Hash, PublicKey, hash_tagged_parts, merkle_ro
 
 /// Dernière version du protocole que ce code sait exécuter. Un nœud plus
 /// ancien qu'une mise à jour activée s'arrête au lieu de diverger.
-pub const SUPPORTED_PROTOCOL: u32 = 3;
+pub const SUPPORTED_PROTOCOL: u32 = 4;
 
 #[derive(Clone, Debug, PartialEq, Eq, BorshSerialize, BorshDeserialize)]
 pub struct AdminSet {
@@ -66,6 +66,8 @@ pub enum TxError {
     NameTaken,
     #[error("ce nom n'appartient pas à l'émetteur, ou a expiré")]
     NotNameOwner,
+    #[error("paiement groupé vide ou de plus de 100 paiements")]
+    InvalidBatch,
     #[error("séquestre inconnu")]
     UnknownDeal,
     #[error("séquestre invalide (participants ou échéance)")]
@@ -417,7 +419,7 @@ impl State {
         if sender.nonce.checked_add(1) != Some(tx.nonce) {
             return Err(TxError::BadNonce);
         }
-        if tx.fee < self.params.min_fee {
+        if tx.fee < tx.body.min_fee(self.params.min_fee) {
             return Err(TxError::FeeTooLow);
         }
         if tx.body.min_protocol() > self.protocol_version {
@@ -441,6 +443,18 @@ impl State {
                 changes.debit(&self.accounts, tx.sender, *amount)?;
                 changes.credit(&self.accounts, *to, *amount)?;
             }
+            TxBody::BatchTransfer { payments } => {
+                if payments.is_empty() || payments.len() > vinx_core::MAX_BATCH_PAYMENTS {
+                    return Err(TxError::InvalidBatch);
+                }
+                for p in payments {
+                    self.check_payment(tx.sender, p.to, p.amount, &p.memo)?;
+                    changes.debit(&self.accounts, tx.sender, p.amount)?;
+                    changes.credit(&self.accounts, p.to, p.amount)?;
+                }
+            }
+            // L'empreinte n'est que dans le bloc : rien à changer dans l'état.
+            TxBody::Attest { .. } => {}
             TxBody::SetMemoRequired { required } => {
                 changes.get(&self.accounts, tx.sender).memo_required = *required;
             }

@@ -341,6 +341,9 @@ struct Operation {
     /// Horodatage : empreinte SHA-256 du fichier, en hexadécimal.
     #[serde(default)]
     hash: String,
+    /// Paiement groupé : une ligne « destinataire ; montant ; mémo » par paiement.
+    #[serde(default)]
+    lines: String,
 }
 
 /// Opération prête à signer, avec ce qu'il faut montrer avant.
@@ -369,7 +372,7 @@ fn plan(app: &App, op: &Operation) -> Result<Plan> {
     let min_reserve = units(at(&status, "/params/min_reserve"))?;
     let max_memo = at(&status, "/params/max_memo_bytes").as_u64().unwrap_or(32);
     let protocol = at(&status, "/protocol_version").as_u64().unwrap_or(1);
-    let fee = client.recommended_fee()?;
+    let mut fee = client.recommended_fee()?;
     let Some(mine) = client.account(&me)? else {
         bail!("ce compte est vide : il doit d'abord recevoir des VINX (onglet Recevoir)");
     };
@@ -568,12 +571,110 @@ fn plan(app: &App, op: &Operation) -> Result<Plan> {
                  Garde-le intact, la moindre modification change l'empreinte."
                     .into(),
             );
-            spent = TIMESTAMP_UNITS;
-            TxBody::Transfer {
-                to: Address::treasury(),
-                amount: TIMESTAMP_UNITS,
-                memo: Some(digest.to_vec()),
+            if protocol >= 4 {
+                TxBody::Attest { digest }
+            } else {
+                spent = TIMESTAMP_UNITS;
+                TxBody::Transfer {
+                    to: Address::treasury(),
+                    amount: TIMESTAMP_UNITS,
+                    memo: Some(digest.to_vec()),
+                }
             }
+        }
+        "batch" => {
+            if protocol < 4 {
+                bail!(
+                    "paiement groupé pas encore actif sur ce réseau : il arrive avec le protocole 4"
+                );
+            }
+            let mut payments = Vec::new();
+            let mut new_accounts = std::collections::BTreeSet::new();
+            let mut unknown = std::collections::BTreeSet::new();
+            for (n, raw) in op.lines.lines().enumerate() {
+                let line = raw.trim();
+                if line.is_empty() || line.starts_with('#') {
+                    continue;
+                }
+                let row = n.saturating_add(1);
+                let mut cols = line.split([';', '\t']).map(str::trim);
+                let who = cols.next().unwrap_or_default();
+                let amount = parse_vinx(&cols.next().unwrap_or_default().replace(',', "."))
+                    .map_err(|e| anyhow!("ligne {row} : {e}"))?;
+                if amount == 0 {
+                    bail!("ligne {row} : montant nul");
+                }
+                let memo = cols.next().and_then(memo_bytes);
+                if let Some(m) = &memo {
+                    if u64::try_from(m.len()).map_or(true, |l| l > max_memo) {
+                        bail!("ligne {row} : mémo trop long ({max_memo} octets au plus)");
+                    }
+                }
+                let (to, how) =
+                    resolve(app, &client, who).map_err(|e| anyhow!("ligne {row} : {e}"))?;
+                if to == me {
+                    bail!("ligne {row} : c'est l'adresse de ce compte");
+                }
+                if how == "adresse" {
+                    unknown.insert(to);
+                }
+                match client.account(&to)? {
+                    None if amount < min_reserve => bail!(
+                        "ligne {row} : {who} n'a encore jamais reçu de VINX, le premier \
+                         versement doit être d'au moins {} VINX",
+                        format_vinx(min_reserve)
+                    ),
+                    None => {
+                        new_accounts.insert(to);
+                    }
+                    Some(r) if r.memo_required && memo.is_none() => {
+                        bail!("ligne {row} : {who} exige un mémo")
+                    }
+                    Some(_) => {}
+                }
+                spent = spent
+                    .checked_add(amount)
+                    .ok_or_else(|| anyhow!("total trop grand"))?;
+                payments.push(vinx_core::Payment { to, amount, memo });
+            }
+            if payments.is_empty() {
+                bail!("aucun paiement : une ligne « destinataire ; montant ; mémo » par paiement");
+            }
+            if payments.len() > vinx_core::MAX_BATCH_PAYMENTS {
+                bail!(
+                    "{} paiements : {} au plus par envoi groupé",
+                    payments.len(),
+                    vinx_core::MAX_BATCH_PAYMENTS
+                );
+            }
+            let body = TxBody::BatchTransfer { payments };
+            fee = body.min_fee(fee);
+            if let TxBody::BatchTransfer { payments } = &body {
+                lines.push(("Paiements".into(), payments.len().to_string()));
+                for p in payments.iter().take(5) {
+                    lines.push((p.to.to_string(), format!("{} VINX", format_vinx(p.amount))));
+                }
+                if payments.len() > 5 {
+                    lines.push((
+                        "…".into(),
+                        format!("et {} autres", payments.len().saturating_sub(5)),
+                    ));
+                }
+            }
+            lines.push(("Total versé".into(), format!("{} VINX", format_vinx(spent))));
+            if !unknown.is_empty() {
+                warnings.push(format!(
+                    "{} destinataire(s) donné(s) par une adresse hors de tes contacts : vérifie-les.",
+                    unknown.len()
+                ));
+            }
+            if !new_accounts.is_empty() {
+                warnings.push(format!(
+                    "{} destinataire(s) n'ont encore jamais reçu de VINX sur ce réseau.",
+                    new_accounts.len()
+                ));
+            }
+            body
         }
         other => bail!("opération inconnue : {other}"),
     };
@@ -954,11 +1055,29 @@ struct Verify {
 /// Vérifie qu'une transaction horodate bien l'empreinte donnée.
 fn verify_timestamp(client: &Client, id: &str, hash: &str) -> Result<Value> {
     let id = id.trim().to_lowercase();
+    let hash = hash.trim().to_lowercase();
+    if id.is_empty() {
+        // Horodatage natif (protocole 4) : retrouvé par sa seule empreinte.
+        let Some(r) = client.get_json(&format!("/attestations/{hash}"))? else {
+            return Ok(json!({ "matches": false, "not_found": true }));
+        };
+        let first = at(&r, "/attestations/0");
+        return Ok(json!({
+            "matches": true,
+            "height": at(first, "/height"),
+            "timestamp": at(first, "/timestamp"),
+            "sender": at(first, "/sender"),
+            "id": at(first, "/id"),
+        }));
+    }
     let t = client
         .get_json(&format!("/transactions/{id}"))?
         .ok_or_else(|| anyhow!("transaction introuvable sur ce nœud (identifiant faux, ou bloc trop ancien pour un nœud non archive)"))?;
-    let on_chain = at(&t, "/memo_hex").as_str().unwrap_or_default();
-    let matches = !on_chain.is_empty() && on_chain == hash.trim().to_lowercase();
+    let on_chain = at(&t, "/digest")
+        .as_str()
+        .or_else(|| at(&t, "/memo_hex").as_str())
+        .unwrap_or_default();
+    let matches = !on_chain.is_empty() && on_chain == hash;
     Ok(json!({
         "matches": matches,
         "status": at(&t, "/status"),

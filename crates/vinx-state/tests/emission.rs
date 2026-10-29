@@ -25,7 +25,7 @@ fn validator_balance(net: &Net, i: usize) -> u64 {
 
 #[test]
 fn fees_go_to_the_epoch_pot_not_the_treasury() {
-    let mut net = Net::v3();
+    let mut net = Net::current();
     let alice = net.funded(10 * VINX);
     let treasury = net.state.balance(&Address::treasury());
     let pot = net.state.emission.pot;
@@ -38,7 +38,7 @@ fn fees_go_to_the_epoch_pot_not_the_treasury() {
 
 #[test]
 fn epoch_rewards_follow_proposed_blocks() {
-    let mut net = Net::v3();
+    let mut net = Net::current();
     net.state.emission.epoch_blocks = 4;
     let alice = net.funded(10 * VINX); // hauteur 1, sans proposeur
     let tx = transfer(&alice, 1, addr(&KeyPair::generate()), VINX, true);
@@ -76,7 +76,7 @@ fn epoch_rewards_follow_proposed_blocks() {
 
 #[test]
 fn proposer_must_belong_to_the_set() {
-    let mut net = Net::v3();
+    let mut net = Net::current();
     assert_eq!(
         net.block_by(T0, 9, &[], &[]),
         Err(BlockError::UnknownProposer)
@@ -96,7 +96,7 @@ fn legacy_chains_keep_fees_in_the_treasury() {
 
 #[test]
 fn emission_survives_storage_round_trip() {
-    let mut net = Net::v3();
+    let mut net = Net::current();
     net.block_by(T0, 1, &[], &[]).unwrap();
     let back =
         vinx_state::State::from_parts(&net.state.globals_bytes(), net.state.accounts.clone())

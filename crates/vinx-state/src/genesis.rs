@@ -14,7 +14,7 @@ use vinx_crypto::{Address, PublicKey};
 pub const LEGACY_GENESIS_TREASURY: Amount = 100_000_000 * UNITS_PER_VINX;
 
 /// Version du protocole d'une genèse standard.
-pub const GENESIS_PROTOCOL: u32 = 3;
+pub const GENESIS_PROTOCOL: u32 = 4;
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Genesis {
@@ -203,7 +203,7 @@ mod tests {
         assert_eq!(s.accounts[&Address::treasury()].balance, 0);
         assert_eq!(s.escrow.tranches.len(), 120);
         assert_eq!(s.emission.remaining(), GENESIS_EMISSION);
-        assert_eq!(s.protocol_version, 3);
+        assert_eq!(s.protocol_version, GENESIS_PROTOCOL);
         assert_eq!(s.check_invariant(), Ok(()));
     }
 

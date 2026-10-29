@@ -93,6 +93,13 @@ Certaines erreurs sont refusées avant même l'aperçu :
 - mémo exigé par le destinataire ;
 - solde restant sous la réserve.
 
+**Envoi groupé** (protocole 4) : pour payer jusqu'à 100 personnes d'un coup,
+colle une ligne par paiement dans le cadre « Envoi groupé » :
+`destinataire ; montant ; mémo`. Le mémo est facultatif, et les lignes qui
+commencent par `#` sont ignorées. Les colonnes copiées d'un tableur
+fonctionnent aussi. L'aperçu montre le total et les mises en garde ; les frais
+sont d'un frais minimal par tranche de 10 paiements.
+
 Une transaction est confirmée en quelques secondes. Elle apparaît d'abord « en
 attente » dans l'historique.
 
@@ -135,8 +142,10 @@ pas été modifié depuis : contrat, devis, création, photo…
 3. Une fois l'opération confirmée, télécharge le **certificat**. Garde-le avec
    le fichier : il contient l'identifiant de la transaction.
 
-Pour vérifier, n'importe qui choisit le fichier et colle l'identifiant de
-transaction dans « Vérifier un horodatage ». La moindre modification du
+Pour vérifier, n'importe qui choisit le fichier dans « Vérifier un
+horodatage ». Depuis le protocole 4, l'empreinte suffit : le nœud retrouve
+l'horodatage tout seul. Pour un horodatage fait avant, colle aussi
+l'identifiant de transaction du certificat. La moindre modification du
 fichier change l'empreinte, et la vérification échoue.
 
 Un nœud ordinaire ne garde les blocs que 24 h : pour vérifier un horodatage
