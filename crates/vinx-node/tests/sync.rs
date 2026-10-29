@@ -139,8 +139,12 @@ async fn new_nodes_join_by_snapshot_or_from_an_archive() {
         ],
         vec![validator.public_key()],
     )
+    .unwrap()
+    .with_faucet(1_000 * UNITS_PER_VINX)
     .unwrap();
     genesis.params.min_block_interval_ms = 100;
+    // Époques courtes : l'instantané d'état transporte aussi l'émission.
+    genesis.epoch_blocks = 4;
 
     let v = spec(root.path(), "validateur");
     let archive = spec(root.path(), "archive");

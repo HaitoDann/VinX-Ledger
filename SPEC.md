@@ -84,6 +84,7 @@ State {
     params:     Params,            // §11
     upgrade:    Option<PendingUpgrade>,
     registry:   Registry,          // protocole 2 : noms et séquestres (§5.4, §5.5)
+    emission:   Emission,          // protocole 3 : émission des validateurs (§4.4)
 }
 Registry {
     now:      u64,                         // horodatage du bloc, en secondes
@@ -95,7 +96,8 @@ Registry {
 
 `state_root = H("vinx/state" ‖ racine_SMT(accounts) ‖ H(G))`, avec
 `G = borsh(escrow, admin, validators, params, upgrade, protocol_version)`,
-suivi de `borsh(registry)` à partir du protocole 2.
+suivi de `borsh(registry)` à partir du protocole 2, puis de `borsh(emission)` à
+partir du protocole 3.
 
 **Arbre des comptes (SMT).** Arbre binaire compact indexé par les 160 bits de
 l'adresse, du bit de poids fort au bit de poids faible :
@@ -130,12 +132,41 @@ Tranche { amount: u64, matures_at: u64 }   // horodatage Unix, secondes
 À la fin de chaque bloc :
 
 ```
-Σ accounts.balance + Σ escrow.tranches.amount + Σ deals.amount = 10¹⁸ unités  (1 000 000 000 VINX)
+Σ accounts.balance + Σ escrow.tranches.amount + Σ deals.amount
+  + emission.pot + (emission.budget − emission.emitted) = 10¹⁸ unités  (1 000 000 000 VINX)
 ```
 
 Les séquestres (§5.5) ne font que déplacer des unités existantes : la supply ne change pas.
 
 Un bloc qui viole l'invariant est invalide.
+
+### 4.4 Émission des validateurs (protocole 3, ADR 0002)
+
+```
+Emission {
+    start:        u64,        // genesis_time, en secondes
+    budget:       u64,        // 100 000 000 VINX ; 0 avant le protocole 3
+    emitted:      u64,        // déjà versé
+    pot:          u64,        // frais et reliquats en attente de répartition
+    epoch_blocks: u64,        // 17 280 par défaut
+    proposed:     Vec<(PublicKey, u64)>,   // blocs proposés depuis le début de l'époque
+}
+```
+
+- `cible(t) = ⌊budget × (10¹⁸ − f(t − start)) / 10¹⁸⌋`, où
+  `f(x) = ⌊e^(−ln2 × (x mod H) / H) × 10¹⁸⌋ >> ⌊x / H⌋` et `H = 315 576 000 s`
+  (10 ans de 365,25 jours). `e^(−y)` se calcule par la série de Taylor en
+  entiers, à l'échelle 10¹⁸ (`ln2 × 10¹⁸ = 693 147 180 559 945 309`), jusqu'au
+  premier terme nul (au plus 40 termes).
+- Chaque bloc incrémente le compteur de son proposeur (`header.proposer`, indice
+  dans l'ensemble de la hauteur). Un indice hors de l'ensemble invalide le bloc.
+- Au bloc `h` tel que `h mod epoch_blocks = 0`, avec `t` l'horodatage du bloc
+  en secondes :
+  1. `dû = min(cible(t) − emitted, budget − emitted)` ; `emitted += dû` ; `pot += dû` ;
+  2. chaque validateur ayant proposé `n` des `N` blocs de l'époque reçoit
+     `⌊pot × n / N⌋`, crédité à l'adresse de sa clé ;
+  3. `pot` garde le reliquat ; les compteurs repartent de zéro.
+  Si aucun bloc n'a été compté, rien n'est versé et `pot` est conservé.
 
 ## 5. Transactions
 
@@ -160,7 +191,9 @@ SignedTransaction {
 - Identifiant : `tx_id = H("vinx/txid" ‖ borsh(signed_tx))`.
 - Si `public_key` est fourni pour un compte sans clé, son adresse doit être égale
   à `sender`. Si le compte a déjà une clé, `public_key` doit être absent.
-- Les frais sont débités du `sender` et **crédités à la trésorerie**.
+- Les frais sont débités du `sender` et **crédités à la trésorerie**, jusqu'au
+  protocole 2. À partir du protocole 3, ils s'ajoutent à `emission.pot` et
+  vont aux validateurs (§4.4).
 
 ### 5.2 Corps des transactions utilisateur
 
@@ -441,6 +474,7 @@ hauteur `H + 2`. `validators_hash` du bloc `H + 1` reflète déjà le nouvel ens
 |---|---|
 | 1 | Paiements, mémo obligatoire, rotation de clé, gouvernance |
 | 2 | Noms `.vinx` (§5.4), séquestres (§5.5), paramètre `name_fee` |
+| 3 | Émission des validateurs et frais aux validateurs (§4.4, ADR 0002) |
 
 ## 10. Étiquettes de domaine
 
@@ -497,6 +531,9 @@ Paramètres non modifiables par `SetParam` :
 | `max_clock_drift` | 15 000 ms | |
 | `min_upgrade_delay` | 17 280 blocs | ≈ 24 h à 5 s par bloc |
 | `escrow.period` | 2 629 800 s | |
+| Budget d'émission | 100 000 000 VINX | fixé à la genèse (§4.4) |
+| Demi-vie de l'émission | 315 576 000 s (10 ans) | |
+| `epoch_blocks` | 17 280 blocs | fixé à la genèse |
 | `block_retention` | 24 heures | réglage local du nœud, hors consensus ; illimité en mode archive |
 
 ## 12. Genèse
@@ -506,9 +543,15 @@ Fichier JSON contenant :
 - `chain_id`, `genesis_time`, `protocol_version` ;
 - `admin` : les 3 clés publiques des signataires ;
 - `validators` : la liste initiale des clés de validateurs ;
-- `treasury_balance` : 100 000 000 VINX ;
+- `treasury_balance` : 0 (réseau de test : le robinet, voir plus bas) ;
 - `escrow` : 120 tranches de 7 500 000 VINX, `period` ;
-- `params` : valeurs initiales de §11.
+- `params` : valeurs initiales de §11 ;
+- `emission` : `budget` (100 000 000 VINX) et `epoch_blocks` (17 280).
+  Absente d'une genèse antérieure au protocole 3 : budget nul.
+
+`treasury_balance + Σ escrow + emission.budget` doit valoir exactement 10¹⁸
+unités. Sur un réseau de test, la trésorerie peut recevoir un robinet, pris sur
+la dernière tranche d'escrow (ADR 0002 §5).
 
 Un nœud refuse une genèse dont l'invariant (§4.3) n'est pas exactement respecté.
 

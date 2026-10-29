@@ -507,7 +507,7 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("db");
         let k = || KeyPair::generate().public_key();
-        let mut state = vinx_state::Genesis::standard("vinx-test", 1, [k(), k(), k()], vec![k()])
+        let mut state = vinx_state::Genesis::legacy("vinx-test", 1, [k(), k(), k()], vec![k()])
             .unwrap()
             .into_state()
             .unwrap();

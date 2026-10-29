@@ -20,15 +20,34 @@ pub struct Net {
 }
 
 impl Net {
+    /// Réseau aux règles d'origine (protocole 1, trésorerie de 100 M).
     pub fn new() -> Self {
+        Self::with(Genesis::legacy)
+    }
+
+    /// Réseau d'une genèse standard (protocole 3), avec un robinet de 7 M.
+    pub fn v3() -> Self {
+        Self::with(|c, t, a, v| {
+            Genesis::standard(c, t, a, v).map(|g| g.with_faucet(7_000_000 * VINX).unwrap())
+        })
+    }
+
+    fn with(
+        make: impl FnOnce(
+            String,
+            u64,
+            [vinx_crypto::PublicKey; 3],
+            Vec<vinx_crypto::PublicKey>,
+        ) -> Option<Genesis>,
+    ) -> Self {
         let admins = [
             KeyPair::generate(),
             KeyPair::generate(),
             KeyPair::generate(),
         ];
         let validators: Vec<KeyPair> = (0..4).map(|_| KeyPair::generate()).collect();
-        let state = Genesis::standard(
-            CHAIN,
+        let state = make(
+            CHAIN.into(),
             T0,
             [
                 admins[0].public_key(),
@@ -75,6 +94,25 @@ impl Net {
         let next = self
             .state
             .execute(self.state.height + 1, timestamp_s * 1000, admin_txs, txs)?;
+        self.state = next;
+        Ok(())
+    }
+
+    /// Comme [`Self::block`], avec l'indice du proposeur (émission, protocole 3).
+    pub fn block_by(
+        &mut self,
+        timestamp_s: u64,
+        proposer: u16,
+        admin_txs: &[SignedAdminTransaction],
+        txs: &[SignedTransaction],
+    ) -> Result<(), vinx_state::BlockError> {
+        let next = self.state.execute_by(
+            self.state.height + 1,
+            timestamp_s * 1000,
+            Some(proposer),
+            admin_txs,
+            txs,
+        )?;
         self.state = next;
         Ok(())
     }

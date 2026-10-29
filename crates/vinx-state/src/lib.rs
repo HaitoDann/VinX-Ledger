@@ -1,6 +1,7 @@
 //! État global, escrow, application des transactions et invariant de supply (SPEC §4).
 
 pub mod accounts;
+pub mod emission;
 pub mod escrow;
 pub mod genesis;
 pub mod registry;
@@ -10,6 +11,7 @@ pub mod state;
 pub mod validators;
 
 pub use accounts::Accounts;
+pub use emission::Emission;
 pub use escrow::{Escrow, Tranche};
 pub use genesis::{Genesis, GenesisError};
 pub use registry::{Deal, NameRecord, Registry};

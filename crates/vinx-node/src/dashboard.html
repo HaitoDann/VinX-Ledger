@@ -84,6 +84,19 @@
         <div class="sub" style="margin-top:6px"><span class="ok">■</span> libérée <span class="warn">■</span> échue, libérable <span class="muted">■</span> à venir</div>
         <div class="scroll"><table style="margin-top:8px"><tbody id="escrow-schedule"></tbody></table></div>
       </section>
+      <section class="card" id="emission-card" hidden>
+        <h2>Émission des validateurs</h2>
+        <dl>
+          <dt>Émis</dt><dd id="em-emitted">—</dd>
+          <dt>Restant</dt><dd id="em-remaining">—</dd>
+          <dt>Rythme actuel</dt><dd id="em-rate">—</dd>
+          <dt>Cagnotte (frais)</dt><dd id="em-pot">—</dd>
+          <dt>Prochaine répartition</dt><dd id="em-next">—</dd>
+        </dl>
+        <h3>Blocs proposés cette époque</h3>
+        <div class="scroll"><table><tbody id="em-proposed"></tbody></table></div>
+        <p class="sub">Courbe à demi-vie de 10 ans sur un budget de 100 M VINX. À chaque fin d'époque, l'émission due et les frais sont répartis au prorata des blocs proposés.</p>
+      </section>
       <section class="card">
         <h2>Gouvernance</h2>
         <dl>
@@ -340,6 +353,19 @@ async function refreshGovernance() {
   ]);
   header(status, blocks);
   $("treasury").textContent = vinx(gov.treasury.balance);
+  const em = gov.emission;
+  $("emission-card").hidden = !em || em.budget === "0";
+  if (em && em.budget !== "0") {
+    const pct = (Number(BigInt(em.emitted) * 10000n / BigInt(em.budget)) / 100).toFixed(2);
+    $("em-emitted").textContent = `${vinx(em.emitted)} (${pct} %)`;
+    $("em-remaining").textContent = vinx(em.remaining);
+    $("em-rate").textContent = `${vinx(em.daily_rate)} par jour`;
+    $("em-pot").textContent = vinx(em.pot);
+    $("em-next").textContent = em.next_epoch_height ? `bloc ${em.next_epoch_height} (dans ${em.next_epoch_height - status.height} blocs)` : "—";
+    $("em-proposed").innerHTML = em.proposed.length
+      ? em.proposed.map(p => `<tr><td class="mono">${esc(p.address)}</td><td>${p.blocks} bloc(s)</td></tr>`).join("")
+      : `<tr><td class="muted">aucun bloc encore dans cette époque</td></tr>`;
+  }
   $("escrow").textContent = vinx(gov.escrow.total);
   $("tranches").textContent = `${escrow.released} libérée(s), ${escrow.tranches} restante(s)`;
   const next = gov.escrow.next;

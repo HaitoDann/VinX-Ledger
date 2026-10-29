@@ -1,5 +1,6 @@
 //! Genèse (SPEC §12).
 
+use crate::emission::{DEFAULT_EPOCH_BLOCKS, Emission, GENESIS_EMISSION};
 use crate::escrow::Escrow;
 use crate::state::{AdminSet, State};
 use crate::validators::ValidatorSet;
@@ -7,8 +8,13 @@ use thiserror::Error;
 use vinx_core::{ADMIN_SIGNERS, Account, Amount, Params, TOTAL_SUPPLY, UNITS_PER_VINX};
 use vinx_crypto::{Address, PublicKey};
 
-/// Solde de la trésorerie à la genèse : 100 000 000 VINX.
-pub const GENESIS_TREASURY: Amount = 100_000_000 * UNITS_PER_VINX;
+/// Solde de la trésorerie à la genèse des versions 0.1 à 0.9 : 100 000 000 VINX.
+/// Depuis le protocole 3, ces 100 M forment le budget d'émission des validateurs
+/// et la trésorerie démarre à 0 (ADR 0002).
+pub const LEGACY_GENESIS_TREASURY: Amount = 100_000_000 * UNITS_PER_VINX;
+
+/// Version du protocole d'une genèse standard.
+pub const GENESIS_PROTOCOL: u32 = 3;
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Genesis {
@@ -21,6 +27,10 @@ pub struct Genesis {
     pub treasury_balance: Amount,
     pub escrow: Escrow,
     pub params: Params,
+    /// Budget d'émission des validateurs ; 0 pour une genèse d'avant le protocole 3.
+    pub emission_budget: Amount,
+    /// Durée d'une époque d'émission, en blocs.
+    pub epoch_blocks: u64,
 }
 
 #[derive(Debug, Error, PartialEq, Eq)]
@@ -37,10 +47,13 @@ pub enum GenesisError {
     InvalidEscrow,
     #[error("la supply ne vaut pas exactement 10¹⁸ unités")]
     SupplyMismatch,
+    #[error("robinet de testnet plus grand que la dernière tranche d'escrow")]
+    FaucetTooLarge,
 }
 
 impl Genesis {
-    /// Genèse conforme à l'ADR 0001 : 10 % en trésorerie, 90 % en 120 tranches.
+    /// Genèse conforme aux ADR 0001 et 0002 : 90 % en 120 tranches d'escrow,
+    /// 10 % en budget d'émission des validateurs, trésorerie vide.
     pub fn standard(
         chain_id: impl Into<String>,
         genesis_time: u64,
@@ -50,13 +63,51 @@ impl Genesis {
         Some(Self {
             chain_id: chain_id.into(),
             genesis_time,
-            protocol_version: 1,
+            protocol_version: GENESIS_PROTOCOL,
             admin,
             validators,
-            treasury_balance: GENESIS_TREASURY,
+            treasury_balance: 0,
             escrow: Escrow::genesis(genesis_time)?,
             params: Params::default(),
+            emission_budget: GENESIS_EMISSION,
+            epoch_blocks: DEFAULT_EPOCH_BLOCKS,
         })
+    }
+
+    /// Genèse des versions 0.1 à 0.9 : protocole 1, 100 M en trésorerie, pas
+    /// d'émission. Sert aux réseaux existants et aux tests des règles anciennes.
+    pub fn legacy(
+        chain_id: impl Into<String>,
+        genesis_time: u64,
+        admin: [PublicKey; ADMIN_SIGNERS],
+        validators: Vec<PublicKey>,
+    ) -> Option<Self> {
+        Some(Self {
+            protocol_version: 1,
+            treasury_balance: LEGACY_GENESIS_TREASURY,
+            emission_budget: 0,
+            ..Self::standard(chain_id, genesis_time, admin, validators)?
+        })
+    }
+
+    /// Réseau de test : dote la trésorerie de `amount` (le robinet), pris sur
+    /// la dernière tranche de l'escrow. Le budget des validateurs et la supply
+    /// ne changent pas.
+    pub fn with_faucet(mut self, amount: Amount) -> Result<Self, GenesisError> {
+        let last = self
+            .escrow
+            .tranches
+            .back_mut()
+            .ok_or(GenesisError::FaucetTooLarge)?;
+        last.amount = last
+            .amount
+            .checked_sub(amount)
+            .ok_or(GenesisError::FaucetTooLarge)?;
+        self.treasury_balance = self
+            .treasury_balance
+            .checked_add(amount)
+            .ok_or(GenesisError::SupplyMismatch)?;
+        Ok(self)
     }
 
     /// Construit l'état initial, après vérification de toutes les règles.
@@ -82,7 +133,9 @@ impl Genesis {
         if self.escrow.period == 0 || !ordered {
             return Err(GenesisError::InvalidEscrow);
         }
-        let total = u128::from(self.treasury_balance).checked_add(self.escrow.total());
+        let total = u128::from(self.treasury_balance)
+            .checked_add(self.escrow.total())
+            .and_then(|t| t.checked_add(u128::from(self.emission_budget)));
         if total != Some(u128::from(TOTAL_SUPPLY)) {
             return Err(GenesisError::SupplyMismatch);
         }
@@ -104,6 +157,12 @@ impl Genesis {
             params: self.params,
             upgrade: None,
             registry: crate::Registry::default(),
+            emission: Emission {
+                start: self.genesis_time,
+                budget: self.emission_budget,
+                epoch_blocks: self.epoch_blocks.max(1),
+                ..Emission::default()
+            },
         };
         state
             .check_invariant()
@@ -141,9 +200,32 @@ mod tests {
     #[test]
     fn standard_genesis_is_valid() {
         let s = standard().into_state().unwrap();
-        assert_eq!(s.accounts[&Address::treasury()].balance, GENESIS_TREASURY);
+        assert_eq!(s.accounts[&Address::treasury()].balance, 0);
         assert_eq!(s.escrow.tranches.len(), 120);
+        assert_eq!(s.emission.remaining(), GENESIS_EMISSION);
+        assert_eq!(s.protocol_version, 3);
         assert_eq!(s.check_invariant(), Ok(()));
+    }
+
+    #[test]
+    fn testnet_faucet_comes_from_the_last_tranche() {
+        let faucet = 1_000_000 * UNITS_PER_VINX;
+        let s = standard()
+            .with_faucet(faucet)
+            .unwrap()
+            .into_state()
+            .unwrap();
+        assert_eq!(s.accounts[&Address::treasury()].balance, faucet);
+        assert_eq!(s.emission.remaining(), GENESIS_EMISSION);
+        assert_eq!(
+            s.escrow.tranches.back().unwrap().amount,
+            crate::escrow::GENESIS_TRANCHE_AMOUNT - faucet
+        );
+        assert_eq!(s.check_invariant(), Ok(()));
+        assert_eq!(
+            standard().with_faucet(8_000_000 * UNITS_PER_VINX),
+            Err(GenesisError::FaucetTooLarge)
+        );
     }
 
     #[test]

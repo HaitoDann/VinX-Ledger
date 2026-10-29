@@ -272,7 +272,7 @@ mod tests {
             KeyPair::generate(),
             KeyPair::generate(),
         ];
-        let state = Genesis::standard(
+        let state = Genesis::legacy(
             "vinx-test",
             1_800_000_000,
             [
@@ -331,7 +331,7 @@ mod tests {
             KeyPair::generate(),
             KeyPair::generate(),
         ];
-        let state = Genesis::standard(
+        let state = Genesis::legacy(
             "vinx-test",
             1_800_000_000,
             [

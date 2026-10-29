@@ -1,6 +1,7 @@
 //! État global et application des transactions et des blocs (SPEC §4, §5, §6, §9).
 
 use crate::accounts::Accounts;
+use crate::emission::Emission;
 use crate::escrow::{Escrow, EscrowError};
 use crate::registry::{
     Deal, MAX_DEAL_DURATION, NAME_GRACE, NAME_PERIOD, NameRecord, Registry, valid_name,
@@ -19,7 +20,7 @@ use vinx_crypto::{Address, Domain, Hash, PublicKey, hash_tagged_parts, merkle_ro
 
 /// Dernière version du protocole que ce code sait exécuter. Un nœud plus
 /// ancien qu'une mise à jour activée s'arrête au lieu de diverger.
-pub const SUPPORTED_PROTOCOL: u32 = 2;
+pub const SUPPORTED_PROTOCOL: u32 = 3;
 
 #[derive(Clone, Debug, PartialEq, Eq, BorshSerialize, BorshDeserialize)]
 pub struct AdminSet {
@@ -49,6 +50,8 @@ pub struct State {
     pub upgrade: Option<PendingUpgrade>,
     /// Noms et séquestres (protocole 2). Vide et hors de `state_root` avant.
     pub registry: Registry,
+    /// Émission vers les validateurs et cagnotte des frais (protocole 3).
+    pub emission: Emission,
 }
 
 #[derive(Debug, Error, PartialEq, Eq)]
@@ -131,6 +134,8 @@ pub enum BlockError {
     InvalidAdminTx { index: usize, error: TxError },
     #[error("transaction {index} invalide : {error}")]
     InvalidTx { index: usize, error: TxError },
+    #[error("proposeur hors de l'ensemble de validateurs")]
+    UnknownProposer,
     #[error("invariant de supply violé")]
     InvariantViolated,
 }
@@ -194,6 +199,38 @@ struct Globals {
     params: Params,
     upgrade: Option<PendingUpgrade>,
     registry: Registry,
+    emission: Emission,
+}
+
+/// [`Globals`] des versions 0.8 et 0.9, sans émission.
+#[derive(BorshDeserialize)]
+struct GlobalsV2 {
+    chain_id: String,
+    protocol_version: u32,
+    height: u64,
+    escrow: Escrow,
+    admin: AdminSet,
+    validators: ValidatorSet,
+    params: Params,
+    upgrade: Option<PendingUpgrade>,
+    registry: Registry,
+}
+
+impl From<GlobalsV2> for Globals {
+    fn from(g: GlobalsV2) -> Self {
+        Self {
+            chain_id: g.chain_id,
+            protocol_version: g.protocol_version,
+            height: g.height,
+            escrow: g.escrow,
+            admin: g.admin,
+            validators: g.validators,
+            params: g.params,
+            upgrade: g.upgrade,
+            registry: g.registry,
+            emission: Emission::default(),
+        }
+    }
 }
 
 /// [`Globals`] des versions 0.7 et antérieures, sans registre.
@@ -221,6 +258,7 @@ impl From<LegacyGlobals> for Globals {
             params: g.params,
             upgrade: g.upgrade,
             registry: Registry::default(),
+            emission: Emission::default(),
         }
     }
 }
@@ -238,12 +276,14 @@ impl State {
             params: self.params.clone(),
             upgrade: self.upgrade.clone(),
             registry: self.registry.clone(),
+            emission: self.emission.clone(),
         })
     }
 
     /// Reconstitue un état à partir de [`Self::globals_bytes`] et des comptes.
     pub fn from_parts(globals: &[u8], accounts: Accounts) -> Option<Self> {
         let g: Globals = vinx_core::decode(globals)
+            .or_else(|_| vinx_core::decode::<GlobalsV2>(globals).map(Globals::from))
             .or_else(|_| vinx_core::decode::<LegacyGlobals>(globals).map(Globals::from))
             .ok()?;
         let mut accounts = accounts;
@@ -259,16 +299,19 @@ impl State {
             params: g.params,
             upgrade: g.upgrade,
             registry: g.registry,
+            emission: g.emission,
         })
     }
 
-    /// `Σ soldes + Σ escrow + Σ séquestres = 10¹⁸ unités`.
+    /// `Σ soldes + Σ escrow + Σ séquestres + cagnotte + émission restante = 10¹⁸ unités`.
     pub fn check_invariant(&self) -> Result<(), BlockError> {
         let total = self
             .accounts
             .total_balance()
             .checked_add(self.escrow.total())
-            .and_then(|t| t.checked_add(self.registry.locked()));
+            .and_then(|t| t.checked_add(self.registry.locked()))
+            .and_then(|t| t.checked_add(u128::from(self.emission.pot)))
+            .and_then(|t| t.checked_add(u128::from(self.emission.remaining())));
         if total == Some(u128::from(TOTAL_SUPPLY)) {
             Ok(())
         } else {
@@ -289,6 +332,9 @@ impl State {
         ));
         if self.protocol_version >= 2 {
             globals.extend_from_slice(&encode(&self.registry));
+        }
+        if self.protocol_version >= 3 {
+            globals.extend_from_slice(&encode(&self.emission));
         }
         hash_tagged_parts(
             Domain::State,
@@ -381,7 +427,11 @@ impl State {
         let mut changes = Changes::default();
         let mut registry = None;
         changes.debit(&self.accounts, tx.sender, tx.fee)?;
-        changes.credit(&self.accounts, Address::treasury(), tx.fee)?;
+        // Protocole 3 : les frais vont aux validateurs, via la cagnotte d'époque.
+        let fee_to_pot = self.protocol_version >= 3;
+        if !fee_to_pot {
+            changes.credit(&self.accounts, Address::treasury(), tx.fee)?;
+        }
         let account = changes.get(&self.accounts, tx.sender);
         account.nonce = tx.nonce;
         account.key = Some(key);
@@ -478,7 +528,16 @@ impl State {
         if remaining != 0 && remaining < self.params.min_reserve {
             return Err(TxError::BelowReserve);
         }
+        let pot = if fee_to_pot {
+            self.emission
+                .pot
+                .checked_add(tx.fee)
+                .ok_or(TxError::Overflow)?
+        } else {
+            self.emission.pot
+        };
         changes.commit(&mut self.accounts);
+        self.emission.pot = pot;
         match registry {
             Some(Write::Name(name, record)) => {
                 Arc::make_mut(&mut self.registry.names).insert(name, record);
@@ -631,6 +690,32 @@ impl State {
         }
     }
 
+    /// Protocole 3 : compte le bloc pour son proposeur et, en fin d'époque,
+    /// verse l'émission due et la cagnotte aux validateurs.
+    fn end_block(&mut self, height: u64, proposer: u16, now: u64) -> Result<(), BlockError> {
+        if self.protocol_version < 3 {
+            return Ok(());
+        }
+        let key = self
+            .validators_at(height)
+            .get(usize::from(proposer))
+            .cloned()
+            .ok_or(BlockError::UnknownProposer)?;
+        self.emission.record(&key);
+        let epoch = self.emission.epoch_blocks.max(1);
+        if height.checked_rem(epoch) != Some(0) {
+            return Ok(());
+        }
+        let mut changes = Changes::default();
+        for (key, share) in self.emission.close_epoch(now) {
+            changes
+                .credit(&self.accounts, Address::from_public_key(&key), share)
+                .map_err(|_| BlockError::InvariantViolated)?;
+        }
+        changes.commit(&mut self.accounts);
+        Ok(())
+    }
+
     /// Exécute un bloc sur une copie de l'état et renvoie le nouvel état.
     ///
     /// Sert au proposeur pour calculer `state_root` et `validators_hash`, et à
@@ -639,6 +724,21 @@ impl State {
         &self,
         height: u64,
         timestamp_ms: u64,
+        admin_txs: &[SignedAdminTransaction],
+        txs: &[SignedTransaction],
+    ) -> Result<State, BlockError> {
+        self.execute_by(height, timestamp_ms, None, admin_txs, txs)
+    }
+
+    /// Comme [`Self::execute`], pour un bloc dont `proposer` est l'indice du
+    /// proposeur dans l'ensemble de la hauteur : c'est ce qui compte le bloc
+    /// pour l'émission (protocole 3) et clôt l'époque. Sans proposeur (essais
+    /// du mempool, sélection des transactions), rien de tout cela n'a lieu.
+    pub fn execute_by(
+        &self,
+        height: u64,
+        timestamp_ms: u64,
+        proposer: Option<u16>,
         admin_txs: &[SignedAdminTransaction],
         txs: &[SignedTransaction],
     ) -> Result<State, BlockError> {
@@ -671,6 +771,9 @@ impl State {
                 .map_err(|error| BlockError::InvalidTx { index, error })?;
         }
         next.height = height;
+        if let Some(index) = proposer {
+            next.end_block(height, index, ctx.now)?;
+        }
         next.check_invariant()?;
         Ok(next)
     }
@@ -690,7 +793,13 @@ impl State {
         if block.compute_tx_root() != h.tx_root {
             return Err(BlockError::TxRootMismatch);
         }
-        let next = self.execute(h.height, h.timestamp, &block.admin_txs, &block.txs)?;
+        let next = self.execute_by(
+            h.height,
+            h.timestamp,
+            Some(h.proposer),
+            &block.admin_txs,
+            &block.txs,
+        )?;
         if h.protocol_version != next.protocol_version {
             return Err(BlockError::WrongVersion);
         }

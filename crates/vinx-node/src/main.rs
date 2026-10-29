@@ -44,6 +44,13 @@ enum Command {
         /// de test (`chain_id` contenant « testnet » ou « devnet »).
         #[arg(long)]
         escrow_period: Option<u64>,
+        /// VINX versés à la trésorerie pour financer les testeurs, pris sur la
+        /// dernière tranche d'escrow.
+        #[arg(long, default_value = "1000000")]
+        faucet: String,
+        /// Durée d'une époque d'émission, en blocs (17 280 ≈ 24 h).
+        #[arg(long)]
+        epoch_blocks: Option<u64>,
     },
     /// Écrit la genèse d'un réseau à partir des clés publiques de ses participants.
     ///
@@ -65,6 +72,13 @@ enum Command {
         /// de test (`chain_id` contenant « testnet » ou « devnet »).
         #[arg(long)]
         escrow_period: Option<u64>,
+        /// Réseau de test : VINX versés à la trésorerie pour financer les
+        /// testeurs (le robinet), pris sur la dernière tranche d'escrow.
+        #[arg(long)]
+        faucet: Option<String>,
+        /// Durée d'une époque d'émission, en blocs (17 280 ≈ 24 h).
+        #[arg(long)]
+        epoch_blocks: Option<u64>,
         #[arg(long)]
         out: PathBuf,
     },
@@ -131,6 +145,52 @@ fn load_names(path: &Path) -> Result<std::collections::BTreeMap<vinx_crypto::Pub
         .collect()
 }
 
+/// Options de genèse réservées aux réseaux de test, et durée d'époque.
+fn with_test_options(
+    genesis: Genesis,
+    escrow_period: Option<u64>,
+    faucet: Option<&str>,
+    epoch_blocks: Option<u64>,
+) -> Result<Genesis> {
+    let mut genesis = with_escrow_period(genesis, escrow_period)?;
+    if let Some(faucet) = faucet {
+        let amount = vinx_wallet_amount(faucet)?;
+        if amount > 0 {
+            if !is_test_chain(&genesis.chain_id) {
+                bail!(
+                    "--faucet est réservé aux réseaux de test : l'identifiant de chaîne \
+                     doit contenir « testnet » ou « devnet »"
+                );
+            }
+            genesis = genesis
+                .with_faucet(amount)
+                .map_err(|e| anyhow::anyhow!("robinet : {e}"))?;
+        }
+    }
+    if let Some(n) = epoch_blocks {
+        if n == 0 {
+            bail!("--epoch-blocks doit valoir au moins 1");
+        }
+        genesis.epoch_blocks = n;
+    }
+    Ok(genesis)
+}
+
+fn is_test_chain(chain_id: &str) -> bool {
+    ["testnet", "devnet"].iter().any(|t| chain_id.contains(t))
+}
+
+/// Montant en VINX entiers (« 1000000 ») en unités.
+fn vinx_wallet_amount(s: &str) -> Result<vinx_core::Amount> {
+    let whole: vinx_core::Amount = s
+        .trim()
+        .parse()
+        .map_err(|_| anyhow::anyhow!("montant en VINX entiers attendu : « {s} »"))?;
+    whole
+        .checked_mul(vinx_core::UNITS_PER_VINX)
+        .ok_or_else(|| anyhow::anyhow!("montant trop grand : {s}"))
+}
+
 /// Remplace la période de l'escrow, sur un réseau de test seulement.
 fn with_escrow_period(mut genesis: Genesis, period: Option<u64>) -> Result<Genesis> {
     let Some(period) = period else {
@@ -185,6 +245,8 @@ async fn main() -> Result<()> {
             chain_id,
             validators: count,
             escrow_period,
+            faucet,
+            epoch_blocks,
         } => {
             let pw = pw()?;
             if *count == 0 {
@@ -214,7 +276,7 @@ async fn main() -> Result<()> {
                 validators.iter().map(KeyPair::public_key).collect(),
             )
             .context("horodatage de genèse invalide")?;
-            let genesis = with_escrow_period(genesis, *escrow_period)?;
+            let genesis = with_test_options(genesis, *escrow_period, Some(faucet), *epoch_blocks)?;
             GenesisFile::save(&genesis, &dir.join("genesis.json"))?;
             for (i, a) in admins.iter().enumerate() {
                 describe(&format!("admin-{}", i.saturating_add(1)), a);
@@ -222,7 +284,11 @@ async fn main() -> Result<()> {
             for (i, v) in validators.iter().enumerate() {
                 describe(&format!("validator-{}", i.saturating_add(1)), v);
             }
-            println!("trésorerie   adresse {}", Address::treasury());
+            println!(
+                "trésorerie   adresse {}  (robinet : {} VINX)",
+                Address::treasury(),
+                genesis.treasury_balance / vinx_core::UNITS_PER_VINX
+            );
             println!(
                 "\nDémarrer : vinx-node run --genesis {0}/genesis.json --key {0}/validator-1.json --data-dir {0}/data-1",
                 dir.display()
@@ -234,6 +300,8 @@ async fn main() -> Result<()> {
             validators,
             time,
             escrow_period,
+            faucet,
+            epoch_blocks,
             out,
         } => {
             let admins = admins
@@ -250,7 +318,8 @@ async fn main() -> Result<()> {
             let time = time.unwrap_or_else(|| node::now_ms() / 1000);
             let genesis = Genesis::standard(chain_id.clone(), time, admins, validators)
                 .context("horodatage de genèse invalide")?;
-            let genesis = with_escrow_period(genesis, *escrow_period)?;
+            let genesis =
+                with_test_options(genesis, *escrow_period, faucet.as_deref(), *epoch_blocks)?;
             // Vérifie toutes les règles (doublons, supply) avant d'écrire.
             genesis
                 .clone()

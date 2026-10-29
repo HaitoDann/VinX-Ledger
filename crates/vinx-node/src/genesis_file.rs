@@ -22,6 +22,18 @@ pub struct GenesisFile {
     pub treasury_balance: String,
     pub escrow: EscrowFile,
     pub params: ParamsFile,
+    /// Émission des validateurs (protocole 3). Absente des genèses plus anciennes.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub emission: Option<EmissionFile>,
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct EmissionFile {
+    /// Budget total, en unités.
+    pub budget: String,
+    /// Durée d'une époque, en blocs.
+    pub epoch_blocks: u64,
 }
 
 #[derive(Debug, Serialize, Deserialize)]
@@ -76,6 +88,10 @@ impl GenesisFile {
                     })
                     .collect(),
             },
+            emission: (g.emission_budget > 0).then(|| EmissionFile {
+                budget: amount_to_string(g.emission_budget),
+                epoch_blocks: g.epoch_blocks,
+            }),
             params: ParamsFile {
                 min_fee: amount_to_string(p.min_fee),
                 min_reserve: amount_to_string(p.min_reserve),
@@ -112,7 +128,13 @@ impl GenesisFile {
             })
             .collect::<Result<VecDeque<_>>>()?;
         let p = &self.params;
+        let (emission_budget, epoch_blocks) = match &self.emission {
+            Some(e) => (amount_from_str(&e.budget)?, e.epoch_blocks),
+            None => (0, vinx_state::emission::DEFAULT_EPOCH_BLOCKS),
+        };
         Ok(Genesis {
+            emission_budget,
+            epoch_blocks,
             chain_id: self.chain_id.clone(),
             genesis_time: self.genesis_time,
             protocol_version: self.protocol_version,

@@ -159,7 +159,7 @@ mod tests {
 
     fn vinx_state_genesis() -> State {
         let k = || KeyPair::generate().public_key();
-        crate::Genesis::standard("vinx-test", 1, [k(), k(), k()], vec![k()])
+        crate::Genesis::legacy("vinx-test", 1, [k(), k(), k()], vec![k()])
             .unwrap()
             .into_state()
             .unwrap()

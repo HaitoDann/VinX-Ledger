@@ -24,6 +24,12 @@
 #   sudo ./install-validator.sh rollback
 #       Revient au binaire d'avant la dernière mise à jour.
 #
+#   sudo ./install-validator.sh reset-chain nouvelle-genesis.json
+#       Réseau de test seulement : passe le nœud sur une nouvelle genèse.
+#       Sauvegarde puis efface les données de l'ancienne chaîne, en gardant
+#       l'identité réseau (les adresses --peer et --allow ne changent pas),
+#       la clé du validateur et les options.
+#
 # Le binaire vinx-node doit être dans /usr/local/bin ou à côté de ce script.
 set -euo pipefail
 
@@ -233,10 +239,43 @@ rollback() {
         die "le nœud ne finalise toujours pas ; voir journalctl -u vinx-node -n 50"
 }
 
+reset_chain() {
+    local genesis="${1:-}"
+    [ -n "$genesis" ] && [ -f "$genesis" ] || die "usage : reset-chain nouvelle-genesis.json"
+    [ -f "$ETC/vinx-node.env" ] || die "aucun nœud installé ici : utilise prepare puis start"
+    grep -Eq '"chain_id": *"[^"]*(testnet|devnet)' "$genesis" ||
+        die "reset-chain est réservé aux réseaux de test (chain_id contenant testnet ou devnet)"
+    if cmp -s "$genesis" "$ETC/genesis.json"; then
+        echo "cette genèse est déjà installée"
+        return 0
+    fi
+    install_binary
+    local stamp
+    stamp="$(date +%Y%m%d-%H%M%S)"
+    install -d -m 700 "$BACKUP"
+    systemctl stop vinx-node
+    echo "sauvegarde de l'ancienne chaîne dans $BACKUP/chaine-$stamp.tar.gz…"
+    tar czf "$BACKUP/chaine-$stamp.tar.gz" -C "$(dirname "$DATA")" "$(basename "$DATA")" \
+        -C "$ETC" genesis.json
+    find "$DATA" -mindepth 1 -maxdepth 1 ! -name network.key -exec rm -rf -- {} +
+    install -m 644 "$genesis" "$ETC/genesis.json"
+    systemctl start vinx-node
+    local status=""
+    for _ in $(seq 1 30); do
+        status="$(curl -fsS "$API/status" 2>/dev/null)" && break
+        sleep 1
+    done
+    [ -n "$status" ] || die "le nœud ne répond pas ; voir : journalctl -u vinx-node -n 50"
+    echo "$status"
+    echo
+    echo "Nœud passé sur la nouvelle genèse. Ancienne chaîne : $BACKUP/chaine-$stamp.tar.gz"
+}
+
 case "${1:-}" in
     prepare) shift; prepare "$@" ;;
     start) shift; start "$@" ;;
     upgrade) shift; upgrade "$@" ;;
     rollback) rollback ;;
-    *) die "usage : $0 prepare [--observer] | start genesis.json [--archive] [--peer ADRESSE]... [--allow ID]... | upgrade [binaire] | rollback" ;;
+    reset-chain) shift; reset_chain "$@" ;;
+    *) die "usage : $0 prepare [--observer] | start genesis.json [--archive] [--peer ADRESSE]... [--allow ID]... | upgrade [binaire] | rollback | reset-chain genesis.json" ;;
 esac
