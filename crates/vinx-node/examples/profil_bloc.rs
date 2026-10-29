@@ -16,7 +16,7 @@ fn main() {
         .and_then(|a| a.parse().ok())
         .unwrap_or(5000);
     let k = || KeyPair::generate().public_key();
-    let mut state = vinx_state::Genesis::standard("vinx-profil", 1, [k(), k(), k()], vec![k()])
+    let mut state = vinx_state::Genesis::legacy("vinx-profil", 1, [k(), k(), k()], vec![k()])
         .unwrap()
         .into_state()
         .unwrap();

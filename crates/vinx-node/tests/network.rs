@@ -154,10 +154,15 @@ async fn four_validators_tolerate_a_crash_and_resync() {
         ],
         validators.iter().map(KeyPair::public_key).collect(),
     )
+    .unwrap()
+    .with_faucet(1_000 * UNITS_PER_VINX)
     .unwrap();
     genesis.params.min_block_interval_ms = 200;
     genesis.params.timeout_propose_ms = 1_500;
     genesis.params.timeout_vote_ms = 800;
+    // Époques courtes : les récompenses sont versées pendant le test, et les
+    // quatre nœuds doivent s'accorder dessus (même hash de bloc).
+    genesis.epoch_blocks = 2;
 
     let specs: Vec<Spec> = (0..4).map(|i| spec(root.path(), i)).collect();
     let others = |i: usize| -> Vec<&Spec> {
@@ -190,6 +195,21 @@ async fn four_validators_tolerate_a_crash_and_resync() {
     let reference = nodes[0].as_ref().unwrap().block_hash(3);
     for n in nodes.iter().flatten() {
         assert_eq!(n.block_hash(3), reference);
+    }
+    // Récompenses de l'époque close à la hauteur 2 : des validateurs payés.
+    {
+        let n1 = nodes[0].as_ref().unwrap();
+        let s = node::lock(&n1.shared);
+        let paid: u64 = validators
+            .iter()
+            .map(|v| {
+                s.chain
+                    .state
+                    .balance(&Address::from_public_key(&v.public_key()))
+            })
+            .sum();
+        assert!(paid > 0, "aucune récompense versée");
+        assert!(s.chain.state.emission.emitted > 0);
     }
 
     // 2. Panne du nœud 4 : les trois autres continuent.

@@ -34,10 +34,13 @@ référence pour toute nouvelle proposition.
 3. **Fonctions génériques seulement** : aucune règle propre à un usage
    particulier (un subnet, un commerçant, une application) n'entre dans le
    protocole.
-4. **Pas de contrats intelligents.** Si un jour il faut plus de souplesse, ce
+4. **Les VINX entrent en circulation par l'escrow (gouvernance) et par
+   l'émission des validateurs (automatique, ADR 0002)**, jamais par création
+   au-delà du milliard.
+5. **Pas de contrats intelligents.** Si un jour il faut plus de souplesse, ce
    sera un langage de conditions limité (signatures, dates, secrets), jamais
    des programmes.
-5. **Occuper l'état a un coût** : tout objet durable (compte, ligne de jeton,
+6. **Occuper l'état a un coût** : tout objet durable (compte, ligne de jeton,
    titre, séquestre) immobilise une réserve, rendue à sa suppression.
 
 ## 3. Les briques
@@ -49,7 +52,8 @@ référence pour toute nouvelle proposition.
 | Protocole 1 | Gouvernance | Multisig 2 sur 3, paramètres, validateurs, mises à jour programmées | Actif |
 | Protocole 2 | Noms `.vinx` | Un nom à la place d'une adresse, un an renouvelable | Activé au bloc 70 000 du testnet |
 | Protocole 2 | Séquestre | Fonds bloqués, versés ou remboursés, arbitre, échéance | Activé au bloc 70 000 du testnet |
-| **Protocole 3** | Comptes multisig | « 2 signatures sur 3 » pour dépenser, pour tous | Prévu |
+| **Protocole 3** | Émission des validateurs | 100 M sur une courbe à demi-vie de 10 ans, répartis par époque selon les blocs proposés ; frais aux validateurs (ADR 0002) | Testnet remis à zéro en 0.10 |
+| **Protocole 4** | Comptes multisig | « 2 signatures sur 3 » pour dépenser, pour tous | Prévu |
 | | Paiements groupés | Jusqu'à 100 destinataires en une transaction | Prévu |
 | | Mandats de prélèvement | Un tiers prélève jusqu'à X par période, révocable | Prévu |
 | | Frais payés par un tiers | Le commerçant paie les frais du client | Prévu |
@@ -57,10 +61,10 @@ référence pour toute nouvelle proposition.
 | | Récupération sociale | Des proches remplacent une clé perdue, avec délai d'opposition | Prévu |
 | | Horodatage natif | Une transaction dédiée à l'empreinte d'un document | Prévu |
 | | Arbres pour tout l'état | Noms et séquestres rangés comme les comptes (voir §6) | Prévu |
-| **Protocole 4** | Jetons de tiers | Monnaies, points, crédits : accord préalable, gel déclaré, émetteur visible, création payante | Prévu |
+| **Protocole 5** | Jetons de tiers | Monnaies, points, crédits : accord préalable, gel déclaré, émetteur visible, création payante | Prévu |
 | | Titres (non fongibles) | Collections d'objets uniques : billets, certificats, cartes de membre | Prévu |
 | | Réserve par objet | Chaque ligne de jeton ou titre immobilise un dépôt | Prévu |
-| **Protocole 5** | Canaux de paiement | Un dépôt, des reçus signés hors chaîne, un règlement : micropaiements | Prévu |
+| **Protocole 6** | Canaux de paiement | Un dépôt, des reçus signés hors chaîne, un règlement : micropaiements | Prévu |
 | Plus tard | Paiements conditionnels | Secret et délai : échanges sûrs avec d'autres chaînes | Si besoin |
 | Plus tard | Clés post-quantiques | ML-DSA, via la rotation de clé | Avant que ça presse |
 
@@ -117,7 +121,7 @@ référence pour toute nouvelle proposition.
 |---|---|---|
 | Historique des blocs | Élagué après 24 h ; ~17 Go par jour au maximum théorique (1 000 tx/s en continu) | Un seul nœud archive facultatif |
 | Comptes | ~150 à 200 Mo pour 1 million | Réserve minimale de 0,1 VINX |
-| Noms et séquestres | Recalculés en entier à chaque bloc aujourd'hui | **À ranger dans des arbres avant le protocole 4** |
+| Noms et séquestres | Recalculés en entier à chaque bloc aujourd'hui | **À ranger dans des arbres avant le protocole 5** |
 | Jetons et titres | Une ligne par détenteur, un enregistrement par titre | Réserve par objet, accord préalable, nettoyage des noms expirés |
 
 ## 7. Ordre des versions
@@ -126,10 +130,11 @@ référence pour toute nouvelle proposition.
 |---|---|---|
 | 0.8.x | Logiciel et protocole 2 | Portefeuille, noms, séquestres, nœud public (fait) |
 | **0.9** | Logiciel | Demandes de paiement (lien `vinx:` et QR), export CSV, horodatage de documents |
-| 0.10 | Logiciel | Portefeuille Android (`.apk`), scan de QR |
-| Protocole 3 | Règles | Comptes et paiements, horodatage natif, arbres pour tout l'état |
-| Protocole 4 | Règles | Jetons et titres, réserve par objet |
-| Protocole 5 | Règles | Canaux de paiement |
+| **0.10** | Protocole 3, nouvelle genèse | Émission des validateurs, frais aux validateurs, trésorerie de genèse supprimée (ADR 0002) |
+| 0.11 | Logiciel | Portefeuille Android (`.apk`), scan de QR |
+| Protocole 4 | Règles | Comptes et paiements, horodatage natif, arbres pour tout l'état |
+| Protocole 5 | Règles | Jetons et titres, réserve par objet |
+| Protocole 6 | Règles | Canaux de paiement |
 | En parallèle | Hors chaîne | Pilote VinX Ping (premier subnet), conception des subnets |
 
 Une règle de protocole ne se retire pas : chaque version de protocole n'est

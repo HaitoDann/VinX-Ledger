@@ -22,7 +22,7 @@ const TXS: u64 = 1_000;
 #[ignore]
 fn one_million_accounts() {
     let k = || KeyPair::generate().public_key();
-    let mut state = Genesis::standard("vinx-scale", 1_800_000_000, [k(), k(), k()], vec![k()])
+    let mut state = Genesis::legacy("vinx-scale", 1_800_000_000, [k(), k(), k()], vec![k()])
         .unwrap()
         .into_state()
         .unwrap();

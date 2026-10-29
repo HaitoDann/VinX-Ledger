@@ -32,6 +32,8 @@ fn start_node(admins: &[KeyPair; 3], dir: &std::path::Path) -> String {
         ],
         vec![validator.public_key()],
     )
+    .unwrap()
+    .with_faucet(1_000 * VINX)
     .unwrap();
     genesis.params.min_block_interval_ms = 50;
     let shared = node::open(genesis, dir).unwrap();

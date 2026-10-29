@@ -140,7 +140,7 @@ mod tests {
     fn sample() -> (KeyPair, SnapshotInfo, Vec<(Address, Account)>) {
         let validator = KeyPair::generate();
         let k = || KeyPair::generate().public_key();
-        let mut state = Genesis::standard(
+        let mut state = Genesis::legacy(
             "vinx-snap",
             1,
             [k(), k(), k()],

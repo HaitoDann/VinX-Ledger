@@ -262,6 +262,24 @@ async fn governance(State(shared): State<SharedRef>) -> ApiResult {
             "address": vinx_crypto::Address::treasury().to_string(),
             "balance": amount_to_string(st.balance(&vinx_crypto::Address::treasury())),
         },
+        "emission": {
+            "budget": amount_to_string(st.emission.budget),
+            "emitted": amount_to_string(st.emission.emitted),
+            "remaining": amount_to_string(st.emission.remaining()),
+            "pot": amount_to_string(st.emission.pot),
+            "daily_rate": amount_to_string(st.emission.daily_rate(st.registry.now)),
+            "epoch_blocks": st.emission.epoch_blocks,
+            "next_epoch_height": st.height
+                .checked_div(st.emission.epoch_blocks.max(1))
+                .and_then(|e| e.checked_add(1))
+                .and_then(|e| e.checked_mul(st.emission.epoch_blocks.max(1))),
+            "proposed": st.emission.proposed.iter().map(|(k, n)| json!({
+                "key": key_to_hex(k),
+                "address": Address::from_public_key(k).to_string(),
+                "blocks": n,
+            })).collect::<Vec<_>>(),
+            "fees_to_validators": st.protocol_version >= 3,
+        },
         "escrow": {
             "total": st.escrow.total().to_string(),
             "tranches": st.escrow.tranches.len(),

@@ -50,6 +50,8 @@ fn devnet() -> Devnet {
         ],
         vec![validator.public_key()],
     )
+    .unwrap()
+    .with_faucet(1_000 * VINX)
     .unwrap();
     // Blocs rapprochés pour un test rapide.
     genesis.params.min_block_interval_ms = 50;

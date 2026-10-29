@@ -122,7 +122,7 @@ impl Chain {
         // `execute` ne peut pas échouer ici : chaque transaction a été appliquée avec succès.
         let next = self
             .state
-            .execute(height, timestamp_ms, &admin, &txs)
+            .execute_by(height, timestamp_ms, Some(proposer), &admin, &txs)
             .unwrap_or_else(|_| self.state.clone());
         Block {
             header: BlockHeader {

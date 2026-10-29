@@ -207,7 +207,7 @@ proptest! {
     ) {
         let bytes = mutate(samples()[which].clone(), &mutations);
         let k = || KeyPair::generate().public_key();
-        let mut state = Genesis::standard("vinx-fuzz", 1_800_000_000, [k(), k(), k()], vec![k()])
+        let mut state = Genesis::legacy("vinx-fuzz", 1_800_000_000, [k(), k(), k()], vec![k()])
             .unwrap()
             .into_state()
             .unwrap();
