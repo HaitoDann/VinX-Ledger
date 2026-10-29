@@ -1,0 +1,8 @@
+{
+  "appId": "fr.vinxlabs.wallet",
+  "appName": "VinX",
+  "webDir": "../www",
+  "android": {
+    "allowMixedContent": false
+  }
+}

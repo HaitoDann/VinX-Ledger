@@ -17,10 +17,25 @@ séquestres, mandats, multisig) restent dans le portefeuille de l'ordinateur.
 - Le portefeuille se verrouille après 5 minutes en arrière-plan.
 - Le nœud ne reçoit que des transactions déjà signées.
 
-## Installer
+## Installer sur Android
 
-L'application Android (`.apk`) sera publiée dans les releases. En attendant,
-pour l'essayer sur un ordinateur :
+1. Sur le téléphone, ouvre la page des releases du projet sur GitHub et
+   télécharge `vinx-X.Y.Z-android.apk`.
+2. Ouvre le fichier. Android demande d'autoriser l'installation depuis le
+   navigateur (« sources inconnues ») : accepte pour cette installation.
+3. Ouvre **VinX**, puis crée un portefeuille ou restaure tes 12 mots.
+4. La première fois que tu touches **Scanner**, autorise l'accès à la caméra.
+
+Le nœud utilisé par défaut est `https://vinx-ledger.vinxlabs.fr` (Réglages
+pour en changer).
+
+**Mettre à jour.** Pour l'instant, l'APK est signée avec une clé de test qui
+change à chaque version : Android refuse alors la mise à jour par-dessus
+l'ancienne. Désinstalle l'ancienne version, installe la nouvelle, puis
+restaure ton portefeuille avec tes 12 mots. **Vérifie que tu les as notés
+avant de désinstaller.**
+
+## Essayer sur un ordinateur
 
 ```bash
 crates/vinx-mobile/build.sh
@@ -36,5 +51,8 @@ La caméra ne fonctionne que sur `localhost` ou en HTTPS.
   QR codes (affichage et lecture), en WebAssembly. La dérivation est partagée
   avec le portefeuille de bureau.
 - `crates/vinx-mobile/www/` : l'interface (HTML et JavaScript, sans dépendance).
+- `crates/vinx-mobile/capacitor/` : l'emballage Android (Capacitor).
+  `prepare.sh VERSION` génère le projet, puis `cd android && ./gradlew
+  assembleDebug`. La CI le fait dans `.github/workflows/android.yml`.
 - Le nœud autorise les appels d'autres origines (CORS) : l'API est publique et
   sans cookie.
