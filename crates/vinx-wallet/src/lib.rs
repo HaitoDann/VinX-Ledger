@@ -6,6 +6,7 @@ pub mod app;
 pub mod bench;
 pub mod client;
 pub mod cockpit;
+pub mod multisig;
 pub mod ops;
 pub mod params;
 pub mod preflight;

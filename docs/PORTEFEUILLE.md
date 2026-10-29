@@ -157,7 +157,45 @@ Le bouton **Exporter en CSV** de l'onglet Historique crée un fichier lisible
 par Excel ou LibreOffice : date, type, contrepartie, montant, frais, mémo,
 bloc et transaction.
 
-## 9. Plusieurs comptes
+## 9. Comptes à plusieurs signatures et plafonds
+
+Depuis le protocole 4, un compte peut avoir des **règles**. Elles se règlent
+pour l'instant en ligne de commande ; le portefeuille les affiche dans
+Réglages et refuse à l'avance ce que le réseau refuserait.
+
+- **Compte d'association (multisig)** : toute dépense exige, par exemple,
+  2 signatures sur 3 membres.
+
+  ```bash
+  vinx-wallet account set-policy --key asso.json \
+    --signer CLE-MEMBRE-1 --signer CLE-MEMBRE-2 --signer CLE-MEMBRE-3 --threshold 2
+  ```
+
+- **Plafond avec clé coffre** : la clé du compte peut dépenser 50 VINX par
+  jour ; au-delà, ou pour changer les règles, il faut la clé coffre, gardée
+  ailleurs.
+
+  ```bash
+  vinx-wallet account set-policy --key compte.json \
+    --signer CLE-COFFRE --threshold 1 --daily-limit 50
+  ```
+
+Une opération approuvée suit le même circuit que la gouvernance :
+
+```bash
+vinx-wallet account propose --from ADRESSE-DU-COMPTE --out p.json send --to DESTINATAIRE --amount 25
+vinx-wallet account approve --file p.json --key membre-1.json   # chaque signataire
+vinx-wallet account submit  --file p.json --key asso.json       # la clé du compte envoie
+```
+
+`account propose … set-policy` change ou retire des règles existantes : sans
+aucune option, il les retire. `account policy ADRESSE` affiche les règles d'un
+compte. La clé d'un membre s'obtient avec `vinx-wallet address --key membre.json`.
+
+Une proposition utilise le prochain nonce du compte : si le compte fait une
+autre opération entre-temps, il faut la refaire.
+
+## 10. Plusieurs comptes
 
 **Réglages → Nouveau compte** crée un autre compte, par exemple « Épargne ».
 
@@ -165,7 +203,7 @@ Tous les comptes viennent de la même phrase de 12 mots : une restauration les
 retrouve tous. Pour cela, recrée les comptes dans le même ordre ; ils
 reprennent les mêmes adresses.
 
-## 10. Si quelque chose ne va pas
+## 11. Si quelque chose ne va pas
 
 | Message | Que faire |
 |---|---|

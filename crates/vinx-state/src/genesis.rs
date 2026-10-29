@@ -157,6 +157,7 @@ impl Genesis {
             params: self.params,
             upgrade: None,
             registry: crate::Registry::default(),
+            policies: Default::default(),
             emission: Emission {
                 start: self.genesis_time,
                 budget: self.emission_budget,

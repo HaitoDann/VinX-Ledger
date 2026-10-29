@@ -96,8 +96,8 @@ Registry {
 
 `state_root = H("vinx/state" ‖ racine_SMT(accounts) ‖ H(G))`, avec
 `G = borsh(escrow, admin, validators, params, upgrade, protocol_version)`,
-suivi de `borsh(registry)` à partir du protocole 2, puis de `borsh(emission)` à
-partir du protocole 3.
+suivi de `borsh(registry)` à partir du protocole 2, de `borsh(emission)` à
+partir du protocole 3, puis de `borsh(policies)` à partir du protocole 4.
 
 **Arbre des comptes (SMT).** Arbre binaire compact indexé par les 160 bits de
 l'adresse, du bit de poids fort au bit de poids faible :
@@ -219,6 +219,8 @@ SignedTransaction {
 |---|---|---|---|
 | `0x09` | `BatchTransfer` | `payments: Vec<Payment { to, amount, memo }>` | Plusieurs paiements (§5.6) |
 | `0x0A` | `Attest` | `digest: Hash` | Horodate une empreinte (§5.7) |
+| `0x0B` | `SetPolicy` | `policy: PolicyConfig { signers, threshold, daily_limit }` | Règles du compte (§5.8) |
+| `0x0C` | `Approved` | `body: TxBody`, `approvals: Vec<(signer_index: u8, Signature)>` | `body` approuvé par des signataires du compte (§5.8) |
 
 `RotateKey` est aussi la voie de migration post-quantique : quand `0x02` sera
 actif, chaque compte pourra passer à une clé ML-DSA sans changer d'adresse.
@@ -308,6 +310,33 @@ Deal { buyer, seller: Address, arbiter: Option<Address>, amount, deadline: u64, 
 - Les nœuds indexent les empreintes des blocs conservés
   (`GET /attestations/{empreinte}`). Pour vérifier un horodatage plus ancien que
   l'élagage, il faut un nœud archive.
+
+### 5.8 Règles de compte : multisig et plafond (protocole 4)
+
+```
+PolicyConfig { signers: Vec<PublicKey>, threshold: u8, daily_limit: Option<u64> }
+Policy       { config: PolicyConfig, day: u64, spent: u64 }   // état : Map<Address, Policy>
+```
+
+- `SetPolicy` fixe les règles du compte émetteur. Une configuration valide a
+  1 à 10 signataires distincts et `1 ≤ threshold ≤ nombre de signataires`.
+  Une configuration entièrement vide retire les règles.
+- `Approved { body, approvals }` porte `body` avec les approbations de
+  signataires. Chacune signe `"vinx/tx/approval" ‖ borsh(chain_id, sender,
+  nonce, fee, body)`. Les indices sont strictement croissants, et `body` ne
+  peut pas être lui-même un `Approved`. La transaction reste signée par la clé
+  du compte, qui sert à la soumettre.
+- Sans règles : comme avant, et un `Approved` est refusé.
+- Avec règles :
+  - `threshold` approbations valides ou plus autorisent toute transaction ;
+  - moins d'approbations, mais au moins une : refus ;
+  - sans approbation et sans plafond : refus (multisig pur) ;
+  - sans approbation, avec un plafond : `SetPolicy` et `RotateKey` sont
+    refusés ; les autres transactions sont permises tant que le total dépensé
+    sans approbation dans la journée (`now / 86 400`, UTC) ne dépasse pas
+    `daily_limit`.
+- Le montant dépensé compte les paiements, la somme d'un paiement groupé, le
+  montant d'un séquestre ouvert et le prix d'un nom, mais pas les frais.
 
 ## 6. Blocs
 
@@ -499,7 +528,7 @@ hauteur `H + 2`. `validators_hash` du bloc `H + 1` reflète déjà le nouvel ens
 | 1 | Paiements, mémo obligatoire, rotation de clé, gouvernance |
 | 2 | Noms `.vinx` (§5.4), séquestres (§5.5), paramètre `name_fee` |
 | 3 | Émission des validateurs et frais aux validateurs (§4.4, ADR 0002) |
-| 4 | Paiements groupés (§5.6), horodatage natif (§5.7) ; suite en cours (feuille de route) |
+| 4 | Paiements groupés (§5.6), horodatage natif (§5.7), règles de compte (§5.8) ; suite en cours (feuille de route) |
 
 ## 10. Étiquettes de domaine
 
@@ -516,6 +545,7 @@ hauteur `H + 2`. `validators_hash` du bloc `H + 1` reflète déjà le nouvel ens
 | Proposition de bloc | `vinx/proposal` |
 | Ensemble de validateurs | `vinx/validators` |
 | Identifiant de séquestre | `vinx/deal` |
+| Approbation d'une transaction de compte | `vinx/tx/approval` |
 | Arbre des comptes (feuille / nœud) | `vinx/smt/leaf`, `vinx/smt/node` |
 | Merkle (feuille / nœud / liste vide) | `vinx/merkle/leaf`, `vinx/merkle/node`, `vinx/merkle/empty` |
 
