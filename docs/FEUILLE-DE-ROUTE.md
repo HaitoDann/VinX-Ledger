@@ -41,7 +41,10 @@ référence pour toute nouvelle proposition.
    sera un langage de conditions limité (signatures, dates, secrets), jamais
    des programmes.
 6. **Occuper l'état a un coût** : tout objet durable (compte, ligne de jeton,
-   titre, séquestre) immobilise une réserve, rendue à sa suppression.
+   titre, séquestre) doit immobiliser une réserve, rendue à sa suppression.
+   Aujourd'hui, seuls les comptes en ont une ; pour les jetons, l'accord
+   préalable empêche déjà de remplir l'état des autres. La réserve par objet
+   reste à faire.
 
 ## 3. Les briques
 
@@ -139,6 +142,7 @@ référence pour toute nouvelle proposition.
 | **0.16** | Logiciel, lot 5b | API des actifs, commandes `vinx-wallet asset` et `vinx-wallet name`, guide de l'émetteur |
 | **0.17** | Logiciel, lot 5c | Onglet Jetons du portefeuille : accepter, envoyer, créer, émettre, geler, reprendre |
 | **0.18** | Protocole 5, lot 5d | Séquestres et mandats de prélèvement en jetons |
+| **0.18** | Release, nouvelle genèse | Protocole 5 complet (séquestres et mandats en jetons) ; testnet 2 (`vinx-testnet-2`) |
 | Ensuite | Logiciel | Portefeuille Android (`.apk`), scan de QR |
 | Protocole 5 | Règles | Jetons et titres, réserve par objet |
 | Protocole 6 | Règles | Canaux de paiement |
