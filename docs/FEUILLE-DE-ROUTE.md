@@ -56,8 +56,8 @@ référence pour toute nouvelle proposition.
 | **Protocole 4** | Paiements groupés | Jusqu'à 100 destinataires en une transaction, frais par tranche de 10 | Fait (0.11, lot 4a) |
 | | Horodatage natif | Transaction dédiée, retrouvée par sa seule empreinte | Fait (0.11, lot 4a) |
 | | Comptes multisig | « 2 signatures sur 3 » pour dépenser, pour tous | Fait (0.12, lot 4b) |
-| | Mandats de prélèvement | Un tiers prélève jusqu'à X par période, révocable | Prévu |
-| | Frais payés par un tiers | Le commerçant paie les frais du client | Prévu |
+| | Mandats de prélèvement | Un tiers prélève jusqu'à X par période, révocable | Fait (0.13, lot 4c) |
+| | Frais payés par un tiers | Le commerçant paie les frais du client | Fait (0.13, lot 4c) |
 | | Plafonds de dépense | Clé « téléphone » limitée, clé « coffre » sans limite | Fait (0.12, lot 4b) |
 | | Récupération sociale | Des proches remplacent une clé perdue, avec délai d'opposition | Prévu |
 | | Arbres pour tout l'état | Noms et séquestres rangés comme les comptes (voir §6) | Prévu |
@@ -133,7 +133,8 @@ référence pour toute nouvelle proposition.
 | **0.10** | Protocole 3, nouvelle genèse | Émission des validateurs, frais aux validateurs, trésorerie de genèse supprimée (ADR 0002) |
 | **0.11** | Protocole 4, lot 4a | Paiements groupés, horodatage natif |
 | **0.12** | Protocole 4, lot 4b | Comptes multisig, plafonds journaliers et clé coffre |
-| Protocole 4, lots 4c et 4d | Règles | Mandats et frais payés par un tiers, arbres pour tout l'état |
+| **0.13** | Protocole 4, lot 4c | Mandats de prélèvement, frais payés par un parrain |
+| Protocole 4, lot 4d | Règles | Arbres pour tout l'état (noms, séquestres, règles, mandats) |
 | Ensuite | Logiciel | Portefeuille Android (`.apk`), scan de QR |
 | Protocole 5 | Règles | Jetons et titres, réserve par objet |
 | Protocole 6 | Règles | Canaux de paiement |

@@ -75,7 +75,39 @@ pub enum TxBody {
         body: Box<TxBody>,
         approvals: Vec<crate::Approval>,
     } = 0x0C,
+    /// Autorise `payee` à prélever sur le compte émetteur (SPEC §5.9).
+    /// Remplace un mandat existant pour le même bénéficiaire.
+    GrantMandate {
+        payee: Address,
+        /// Montant maximal prélevé par période.
+        max_per_period: Amount,
+        /// Durée d'une période, en secondes (1 jour à 366 jours).
+        period: u64,
+        /// Horodatage Unix (secondes) de fin du mandat, s'il en a une.
+        expires_at: Option<u64>,
+    } = 0x0D,
+    /// Révoque le mandat accordé à `payee`.
+    RevokeMandate {
+        payee: Address,
+    } = 0x0E,
+    /// Prélève sur `payer`, dans les limites de son mandat ; envoyé par le bénéficiaire.
+    Collect {
+        payer: Address,
+        amount: Amount,
+        memo: Option<Vec<u8>>,
+    } = 0x0F,
+    /// `body`, dont les frais sont payés par le compte `sponsor` (SPEC §5.10).
+    Sponsored {
+        body: Box<TxBody>,
+        sponsor: Address,
+        signature: Signature,
+    } = 0x10,
 }
+
+/// Durée minimale d'une période de mandat : un jour.
+pub const MIN_MANDATE_PERIOD: u64 = 86_400;
+/// Durée maximale d'une période de mandat : 366 jours.
+pub const MAX_MANDATE_PERIOD: u64 = 366 * 86_400;
 
 /// Règles d'un compte (SPEC §5.8). Tout à zéro : pas de règle.
 #[derive(Clone, Debug, Default, PartialEq, Eq, BorshSerialize, BorshDeserialize)]
@@ -116,7 +148,11 @@ impl TxBody {
             TxBody::BatchTransfer { .. }
             | TxBody::Attest { .. }
             | TxBody::SetPolicy { .. }
-            | TxBody::Approved { .. } => 4,
+            | TxBody::Approved { .. }
+            | TxBody::GrantMandate { .. }
+            | TxBody::RevokeMandate { .. }
+            | TxBody::Collect { .. }
+            | TxBody::Sponsored { .. } => 4,
             _ => 2,
         }
     }
@@ -129,16 +165,48 @@ impl TxBody {
                 let units = payments.len().div_ceil(PAYMENTS_PER_FEE).max(1);
                 min_fee.saturating_mul(Amount::try_from(units).unwrap_or(Amount::MAX))
             }
-            TxBody::Approved { body, .. } => body.min_fee(min_fee),
+            TxBody::Approved { body, .. } | TxBody::Sponsored { body, .. } => body.min_fee(min_fee),
             _ => min_fee,
         }
     }
 
     /// Corps effectif : celui qu'enveloppe un [`TxBody::Approved`].
+    /// Enveloppes admises : `Sponsored { Approved { corps } }`, `Sponsored {
+    /// corps }`, `Approved { corps }`.
     pub fn inner(&self) -> &TxBody {
         match self {
+            TxBody::Sponsored { body, .. } => body.inner(),
             TxBody::Approved { body, .. } => body,
             other => other,
+        }
+    }
+
+    /// Corps sans l'enveloppe du parrain.
+    pub fn unsponsored(&self) -> &TxBody {
+        match self {
+            TxBody::Sponsored { body, .. } => body,
+            other => other,
+        }
+    }
+
+    /// Approbations des signataires du compte, s'il y en a.
+    pub fn approvals(&self) -> Option<&[crate::Approval]> {
+        match self.unsponsored() {
+            TxBody::Approved { approvals, .. } => Some(approvals),
+            _ => None,
+        }
+    }
+
+    /// Les enveloppes sont-elles dans un ordre permis ?
+    pub fn well_wrapped(&self) -> bool {
+        let wrapped = |b: &TxBody| matches!(b, TxBody::Approved { .. } | TxBody::Sponsored { .. });
+        match self {
+            TxBody::Sponsored { body, .. } => match body.as_ref() {
+                TxBody::Approved { body, .. } => !wrapped(body),
+                other => !wrapped(other),
+            },
+            TxBody::Approved { body, .. } => !wrapped(body),
+            _ => true,
         }
     }
 }
@@ -165,6 +233,22 @@ impl Transaction {
         tagged(
             Domain::TxApproval,
             &encode(&(&self.chain_id, &self.sender, self.nonce, self.fee, inner)),
+        )
+    }
+
+    /// Message signé par le parrain qui paie les frais :
+    /// `"vinx/tx/sponsor" ‖ borsh(chaîne, émetteur, nonce, frais, corps, parrain)`.
+    pub fn sponsor_message(&self, sponsor: &Address) -> Vec<u8> {
+        tagged(
+            Domain::TxSponsor,
+            &encode(&(
+                &self.chain_id,
+                &self.sender,
+                self.nonce,
+                self.fee,
+                self.body.inner(),
+                sponsor,
+            )),
         )
     }
 
@@ -240,7 +324,7 @@ mod tests {
         .map(|b| encode(&b)[0]);
         assert_eq!(codes, [0x01, 0x02, 0x03]);
         assert!(decode::<TxBody>(&[0x00, 1]).is_err());
-        assert!(decode::<TxBody>(&[0x0D, 1]).is_err());
+        assert!(decode::<TxBody>(&[0x11, 1]).is_err());
     }
 
     #[test]

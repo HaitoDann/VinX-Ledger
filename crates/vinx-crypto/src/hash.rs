@@ -26,6 +26,7 @@ pub enum Domain {
     Validators,
     Deal,
     TxApproval,
+    TxSponsor,
 }
 
 impl Domain {
@@ -48,6 +49,7 @@ impl Domain {
             Domain::Validators => "vinx/validators",
             Domain::Deal => "vinx/deal",
             Domain::TxApproval => "vinx/tx/approval",
+            Domain::TxSponsor => "vinx/tx/sponsor",
         }
     }
 }

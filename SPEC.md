@@ -97,7 +97,8 @@ Registry {
 `state_root = H("vinx/state" ‖ racine_SMT(accounts) ‖ H(G))`, avec
 `G = borsh(escrow, admin, validators, params, upgrade, protocol_version)`,
 suivi de `borsh(registry)` à partir du protocole 2, de `borsh(emission)` à
-partir du protocole 3, puis de `borsh(policies)` à partir du protocole 4.
+partir du protocole 3, puis de `borsh(policies)` et `borsh(mandates)` à partir
+du protocole 4.
 
 **Arbre des comptes (SMT).** Arbre binaire compact indexé par les 160 bits de
 l'adresse, du bit de poids fort au bit de poids faible :
@@ -221,6 +222,10 @@ SignedTransaction {
 | `0x0A` | `Attest` | `digest: Hash` | Horodate une empreinte (§5.7) |
 | `0x0B` | `SetPolicy` | `policy: PolicyConfig { signers, threshold, daily_limit }` | Règles du compte (§5.8) |
 | `0x0C` | `Approved` | `body: TxBody`, `approvals: Vec<(signer_index: u8, Signature)>` | `body` approuvé par des signataires du compte (§5.8) |
+| `0x0D` | `GrantMandate` | `payee`, `max_per_period`, `period`, `expires_at: Option<u64>` | Accorde un mandat de prélèvement (§5.9) |
+| `0x0E` | `RevokeMandate` | `payee` | Révoque le mandat accordé à `payee` |
+| `0x0F` | `Collect` | `payer`, `amount`, `memo` | Prélève sur `payer` (§5.9) |
+| `0x10` | `Sponsored` | `body`, `sponsor: Address`, `signature` | Frais payés par `sponsor` (§5.10) |
 
 `RotateKey` est aussi la voie de migration post-quantique : quand `0x02` sera
 actif, chaque compte pourra passer à une clé ML-DSA sans changer d'adresse.
@@ -337,6 +342,42 @@ Policy       { config: PolicyConfig, day: u64, spent: u64 }   // état : Map<Add
     `daily_limit`.
 - Le montant dépensé compte les paiements, la somme d'un paiement groupé, le
   montant d'un séquestre ouvert et le prix d'un nom, mais pas les frais.
+
+### 5.9 Mandats de prélèvement (protocole 4)
+
+```
+Mandate { max_per_period, period, start, expires_at: Option<u64>, period_index, used }
+// état : Map<(payeur, bénéficiaire), Mandate>
+```
+
+- `GrantMandate`, envoyé par le payeur :
+  - bénéficiaire différent du payeur, `max_per_period > 0`,
+    `86 400 ≤ period ≤ 31 622 400` (1 à 366 jours), `expires_at > now` s'il est fixé ;
+  - `start = now` ; un nouveau mandat pour le même bénéficiaire remplace l'ancien ;
+  - pour un compte à règles (§5.8), il exige les approbations, comme `SetPolicy`.
+- `RevokeMandate`, envoyé par le payeur, retire le mandat.
+- `Collect`, envoyé par le bénéficiaire, qui paie les frais :
+  - refusé si `now ≥ expires_at` ;
+  - la période en cours est `⌊(now − start) / period⌋`, et le compteur `used`
+    repart de zéro à chaque nouvelle période ;
+  - `used + amount ≤ max_per_period` ;
+  - mêmes règles qu'un `Transfer` du payeur vers le bénéficiaire ;
+  - le solde restant du payeur doit être nul ou au moins `min_reserve` ;
+  - le plafond journalier du payeur (§5.8) ne s'applique pas : le mandat est
+    une autorisation préalable.
+
+### 5.10 Frais payés par un parrain (protocole 4)
+
+- `Sponsored { body, sponsor, signature }` fait payer les frais de la
+  transaction par le compte `sponsor`, au lieu de l'émetteur.
+- Le parrain signe `"vinx/tx/sponsor" ‖ borsh(chain_id, sender, nonce, fee,
+  corps, sponsor)` avec la clé de son compte, déjà en état. Le corps est le
+  corps effectif, sous un éventuel `Approved`. Il doit être différent de
+  l'émetteur.
+- Après la transaction, le solde du parrain doit être nul ou au moins
+  `min_reserve`.
+- Enveloppes admises : `Sponsored { Approved { corps } }`, `Sponsored { corps }`,
+  `Approved { corps }`. Tout autre emboîtement est refusé.
 
 ## 6. Blocs
 
@@ -528,7 +569,7 @@ hauteur `H + 2`. `validators_hash` du bloc `H + 1` reflète déjà le nouvel ens
 | 1 | Paiements, mémo obligatoire, rotation de clé, gouvernance |
 | 2 | Noms `.vinx` (§5.4), séquestres (§5.5), paramètre `name_fee` |
 | 3 | Émission des validateurs et frais aux validateurs (§4.4, ADR 0002) |
-| 4 | Paiements groupés (§5.6), horodatage natif (§5.7), règles de compte (§5.8) ; suite en cours (feuille de route) |
+| 4 | Paiements groupés (§5.6), horodatage natif (§5.7), règles de compte (§5.8), mandats (§5.9), frais payés par un parrain (§5.10) |
 
 ## 10. Étiquettes de domaine
 
@@ -546,6 +587,7 @@ hauteur `H + 2`. `validators_hash` du bloc `H + 1` reflète déjà le nouvel ens
 | Ensemble de validateurs | `vinx/validators` |
 | Identifiant de séquestre | `vinx/deal` |
 | Approbation d'une transaction de compte | `vinx/tx/approval` |
+| Signature du parrain des frais | `vinx/tx/sponsor` |
 | Arbre des comptes (feuille / nœud) | `vinx/smt/leaf`, `vinx/smt/node` |
 | Merkle (feuille / nœud / liste vide) | `vinx/merkle/leaf`, `vinx/merkle/node`, `vinx/merkle/empty` |
 
