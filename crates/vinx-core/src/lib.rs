@@ -17,8 +17,8 @@ pub use block::{Block, BlockHeader};
 pub use consensus::{CommitCertificate, Vote, VoteKind, quorum};
 pub use params::{ParamId, Params};
 pub use transaction::{
-    MAX_BATCH_PAYMENTS, MAX_MANDATE_PERIOD, MAX_POLICY_SIGNERS, MIN_MANDATE_PERIOD, Payment,
-    PolicyConfig, SignedTransaction, Transaction, TxBody, deal_id,
+    AssetPowers, MAX_BATCH_PAYMENTS, MAX_MANDATE_PERIOD, MAX_POLICY_SIGNERS, MIN_MANDATE_PERIOD,
+    Payment, PolicyConfig, SignedTransaction, Transaction, TxBody, deal_id,
 };
 pub use vinx_crypto::{Address, Hash, PublicKey, Signature};
 
