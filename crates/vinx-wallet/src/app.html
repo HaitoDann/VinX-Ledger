@@ -12,7 +12,7 @@
 .hero { padding: 22px 20px; }
 .hero .label { color: var(--muted); font-size: 11px; text-transform: uppercase; letter-spacing: .12em; font-weight: 600; }
 .hero .balance { font-size: 40px; font-weight: 750; letter-spacing: -.02em; font-variant-numeric: tabular-nums; margin: 4px 0 2px; }
-.hero.balance-card { padding: 24px; background: var(--stripes), radial-gradient(120% 140% at 100% 0, rgba(13, 220, 142, .22), transparent 55%), var(--card); }
+.hero.balance-card { padding: 24px; background: var(--stripes), radial-gradient(120% 140% at 100% 0, rgba(13, 220, 142, .08), transparent 55%), var(--card); }
 .balance-card .grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(min(100%, 300px), 1fr)); gap: 18px 24px; align-items: end; }
 .balance-card .panel { background: var(--panel); border: 1px solid var(--line); border-radius: 4px; padding: 10px 12px;
                        display: grid; grid-template-columns: 1fr 1fr; gap: 0 12px; }
@@ -934,6 +934,10 @@ function txRow(t) {
     return `<tr><td>${t.status === "en attente" ? "à l'instant" : date(t.timestamp)}</td><td>${payer ? "Prélèvement (mandat)" : "Prélèvement encaissé"}${t.memo ? `<div class="sub">${esc(t.memo)}</div>` : ""}</td>
       <td>${who(t.to)}</td><td style="text-align:right">${amount}${payer ? "" : `<div class="sub">frais ${vinx(t.fee)}</div>`}</td>
       <td>${t.status === "en attente" ? `<span class="pill warn">en attente</span>` : `<span class="pill ok">confirmée</span>`}</td></tr>`;
+  }
+  if (t.kind === "paiement groupé" && out) {
+    // Envoi groupé : le montant affiché est la somme des paiements.
+    t = { ...t, amount: (t.payments || []).reduce((s, p) => s + BigInt(p.amount || "0"), 0n).toString() };
   }
   if (t.kind === "paiement groupé" && !out) {
     const mine = (t.payments || []).filter((p) => p.to === data.address);

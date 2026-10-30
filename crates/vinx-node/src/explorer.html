@@ -145,7 +145,7 @@ function stat(ico, label, value, cells, extra = "") {
 let areaId = 0;
 function area(values, labels, unit = "") {
   if (values.length < 2) return '<p class="muted">Pas encore assez de blocs.</p>';
-  const W = 600, H = 200, L = 36, B = 18, T = 8;
+  const W = 600, H = 200, L = 46, B = 18, T = 8;
   const hi = Math.max(...values) * 1.15 || 1;
   const x = (i) => L + (i / (values.length - 1)) * (W - L - 4);
   const y = (v) => T + (1 - v / hi) * (H - T - B);
@@ -159,7 +159,7 @@ function area(values, labels, unit = "") {
   const grid = [0, .25, .5, .75, 1].map((f) => {
     const v = hi * f, yy = y(v);
     return `<line x1="${L}" x2="${W}" y1="${yy}" y2="${yy}" stroke="var(--line)" stroke-dasharray="3 4"/>
-      <text x="${L - 6}" y="${yy + 3}" text-anchor="end">${v >= 10 ? Math.round(v) : v.toFixed(1)}${unit}</text>`;
+      <text x="${L - 6}" y="${yy + 3}" text-anchor="end">${v >= 1e3 ? (v / 1e3).toLocaleString("fr-FR", { maximumFractionDigits: 1 }) + " k" : v >= 10 ? Math.round(v) : v.toFixed(1)}${unit}</text>`;
   }).join("");
   const step = Math.max(1, Math.floor(labels.length / 6));
   const ticks = labels.map((t, i) => i % step ? "" : `<text x="${x(i)}" y="${H - 3}" text-anchor="middle">${esc(t)}</text>`).join("");
