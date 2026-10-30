@@ -3,24 +3,28 @@
    Voir docs/CHARTE-GRAPHIQUE.md. */
 :root {
   color-scheme: dark;
-  --bg: #0a0d0c; --card: #121715; --card-2: #171d1a; --text: #e8efeb; --muted: #8c9a93;
-  --line: #222b27; --accent: #0ddc8e; --accent-soft: rgba(13, 220, 142, .12); --accent-text: #05140d;
+  --bg: #070a09; --card: #0f1513; --card-2: #141b18; --panel: #0b100e; --text: #e8efeb; --muted: #8c9a93;
+  --line: #1f2925; --accent: #0ddc8e; --accent-soft: rgba(13, 220, 142, .12); --accent-text: #05140d;
   --ok: #0ddc8e; --warn: #f5a524; --bad: #ff6b6b;
   --chart: #0ddc8e; --chart-soft: rgba(13, 220, 142, .14);
-  --shadow: 0 1px 0 rgba(255, 255, 255, .03) inset;
+  --shadow: 0 1px 0 rgba(255, 255, 255, .03) inset, 0 10px 30px rgba(0, 0, 0, .25);
+  /* Dégradé émeraude du haut de page, inspiré du halo du logo. */
+  --hero: linear-gradient(180deg, #05553a 0, #063524 180px, #07160f 380px, var(--bg) 620px);
+  --stripes: repeating-linear-gradient(-45deg, rgba(255, 255, 255, .025) 0 10px, transparent 10px 20px);
 }
-@media (prefers-color-scheme: light) {
-  :root {
-    color-scheme: light;
-    --bg: #f4f7f5; --card: #ffffff; --card-2: #f8faf9; --text: #111614; --muted: #5b6762;
-    --line: #dde4e0; --accent: #067a4e; --accent-soft: rgba(6, 122, 78, .09); --accent-text: #ffffff;
-    --ok: #067a4e; --warn: #9a5b00; --bad: #c0362c;
-    --chart: #0aa86c; --chart-soft: rgba(10, 168, 108, .12);
-    --shadow: 0 1px 2px rgba(17, 22, 20, .04);
-  }
+/* Thème clair : choisi avec le bouton de l'en-tête (mémorisé dans le navigateur). */
+:root[data-theme="light"] {
+  color-scheme: light;
+  --bg: #f2f6f4; --card: #ffffff; --card-2: #f6f9f7; --panel: #f3f7f5; --text: #111614; --muted: #5b6762;
+  --line: #dbe3df; --accent: #067a4e; --accent-soft: rgba(6, 122, 78, .09); --accent-text: #ffffff;
+  --ok: #067a4e; --warn: #9a5b00; --bad: #c0362c;
+  --chart: #0aa86c; --chart-soft: rgba(10, 168, 108, .14);
+  --shadow: 0 1px 2px rgba(17, 22, 20, .05), 0 8px 24px rgba(17, 22, 20, .04);
+  --hero: linear-gradient(180deg, #bff0d9 0, #dcf6ea 200px, var(--bg) 560px);
+  --stripes: repeating-linear-gradient(-45deg, rgba(6, 122, 78, .04) 0 10px, transparent 10px 20px);
 }
 * { box-sizing: border-box; }
-body { margin: 0; background: var(--bg); color: var(--text);
+body { margin: 0; background: var(--hero) no-repeat, var(--bg); color: var(--text); min-height: 100vh;
        font: 15px/1.45 system-ui, -apple-system, "Segoe UI", Roboto, sans-serif; }
 
 /* En-tête : logo, nom, contexte. */
@@ -28,7 +32,7 @@ header { padding: 20px 16px 10px; max-width: 1120px; margin: 0 auto;
          display: flex; flex-wrap: wrap; gap: 10px 14px; align-items: center; }
 .brand { display: flex; align-items: center; gap: 10px; text-decoration: none; color: var(--text); margin-right: 6px; }
 .brand svg { width: 34px; height: auto; color: var(--accent); flex: none; }
-.brand b { font-size: 19px; letter-spacing: .02em; }
+.brand b { font-size: 20px; letter-spacing: .02em; }
 .brand b span { color: var(--accent); }
 .brand small { display: block; font-size: 11px; color: var(--muted); letter-spacing: .14em; text-transform: uppercase; }
 h1 { font-size: 20px; margin: 0; }
@@ -36,6 +40,10 @@ h2 { font-size: 12px; margin: 0 0 12px; color: var(--muted); font-weight: 650;
      text-transform: uppercase; letter-spacing: .1em; display: flex; align-items: center; gap: 8px; }
 /* Le losange du logo marque chaque titre de carte. */
 h2::before { content: ""; width: 7px; height: 7px; background: var(--accent); transform: rotate(45deg); flex: none; }
+/* Titre en tête de carte : bandeau hachuré, comme les cartes d'un explorateur. */
+.card > h2:first-child { margin: -14px -16px 14px; padding: 11px 16px; background: var(--stripes), var(--card-2);
+                         border-bottom: 1px solid var(--line); }
+.card > h2 .more { margin-left: auto; text-transform: none; letter-spacing: 0; font-weight: 600; font-size: 12px; text-decoration: none; }
 h2 .sub { text-transform: none; letter-spacing: 0; font-weight: 400; }
 h3 { font-size: 12px; margin: 16px 0 6px; color: var(--muted); font-weight: 650; text-transform: uppercase; letter-spacing: .08em; }
 
@@ -107,7 +115,8 @@ button:disabled { opacity: .4; cursor: default; filter: none; }
 .scroll { overflow-x: auto; }
 
 /* Graphiques et jauges. */
-.chart svg { display: block; width: 100%; height: 90px; }
+.chart svg { display: block; width: 100%; height: 130px; }
+.chart.big svg { height: 200px; }
 .chart .axis { display: flex; justify-content: space-between; color: var(--muted); font-size: 11px; margin-top: 4px; }
 .chart .now { font-size: 20px; font-weight: 700; font-variant-numeric: tabular-nums; margin-bottom: 4px; }
 .bar { height: 6px; background: var(--line); overflow: hidden; min-width: 60px; }
@@ -130,3 +139,48 @@ dialog::backdrop { background: rgba(0, 0, 0, .6); }
 #toast div.err { border-left-color: var(--bad); }
 
 footer { max-width: 1120px; margin: 0 auto; padding: 0 16px 24px; color: var(--muted); font-size: 12px; }
+
+/* Bouton clair / sombre. */
+.theme-toggle { margin-left: auto; width: 36px; height: 36px; padding: 0; display: inline-grid; place-items: center;
+                border-radius: 50%; background: var(--card); }
+.theme-toggle svg { width: 16px; height: 16px; }
+.theme-toggle .sun { display: none; }
+:root[data-theme="light"] .theme-toggle .sun { display: block; }
+:root[data-theme="light"] .theme-toggle .moon { display: none; }
+
+/* Accueil façon explorateur : grand titre et grande barre de recherche. */
+.explore-hero { text-align: center; padding: 34px 0 22px; }
+.explore-hero h1 { font-size: clamp(26px, 5vw, 38px); font-weight: 750; letter-spacing: -.02em; margin: 0 0 20px; word-break: normal; }
+.explore-hero h1 span { color: var(--accent); }
+.big-search { display: flex; max-width: 640px; margin: 0 auto; padding: 5px; gap: 6px; border-radius: 999px;
+              background: color-mix(in srgb, var(--card) 80%, transparent); border: 1px solid var(--line);
+              box-shadow: 0 10px 40px rgba(0, 0, 0, .25); }
+.big-search:focus-within { border-color: var(--accent); }
+.big-search input { border: none; background: transparent; padding: 10px 16px; box-shadow: none !important; }
+.big-search button { border-radius: 999px; padding: 0 20px; }
+
+/* Cartes de statistiques : valeur principale, puis un panneau de sous-indicateurs. */
+.stats { display: grid; grid-template-columns: repeat(auto-fit, minmax(240px, 1fr)); gap: 12px; }
+.stat { background: var(--card); border: 1px solid var(--line); border-radius: 6px; padding: 14px; box-shadow: var(--shadow); min-width: 0; }
+.stat .top { display: flex; gap: 12px; align-items: center; justify-content: space-between; margin-bottom: 12px; }
+.stat .top > div { display: flex; gap: 12px; align-items: center; min-width: 0; }
+.stat .ico { width: 34px; height: 34px; flex: none; display: grid; place-items: center; border-radius: 50%;
+             background: var(--accent-soft); color: var(--accent); }
+.stat .ico svg { width: 16px; height: 16px; }
+.stat .label { color: var(--muted); font-size: 12px; }
+.stat .value { font-size: 22px; font-weight: 700; font-variant-numeric: tabular-nums; letter-spacing: -.01em; }
+.stat .value small { font-size: 12px; color: var(--muted); font-weight: 500; }
+.stat .panel { background: var(--panel); border: 1px solid var(--line); border-radius: 4px; padding: 10px 12px;
+               display: grid; grid-template-columns: 1fr 1fr; gap: 0 12px; }
+.stat .panel > div { padding: 7px 0; min-width: 0; }
+.stat .panel > div:nth-child(n+3) { border-top: 1px dashed var(--line); }
+.stat .panel > div:nth-child(even) { text-align: right; }
+.stat .panel b { display: block; font-size: 13px; font-variant-numeric: tabular-nums; font-weight: 600; overflow: hidden; text-overflow: ellipsis; }
+.stat .panel span { font-size: 11px; color: var(--muted); }
+.progress { width: 80px; height: 5px; background: var(--line); border-radius: 3px; overflow: hidden; }
+.progress > span { display: block; height: 100%; background: var(--accent); border-radius: 3px; }
+
+/* Classements : rang, pastille et deux colonnes chiffrées. */
+.rank { display: inline-grid; place-items: center; width: 26px; height: 26px; border-radius: 50%; margin-right: 10px;
+        background: var(--accent-soft); color: var(--accent); font-size: 11px; font-weight: 700; vertical-align: middle; }
+td.num, th.num { text-align: right; }

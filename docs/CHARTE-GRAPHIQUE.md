@@ -7,13 +7,23 @@ Le tableau de bord du nœud et le cockpit partagent la même feuille de style, `
 
 | Rôle | Thème sombre (par défaut) | Thème clair |
 |---|---|---|
-| Fond | `#0a0d0c` | clair, selon `prefers-color-scheme` |
+| Fond | `#070a09`, dégradé émeraude en haut de page | clair, teinté d'émeraude en haut |
 | Carte | `#121715` | blanc cassé |
 | Accent émeraude | `#0ddc8e` (texte sur accent `#05140d`) | `#067a4e` |
 | Avertissement | `#f5a524` | `#9a5b00` |
 | Erreur | `#ff6b6b` | `#c0362c` |
 
 Tous les couples texte/fond ont un contraste d'au moins 4,99:1 (WCAG AA).
+
+Le thème sombre est celui par défaut. Le bouton rond de l'en-tête bascule en clair ; le choix est mémorisé dans le navigateur (`localStorage`, clé `vinx-theme`).
+
+## Composants
+
+- **Hero** (explorateur) : grand titre centré et barre de recherche arrondie.
+- **Cartes de statistiques** (`.stat`) : icône, valeur principale, puis un panneau de quatre sous-indicateurs.
+- **Titres de carte** : bandeau hachuré en tête de carte, lien « Voir plus › » à droite.
+- **Graphiques** : aires lissées en dégradé émeraude, avec graduations.
+- **Classements** : rang dans une pastille ronde, colonnes chiffrées alignées à droite.
 
 ## Formes
 
