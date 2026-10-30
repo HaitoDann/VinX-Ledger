@@ -62,6 +62,7 @@ td .mono, td.mono, td.nowrap { word-break: normal; white-space: nowrap; }
   <div id="page"></div>
 </main>
 
+<script>/*__CHARTS__*/</script>
 <script>
 const $ = (id) => document.getElementById(id);
 const esc = (s) => String(s ?? "").replace(/[&<>"']/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" })[c]);
@@ -141,14 +142,15 @@ function stat(ico, label, value, cells, extra = "") {
     <div class="panel">${cells.map(([k, v]) => `<div><span>${k}</span><b>${v}</b></div>`).join("")}</div></div>`;
 }
 
-/* Aire lissée en dégradé, avec graduations : sans bibliothèque. */
+/* Aire lissée en dégradé, avec graduations et survol : sans bibliothèque.
+   Un pic isolé est tronqué (marqué en haut) pour ne pas écraser le reste. */
 let areaId = 0;
 function area(values, labels, unit = "") {
   if (values.length < 2) return '<p class="muted">Pas encore assez de blocs.</p>';
   const W = 600, H = 200, L = 46, B = 18, T = 8;
-  const hi = Math.max(...values) * 1.15 || 1;
+  const { hi, capped } = chartScale(values);
   const x = (i) => L + (i / (values.length - 1)) * (W - L - 4);
-  const y = (v) => T + (1 - v / hi) * (H - T - B);
+  const y = (v) => T + (1 - Math.min(v, hi) / hi) * (H - T - B);
   const p = values.map((v, i) => [x(i), y(v)]);
   let d = `M${p[0][0]},${p[0][1]}`;
   for (let i = 1; i < p.length; i++) {
@@ -156,19 +158,23 @@ function area(values, labels, unit = "") {
     d += ` C${cx},${y0} ${cx},${y1} ${x1},${y1}`;
   }
   const id = `area${areaId++}`;
+  const num = (v) => v >= 1e3 ? (v / 1e3).toLocaleString("fr-FR", { maximumFractionDigits: 1 }) + " k" : v >= 10 ? Math.round(v).toLocaleString("fr-FR") : v.toLocaleString("fr-FR", { maximumFractionDigits: 1 });
   const grid = [0, .25, .5, .75, 1].map((f) => {
     const v = hi * f, yy = y(v);
     return `<line x1="${L}" x2="${W}" y1="${yy}" y2="${yy}" stroke="var(--line)" stroke-dasharray="3 4"/>
-      <text x="${L - 6}" y="${yy + 3}" text-anchor="end">${v >= 1e3 ? (v / 1e3).toLocaleString("fr-FR", { maximumFractionDigits: 1 }) + " k" : v >= 10 ? Math.round(v) : v.toFixed(1)}${unit}</text>`;
+      <text x="${L - 6}" y="${yy + 3}" text-anchor="end">${num(v)}${unit}</text>`;
   }).join("");
   const step = Math.max(1, Math.floor(labels.length / 6));
   const ticks = labels.map((t, i) => i % step ? "" : `<text x="${x(i)}" y="${H - 3}" text-anchor="middle">${esc(t)}</text>`).join("");
-  return `<svg viewBox="0 0 ${W} ${H}" role="img" style="height:auto;font-size:10px;fill:var(--muted)">
+  const peaks = values.map((v, i) => v > hi ? `<path d="M${x(i) - 5},${T + 8} L${x(i)},${T} L${x(i) + 5},${T + 8}Z" fill="var(--warn)"/>` : "").join("");
+  const hover = chartPoints(values.map((v, i) => [x(i), y(v), `${esc(labels[i] || "")} · <b>${num(v)}${unit}</b>`]));
+  return `<svg viewBox="0 0 ${W} ${H}" role="img" data-chart="${hover}" style="height:auto;font-size:10px;fill:var(--muted)">
     <defs><linearGradient id="${id}" x1="0" y1="0" x2="0" y2="1">
       <stop offset="0" stop-color="var(--chart)" stop-opacity=".5"/><stop offset="1" stop-color="var(--chart)" stop-opacity="0"/>
     </linearGradient></defs>${grid}
     <path d="${d} L${x(values.length - 1)},${H - B} L${L},${H - B}Z" fill="url(#${id})"/>
-    <path d="${d}" fill="none" stroke="var(--chart)" stroke-width="2"/>${ticks}</svg>`;
+    <path d="${d}" fill="none" stroke="var(--chart)" stroke-width="2"/>${peaks}${ticks}</svg>
+    ${capped ? `<div class="capped">▲ ${capped} pic(s) au-dessus de ${num(hi)}${unit}, tronqué(s) — max ${num(Math.max(...values))}${unit}</div>` : ""}`;
 }
 
 /* ---------- Pages ---------- */
@@ -223,16 +229,23 @@ async function home() {
         ["Gouvernance", "2 sur 3"], ["Quorum", fr(Math.floor(2 * status.validators.length / 3) + 1)],
         ["Proposeurs actifs", fr(ranked.length)], ["Rounds > 0", fr(byRound)]])}
       ${stat("layers", "Protocole", "v" + status.protocol_version, [
-        ["Chaîne", `<span class="mono">${esc(status.chain_id)}</span>`], ["Hauteur", fr(status.height)]])}
+        ["Chaîne", `<span class="mono">${esc(status.chain_id)}</span>`], ["Pairs", fr(status.peers ?? 0)],
+        ["En attente", fr(status.pending_transactions ?? 0)], ["Version du nœud", esc(status.node_version || "—")]])}
     </div>
     <div class="home-grid">
       <section class="card chart"><h2>Transactions par bloc <a class="more" href="#/blocs">Voir plus ›</a></h2>${area(txs, chrono.map(hours))}</section>
-      <section class="card"><h2>Validateurs les plus actifs</h2><div class="scroll"><table>
-        <thead><tr><th>Validateur</th><th class="num">Blocs proposés</th><th class="num">Transactions</th></tr></thead><tbody>
-        ${ranked.slice(0, 8).map(([i, r], n) => `<tr><td><span class="rank">${n + 1}</span>${vnames[i] ? esc(vnames[i]) : `Validateur n° ${+i + 1}`}</td>
-          <td class="num">${fr(r.blocks)}</td><td class="num">${fr(r.tx)}</td></tr>`).join("") || '<tr><td colspan="3" class="muted">Aucun bloc.</td></tr>'}
-        </tbody></table></div></section>
       <section class="card chart"><h2>Temps entre les blocs</h2>${area(gaps, chrono.slice(1).map(hours), " s")}</section>
+      <section class="card"><h2>Validateurs les plus actifs <span class="sub">sur ${fr(window_.length)} blocs</span></h2><div class="scroll"><table>
+        <thead><tr><th>Validateur</th><th>Part des blocs</th><th class="num">Blocs</th><th class="num">Transactions</th></tr></thead><tbody>
+        ${ranked.slice(0, 8).map(([i, r], n) => { const share = 100 * r.blocks / Math.max(1, window_.length);
+          return `<tr><td><span class="rank">${n + 1}</span>${vnames[i] ? esc(vnames[i]) : `Validateur n° ${+i + 1}`}</td>
+          <td><div style="display:flex;gap:8px;align-items:center"><div class="bar" style="flex:1"><span style="width:${share.toFixed(1)}%"></span></div>${share.toFixed(0)} %</div></td>
+          <td class="num">${fr(r.blocks)}</td><td class="num">${fr(r.tx)}</td></tr>`; }).join("") || '<tr><td colspan="4" class="muted">Aucun bloc.</td></tr>'}
+        </tbody></table></div>
+        <div class="stats" style="margin-top:14px;grid-template-columns:repeat(3,1fr);gap:8px">
+          ${[["Validateurs", fr(status.validators.length)], ["Quorum", fr(Math.floor(2 * status.validators.length / 3) + 1)], ["Pannes tolérées", fr(status.validators.length - Math.floor(2 * status.validators.length / 3) - 1)]]
+            .map(([k, v]) => `<div class="stat" style="padding:10px;box-shadow:none;background:var(--panel)"><div class="label">${k}</div><div class="value" style="font-size:18px">${v}</div></div>`).join("")}
+        </div></section>
       <section class="card"><h2>Derniers blocs <a class="more" href="#/blocs">Voir plus ›</a></h2><div class="scroll"><table>
         <thead><tr><th>Bloc</th><th>Heure</th><th class="num">Transactions</th><th>Proposeur</th></tr></thead><tbody>
         ${blocks.blocks.slice(0, 8).map((b) => `<tr class="link" onclick="location.hash='#/bloc/${b.height}'">
@@ -408,8 +421,12 @@ async function route() {
   document.querySelectorAll("nav a").forEach((a) => a.classList.toggle("active", a.dataset.view === navView));
   $("hero").classList.toggle("compact", page !== home);
   clearInterval(timer);
+  // Chargement : des cartes grises animées tant que la page n'est pas prête.
+  $("page").innerHTML = page === home
+    ? `<div class="stats">${'<div class="skeleton skel-card"></div>'.repeat(4)}</div><div class="home-grid">${'<div class="skeleton skel-card" style="height:260px"></div>'.repeat(2)}</div>`
+    : '<div class="skeleton skel-card"></div>';
   const run = async () => {
-    try { $("page").innerHTML = await page(decodeURIComponent(arg)); }
+    try { $("page").innerHTML = await page(decodeURIComponent(arg)); bindCharts($("page")); }
     catch (e) { $("page").innerHTML = `<section class="card alert">${e.status === 404 ? "Introuvable : " : "Erreur : "}${esc(e.message)}</section>`; }
   };
   await run();

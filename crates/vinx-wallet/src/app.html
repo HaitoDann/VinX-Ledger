@@ -24,6 +24,7 @@
 .range { display: flex; gap: 4px; margin-left: auto; }
 .range button { padding: 3px 10px; font-size: 12px; text-transform: none; letter-spacing: 0; }
 .range button.on { border-color: var(--accent); color: var(--accent); background: var(--accent-soft); }
+#balanceChart.skeleton { min-height: 200px; } #recent.skeleton { min-height: 160px; } #balanceStats.skeleton { min-height: 110px; }
 #balanceChart svg { display: block; width: 100%; height: auto; }
 .hero .balance small { font-size: 18px; color: var(--accent); font-weight: 700; margin-left: 6px; }
 .words { display: grid; grid-template-columns: repeat(3, 1fr); gap: 8px; margin: 12px 0; counter-reset: w; }
@@ -134,13 +135,18 @@ header select { width: auto; min-width: 180px; }
   <a href="#send" data-view="send">Envoyer</a>
   <a href="#receive" data-view="receive">Recevoir</a>
   <a href="#history" data-view="history">Historique</a>
-  <a href="#names" data-view="names">Noms .vinx</a>
-  <a href="#deals" data-view="deals">Séquestres</a>
-  <a href="#stamp" data-view="stamp">Horodatage</a>
-  <a href="#mandates" data-view="mandates">Mandats</a>
   <a href="#assets" data-view="assets">Jetons</a>
-  <a href="#contacts" data-view="contacts">Contacts</a>
-  <a href="#settings" data-view="settings">Réglages</a>
+  <details class="more" id="moreTabs">
+    <summary>Plus ▾</summary>
+    <div class="menu">
+      <a href="#names" data-view="names">Noms .vinx</a>
+      <a href="#deals" data-view="deals">Séquestres</a>
+      <a href="#stamp" data-view="stamp">Horodatage</a>
+      <a href="#mandates" data-view="mandates">Mandats</a>
+      <a href="#contacts" data-view="contacts">Contacts</a>
+      <a href="#settings" data-view="settings">Réglages</a>
+    </div>
+  </details>
 </nav>
 
 <main id="home" class="view">
@@ -400,6 +406,7 @@ header select { width: auto; min-width: 180px; }
 <div id="toast"></div>
 <footer>Portefeuille VinX Ledger · tes clés restent sur cet ordinateur · verrouillage automatique après 15 minutes d'inactivité.</footer>
 
+<script>/*__CHARTS__*/</script>
 <script>
 const TOKEN = "__APP_TOKEN__";
 const $ = (id) => document.getElementById(id);
@@ -459,6 +466,9 @@ function show(view) {
   const open = !PUBLIC.includes(view);
   $("tabs").hidden = !open; $("account").hidden = !open; $("lockBtn").hidden = !open;
   document.querySelectorAll("#tabs a").forEach((a) => a.classList.toggle("active", a.dataset.view === view));
+  // Onglet rangé dans « Plus » : le menu se referme et s'affiche comme actif.
+  $("moreTabs").open = false;
+  $("moreTabs").classList.toggle("active", !!$("moreTabs").querySelector(`a[data-view="${view}"]`));
   if (open && location.hash !== "#" + view) history.replaceState(null, "", "#" + view);
   if (view === "locked") setTimeout(() => $("unlockPw").focus(), 50);
 }
@@ -584,6 +594,7 @@ async function refresh() {
     return;
   }
   $("netWarn").hidden = true;
+  loaded();
   $("balance").textContent = vinx(data.balance);
   $("homeLabel").textContent = "Solde · " + data.label;
   const names = (data.names || []).map((n) => n.name);
@@ -593,7 +604,7 @@ async function refresh() {
   $("reserveNote").textContent = data.exists ? "" : `Ce compte n'existe pas encore sur le réseau : le premier versement doit être d'au moins ${vinx(data.network.min_reserve)} VINX.`;
   const v2 = data.network.protocol_version >= 2;
   $("netInfo").innerHTML = `Réseau <b>${esc(data.network.chain_id)}</b> · bloc ${esc(data.network.height)} · protocole ${esc(data.network.protocol_version)}${v2 ? "" : " (noms et séquestres pas encore actifs)"}`;
-  const rows = (list) => list.length ? `<table><thead><tr><th>Date</th><th>Opération</th><th>Avec</th><th style="text-align:right">Montant</th><th>Statut</th></tr></thead><tbody>${list.map(txRow).join("")}</tbody></table>` : `<p class="muted">Aucune opération pour l'instant.</p>`;
+  const rows = (list) => list.length ? `<table class="tx"><thead><tr><th>Date</th><th>Opération</th><th>Avec</th><th style="text-align:right">Montant</th><th>Statut</th></tr></thead><tbody>${list.map(txRow).join("")}</tbody></table>` : `<p class="muted">Aucune opération pour l'instant.</p>`;
   $("recent").innerHTML = rows(data.history.slice(0, 6));
   $("historyTable").innerHTML = rows(data.history);
   renderBalance();
@@ -645,6 +656,7 @@ function renderBalance() {
     ["Opérations", count.toLocaleString("fr-FR")], ["Jetons détenus", (data.assets || []).length.toLocaleString("fr-FR")]]
     .map(([k, v]) => `<div><span>${k}</span><b>${v}</b></div>`).join("");
   $("balanceChart").innerHTML = balanceChart(series);
+  bindCharts($("balanceChart"));
 }
 function balanceChart(series) {
   if (series.length < 2) return '<p class="muted">Pas encore d\'opérations sur cette période.</p>';
@@ -661,7 +673,9 @@ function balanceChart(series) {
     <text x="${L - 6}" y="${y(hi * f) + 3}" text-anchor="end">${fmtAxis(hi * f)}</text>`).join("");
   const ticks = [0, .25, .5, .75, 1].map((f) => { const ts = t0 + f * (t1 - t0);
     return `<text x="${x(ts)}" y="${H - 4}" text-anchor="${f === 0 ? "start" : f === 1 ? "end" : "middle"}">${new Date(ts).toLocaleDateString("fr-FR", { day: "numeric", month: "short" })}</text>`; }).join("");
-  return `<svg viewBox="0 0 ${W} ${H}" role="img" aria-label="Évolution du solde" style="font-size:11px;fill:var(--muted)">
+  const hover = chartPoints(series.map(([ts], i) => [x(ts), y(vals[i]),
+    `${new Date(ts).toLocaleString("fr-FR", { dateStyle: "medium", timeStyle: "short" })} · <b>${vals[i].toLocaleString("fr-FR", { maximumFractionDigits: 4 })} VINX</b>`]));
+  return `<svg viewBox="0 0 ${W} ${H}" role="img" aria-label="Évolution du solde" data-chart="${hover}" style="font-size:11px;fill:var(--muted)">
     <defs><linearGradient id="balGrad" x1="0" y1="0" x2="0" y2="1">
       <stop offset="0" stop-color="var(--chart)" stop-opacity=".5"/><stop offset="1" stop-color="var(--chart)" stop-opacity="0"/></linearGradient></defs>
     ${grid}<path d="${d} L${x(t1)},${H - B} L${L},${H - B}Z" fill="url(#balGrad)"/>
@@ -1047,6 +1061,8 @@ $("copyAddr").onclick = async () => {
 };
 
 setInterval(() => { if (!$("tabs").hidden) refresh(); }, 10000);
+document.addEventListener("click", (e) => { if (!e.target.closest("#moreTabs")) $("moreTabs").open = false; });
+skeleton("#balance, #balanceStats, #balanceChart, #recent");
 boot().catch((e) => toast(e.message, true));
 </script>
 </body>

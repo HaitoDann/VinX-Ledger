@@ -491,6 +491,7 @@ pub(crate) fn render_page(template: &str) -> String {
     );
     template
         .replace("/*__THEME__*/", include_str!("../../../assets/theme.css"))
+        .replace("/*__CHARTS__*/", include_str!("../../../assets/charts.js"))
         .replace("<!--__LOGO__-->", logo)
         .replace("__FAVICON__", &favicon)
 }

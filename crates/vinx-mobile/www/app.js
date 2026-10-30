@@ -139,11 +139,62 @@ async function refresh() {
   data = { status, acc, address: addr };
   $("netLabel").textContent = `${status.chain_id} · bloc ${status.height}`;
   $("balance").textContent = fmt(acc?.balance || "0");
+  $("balance").classList.remove("skeleton");
+  renderBalance(addr, BigInt(acc?.balance || "0")).catch(() => { $("chart").innerHTML = `<p class="muted">Historique indisponible.</p>`; });
   const tokens = acc?.assets || [];
   $("tokens").innerHTML = tokens.length
     ? tokens.map((t) => `<div><span><b>${esc(t.symbol)}</b> <span class="muted">${esc(t.name || "")}</span>${t.frozen ? ' <span class="warn">gelé</span>' : ""}</span><span>${fmt(t.units, t.decimals)}</span></div>`).join("")
     : `<p class="muted">Aucun jeton accepté.</p>`;
   $("sendCur").innerHTML = `<option value="">VINX</option>` + tokens.map((t) => `<option value="${esc(t.symbol)}">${esc(t.symbol)}</option>`).join("");
+}
+
+/* ----- Évolution du solde ----- */
+// Variation du solde VINX apportée par une opération, frais compris.
+function vinxDelta(t, me) {
+  const big = (x) => { try { return BigInt(x || "0"); } catch (_) { return 0n; } };
+  let d = t.sender === me ? -big(t.fee) : 0n;
+  if (t.asset && t.units) return d;
+  if (t.kind === "prélèvement") return d + (t.payer === me ? -big(t.amount) : t.sender === me ? big(t.amount) : 0n);
+  if (t.kind === "paiement groupé") {
+    const list = t.payments || [];
+    if (t.sender === me) return d - list.reduce((s, p) => s + big(p.amount), 0n);
+    return d + list.filter((p) => p.to === me).reduce((s, p) => s + big(p.amount), 0n);
+  }
+  if (!t.amount) return d;
+  if (t.sender === me && t.to !== me) return d - big(t.amount);
+  if (t.to === me && t.sender !== me) return d + big(t.amount);
+  return d;
+}
+async function renderBalance(addr, balance) {
+  const h = await get(`/accounts/${addr}/transactions?limit=100`);
+  const now = Date.now(), from = now - 30 * 86400000;
+  const done = (h?.transactions || []).filter((t) => t.status !== "en attente" && t.timestamp).sort((a, b) => b.timestamp - a.timestamp);
+  let bal = balance, inSum = 0n, outSum = 0n, count = 0;
+  const pts = [[now, bal]];
+  for (const t of done) {
+    if (t.timestamp < from) break;
+    const d = vinxDelta(t, addr);
+    count++; if (d > 0n) inSum += d; else outSum -= d;
+    pts.push([t.timestamp, bal]); bal -= d; pts.push([t.timestamp - 1, bal]);
+  }
+  pts.push([from, bal]);
+  const series = pts.reverse();
+  $("stats").innerHTML = [["Reçu (30 j)", `<span class="in">+ ${fmt(inSum)}</span>`], ["Envoyé (30 j)", `− ${fmt(outSum)}`], ["Opérations", count]]
+    .map(([k, v]) => `<div><span>${k}</span><b>${v}</b></div>`).join("");
+  const W = Math.max(280, $("chart").clientWidth || 320), H = 150, L = 8, B = 18, T = 10;
+  const vals = series.map(([, v]) => Number(v) / 10 ** VINX_DECIMALS);
+  const hi = Math.max(...vals) * 1.12 || 1;
+  const x = (ts) => L + ((ts - from) / (now - from)) * (W - L - 6);
+  const y = (v) => T + (1 - v / hi) * (H - T - B);
+  const d = series.map(([ts], i) => `${i ? "L" : "M"}${x(ts).toFixed(1)},${y(vals[i]).toFixed(1)}`).join(" ");
+  const day = (ts) => new Date(ts).toLocaleDateString("fr-FR", { day: "numeric", month: "short" });
+  $("chart").innerHTML = `<svg viewBox="0 0 ${W} ${H}" role="img" aria-label="Évolution du solde">
+    <defs><linearGradient id="g" x1="0" y1="0" x2="0" y2="1"><stop offset="0" stop-color="var(--accent)" stop-opacity=".45"/><stop offset="1" stop-color="var(--accent)" stop-opacity="0"/></linearGradient></defs>
+    <line x1="${L}" x2="${W}" y1="${H - B}" y2="${H - B}" stroke="var(--line)"/>
+    <path d="${d} L${x(now)},${H - B} L${x(from)},${H - B}Z" fill="url(#g)"/>
+    <path d="${d}" fill="none" stroke="var(--accent)" stroke-width="2" stroke-linejoin="round"/>
+    <circle cx="${x(now)}" cy="${y(vals[vals.length - 1])}" r="4" fill="var(--accent)"/>
+    <text x="${L}" y="${H - 3}">${day(from)}</text><text x="${W - 4}" y="${H - 3}" text-anchor="end">aujourd'hui</text></svg>`;
 }
 
 /* ----- Envoyer ----- */

@@ -181,6 +181,7 @@
   </section>
 </main>
 
+<script>/*__CHARTS__*/</script>
 <script>
 const UNITS = 1000000000n;
 const REFRESH_MS = 3000;
@@ -226,25 +227,28 @@ function proposerName(index) {
 
 /* Petit graphique en ligne, sans bibliothèque : une aire en dégradé sous une courbe. */
 let chartId = 0;
-function chart(values, { min = 0, max, refLine } = {}) {
+function chart(values, { min = 0, max, refLine, labels = [], unit = "" } = {}) {
   if (values.length < 2) return '<div class="sub">pas encore assez de blocs</div>';
   const W = 600, H = 90, pad = 4;
-  const hi = Math.max(max ?? 0, ...values, refLine ?? 0) || 1;
+  // Échelle robuste : un arrêt du nœud ne doit pas écraser la courbe.
+  const { hi, capped } = chartScale(values, Math.max(max ?? 0, refLine ?? 0));
   const x = (i) => (i / (values.length - 1)) * W;
-  const y = (v) => H - pad - ((v - min) / (hi - min)) * (H - 2 * pad);
+  const y = (v) => H - pad - ((Math.min(v, hi) - min) / (hi - min)) * (H - 2 * pad);
   const pts = values.map((v, i) => `${x(i).toFixed(1)},${y(v).toFixed(1)}`).join(" ");
   const ref = refLine != null
     ? `<line x1="0" x2="${W}" y1="${y(refLine)}" y2="${y(refLine)}" stroke="var(--muted)" stroke-dasharray="4 4" stroke-width="1" vector-effect="non-scaling-stroke"/>`
     : "";
   const id = `grad${chartId++}`;
-  return `<svg viewBox="0 0 ${W} ${H}" preserveAspectRatio="none" role="img">
+  const num = (v) => v.toLocaleString("fr-FR", { maximumFractionDigits: v < 10 ? 1 : 0 });
+  const hover = chartPoints(values.map((v, i) => [x(i), y(v), `${labels[i] ? esc(labels[i]) + " · " : ""}<b>${num(v)}${unit}</b>`]));
+  return `<svg viewBox="0 0 ${W} ${H}" preserveAspectRatio="none" role="img" data-chart="${hover}">
     <defs><linearGradient id="${id}" x1="0" y1="0" x2="0" y2="1">
       <stop offset="0" stop-color="var(--chart)" stop-opacity=".45"/><stop offset="1" stop-color="var(--chart)" stop-opacity="0"/>
     </linearGradient></defs>
     <polygon points="0,${H} ${pts} ${W},${H}" fill="url(#${id})"/>
     ${ref}
     <polyline points="${pts}" fill="none" stroke="var(--chart)" stroke-width="1.5" vector-effect="non-scaling-stroke"/>
-  </svg>`;
+  </svg>${capped ? `<div class="capped">▲ ${capped} pic(s) tronqué(s), max ${num(Math.max(...values))}${unit}</div>` : ""}`;
 }
 
 /* ---------- Aperçu ---------- */
@@ -319,12 +323,14 @@ async function refreshOverview() {
   const hb = hist.blocks;
   const gaps = hb.slice(1).map((b, i) => (b.timestamp - hb[i].timestamp) / 1000);
   const tps = hb.slice(1).map((b, i) => b.transactions / Math.max(0.001, (b.timestamp - hb[i].timestamp) / 1000));
-  $("c-interval").innerHTML = chart(gaps, { refLine: interval / 1000 });
+  const at = hb.slice(1).map((b) => new Date(b.timestamp).toLocaleTimeString("fr-FR", { hour: "2-digit", minute: "2-digit", second: "2-digit" }));
+  $("c-interval").innerHTML = chart(gaps, { refLine: interval / 1000, labels: at, unit: " s" });
   $("c-interval-now").textContent = gaps.length ? `${Math.max(...gaps).toFixed(1)} s au plus` : "—";
-  $("c-tps").innerHTML = chart(tps);
+  $("c-tps").innerHTML = chart(tps, { labels: at, unit: " tx/s" });
   $("c-tps-now").textContent = tps.length ? `${Math.round(Math.max(...tps))} au plus` : "—";
   const peers = hb.filter(b => b.peers !== null).map(b => b.peers);
-  $("c-peers").innerHTML = chart(peers, { max: status.validators.length - 1 });
+  $("c-peers").innerHTML = chart(peers, { max: status.validators.length - 1, labels: hb.filter(b => b.peers !== null).map(b => new Date(b.timestamp).toLocaleTimeString("fr-FR")), unit: " pair(s)" });
+  bindCharts();
   $("c-peers-now").textContent = `${status.peers} maintenant`;
 
   $("blocks").innerHTML = blocks.blocks.map(b => `
@@ -547,6 +553,7 @@ async function route() {
   const run = async () => {
     try {
       if (refresh) await refresh();
+      loaded();
       $("error").style.display = "none";
     } catch (e) {
       $("error").style.display = "block";
@@ -564,6 +571,7 @@ async function route() {
   if (refresh) timer = setInterval(run, REFRESH_MS);
 }
 window.addEventListener("hashchange", route);
+skeleton(".tile .value, .chart .now, #c-interval, #c-tps, #c-peers");
 route();
 </script>
 </body>

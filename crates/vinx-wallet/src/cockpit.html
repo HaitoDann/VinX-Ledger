@@ -44,6 +44,11 @@
 
   <!-- Réseau -->
   <section id="view-reseau" class="view">
+    <div class="stats" id="netStats"><div class="skeleton skel-card"></div><div class="skeleton skel-card"></div><div class="skeleton skel-card"></div><div class="skeleton skel-card"></div></div>
+    <div class="grid2">
+      <section class="card chart"><h2>Temps entre les blocs <span class="sub">dernière heure</span></h2><div id="netGaps" class="skeleton" style="min-height:150px"></div></section>
+      <section class="card chart"><h2>Transactions par bloc <span class="sub">dernière heure</span></h2><div id="netTx" class="skeleton" style="min-height:150px"></div></section>
+    </div>
     <div class="nodes" id="nodes"></div>
     <section class="card">
       <h2>Validateurs</h2>
@@ -209,6 +214,7 @@
 </dialog>
 <div id="toast"></div>
 
+<script>/*__CHARTS__*/</script>
 <script>
 const TOKEN = "__COCKPIT_TOKEN__";
 const UNITS = 1000000000n;
@@ -297,6 +303,27 @@ async function loadCore() {
 }
 
 /* ---------- Réseau ---------- */
+/* Aire en dégradé avec graduations, pic isolé tronqué, survol. */
+function miniArea(values, labels, unit = "") {
+  if (values.length < 2) return '<p class="muted">Pas encore assez de blocs.</p>';
+  const W = 600, H = 170, L = 44, B = 18, T = 8;
+  const { hi, capped } = chartScale(values);
+  const x = (i) => L + (i / (values.length - 1)) * (W - L - 4);
+  const y = (v) => T + (1 - Math.min(v, hi) / hi) * (H - T - B);
+  const num = (v) => v.toLocaleString("fr-FR", { maximumFractionDigits: v < 10 ? 1 : 0 });
+  const d = values.map((v, i) => `${i ? "L" : "M"}${x(i).toFixed(1)},${y(v).toFixed(1)}`).join(" ");
+  const grid = [0, .5, 1].map((f) => `<line x1="${L}" x2="${W}" y1="${y(hi * f)}" y2="${y(hi * f)}" stroke="var(--line)" stroke-dasharray="3 4"/>
+    <text x="${L - 6}" y="${y(hi * f) + 3}" text-anchor="end">${num(hi * f)}${unit}</text>`).join("");
+  const step = Math.max(1, Math.floor(labels.length / 5));
+  const ticks = labels.map((t, i) => i % step ? "" : `<text x="${x(i)}" y="${H - 3}" text-anchor="middle">${esc(t)}</text>`).join("");
+  const hover = chartPoints(values.map((v, i) => [x(i), y(v), `${esc(labels[i] || "")} · <b>${num(v)}${unit}</b>`]));
+  const id = "ma" + chartSeq;
+  return `<svg viewBox="0 0 ${W} ${H}" data-chart="${hover}" style="height:auto;font-size:10px;fill:var(--muted)">
+    <defs><linearGradient id="${id}" x1="0" y1="0" x2="0" y2="1"><stop offset="0" stop-color="var(--chart)" stop-opacity=".45"/><stop offset="1" stop-color="var(--chart)" stop-opacity="0"/></linearGradient></defs>
+    ${grid}<path d="${d} L${x(values.length - 1)},${H - B} L${L},${H - B}Z" fill="url(#${id})"/><path d="${d}" fill="none" stroke="var(--chart)" stroke-width="2"/>${ticks}</svg>
+    ${capped ? `<div class="capped">▲ ${capped} pic(s) tronqué(s), max ${num(Math.max(...values))}${unit}</div>` : ""}`;
+}
+
 async function refreshNetwork() {
   const [nodes, config] = await Promise.all([api("/api/nodes"), api("/api/config")]);
   const vals = await node("/validators").catch(() => null);
@@ -318,6 +345,34 @@ async function refreshNetwork() {
   if (heights.length > 1 && Math.max(...heights) - Math.min(...heights) > 3)
     html += `<div class="card alert warning">Écart de ${Math.max(...heights) - Math.min(...heights)} blocs entre les nœuds : l'un d'eux est en retard.</div>`;
   $("nodes").innerHTML = html;
+
+  // Cartes de synthèse et graphiques, depuis le premier nœud joignable.
+  const top = nodes.nodes[primary]?.status;
+  const hist = await node("/history").catch(() => null);
+  const hb = hist?.blocks || [];
+  const gaps = hb.slice(1).map((b, i) => (b.timestamp - hb[i].timestamp) / 1000);
+  const at = hb.slice(1).map((b) => new Date(b.timestamp).toLocaleTimeString("fr-FR", { hour: "2-digit", minute: "2-digit" }));
+  const okNodes = nodes.nodes.filter((n) => n.ok).length;
+  const nv = vals?.validators || [];
+  const absentN = nv.filter((v) => v.presence === "absent").length;
+  const avg = gaps.length ? gaps.reduce((a, g) => a + g, 0) / gaps.length : 0;
+  const card = (ico, label, value, cells) => `<div class="stat"><div class="top"><div><span class="ico"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linejoin="round">${ico}</svg></span>
+    <div><div class="label">${label}</div><div class="value">${value}</div></div></div></div>
+    <div class="panel">${cells.map(([k, v]) => `<div><span>${k}</span><b>${v}</b></div>`).join("")}</div></div>`;
+  $("netStats").innerHTML = [
+    card('<path d="M12 2 3 7v10l9 5 9-5V7z"/><path d="M3 7l9 5 9-5M12 12v10"/>', "Hauteur", top ? fr(top.height) : "—",
+      [["Temps moyen", avg ? avg.toFixed(1) + " s" : "—"], ["Blocs (1 h)", fr(hb.length)], ["Transactions (1 h)", fr(hb.reduce((a, b) => a + b.transactions, 0))], ["En attente", top ? fr(top.pending_transactions) : "—"]]),
+    card('<rect x="3" y="4" width="18" height="7" rx="1"/><rect x="3" y="13" width="18" height="7" rx="1"/><path d="M7 7.5h.01M7 16.5h.01"/>', "Nœuds suivis", `${okNodes} <small>/ ${nodes.nodes.length}</small>`,
+      [["En ligne", `<span class="${okNodes === nodes.nodes.length ? "ok" : "warn"}">${okNodes}</span>`], ["Injoignables", fr(nodes.nodes.length - okNodes)], ["Pairs", top ? fr(top.peers) : "—"], ["Version", top ? esc(top.node_version) : "—"]]),
+    card('<path d="M12 2 4 5v6c0 5 3.4 9.4 8 11 4.6-1.6 8-6 8-11V5z"/><path d="m9 12 2 2 4-4"/>', "Validateurs", fr(nv.length),
+      [["Quorum", fr(quorum(nv.length))], ["Pannes tolérées", fr(nv.length - quorum(nv.length))], ["Absents", `<span class="${absentN ? "bad" : ""}">${absentN}</span>`], ["En retard", fr(nv.filter((v) => v.presence === "en retard").length)]]),
+    card('<path d="M9 11l3 3L22 4"/><path d="M21 12v7a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h11"/>', "Propositions", `<span id="todoStat">${$("todo").hidden ? 0 : esc($("todo").textContent)}</span>`,
+      [["Chaîne", top ? `<span class="mono">${esc(top.chain_id)}</span>` : "—"], ["Protocole", top ? "v" + top.protocol_version : "—"]]),
+  ].join("");
+  $("netGaps").innerHTML = miniArea(gaps, at, " s");
+  $("netTx").innerHTML = miniArea(hb.slice(1).map((b) => b.transactions), at, " tx");
+  loaded($("view-reseau"));
+  bindCharts($("view-reseau"));
 
   if (vals) {
     const cls = { "en ligne": "ok", "en retard": "warn", "absent": "bad", "nouveau": "muted" };
