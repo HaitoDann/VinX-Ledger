@@ -232,3 +232,50 @@ nav details.more .menu a.active { background: var(--accent-soft); }
   table.tx td:nth-child(5) { grid-area: 3 / 2; text-align: right; }
   table.tx td:nth-child(5) .pill { font-size: 11px; padding: 0 6px; }
 }
+
+/* Bouton copier. */
+button.copy { display: inline-grid; place-items: center; width: 24px; height: 24px; padding: 0; margin-left: 4px; vertical-align: middle;
+              border: 1px solid transparent; background: transparent; color: var(--muted); border-radius: 4px; }
+button.copy:hover { color: var(--accent); border-color: var(--line); background: var(--card-2); }
+button.copy svg { width: 13px; height: 13px; }
+button.copy.done { color: var(--ok); }
+button.copy.done svg { display: none; }
+button.copy.done::after { content: "✓"; font-size: 13px; }
+.amt { border-bottom: 1px dotted var(--muted); cursor: help; }
+time[title] { cursor: help; }
+/* Frais et précisions sous un montant : discrets. */
+td .sub, td.amount .sub { font-size: 11px; }
+
+/* Bandeau d'état global (tableau de bord du nœud). */
+.status-banner { display: flex; gap: 14px; align-items: center; padding: 14px 18px; border-radius: 6px; border: 1px solid var(--line);
+                 background: var(--card); box-shadow: var(--shadow); border-left: 4px solid var(--ok); }
+.status-banner .big-dot { width: 12px; height: 12px; flex: none; background: var(--ok); transform: rotate(45deg); box-shadow: 0 0 0 5px var(--accent-soft); }
+.status-banner b { font-size: 15px; }
+.status-banner .sub { margin-top: 2px; }
+.status-banner.warn { border-left-color: var(--warn); } .status-banner.warn .big-dot { background: var(--warn); box-shadow: 0 0 0 5px rgba(245, 165, 36, .15); }
+.status-banner.bad { border-left-color: var(--bad); } .status-banner.bad .big-dot { background: var(--bad); box-shadow: 0 0 0 5px rgba(255, 107, 107, .15); }
+.status-banner .right { margin-left: auto; text-align: right; color: var(--muted); font-size: 12px; }
+
+/* En direct : pastille qui pulse, nouvelles lignes en surbrillance. */
+.live { display: inline-flex; align-items: center; gap: 6px; font-size: 12px; color: var(--ok); font-weight: 600; }
+.live::before { content: ""; width: 7px; height: 7px; border-radius: 50%; background: currentColor; animation: pulse 1.6s ease-out infinite; }
+@keyframes pulse { 0% { box-shadow: 0 0 0 0 rgba(13, 220, 142, .6); } 100% { box-shadow: 0 0 0 8px rgba(13, 220, 142, 0); } }
+tr.fresh td { animation: fresh 2.4s ease-out; }
+@keyframes fresh { from { background: var(--accent-soft); } to { background: transparent; } }
+@media (prefers-reduced-motion: reduce) { .live::before, tr.fresh td { animation: none; } }
+
+/* Confirmation d'un envoi. */
+.confirm-amount { text-align: center; padding: 6px 0 14px; }
+.confirm-amount .big { font-size: 32px; font-weight: 750; letter-spacing: -.02em; font-variant-numeric: tabular-nums; }
+.confirm-amount .big small { font-size: 15px; color: var(--accent); margin-left: 4px; }
+.flow { display: grid; grid-template-columns: 1fr auto 1fr; gap: 10px; align-items: center; margin-bottom: 14px; }
+.flow > div { background: var(--panel); border: 1px solid var(--line); border-radius: 6px; padding: 10px 12px; min-width: 0; }
+.flow .lbl { font-size: 11px; color: var(--muted); text-transform: uppercase; letter-spacing: .08em; }
+.flow .who { font-weight: 600; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.flow .arrow { color: var(--accent); font-size: 20px; padding: 0; border: none; background: none; }
+.breakdown { display: grid; grid-template-columns: 1fr auto; gap: 6px 12px; font-size: 13px; font-variant-numeric: tabular-nums; }
+.breakdown dt { color: var(--muted); } .breakdown dd { text-align: right; margin: 0; }
+.breakdown .total { border-top: 1px solid var(--line); padding-top: 6px; font-weight: 700; }
+.balance-bar { height: 6px; border-radius: 3px; background: var(--line); overflow: hidden; margin: 12px 0 4px; display: flex; }
+.balance-bar span { background: var(--accent); } .balance-bar i { background: var(--warn); }
+.notice { border-radius: 6px; padding: 9px 12px; font-size: 13px; margin-top: 10px; background: rgba(245, 165, 36, .1); color: var(--warn); }

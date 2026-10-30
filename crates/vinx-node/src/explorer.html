@@ -103,15 +103,17 @@ async function loadAssets() {
 }
 
 /* Liens. */
-const addr = (a, n = 14) => a ? `<a class="mono" href="#/adresse/${esc(a)}">${esc(short(a, n))}</a>` : "—";
-const txLink = (id, n = 12) => `<a class="mono" href="#/tx/${esc(id)}">${esc(short(id, n))}</a>`;
+const addr = (a, n = 14) => a ? `<span class="nowrap"><a class="mono" href="#/adresse/${esc(a)}" title="${esc(a)}">${esc(short(a, n))}</a>${copyBtn(a, "Copier l'adresse")}</span>` : "—";
+const txLink = (id, n = 12) => `<span class="nowrap"><a class="mono" href="#/tx/${esc(id)}" title="${esc(id)}">${esc(short(id, n))}</a>${copyBtn(id, "Copier l'identifiant")}</span>`;
+/* Identifiant complet suivi d'un bouton copier (pages de détail). */
+const full = (v) => `<span class="mono">${esc(v)}</span>${copyBtn(v)}`;
 const blockLink = (h) => `<a href="#/bloc/${h}">${fr(h)}</a>`;
 const assetLink = (s) => `<a href="#/jeton/${esc(s)}"><b>${esc(s)}</b></a>`;
 
 /* Montant d'une transaction, quel que soit son type. */
-function txAmount(t) {
-  if (t.asset && t.units) return inAsset(t.units, t.asset);
-  if (t.amount) return vinx(t.amount);
+function txAmount(t, compact = false) {
+  if (t.asset && t.units) return compact ? shortAmount(fmt(t.units, assets[t.asset]?.decimals ?? 0), esc(t.asset)) : inAsset(t.units, t.asset);
+  if (t.amount) return compact ? shortAmount(fmt(t.amount), "VINX") : vinx(t.amount);
   return "";
 }
 function txCounterparty(t) {
@@ -125,7 +127,7 @@ function txTable(list, { withBlock = true } = {}) {
       ${withBlock ? `<td>${t.height ? blockLink(t.height) : '<span class="warn">en attente</span>'}</td>` : ""}
       <td>${txLink(t.id)}</td><td>${esc(t.kind)}${t.asset && !t.units ? " " + esc(t.asset) : ""}</td>
       <td>${t.sender ? addr(t.sender) : '<span class="muted">trésorerie</span>'}</td><td>${addr(txCounterparty(t))}</td>
-      <td class="amount">${txAmount(t)}</td></tr>`).join("")}
+      <td class="amount">${txAmount(t, true)}</td></tr>`).join("")}
   </tbody></table></div>`;
 }
 
@@ -219,7 +221,7 @@ async function home() {
   return `
     <div class="stats">
       ${stat("cube", "Hauteur", fr(status.height), [
-        ["Dernier bloc", last ? ago(last.timestamp) : "—"], ["Temps moyen", avgGap ? avgGap.toFixed(1) + " s" : "—"],
+        ["Dernier bloc", last ? when(last.timestamp) : "—"], ["Temps moyen", avgGap ? avgGap.toFixed(1) + " s" : "—"],
         [`Tx (${fr(window_.length)} blocs)`, fr(totalTx)], ["Tx max / bloc", fr(Math.max(0, ...txs))]])}
       ${stat("coin", "VINX émis", `${e.emitted ? fmt(e.emitted).split(",")[0] : "0"} <small>VINX</small>`, [
         ["Budget", e.budget ? fmt(e.budget).split(",")[0] : "—"], ["Pourcentage", pct.toLocaleString("fr-FR") + " %"],
@@ -246,10 +248,10 @@ async function home() {
           ${[["Validateurs", fr(status.validators.length)], ["Quorum", fr(Math.floor(2 * status.validators.length / 3) + 1)], ["Pannes tolérées", fr(status.validators.length - Math.floor(2 * status.validators.length / 3) - 1)]]
             .map(([k, v]) => `<div class="stat" style="padding:10px;box-shadow:none;background:var(--panel)"><div class="label">${k}</div><div class="value" style="font-size:18px">${v}</div></div>`).join("")}
         </div></section>
-      <section class="card"><h2>Derniers blocs <a class="more" href="#/blocs">Voir plus ›</a></h2><div class="scroll"><table>
+      <section class="card" data-height="${status.height}"><h2>Derniers blocs <span class="live">en direct</span><a class="more" href="#/blocs">Voir plus ›</a></h2><div class="scroll"><table>
         <thead><tr><th>Bloc</th><th>Heure</th><th class="num">Transactions</th><th>Proposeur</th></tr></thead><tbody>
-        ${blocks.blocks.slice(0, 8).map((b) => `<tr class="link" onclick="location.hash='#/bloc/${b.height}'">
-          <td>${blockLink(b.height)}</td><td class="nowrap">${ago(b.timestamp)}</td><td class="num">${fr(b.transactions + b.admin_transactions)}</td><td>${vnames[b.proposer] ? esc(vnames[b.proposer]) : "n° " + (b.proposer + 1)}</td></tr>`).join("")}
+        ${blocks.blocks.slice(0, 8).map((b) => `<tr class="link${seenHeight !== null && b.height > seenHeight ? " fresh" : ""}" onclick="location.hash='#/bloc/${b.height}'">
+          <td>${blockLink(b.height)}</td><td class="nowrap">${when(b.timestamp)}</td><td class="num">${fr(b.transactions + b.admin_transactions)}</td><td>${vnames[b.proposer] ? esc(vnames[b.proposer]) : "n° " + (b.proposer + 1)}</td></tr>`).join("")}
         </tbody></table></div></section>
     </div>
     <section class="card"><h2>Dernières transactions</h2>${txTable(recent.slice(0, 10))}</section>`;
@@ -263,7 +265,7 @@ async function blockList(before) {
   return `<section class="card"><h2>Blocs</h2><div class="scroll"><table>
     <thead><tr><th>Bloc</th><th>Heure</th><th>Transactions</th><th>Proposeur</th><th>Round</th><th>Hash</th></tr></thead><tbody>
     ${list.map((b) => `<tr class="link" onclick="location.hash='#/bloc/${b.height}'">
-      <td>${blockLink(b.height)}</td><td class="nowrap">${dateTime(b.timestamp)}</td><td>${fr(b.transactions + b.admin_transactions)}</td>
+      <td>${blockLink(b.height)}</td><td class="nowrap">${when(b.timestamp)}</td><td>${fr(b.transactions + b.admin_transactions)}</td>
       <td>n° ${b.proposer + 1}</td><td class="${b.round ? "warn" : ""}">${b.round ?? "—"}</td><td class="mono">${esc(short(b.hash, 16))}</td></tr>`).join("")}
     </tbody></table></div>
     <div class="crumbs" style="margin-top:10px">${before ? `<a href="#/blocs">← les plus récents</a>` : ""}
@@ -278,15 +280,15 @@ async function block(h) {
   const admin = b.admin_details.map((a) => ({ ...a, kind: `admin : ${a.kind}`, height: b.height }));
   return `<div class="crumbs">${b.height > 1 ? `<a href="#/bloc/${b.height - 1}">← bloc ${fr(b.height - 1)}</a>` : ""}<a href="#/bloc/${b.height + 1}">bloc ${fr(b.height + 1)} →</a></div>
     <section class="card"><h1>Bloc ${fr(b.height)}</h1><dl>
-      <dt>Heure</dt><dd>${dateTime(b.timestamp)} (${ago(b.timestamp)})</dd>
+      <dt>Heure</dt><dd>${when(b.timestamp)} <span class="muted">· ${dateTime(b.timestamp)}</span></dd>
       <dt>Proposeur</dt><dd>${v ? (v.name ? esc(v.name) + " " : "") + `<span class="muted">validateur n° ${v.index + 1}</span>` : "—"}</dd>
       <dt>Round</dt><dd>${b.round ?? "—"}</dd>
       <dt>Signé par</dt><dd>${b.signers.map((s) => s.name ? esc(s.name) : `n° ${s.index + 1}`).join(", ") || "—"}</dd>
       <dt>Protocole</dt><dd>${b.protocol_version}</dd>
       <dt>Transactions</dt><dd>${fr(count)}</dd>
-      <dt>Hash</dt><dd class="mono">${esc(b.hash)}</dd>
-      <dt>Parent</dt><dd class="mono">${esc(b.prev_hash)}</dd>
-      <dt>Racine d'état</dt><dd class="mono">${esc(b.state_root)}</dd>
+      <dt>Hash</dt><dd>${full(b.hash)}</dd>
+      <dt>Parent</dt><dd>${full(b.prev_hash)}</dd>
+      <dt>Racine d'état</dt><dd>${full(b.state_root)}</dd>
     </dl></section>
     ${count ? `<section class="card"><h2>Transactions</h2>${txTable([...admin, ...b.details], { withBlock: false })}
       ${b.transactions.length > b.details.length ? `<p class="muted">Les ${fr(b.details.length)} premières sur ${fr(b.transactions.length)}.</p>` : ""}</section>` : ""}`;
@@ -296,7 +298,7 @@ async function tx(id) {
   await loadAssets();
   const t = await get(`/transactions/${encodeURIComponent(id)}`);
   const rows = [
-    ["Statut", t.status === "finalisée" ? `<span class="ok">finalisée</span> au bloc ${blockLink(t.height)}, ${dateTime(t.timestamp)}` : `<span class="warn">${esc(t.status)}</span>`],
+    ["Statut", t.status === "finalisée" ? `<span class="ok">finalisée</span> au bloc ${blockLink(t.height)}, ${when(t.timestamp)} <span class="muted">· ${dateTime(t.timestamp)}</span>` : `<span class="warn">${esc(t.status)}</span>`],
     ["Type", esc(t.kind)],
   ];
   if (t.sender) rows.push(["Émetteur", addr(t.sender, 64)], ["Nonce", t.nonce], ["Frais", vinx(t.fee)]);
@@ -316,7 +318,7 @@ async function tx(id) {
   if (t.payments) rows.push(["Paiements", `${t.payments.length}<div>${t.payments.map((p) => `${addr(p.to)} ${vinx(p.amount)}${p.memo ? ` <span class="muted">${esc(p.memo)}</span>` : ""}`).join("<br>")}</div>`]);
   if (t.memo) rows.push(["Mémo", esc(t.memo)]);
   if (t.detail) rows.push(["Détail", esc(typeof t.detail === "string" ? t.detail : JSON.stringify(t.detail))]);
-  return `<section class="card"><h1>Transaction</h1><p class="mono">${esc(t.id)}</p>
+  return `<section class="card"><h1>Transaction</h1><p>${full(t.id)}</p>
     <dl>${rows.map(([k, v]) => `<dt>${k}</dt><dd>${v}</dd>`).join("")}</dl></section>`;
 }
 
@@ -330,7 +332,7 @@ async function account(a) {
   const tokens = acc.assets || [];
   const pol = acc.policy;
   const m = acc.mandates || { granted: [], received: [] };
-  return `<section class="card"><h1 class="mono">${esc(acc.address)}</h1><dl>
+  return `<section class="card"><h1 class="mono">${esc(acc.address)}${copyBtn(acc.address, "Copier l'adresse")}</h1><dl>
       <dt>Solde</dt><dd><b>${vinx(acc.balance)}</b></dd>
       ${acc.names.length ? `<dt>Noms</dt><dd>${acc.names.map((n) => `<a href="#/nom/${esc(n.name.replace(/\.vinx$/, ""))}">${esc(n.name)}</a>`).join(", ")}</dd>` : ""}
       <dt>Transactions envoyées</dt><dd>${fr(acc.nonce)}</dd>
@@ -412,7 +414,7 @@ $("searchForm").addEventListener("submit", async (e) => {
 });
 
 /* ---------- Navigation ---------- */
-let timer = null;
+let timer = null, seenHeight = null;
 async function route() {
   const [, view = "", arg = ""] = (location.hash.slice(1) || "/").split("/");
   const pages = { "": home, blocs: blockList, bloc: block, tx, adresse: account, jetons: tokens, jeton: token, nom: name };
@@ -425,13 +427,27 @@ async function route() {
   $("page").innerHTML = page === home
     ? `<div class="stats">${'<div class="skeleton skel-card"></div>'.repeat(4)}</div><div class="home-grid">${'<div class="skeleton skel-card" style="height:260px"></div>'.repeat(2)}</div>`
     : '<div class="skeleton skel-card"></div>';
+  let shownHeight = null;
+  seenHeight = null;
   const run = async () => {
-    try { $("page").innerHTML = await page(decodeURIComponent(arg)); bindCharts($("page")); }
+    try {
+      // Accueil en direct : on ne recharge que si un bloc est arrivé, et les nouveaux blocs s'allument.
+      if (page === home && shownHeight !== null) {
+        const st = await get("/status");
+        if (st.height === shownHeight) return;
+        $("height").textContent = `bloc ${fr(st.height)}`;
+        seenHeight = shownHeight;
+      }
+      const html = await page(decodeURIComponent(arg));
+      const y = window.scrollY;
+      $("page").innerHTML = html; bindCharts($("page"));
+      if (page === home) { shownHeight = +($("page").querySelector("[data-height]")?.dataset.height ?? 0); window.scrollTo(0, y); }
+    }
     catch (e) { $("page").innerHTML = `<section class="card alert">${e.status === 404 ? "Introuvable : " : "Erreur : "}${esc(e.message)}</section>`; }
   };
   await run();
   // L'accueil se met à jour seul, sans charger le nœud : toutes les 10 s.
-  if (page === home) timer = setInterval(run, 10000);
+  if (page === home) timer = setInterval(run, 5000);
   get("/status").then((s) => { $("chain").textContent = s.chain_id; $("height").textContent = `bloc ${fr(s.height)}`; $("height").className = "pill ok"; })
     .catch(() => { $("height").textContent = "hors ligne"; $("height").className = "pill bad"; });
   window.scrollTo(0, 0);

@@ -380,9 +380,9 @@ async function refreshNetwork() {
       const pct = v.expected ? (100 * v.signed / v.expected).toFixed(1) + " %" : "—";
       const label = v.name || "n° " + (v.index + 1);
       return `<tr><td>${v.name ? esc(v.name) + ` <span class="muted">(n° ${v.index + 1})</span>` : "Validateur n° " + (v.index + 1)}
-        <div class="sub mono">${esc(short(v.key, 18))}</div></td>
+        <div class="sub mono">${esc(short(v.key, 18))}${copyBtn(v.key, "Copier la clé")}</div></td>
         <td class="${cls[v.presence] || ""}"><span class="dot"></span>${esc(v.presence)}</td>
-        <td>${v.last_signed_ms ? ago(v.last_signed_ms) : "—"}</td><td>${pct}</td>
+        <td>${v.last_signed_ms ? when(v.last_signed_ms) : "—"}</td><td>${pct}</td>
         <td class="${v.missed_proposals ? "warn" : ""}">${v.missed_proposals}</td>
         <td><button class="danger" data-key="${esc(v.key)}" data-name="${esc(label)}" onclick="proposeRemove(this.dataset.key, this.dataset.name)">Retirer…</button></td></tr>`;
     }).join("");

@@ -56,3 +56,48 @@ function bindCharts(root = document) {
 /* Squelettes de chargement : retirés au premier rendu réussi. */
 function skeleton(selector) { document.querySelectorAll(selector).forEach((e) => e.classList.add("skeleton")); }
 function loaded(root = document) { root.querySelectorAll(".skeleton").forEach((e) => e.classList.remove("skeleton")); }
+
+/* ---------- Mise en forme commune ---------- */
+
+/* Dates : temps relatif partout, date exacte au survol, mis à jour tout seul. */
+function relTime(ms) {
+  const s = Math.round((Date.now() - ms) / 1000);
+  if (s < 5) return "à l'instant";
+  if (s < 60) return `il y a ${s} s`;
+  if (s < 3600) return `il y a ${Math.floor(s / 60)} min`;
+  if (s < 86400) return `il y a ${Math.floor(s / 3600)} h`;
+  if (s < 7 * 86400) return `il y a ${Math.floor(s / 86400)} j`;
+  return new Date(ms).toLocaleDateString("fr-FR", { day: "numeric", month: "short", year: "numeric" });
+}
+function when(ms) {
+  if (!ms) return "—";
+  const full = new Date(ms).toLocaleString("fr-FR", { dateStyle: "long", timeStyle: "medium" });
+  return `<time data-ts="${ms}" datetime="${new Date(ms).toISOString()}" title="${full}">${relTime(ms)}</time>`;
+}
+setInterval(() => document.querySelectorAll("time[data-ts]").forEach((t) => { t.textContent = relTime(+t.dataset.ts); }), 15000);
+
+/* Montants : au plus 4 décimales à l'écran, la valeur exacte au survol.
+   `text` est un montant déjà formaté (« 1 234,567891234 »). */
+function shortAmount(text, unit = "") {
+  const [whole, frac = ""] = String(text).split(",");
+  const shown = frac.length > 4 ? `${whole},${frac.slice(0, 4)}…` : text;
+  const u = unit ? ` ${unit}` : "";
+  return shown === text ? `${text}${u}` : `<span class="amt" title="${text}${u}">${shown}${u}</span>`;
+}
+
+/* Bouton copier, à côté d'une adresse, d'un identifiant ou d'un hash. */
+const COPY_ICON = '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="9" y="9" width="12" height="12" rx="2"/><path d="M5 15V5a2 2 0 0 1 2-2h10"/></svg>';
+function copyBtn(text, label = "Copier") {
+  return `<button type="button" class="copy" data-copy="${String(text).replace(/"/g, "&quot;")}" title="${label}" aria-label="${label}">${COPY_ICON}</button>`;
+}
+// En phase de capture : un clic sur « copier » n'ouvre pas la ligne du tableau.
+document.addEventListener("click", async (e) => {
+  const b = e.target.closest("button.copy");
+  if (!b) return;
+  e.preventDefault(); e.stopPropagation();
+  try {
+    await navigator.clipboard.writeText(b.dataset.copy);
+    b.classList.add("done"); b.title = "Copié";
+    setTimeout(() => { b.classList.remove("done"); b.title = "Copier"; }, 1200);
+  } catch (_) { b.title = "Copie impossible : sélectionne le texte à la main"; }
+}, true);

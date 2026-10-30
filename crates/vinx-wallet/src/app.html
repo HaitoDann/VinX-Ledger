@@ -441,6 +441,7 @@ function dialog(title, html, { ok = "Confirmer", cancel = true } = {}) {
 }
 
 /* Unités (chaîne, 1 VINX = 10⁹) → texte en VINX. */
+const fullVinx = (u) => vinx(u);
 function vinx(u) {
   let n; try { n = BigInt(u || "0"); } catch (_) { return "—"; }
   const whole = (n / 1000000000n).toString().replace(/\B(?=(\d{3})+(?!\d))/g, " ");
@@ -456,7 +457,7 @@ function who(addr) {
   if (c) return esc(c.name);
   const me = (state?.accounts || []).find((a) => a.address === addr);
   if (me) return esc(me.label);
-  return `<span class="mono" title="${esc(addr)}">${esc(short(addr))}</span>`;
+  return `<span class="nowrap"><span class="mono" title="${esc(addr)}">${esc(short(addr))}</span>${copyBtn(addr, "Copier l'adresse")}</span>`;
 }
 
 /* ----- Écrans ----- */
@@ -916,6 +917,9 @@ $("csvBtn").onclick = () => {
     "\ufeff" + rows.map((r) => r.map(cell).join(";")).join("\r\n"), "text/csv");
 };
 function txRow(t) {
+  // Dans les listes : au plus 4 décimales, la valeur exacte au survol ; dates relatives.
+  const vinx = (u) => shortAmount(fullVinx(u));
+  const date = when;
   const out = t.sender === data.address;
   const kinds = { "paiement": out ? "Envoi" : "Réception", "nom": "Nom " + (t.name || ""), "cession de nom": "Cession " + (t.name || ""),
     "séquestre": out ? "Séquestre ouvert" : "Séquestre en votre faveur", "séquestre versé": "Séquestre versé", "séquestre remboursé": "Séquestre remboursé",
@@ -934,7 +938,7 @@ function txRow(t) {
     const inbound = collector ? t.sender === data.address : t.to === data.address;
     const moves = ["paiement en actif", "reprise forcée", "prélèvement", "séquestre"].includes(t.kind);
     const sign = inbound ? "+" : moves || t.kind === "destruction d'actif" ? "−" : "";
-    const shown = a ? units(t.units, a.decimals) : t.units;
+    const shown = shortAmount(a ? units(t.units, a.decimals) : t.units);
     return `<tr><td>${t.status === "en attente" ? "à l'instant" : date(t.timestamp)}</td><td>${esc(kinds[t.kind] || t.kind)}${t.memo ? `<div class="sub">${esc(t.memo)}</div>` : ""}</td>
       <td>${t.to && t.to !== data.address ? who(t.to) : t.from && t.from !== data.address ? who(t.from) : t.payer && t.payer !== data.address ? who(t.payer) : t.sender !== data.address ? who(t.sender) : ""}</td>
       <td style="text-align:right"><span class="${inbound ? "in" : "out"}">${sign} ${shown} ${esc(t.asset)}</span>${out ? `<div class="sub">frais ${vinx(t.fee)}</div>` : ""}</td>
@@ -1031,13 +1035,46 @@ async function operate(op, title, done) {
   op.account = current;
   let p;
   try { p = await api("/api/preview", op); } catch (e) { return toast(e.message, true); }
-  const mono = (l) => /^vinx1/.test(l.value) ? "mono" : "";
   const fr = (v) => String(v).replace(/^(\d+)\.(\d+)/, "$1,$2");
-  const html = `<dl>${p.lines.map((l) => `<dt>${esc(l.label)}</dt><dd class="${mono(l)}">${esc(fr(l.value))}</dd>`).join("")}
-    <dt>Frais du réseau</dt><dd>${esc(fr(p.fee))} VINX</dd><dt><b>Total débité</b></dt><dd><b>${esc(fr(p.total))} VINX</b></dd>
-    <dt>Solde après</dt><dd>${esc(fr(p.after))} VINX</dd></dl>
-    ${p.warnings.map((w) => `<p class="warn">⚠ ${esc(w)}</p>`).join("")}`;
-  if (!await dialog(title, html, { ok: "Confirmer" })) return;
+  const line = (label) => p.lines.find((l) => l.label === label)?.value;
+  const warnings = p.warnings.map((w) => `<p class="notice">⚠ ${esc(w)}</p>`);
+  let html, ok = "Confirmer";
+  const to = line("Destinataire");
+  if (op.action === "send" && to) {
+    // Envoi : montant en grand, de qui vers qui, détail des frais et solde avant / après.
+    const amount = fr(line("Montant") || "").replace(/ VINX$/, "");
+    const known = (state.contacts || []).some((c) => c.address === to) || (state.accounts || []).some((a) => a.address === to)
+      || (data?.history || []).some((t) => t.to === to || t.sender === to);
+    if (!known) warnings.unshift(`<p class="notice">⚠ Premier paiement vers cette adresse : vérifie-la caractère par caractère, un envoi ne peut pas être annulé.</p>`);
+    const num = (v) => Number(String(v).replace(/\s/g, "").replace(",", ".")) || 0;
+    const before = num(fr(p.after)) + num(fr(p.total));
+    const pct = before ? Math.max(0, Math.min(100, 100 * num(fr(p.after)) / before)) : 0;
+    const me = (state.accounts || []).find((a) => a.index === current);
+    html = `<div class="confirm-amount"><div class="label muted">Tu envoies</div><div class="big">${esc(amount)}<small>VINX</small></div></div>
+      <div class="flow">
+        <div><div class="lbl">De</div><div class="who">${esc(me?.label || "Mon compte")}</div><div class="mono sub">${esc(short(data.address))}</div></div>
+        <span class="arrow">→</span>
+        <div><div class="lbl">Vers</div><div class="who">${who(to).replace(/<button[\s\S]*<\/button>/, "")}</div>
+          <div class="sub">${esc(line("Trouvé par") || "")}</div></div>
+      </div>
+      <div class="mono sub" style="word-break:break-all;margin:-6px 0 12px">${esc(to)}${copyBtn(to)}</div>
+      <dl class="breakdown">
+        <dt>Montant</dt><dd>${esc(amount)} VINX</dd>
+        ${op.memo ? `<dt>Mémo</dt><dd>${esc(op.memo)}</dd>` : ""}
+        <dt>Frais du réseau</dt><dd>${esc(fr(p.fee))} VINX</dd>
+        <dt class="total">Total débité</dt><dd class="total">${esc(fr(p.total))} VINX</dd>
+      </dl>
+      <div class="balance-bar" title="Solde après l'envoi"><span style="width:${pct}%"></span><i style="width:${100 - pct}%"></i></div>
+      <div class="sub" style="display:flex;justify-content:space-between"><span>Solde après : <b>${esc(fr(p.after))} VINX</b></span><span>${(100 - pct).toLocaleString("fr-FR", { maximumFractionDigits: 1 })} % du solde</span></div>
+      ${warnings.join("")}`;
+    ok = `Envoyer ${amount} VINX`;
+  } else {
+    const mono = (l) => /^vinx1/.test(l.value) ? "mono" : "";
+    html = `<dl class="breakdown">${p.lines.map((l) => `<dt>${esc(l.label)}</dt><dd class="${mono(l)}">${esc(fr(l.value))}</dd>`).join("")}
+      <dt>Frais du réseau</dt><dd>${esc(fr(p.fee))} VINX</dd><dt class="total">Total débité</dt><dd class="total">${esc(fr(p.total))} VINX</dd>
+      <dt>Solde après</dt><dd>${esc(fr(p.after))} VINX</dd></dl>${warnings.join("")}`;
+  }
+  if (!await dialog(title, html, { ok })) return;
   try {
     await api("/api/execute", op);
     toast("Envoyé : confirmation dans quelques secondes.");
