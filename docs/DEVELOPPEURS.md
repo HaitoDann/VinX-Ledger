@@ -16,13 +16,13 @@ cargo run --release -p vinx-node -- run \
 
 `devnet` crée trois clés admin et une clé de validateur, chiffrées par le mot de
 passe, ainsi que la genèse. Le tableau de bord du nœud est sur
-`http://127.0.0.1:8545/`, ses métriques Prometheus sur `/metrics`. L'API :
+`http://127.0.0.1:8545/`, l'explorateur sur `/explorer`, ses métriques Prometheus sur `/metrics`. L'API :
 `/status`, `/governance`, `/accounts/{adresse}`, `/blocks`, `/blocks/{hauteur}`,
 `/escrow`, `/fees`,
 `/evidence` (preuves de validateurs fautifs), `/validators` (état de chaque
 validateur), `/history`, `/mempool`, `/admin-history`, `/transactions/{id}`,
 `/accounts/{adresse}/transactions`, `/names/{nom}`, `/deals/{id}`,
-`/attestations/{empreinte}`, `/assets`, `/assets/{symbole}`,
+`/attestations/{empreinte}`, `/assets`, `/assets/{symbole}`, `/blocks?before={hauteur}` (pagination),
 et en `POST`
 `/transactions` et `/admin-transactions`.
 

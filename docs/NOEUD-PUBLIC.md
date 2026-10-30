@@ -139,7 +139,7 @@ nœud ne suit plus la chaîne.
 
 | Exposé | Pas exposé |
 |---|---|
-| Le tableau de bord, l'API en lecture (comptes, blocs, noms, séquestres) | Les métriques `/metrics` (bloquées par Caddy) |
+| Le tableau de bord, l'explorateur (`/explorer`), l'API en lecture (comptes, blocs, noms, séquestres, jetons) | Les métriques `/metrics` (bloquées par Caddy) |
 | L'envoi de transactions signées (`POST /transactions`) | Aucune clé : le nœud n'en a pas |
 | | Le port P2P : uniquement des connexions sortantes |
 
