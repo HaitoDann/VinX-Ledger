@@ -477,6 +477,17 @@ async fn page(State(c): State<Shared>) -> Html<String> {
     Html(render_page(include_str!("cockpit.html")).replace("__COCKPIT_TOKEN__", &c.token))
 }
 
+/// Police de la charte (DM Sans, licence OFL), servie avec les pages.
+pub(crate) async fn font() -> impl axum::response::IntoResponse {
+    (
+        [
+            (axum::http::header::CONTENT_TYPE, "font/woff2"),
+            (axum::http::header::CACHE_CONTROL, "public, max-age=31536000, immutable"),
+        ],
+        include_bytes!("../../../assets/fonts/dm-sans.woff2").as_slice(),
+    )
+}
+
 /// Page complète : feuille de style commune, logo et icône de la charte VinX
 /// (`assets/`), insérés dans le gabarit.
 pub(crate) fn render_page(template: &str) -> String {
@@ -801,6 +812,7 @@ pub fn router(dir: PathBuf, token: String, port: u16) -> Router {
     let shared = Arc::new(Cockpit { dir, token, port });
     Router::new()
         .route("/", get(page))
+        .route("/fonts/dm-sans.woff2", get(font))
         .route("/api/config", get(get_config).post(put_config))
         .route("/api/nodes", get(nodes))
         .route("/api/node", get(node_get))

@@ -7,7 +7,7 @@
 <link rel="icon" href="__FAVICON__">
 <style>/*__THEME__*/
 main { display: grid; gap: 14px; }
-.big-search input { flex: 1; font: 14px ui-monospace, "Cascadia Mono", SFMono-Regular, Menlo, monospace; }
+.big-search input { flex: 1; font-size: 14px; }
 #page { display: grid; gap: 14px; }
 .home-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(min(100%, 460px), 1fr)); gap: 14px; }
 .explore-hero.compact { padding: 6px 0 4px; }
@@ -55,7 +55,7 @@ td .mono, td.mono, td.nowrap { word-break: normal; white-space: nowrap; }
   <section class="explore-hero" id="hero">
     <h1>Explorer <span>VinX Ledger</span></h1>
     <form class="big-search" id="searchForm">
-      <input id="q" placeholder="Adresse vinx1…, nom.vinx, jeton, transaction ou hauteur de bloc" autocomplete="off" spellcheck="false">
+      <input id="q" placeholder="Rechercher une adresse, un nom .vinx, un jeton, une transaction ou un bloc" autocomplete="off" spellcheck="false">
       <button class="primary">Chercher</button>
     </form>
   </section>

@@ -64,6 +64,7 @@ pub fn router(shared: SharedRef) -> Router {
     Router::new()
         .route("/", get(dashboard))
         .route("/explorer", get(explorer))
+        .route("/fonts/dm-sans.woff2", get(font))
         .route("/metrics", get(metrics))
         .route("/governance", get(governance))
         .route("/blocks", get(recent_blocks))
@@ -108,6 +109,17 @@ async fn explorer() -> axum::response::Html<&'static str> {
     static PAGE: std::sync::LazyLock<String> =
         std::sync::LazyLock::new(|| render_page(include_str!("explorer.html")));
     axum::response::Html(PAGE.as_str())
+}
+
+/// Police de la charte (DM Sans, licence OFL), servie avec les pages.
+pub(crate) async fn font() -> impl axum::response::IntoResponse {
+    (
+        [
+            (axum::http::header::CONTENT_TYPE, "font/woff2"),
+            (axum::http::header::CACHE_CONTROL, "public, max-age=31536000, immutable"),
+        ],
+        include_bytes!("../../../assets/fonts/dm-sans.woff2").as_slice(),
+    )
 }
 
 /// Page complète : feuille de style commune, logo et icône de la charte VinX

@@ -1723,6 +1723,7 @@ fn router_with_kdf(dir: PathBuf, token: String, port: u16, kdf: Kdf) -> Router {
     });
     Router::new()
         .route("/", get(page))
+        .route("/fonts/dm-sans.woff2", get(crate::cockpit::font))
         .route("/api/state", get(get_state))
         .route("/api/phrase", get(new_phrase))
         .route("/api/create", post(create))

@@ -1,6 +1,6 @@
 # Charte graphique VinX Ledger
 
-Elle découle du logo (`assets/logo.svg`) : un V et un X anguleux, un losange et un triangle, émeraude sur noir.
+Elle découle du logo (`assets/logo.svg`), émeraude sur noir, avec une mise en page sobre inspirée des explorateurs de blockchain : gris neutres, l'émeraude réservée aux actions, aux liens et aux graphiques.
 Le tableau de bord du nœud et le cockpit partagent la même feuille de style, `assets/theme.css`, intégrée aux binaires à la compilation.
 
 ## Couleurs
@@ -25,11 +25,16 @@ Le thème sombre est celui par défaut. Le bouton rond de l'en-tête bascule en 
 - **Graphiques** : aires lissées en dégradé émeraude, avec graduations.
 - **Classements** : rang dans une pastille ronde, colonnes chiffrées alignées à droite.
 
+## Police
+
+**DM Sans** (licence SIL Open Font License, `assets/fonts/`), intégrée aux binaires et servie par le nœud et le portefeuille à `/fonts/dm-sans.woff2` : aucune dépendance à Internet. Poids 400 pour le texte, 500 pour les titres, 600 pour les grands chiffres. Les adresses, clés et hash restent en police à chasse fixe.
+
 ## Formes
 
-- **Angles** : rayons faibles (2 à 4 px). Les cartes et les tuiles ont le coin supérieur droit coupé (`clip-path`), comme les branches du logo.
-- **Losange** : c'est le motif de la marque. Il précède les titres de section et sert de pastille d'état (en ligne, absent) et de repère dans les frises.
-- **Titres de section** : en majuscules, espacés.
+- **Coins arrondis** : 12 px pour les cartes, 8 px pour les champs, boutons et panneaux internes, pastilles entièrement arrondies.
+- **Titres de carte** : en minuscules, 14 px, sur un bandeau légèrement hachuré.
+- **Pastilles d'état** : fond teinté, sans bordure (vert, orange, rouge).
+- **Liens** : émeraude, soulignés seulement au survol.
 - **Onglets** : soulignés en émeraude.
 - **Bouton principal** : émeraude plein. Les autres boutons sont bordés.
 

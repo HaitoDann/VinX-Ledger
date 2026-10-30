@@ -10,11 +10,11 @@
 /* Propre au portefeuille : écrans d'accueil et gros solde. */
 .narrow { max-width: 560px; width: 100%; margin: 0 auto; }
 .hero { padding: 22px 20px; }
-.hero .label { color: var(--muted); font-size: 11px; text-transform: uppercase; letter-spacing: .12em; font-weight: 600; }
-.hero .balance { font-size: 40px; font-weight: 750; letter-spacing: -.02em; font-variant-numeric: tabular-nums; margin: 4px 0 2px; }
+.hero .label { color: var(--muted); font-size: 13px; }
+.hero .balance { font-size: 40px; font-weight: 600; letter-spacing: -.02em; font-variant-numeric: tabular-nums; margin: 4px 0 2px; }
 .hero.balance-card { padding: 24px; background: var(--stripes), radial-gradient(120% 140% at 100% 0, rgba(13, 220, 142, .08), transparent 55%), var(--card); }
 .balance-card .grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(min(100%, 300px), 1fr)); gap: 18px 24px; align-items: end; }
-.balance-card .panel { background: var(--panel); border: 1px solid var(--line); border-radius: 4px; padding: 10px 12px;
+.balance-card .panel { background: var(--panel); border: 1px solid var(--line); border-radius: 8px; padding: 10px 12px;
                        display: grid; grid-template-columns: 1fr 1fr; gap: 0 12px; }
 .balance-card .panel > div { padding: 7px 0; min-width: 0; }
 .balance-card .panel > div:nth-child(n+3) { border-top: 1px dashed var(--line); }
@@ -22,11 +22,11 @@
 .balance-card .panel > div > span { font-size: 11px; color: var(--muted); }
 .balance-card .panel b { display: block; font-size: 14px; font-variant-numeric: tabular-nums; }
 .range { display: flex; gap: 4px; margin-left: auto; }
-.range button { padding: 3px 10px; font-size: 12px; text-transform: none; letter-spacing: 0; }
+.range button { padding: 3px 10px; font-size: 12px; border-radius: 999px; }
 .range button.on { border-color: var(--accent); color: var(--accent); background: var(--accent-soft); }
 #balanceChart.skeleton { min-height: 200px; } #recent.skeleton { min-height: 160px; } #balanceStats.skeleton { min-height: 110px; }
 #balanceChart svg { display: block; width: 100%; height: auto; }
-.hero .balance small { font-size: 18px; color: var(--accent); font-weight: 700; margin-left: 6px; }
+.hero .balance small { font-size: 18px; color: var(--muted); font-weight: 500; margin-left: 6px; }
 .words { display: grid; grid-template-columns: repeat(3, 1fr); gap: 8px; margin: 12px 0; counter-reset: w; }
 .words span { background: var(--bg); border: 1px solid var(--line); border-radius: 3px; padding: 8px 10px;
               font: 14px ui-monospace, "Cascadia Mono", Menlo, monospace; counter-increment: w; }
