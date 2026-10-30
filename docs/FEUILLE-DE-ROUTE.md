@@ -144,7 +144,8 @@ référence pour toute nouvelle proposition.
 | **0.18** | Protocole 5, lot 5d | Séquestres et mandats de prélèvement en jetons |
 | **0.18** | Release, nouvelle genèse | Protocole 5 complet (séquestres et mandats en jetons) ; testnet 2 (`vinx-testnet-2`) |
 | **0.19** | Logiciel, lot A1 | Portefeuille mobile : cœur en WebAssembly, payer, recevoir, scanner un QR, jetons ; API ouverte aux autres origines |
-| Ensuite | Logiciel, lot A2 | Application Android (`.apk`) publiée dans les releases |
+| Ensuite | Logiciel, lot A2 | Application Android (`.apk`) publiée dans les releases (fait) |
+| **0.20** | Logiciel, lot 1a | Explorateur public (`/explorer`) : blocs, transactions, comptes, jetons, noms, recherche |
 | Protocole 5 | Règles | Jetons et titres, réserve par objet |
 | Protocole 6 | Règles | Canaux de paiement |
 | En parallèle | Hors chaîne | Pilote VinX Ping (premier subnet), conception des subnets |

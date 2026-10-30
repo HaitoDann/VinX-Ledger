@@ -66,6 +66,7 @@ compte à créer : tes clés restent sur ton ordinateur.
 |---|---|
 | Utiliser le portefeuille | [Portefeuille](./docs/PORTEFEUILLE.md) |
 | Payer depuis un téléphone | [Portefeuille mobile](./docs/MOBILE.md) |
+| Voir ce qui se passe sur le réseau | [L'explorateur](https://vinx-ledger.vinxlabs.fr/explorer) : blocs, transactions, comptes, jetons, noms |
 | Créer un jeton | [Jetons](./docs/JETONS.md) |
 | Comprendre où va le projet | [Feuille de route](./docs/FEUILLE-DE-ROUTE.md) |
 | Faire tourner un validateur | [Déployer un validateur](./docs/DEPLOYER-UN-VALIDATEUR.md), [Exploitation](./docs/EXPLOITATION.md) |

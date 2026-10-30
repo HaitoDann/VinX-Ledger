@@ -63,6 +63,7 @@ fn error(status: StatusCode, message: impl std::fmt::Display) -> (StatusCode, Js
 pub fn router(shared: SharedRef) -> Router {
     Router::new()
         .route("/", get(dashboard))
+        .route("/explorer", get(explorer))
         .route("/metrics", get(metrics))
         .route("/governance", get(governance))
         .route("/blocks", get(recent_blocks))
@@ -100,6 +101,12 @@ pub fn router(shared: SharedRef) -> Router {
 async fn dashboard() -> axum::response::Html<&'static str> {
     static PAGE: std::sync::LazyLock<String> =
         std::sync::LazyLock::new(|| render_page(include_str!("dashboard.html")));
+    axum::response::Html(PAGE.as_str())
+}
+
+async fn explorer() -> axum::response::Html<&'static str> {
+    static PAGE: std::sync::LazyLock<String> =
+        std::sync::LazyLock::new(|| render_page(include_str!("explorer.html")));
     axum::response::Html(PAGE.as_str())
 }
 
@@ -332,10 +339,21 @@ async fn governance(State(shared): State<SharedRef>) -> ApiResult {
 }
 
 /// Les 20 derniers blocs conservés, du plus récent au plus ancien.
-async fn recent_blocks(State(shared): State<SharedRef>) -> ApiResult {
+#[derive(Deserialize)]
+struct Before {
+    /// Blocs strictement sous cette hauteur (pagination) ; les derniers sinon.
+    before: Option<u64>,
+}
+
+async fn recent_blocks(
+    State(shared): State<SharedRef>,
+    axum::extract::Query(q): axum::extract::Query<Before>,
+) -> ApiResult {
     let s = lock(&shared);
     let mut out = Vec::new();
-    let mut h = s.chain.state.height;
+    let mut h = q.before.map_or(s.chain.state.height, |b| {
+        b.saturating_sub(1).min(s.chain.state.height)
+    });
     while h > 0 && out.len() < 20 {
         let Ok(Some(b)) = s.store.block(h) else { break };
         let round = s.store.certificate(h).ok().flatten().map(|c| c.round);

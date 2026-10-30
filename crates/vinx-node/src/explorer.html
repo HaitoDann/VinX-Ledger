@@ -1,0 +1,324 @@
+<!doctype html>
+<html lang="fr">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>VinX Ledger — explorateur</title>
+<link rel="icon" href="__FAVICON__">
+<style>/*__THEME__*/
+main { display: grid; gap: 14px; }
+.searchbar { display: flex; gap: 8px; }
+.searchbar input { flex: 1; font: 14px ui-monospace, "Cascadia Mono", SFMono-Regular, Menlo, monospace; }
+.crumbs { display: flex; gap: 12px; flex-wrap: wrap; font-size: 13px; }
+.amount { text-align: right; white-space: nowrap; }
+.in { color: var(--ok); }
+h1 { margin: 0 0 4px; font-size: 18px; word-break: break-all; }
+/* Dans les tableaux, une adresse reste sur une ligne : le tableau défile. */
+td .mono, td.mono, td.nowrap { word-break: normal; white-space: nowrap; }
+</style>
+</head>
+<body>
+<header>
+  <a class="brand" href="#/">
+    <!--__LOGO__-->
+    <span><b>VinX <span>Ledger</span></b><small>Explorateur</small></span>
+  </a>
+  <span id="chain" class="mono"></span>
+  <span id="height" class="pill"></span>
+</header>
+<nav>
+  <a href="#/" data-view="accueil">Accueil</a>
+  <a href="#/blocs" data-view="blocs">Blocs</a>
+  <a href="#/jetons" data-view="jetons">Jetons</a>
+  <a href="/" data-view="noeud">Tableau de bord du nœud</a>
+</nav>
+<main>
+  <form class="searchbar" id="searchForm">
+    <input id="q" placeholder="Adresse vinx1…, nom.vinx, jeton, transaction ou hauteur de bloc" autocomplete="off" spellcheck="false">
+    <button class="primary">Chercher</button>
+  </form>
+  <div id="page"></div>
+</main>
+
+<script>
+const $ = (id) => document.getElementById(id);
+const esc = (s) => String(s ?? "").replace(/[&<>"']/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" })[c]);
+const fr = (n) => Number(n).toLocaleString("fr-FR");
+const dateTime = (ms) => new Date(ms).toLocaleString("fr-FR");
+const day = (s) => new Date(s * 1000).toLocaleDateString("fr-FR", { dateStyle: "medium" });
+const ago = (ms) => {
+  const s = Math.max(0, Math.round((Date.now() - ms) / 1000));
+  if (s < 90) return `il y a ${s} s`;
+  if (s < 5400) return `il y a ${Math.round(s / 60)} min`;
+  if (s < 172800) return `il y a ${Math.round(s / 3600)} h`;
+  return `il y a ${Math.round(s / 86400)} j`;
+};
+const short = (s, n = 12) => s ? (s.length > n + 6 ? s.slice(0, n) + "…" + s.slice(-4) : s) : "—";
+
+/* Montants : unités → texte, avec les décimales de la monnaie. */
+function fmt(units, decimals = 9) {
+  let n; try { n = BigInt(units || "0"); } catch (_) { return "—"; }
+  const one = 10n ** BigInt(decimals);
+  const whole = (n / one).toString().replace(/\B(?=(\d{3})+(?!\d))/g, " ");
+  const frac = decimals ? (n % one).toString().padStart(decimals, "0").replace(/0+$/, "") : "";
+  return whole + (frac ? "," + frac : "");
+}
+const vinx = (u) => `${fmt(u)} VINX`;
+let assets = {};
+const inAsset = (units, symbol) => `${fmt(units, assets[symbol]?.decimals ?? 0)} ${esc(symbol)}`;
+
+async function get(path) {
+  const r = await fetch(path, { cache: "no-store" });
+  if (r.status === 404) { const e = new Error((await r.json().catch(() => ({}))).error || "introuvable"); e.status = 404; throw e; }
+  if (!r.ok) throw new Error((await r.json().catch(() => ({}))).error || `le nœud a répondu ${r.status}`);
+  return r.json();
+}
+async function loadAssets() {
+  const a = await get("/assets").catch(() => ({ assets: [] }));
+  assets = Object.fromEntries(a.assets.map((x) => [x.symbol, x]));
+  return a;
+}
+
+/* Liens. */
+const addr = (a, n = 14) => a ? `<a class="mono" href="#/adresse/${esc(a)}">${esc(short(a, n))}</a>` : "—";
+const txLink = (id, n = 12) => `<a class="mono" href="#/tx/${esc(id)}">${esc(short(id, n))}</a>`;
+const blockLink = (h) => `<a href="#/bloc/${h}">${fr(h)}</a>`;
+const assetLink = (s) => `<a href="#/jeton/${esc(s)}"><b>${esc(s)}</b></a>`;
+
+/* Montant d'une transaction, quel que soit son type. */
+function txAmount(t) {
+  if (t.asset && t.units) return inAsset(t.units, t.asset);
+  if (t.amount) return vinx(t.amount);
+  return "";
+}
+function txCounterparty(t) {
+  return t.to || t.payer || t.from || t.account || "";
+}
+
+function txTable(list, { withBlock = true } = {}) {
+  if (!list.length) return `<p class="muted">Aucune transaction.</p>`;
+  return `<div class="scroll"><table><thead><tr>${withBlock ? "<th>Bloc</th>" : ""}<th>Transaction</th><th>Type</th><th>De</th><th>Vers</th><th class="amount">Montant</th></tr></thead><tbody>
+    ${list.map((t) => `<tr class="link" onclick="location.hash='#/tx/${esc(t.id)}'">
+      ${withBlock ? `<td>${t.height ? blockLink(t.height) : '<span class="warn">en attente</span>'}</td>` : ""}
+      <td>${txLink(t.id)}</td><td>${esc(t.kind)}${t.asset && !t.units ? " " + esc(t.asset) : ""}</td>
+      <td>${t.sender ? addr(t.sender) : '<span class="muted">trésorerie</span>'}</td><td>${addr(txCounterparty(t))}</td>
+      <td class="amount">${txAmount(t)}</td></tr>`).join("")}
+  </tbody></table></div>`;
+}
+
+/* ---------- Pages ---------- */
+async function home() {
+  const [status, blocks, gov, a] = await Promise.all([get("/status"), get("/blocks"), get("/governance"), loadAssets()]);
+  // Transactions récentes : on remonte jusqu'à 200 blocs pour en trouver.
+  const recent = [];
+  let page = blocks.blocks;
+  for (let i = 0; i < 10 && page.length && recent.length < 15; i++) {
+    for (const b of page.filter((b) => b.transactions > 0)) {
+      const d = await get(`/blocks/${b.height}`);
+      d.details.forEach((t) => recent.push({ ...t, height: b.height }));
+      if (recent.length >= 15) break;
+    }
+    const oldest = page[page.length - 1].height;
+    page = oldest > 1 ? (await get(`/blocks?before=${oldest}`)).blocks : [];
+  }
+  const e = gov.emission || {};
+  const last = blocks.blocks[0];
+  return `
+    <div class="tiles">
+      <div class="tile"><div class="label">Hauteur</div><div class="value">${fr(status.height)}</div><div class="sub">${last ? "dernier bloc " + ago(last.timestamp) : ""}</div></div>
+      <div class="tile"><div class="label">Protocole</div><div class="value">${status.protocol_version}</div><div class="sub">${esc(status.chain_id)}</div></div>
+      <div class="tile"><div class="label">Validateurs</div><div class="value">${status.validators.length}</div><div class="sub">gouvernance 2 sur 3</div></div>
+      <div class="tile"><div class="label">Jetons</div><div class="value">${a.assets.length}</div><div class="sub"><a href="#/jetons">voir la liste</a></div></div>
+      <div class="tile"><div class="label">Émis aux validateurs</div><div class="value">${e.emitted ? fmt(e.emitted).split(",")[0] : "0"}</div><div class="sub">VINX sur ${e.budget ? fmt(e.budget).split(",")[0] : "—"}</div></div>
+    </div>
+    <div class="grid2">
+      <section class="card"><h2>Derniers blocs</h2><div class="scroll"><table>
+        <thead><tr><th>Bloc</th><th>Heure</th><th>Transactions</th><th>Proposeur</th></tr></thead><tbody>
+        ${blocks.blocks.slice(0, 12).map((b) => `<tr class="link" onclick="location.hash='#/bloc/${b.height}'">
+          <td>${blockLink(b.height)}</td><td class="nowrap">${ago(b.timestamp)}</td><td>${fr(b.transactions + b.admin_transactions)}</td><td>n° ${b.proposer + 1}</td></tr>`).join("")}
+        </tbody></table></div><p><a href="#/blocs">Tous les blocs →</a></p></section>
+      <section class="card"><h2>Dernières transactions</h2>${txTable(recent.slice(0, 15))}</section>
+    </div>`;
+}
+
+async function blockList(before) {
+  const q = before ? `?before=${encodeURIComponent(before)}` : "";
+  const r = await get("/blocks" + q);
+  const list = r.blocks;
+  const oldest = list.length ? list[list.length - 1].height : null;
+  return `<section class="card"><h2>Blocs</h2><div class="scroll"><table>
+    <thead><tr><th>Bloc</th><th>Heure</th><th>Transactions</th><th>Proposeur</th><th>Round</th><th>Hash</th></tr></thead><tbody>
+    ${list.map((b) => `<tr class="link" onclick="location.hash='#/bloc/${b.height}'">
+      <td>${blockLink(b.height)}</td><td class="nowrap">${dateTime(b.timestamp)}</td><td>${fr(b.transactions + b.admin_transactions)}</td>
+      <td>n° ${b.proposer + 1}</td><td class="${b.round ? "warn" : ""}">${b.round ?? "—"}</td><td class="mono">${esc(short(b.hash, 16))}</td></tr>`).join("")}
+    </tbody></table></div>
+    <div class="crumbs" style="margin-top:10px">${before ? `<a href="#/blocs">← les plus récents</a>` : ""}
+      ${oldest > 1 ? `<a href="#/blocs/${oldest}">plus anciens →</a>` : ""}</div></section>`;
+}
+
+async function block(h) {
+  await loadAssets();
+  const b = await get(`/blocks/${encodeURIComponent(h)}`);
+  const v = b.proposer_validator;
+  const count = b.transactions.length + b.admin_transactions.length;
+  const admin = b.admin_details.map((a) => ({ ...a, kind: `admin : ${a.kind}`, height: b.height }));
+  return `<div class="crumbs">${b.height > 1 ? `<a href="#/bloc/${b.height - 1}">← bloc ${fr(b.height - 1)}</a>` : ""}<a href="#/bloc/${b.height + 1}">bloc ${fr(b.height + 1)} →</a></div>
+    <section class="card"><h1>Bloc ${fr(b.height)}</h1><dl>
+      <dt>Heure</dt><dd>${dateTime(b.timestamp)} (${ago(b.timestamp)})</dd>
+      <dt>Proposeur</dt><dd>${v ? (v.name ? esc(v.name) + " " : "") + `<span class="muted">validateur n° ${v.index + 1}</span>` : "—"}</dd>
+      <dt>Round</dt><dd>${b.round ?? "—"}</dd>
+      <dt>Signé par</dt><dd>${b.signers.map((s) => s.name ? esc(s.name) : `n° ${s.index + 1}`).join(", ") || "—"}</dd>
+      <dt>Protocole</dt><dd>${b.protocol_version}</dd>
+      <dt>Transactions</dt><dd>${fr(count)}</dd>
+      <dt>Hash</dt><dd class="mono">${esc(b.hash)}</dd>
+      <dt>Parent</dt><dd class="mono">${esc(b.prev_hash)}</dd>
+      <dt>Racine d'état</dt><dd class="mono">${esc(b.state_root)}</dd>
+    </dl></section>
+    ${count ? `<section class="card"><h2>Transactions</h2>${txTable([...admin, ...b.details], { withBlock: false })}
+      ${b.transactions.length > b.details.length ? `<p class="muted">Les ${fr(b.details.length)} premières sur ${fr(b.transactions.length)}.</p>` : ""}</section>` : ""}`;
+}
+
+async function tx(id) {
+  await loadAssets();
+  const t = await get(`/transactions/${encodeURIComponent(id)}`);
+  const rows = [
+    ["Statut", t.status === "finalisée" ? `<span class="ok">finalisée</span> au bloc ${blockLink(t.height)}, ${dateTime(t.timestamp)}` : `<span class="warn">${esc(t.status)}</span>`],
+    ["Type", esc(t.kind)],
+  ];
+  if (t.sender) rows.push(["Émetteur", addr(t.sender, 64)], ["Nonce", t.nonce], ["Frais", vinx(t.fee)]);
+  if (t.sponsor) rows.push(["Frais payés par", addr(t.sponsor, 64)]);
+  if (t.approvals) rows.push(["Approbations", t.approvals]);
+  if (t.to) rows.push(["Destinataire", addr(t.to, 64)]);
+  if (t.payer) rows.push(["Payeur", addr(t.payer, 64)]);
+  if (t.from) rows.push(["Repris sur", addr(t.from, 64)]);
+  if (t.account) rows.push(["Compte", addr(t.account, 64)]);
+  if (t.asset) rows.push(["Jeton", assetLink(t.asset)]);
+  if (txAmount(t)) rows.push(["Montant", txAmount(t)]);
+  if (t.name) rows.push(["Nom", `<a href="#/nom/${esc(t.name.replace(/\.vinx$/, ""))}">${esc(t.name)}</a>`]);
+  if (t.deal) rows.push(["Séquestre", `<span class="mono">${esc(t.deal)}</span>`]);
+  if (t.arbiter) rows.push(["Arbitre", addr(t.arbiter, 64)]);
+  if (t.deadline) rows.push(["Échéance", day(t.deadline)]);
+  if (t.digest) rows.push(["Empreinte horodatée", `<span class="mono">${esc(t.digest)}</span>`]);
+  if (t.payments) rows.push(["Paiements", `${t.payments.length}<div>${t.payments.map((p) => `${addr(p.to)} ${vinx(p.amount)}${p.memo ? ` <span class="muted">${esc(p.memo)}</span>` : ""}`).join("<br>")}</div>`]);
+  if (t.memo) rows.push(["Mémo", esc(t.memo)]);
+  if (t.detail) rows.push(["Détail", esc(typeof t.detail === "string" ? t.detail : JSON.stringify(t.detail))]);
+  return `<section class="card"><h1>Transaction</h1><p class="mono">${esc(t.id)}</p>
+    <dl>${rows.map(([k, v]) => `<dt>${k}</dt><dd>${v}</dd>`).join("")}</dl></section>`;
+}
+
+async function account(a) {
+  await loadAssets();
+  const [acc, h] = await Promise.all([
+    get(`/accounts/${encodeURIComponent(a)}`).catch((e) => { if (e.status === 404) return null; throw e; }),
+    get(`/accounts/${encodeURIComponent(a)}/transactions?limit=100`).catch(() => ({ transactions: [] })),
+  ]);
+  if (!acc) return `<section class="card"><h1 class="mono">${esc(a)}</h1><p class="muted">Ce compte n'a encore jamais reçu de VINX.</p></section>`;
+  const tokens = acc.assets || [];
+  const pol = acc.policy;
+  const m = acc.mandates || { granted: [], received: [] };
+  return `<section class="card"><h1 class="mono">${esc(acc.address)}</h1><dl>
+      <dt>Solde</dt><dd><b>${vinx(acc.balance)}</b></dd>
+      ${acc.names.length ? `<dt>Noms</dt><dd>${acc.names.map((n) => `<a href="#/nom/${esc(n.name.replace(/\.vinx$/, ""))}">${esc(n.name)}</a>`).join(", ")}</dd>` : ""}
+      <dt>Transactions envoyées</dt><dd>${fr(acc.nonce)}</dd>
+      ${pol ? `<dt>Règles</dt><dd>${pol.threshold} signature(s) sur ${pol.signers.length}${pol.daily_limit ? `, plafond ${vinx(pol.daily_limit)} par jour sans approbation` : ""}</dd>` : ""}
+      ${acc.memo_required ? `<dt>Mémo</dt><dd>exigé sur les paiements reçus</dd>` : ""}
+      ${acc.deals.length ? `<dt>Séquestres en cours</dt><dd>${acc.deals.length}</dd>` : ""}
+      ${m.granted.length + m.received.length ? `<dt>Mandats</dt><dd>${m.granted.length} accordé(s), ${m.received.length} reçu(s)</dd>` : ""}
+    </dl></section>
+    ${tokens.length ? `<section class="card"><h2>Jetons</h2><div class="scroll"><table><thead><tr><th>Jeton</th><th>Nom</th><th class="amount">Solde</th></tr></thead><tbody>
+      ${tokens.map((t) => `<tr><td>${assetLink(t.symbol)}</td><td>${esc(t.name || "")}${t.frozen ? ' <span class="pill warn">gelé</span>' : ""}</td><td class="amount">${fmt(t.units, t.decimals)}</td></tr>`).join("")}
+    </tbody></table></div></section>` : ""}
+    <section class="card"><h2>Historique</h2>${txTable(h.transactions)}</section>`;
+}
+
+async function tokens() {
+  const a = await loadAssets();
+  return `<section class="card"><h2>Jetons</h2>${a.assets.length ? `<div class="scroll"><table>
+    <thead><tr><th>Jeton</th><th>Nom</th><th class="amount">En circulation</th><th>Pouvoirs de l'émetteur</th><th>Émetteur</th></tr></thead><tbody>
+    ${a.assets.map((x) => `<tr class="link" onclick="location.hash='#/jeton/${esc(x.symbol)}'"><td>${assetLink(x.symbol)}</td><td>${esc(x.name)}${x.frozen ? ' <span class="pill warn">gelé</span>' : ""}</td>
+      <td class="amount">${fmt(x.supply_units, x.decimals)}</td><td>${powers(x.powers)}</td><td>${addr(x.issuer)}</td></tr>`).join("")}
+    </tbody></table></div>` : `<p class="muted">Aucun jeton n'a encore été créé.</p>`}
+    <p class="muted">Créer un jeton coûte ${vinx(a.fee)} et exige le nom .vinx du symbole.</p></section>`;
+}
+const powers = (p) => [p.mint && "émission", p.freeze && "gel", p.clawback && "reprise forcée"].filter(Boolean).join(", ") || "aucun (supply fixe)";
+
+async function token(sym) {
+  await loadAssets();
+  const x = await get(`/assets/${encodeURIComponent(sym)}`);
+  return `<section class="card"><h1>${esc(x.symbol)} <span class="muted">${esc(x.name)}</span></h1><dl>
+    <dt>Émetteur</dt><dd>${addr(x.issuer, 64)}</dd>
+    <dt>En circulation</dt><dd><b>${fmt(x.supply_units, x.decimals)}</b> ${esc(x.symbol)}</dd>
+    <dt>Plafond</dt><dd>${x.max_supply_units ? fmt(x.max_supply_units, x.decimals) : "aucun"}</dd>
+    <dt>Décimales</dt><dd>${x.decimals}</dd>
+    <dt>Pouvoirs de l'émetteur</dt><dd>${powers(x.powers)}</dd>
+    <dt>État</dt><dd>${x.frozen ? '<span class="warn">gelé : plus aucun transfert</span>' : '<span class="ok">en circulation</span>'}</dd>
+    <dt>Nom .vinx</dt><dd><a href="#/nom/${esc(x.symbol.toLowerCase())}">${esc(x.symbol.toLowerCase())}.vinx</a></dd>
+  </dl><p class="muted">Pour recevoir ce jeton, il faut d'abord l'accepter dans son portefeuille.</p></section>`;
+}
+
+async function name(n) {
+  const r = await get(`/names/${encodeURIComponent(n)}`);
+  return `<section class="card"><h1>${esc(r.name)}</h1><dl>
+    <dt>Titulaire</dt><dd>${r.owner ? addr(r.owner, 64) : '<span class="muted">aucun</span>'}</dd>
+    ${r.expires_at ? `<dt>Échéance</dt><dd>${day(r.expires_at)}</dd>` : ""}
+    <dt>Disponible</dt><dd>${r.available ? `<span class="ok">oui</span> — ${vinx(r.fee)} par an` : "non"}</dd>
+  </dl></section>`;
+}
+
+/* ---------- Recherche ---------- */
+async function search(q) {
+  q = q.trim();
+  if (!q) return;
+  if (/^vinx1[a-z0-9]+$/i.test(q)) return go(`/adresse/${q.toLowerCase()}`);
+  if (/^\d+$/.test(q)) return go(`/bloc/${q}`);
+  if (/^[0-9a-f]{64}$/i.test(q)) {
+    try { await get(`/transactions/${q}`); return go(`/tx/${q.toLowerCase()}`); }
+    catch (_) {
+      const att = await get(`/attestations/${q}`).catch(() => null);
+      const first = att?.attestations?.[0];
+      if (first) return go(`/tx/${first.id}`);
+      throw new Error("aucune transaction ni empreinte horodatée avec cet identifiant");
+    }
+  }
+  const n = q.toLowerCase().replace(/\.vinx$/, "");
+  if (/^[a-z0-9-]{3,32}$/.test(n)) {
+    if (!/\.vinx$/i.test(q)) {
+      const a = await get(`/assets/${n.toUpperCase()}`).catch(() => null);
+      if (a) return go(`/jeton/${a.symbol}`);
+    }
+    return go(`/nom/${n}`);
+  }
+  throw new Error("format non reconnu : adresse vinx1…, nom.vinx, jeton, identifiant de 64 caractères ou hauteur de bloc");
+}
+const go = (path) => { location.hash = "#" + path; };
+$("searchForm").addEventListener("submit", async (e) => {
+  e.preventDefault();
+  try { await search($("q").value); }
+  catch (err) { $("page").innerHTML = `<section class="card alert">${esc(err.message)}</section>`; }
+});
+
+/* ---------- Navigation ---------- */
+let timer = null;
+async function route() {
+  const [, view = "", arg = ""] = (location.hash.slice(1) || "/").split("/");
+  const pages = { "": home, blocs: blockList, bloc: block, tx, adresse: account, jetons: tokens, jeton: token, nom: name };
+  const page = pages[view] || home;
+  const navView = { "": "accueil", blocs: "blocs", bloc: "blocs", jetons: "jetons", jeton: "jetons" }[view];
+  document.querySelectorAll("nav a").forEach((a) => a.classList.toggle("active", a.dataset.view === navView));
+  clearInterval(timer);
+  const run = async () => {
+    try { $("page").innerHTML = await page(decodeURIComponent(arg)); }
+    catch (e) { $("page").innerHTML = `<section class="card alert">${e.status === 404 ? "Introuvable : " : "Erreur : "}${esc(e.message)}</section>`; }
+  };
+  await run();
+  // L'accueil se met à jour seul, sans charger le nœud : toutes les 10 s.
+  if (page === home) timer = setInterval(run, 10000);
+  get("/status").then((s) => { $("chain").textContent = s.chain_id; $("height").textContent = `bloc ${fr(s.height)}`; $("height").className = "pill ok"; })
+    .catch(() => { $("height").textContent = "hors ligne"; $("height").className = "pill bad"; });
+  window.scrollTo(0, 0);
+}
+window.addEventListener("hashchange", route);
+route();
+</script>
+</body>
+</html>
