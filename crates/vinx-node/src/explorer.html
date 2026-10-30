@@ -7,8 +7,11 @@
 <link rel="icon" href="__FAVICON__">
 <style>/*__THEME__*/
 main { display: grid; gap: 14px; }
-.searchbar { display: flex; gap: 8px; }
-.searchbar input { flex: 1; font: 14px ui-monospace, "Cascadia Mono", SFMono-Regular, Menlo, monospace; }
+.big-search input { flex: 1; font-size: 14px; }
+#page { display: grid; gap: 14px; }
+.home-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(min(100%, 460px), 1fr)); gap: 14px; }
+.explore-hero.compact { padding: 6px 0 4px; }
+.explore-hero.compact h1 { display: none; }
 .crumbs { display: flex; gap: 12px; flex-wrap: wrap; font-size: 13px; }
 .amount { text-align: right; white-space: nowrap; }
 .in { color: var(--ok); }
@@ -23,23 +26,44 @@ td .mono, td.mono, td.nowrap { word-break: normal; white-space: nowrap; }
     <!--__LOGO__-->
     <span><b>VinX <span>Ledger</span></b><small>Explorateur</small></span>
   </a>
+  <nav>
+    <a href="#/" data-view="accueil">Accueil</a>
+    <a href="#/blocs" data-view="blocs">Blocs</a>
+    <a href="#/jetons" data-view="jetons">Jetons</a>
+    <a href="/" data-view="noeud">Nœud</a>
+  </nav>
   <span id="chain" class="mono"></span>
   <span id="height" class="pill"></span>
+  <button class="theme-toggle" id="themeToggle" type="button" aria-label="Thème clair ou sombre" title="Thème clair ou sombre">
+    <svg class="moon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M21 12.8A9 9 0 1 1 11.2 3a7 7 0 0 0 9.8 9.8z"/></svg>
+    <svg class="sun" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="12" r="4"/><path d="M12 2v2M12 20v2M4.9 4.9l1.4 1.4M17.7 17.7l1.4 1.4M2 12h2M20 12h2M4.9 19.1l1.4-1.4M17.7 6.3l1.4-1.4"/></svg>
+  </button>
 </header>
-<nav>
-  <a href="#/" data-view="accueil">Accueil</a>
-  <a href="#/blocs" data-view="blocs">Blocs</a>
-  <a href="#/jetons" data-view="jetons">Jetons</a>
-  <a href="/" data-view="noeud">Tableau de bord du nœud</a>
-</nav>
+<script>
+/* Thème : sombre par défaut, le choix clair ou sombre est mémorisé. */
+(() => {
+  const root = document.documentElement, key = "vinx-theme";
+  try { const t = localStorage.getItem(key); if (t) root.dataset.theme = t; } catch (_) {}
+  document.getElementById("themeToggle").addEventListener("click", () => {
+    const t = root.dataset.theme === "light" ? "dark" : "light";
+    root.dataset.theme = t;
+    try { localStorage.setItem(key, t); } catch (_) {}
+  });
+})();
+</script>
 <main>
-  <form class="searchbar" id="searchForm">
-    <input id="q" placeholder="Adresse vinx1…, nom.vinx, jeton, transaction ou hauteur de bloc" autocomplete="off" spellcheck="false">
-    <button class="primary">Chercher</button>
-  </form>
+  <section class="explore-hero" id="hero">
+    <h1>Explorer <span>VinX Ledger</span></h1>
+    <form class="big-search" id="searchForm">
+      <input id="q" placeholder="Rechercher une adresse, un nom .vinx, un jeton, une transaction ou un bloc" autocomplete="off" spellcheck="false">
+      <kbd title="Raccourci : touche /">/</kbd>
+      <button class="primary" aria-label="Chercher" title="Chercher"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round"><circle cx="11" cy="11" r="7"/><path d="m20 20-3.5-3.5"/></svg></button>
+    </form>
+  </section>
   <div id="page"></div>
 </main>
 
+<script>/*__CHARTS__*/</script>
 <script>
 const $ = (id) => document.getElementById(id);
 const esc = (s) => String(s ?? "").replace(/[&<>"']/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" })[c]);
@@ -80,15 +104,17 @@ async function loadAssets() {
 }
 
 /* Liens. */
-const addr = (a, n = 14) => a ? `<a class="mono" href="#/adresse/${esc(a)}">${esc(short(a, n))}</a>` : "—";
-const txLink = (id, n = 12) => `<a class="mono" href="#/tx/${esc(id)}">${esc(short(id, n))}</a>`;
+const addr = (a, n = 14) => a ? `<span class="nowrap"><a class="mono" href="#/adresse/${esc(a)}" title="${esc(a)}">${esc(short(a, n))}</a>${copyBtn(a, "Copier l'adresse")}</span>` : "—";
+const txLink = (id, n = 12) => `<span class="nowrap"><a class="mono" href="#/tx/${esc(id)}" title="${esc(id)}">${esc(short(id, n))}</a>${copyBtn(id, "Copier l'identifiant")}</span>`;
+/* Identifiant complet suivi d'un bouton copier (pages de détail). */
+const full = (v) => `<span class="mono">${esc(v)}</span>${copyBtn(v)}`;
 const blockLink = (h) => `<a href="#/bloc/${h}">${fr(h)}</a>`;
 const assetLink = (s) => `<a href="#/jeton/${esc(s)}"><b>${esc(s)}</b></a>`;
 
 /* Montant d'une transaction, quel que soit son type. */
-function txAmount(t) {
-  if (t.asset && t.units) return inAsset(t.units, t.asset);
-  if (t.amount) return vinx(t.amount);
+function txAmount(t, compact = false) {
+  if (t.asset && t.units) return compact ? shortAmount(fmt(t.units, assets[t.asset]?.decimals ?? 0), esc(t.asset)) : inAsset(t.units, t.asset);
+  if (t.amount) return compact ? shortAmount(fmt(t.amount), "VINX") : vinx(t.amount);
   return "";
 }
 function txCounterparty(t) {
@@ -102,43 +128,137 @@ function txTable(list, { withBlock = true } = {}) {
       ${withBlock ? `<td>${t.height ? blockLink(t.height) : '<span class="warn">en attente</span>'}</td>` : ""}
       <td>${txLink(t.id)}</td><td>${esc(t.kind)}${t.asset && !t.units ? " " + esc(t.asset) : ""}</td>
       <td>${t.sender ? addr(t.sender) : '<span class="muted">trésorerie</span>'}</td><td>${addr(txCounterparty(t))}</td>
-      <td class="amount">${txAmount(t)}</td></tr>`).join("")}
+      <td class="amount">${txAmount(t, true)}</td></tr>`).join("")}
   </tbody></table></div>`;
 }
 
+/* ---------- Graphiques ---------- */
+const ICONS = {
+  cube: '<path d="M12 2 3 7v10l9 5 9-5V7z"/><path d="M3 7l9 5 9-5M12 12v10"/>',
+  coin: '<circle cx="12" cy="12" r="9"/><path d="M12 7v10M9 9.5h4.5a1.5 1.5 0 0 1 0 3h-3a1.5 1.5 0 0 0 0 3H15"/>',
+  shield: '<path d="M12 2 4 5v6c0 5 3.4 9.4 8 11 4.6-1.6 8-6 8-11V5z"/><path d="m9 12 2 2 4-4"/>',
+  layers: '<path d="m12 2 10 5-10 5L2 7z"/><path d="m2 12 10 5 10-5M2 17l10 5 10-5"/>',
+};
+const icon = (k) => `<span class="ico"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linejoin="round">${ICONS[k]}</svg></span>`;
+function stat(ico, label, value, cells, extra = "") {
+  return `<div class="stat"><div class="top"><div>${icon(ico)}<div><div class="label">${label}</div><div class="value">${value}</div></div></div>${extra}</div>
+    <div class="panel">${cells.map(([k, v]) => `<div><span>${k}</span><b>${v}</b></div>`).join("")}</div></div>`;
+}
+
+/* Aire lissée en dégradé, avec graduations et survol : sans bibliothèque.
+   Un pic isolé est tronqué (marqué en haut) pour ne pas écraser le reste. */
+let areaId = 0;
+function area(values, labels, unit = "") {
+  if (values.length < 2) return '<p class="muted">Pas encore assez de blocs.</p>';
+  const W = 600, H = 200, L = 46, B = 18, T = 8;
+  const { hi, capped } = chartScale(values);
+  const x = (i) => L + (i / (values.length - 1)) * (W - L - 4);
+  const y = (v) => T + (1 - Math.min(v, hi) / hi) * (H - T - B);
+  const p = values.map((v, i) => [x(i), y(v)]);
+  let d = `M${p[0][0]},${p[0][1]}`;
+  for (let i = 1; i < p.length; i++) {
+    const [x0, y0] = p[i - 1], [x1, y1] = p[i], cx = (x0 + x1) / 2;
+    d += ` C${cx},${y0} ${cx},${y1} ${x1},${y1}`;
+  }
+  const id = `area${areaId++}`;
+  const num = (v) => v >= 1e3 ? (v / 1e3).toLocaleString("fr-FR", { maximumFractionDigits: 1 }) + " k" : v >= 10 ? Math.round(v).toLocaleString("fr-FR") : v.toLocaleString("fr-FR", { maximumFractionDigits: 1 });
+  const grid = [0, .25, .5, .75, 1].map((f) => {
+    const v = hi * f, yy = y(v);
+    return `<line x1="${L}" x2="${W}" y1="${yy}" y2="${yy}" stroke="var(--line)" stroke-dasharray="3 4"/>
+      <text x="${L - 6}" y="${yy + 3}" text-anchor="end">${num(v)}${unit}</text>`;
+  }).join("");
+  const step = Math.max(1, Math.floor(labels.length / 6));
+  const ticks = labels.map((t, i) => i % step ? "" : `<text x="${x(i)}" y="${H - 3}" text-anchor="middle">${esc(t)}</text>`).join("");
+  const peaks = values.map((v, i) => v > hi ? `<path d="M${x(i) - 5},${T + 8} L${x(i)},${T} L${x(i) + 5},${T + 8}Z" fill="var(--warn)"/>` : "").join("");
+  const hover = chartPoints(values.map((v, i) => [x(i), y(v), `${esc(labels[i] || "")} · <b>${num(v)}${unit}</b>`]));
+  return `<svg viewBox="0 0 ${W} ${H}" role="img" data-chart="${hover}" style="height:auto;font-size:10px;fill:var(--muted)">
+    <defs><linearGradient id="${id}" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0" stop-color="var(--chart)" stop-opacity=".5"/><stop offset="1" stop-color="var(--chart)" stop-opacity="0"/>
+    </linearGradient></defs>${grid}
+    <path d="${d} L${x(values.length - 1)},${H - B} L${L},${H - B}Z" fill="url(#${id})"/>
+    <path d="${d}" fill="none" stroke="var(--chart)" stroke-width="2"/>${peaks}${ticks}</svg>
+    ${capped ? `<div class="capped">▲ ${capped} pic(s) au-dessus de ${num(hi)}${unit}, tronqué(s) — max ${num(Math.max(...values))}${unit}</div>` : ""}`;
+}
+
+/* Pastille d'un validateur : ses initiales (« Validateur-3 » → « V3 »). */
+const initials = (name) => esc(String(name).split(/[\s_-]+/).filter(Boolean).map((w) => w[0]).slice(0, 2).join("").toUpperCase());
+
 /* ---------- Pages ---------- */
 async function home() {
-  const [status, blocks, gov, a] = await Promise.all([get("/status"), get("/blocks"), get("/governance"), loadAssets()]);
+  const [status, blocks, gov, a, vals] = await Promise.all([get("/status"), get("/blocks"), get("/governance"), loadAssets(),
+    get("/validators").catch(() => ({ validators: [] }))]);
+  // Fenêtre d'analyse : les derniers blocs, sur quelques pages.
+  let window_ = blocks.blocks.slice();
+  for (let i = 0; i < 3 && window_.length; i++) {
+    const oldest = window_[window_.length - 1].height;
+    if (oldest <= 1) break;
+    window_ = window_.concat((await get(`/blocks?before=${oldest}`)).blocks);
+  }
   // Transactions récentes : on remonte jusqu'à 200 blocs pour en trouver.
   const recent = [];
   let page = blocks.blocks;
-  for (let i = 0; i < 10 && page.length && recent.length < 15; i++) {
+  for (let i = 0; i < 10 && page.length && recent.length < 10; i++) {
     for (const b of page.filter((b) => b.transactions > 0)) {
       const d = await get(`/blocks/${b.height}`);
       d.details.forEach((t) => recent.push({ ...t, height: b.height }));
-      if (recent.length >= 15) break;
+      if (recent.length >= 10) break;
     }
     const oldest = page[page.length - 1].height;
     page = oldest > 1 ? (await get(`/blocks?before=${oldest}`)).blocks : [];
   }
   const e = gov.emission || {};
   const last = blocks.blocks[0];
+  const chrono = window_.slice().reverse();
+  const txs = chrono.map((b) => b.transactions + b.admin_transactions);
+  const gaps = chrono.slice(1).map((b, i) => (b.timestamp - chrono[i].timestamp) / 1000);
+  const avgGap = gaps.length ? gaps.reduce((s, g) => s + g, 0) / gaps.length : 0;
+  const totalTx = txs.reduce((s, n) => s + n, 0);
+  const hours = (b) => new Date(b.timestamp).toLocaleTimeString("fr-FR", { hour: "2-digit", minute: "2-digit" });
+  let pct = 0;
+  try { pct = e.budget && BigInt(e.budget) > 0n ? Number(BigInt(e.emitted || "0") * 10000n / BigInt(e.budget)) / 100 : 0; } catch (_) {}
+  // Classement des validateurs : blocs proposés sur la fenêtre.
+  const vnames = Object.fromEntries((vals.validators || []).map((v) => [v.index, v.name]));
+  const board = {};
+  window_.forEach((b) => { const r = (board[b.proposer] ??= { blocks: 0, tx: 0 }); r.blocks++; r.tx += b.transactions + b.admin_transactions; });
+  const ranked = Object.entries(board).sort((x, y) => y[1].blocks - x[1].blocks);
+  const byRound = window_.filter((b) => b.round).length;
   return `
-    <div class="tiles">
-      <div class="tile"><div class="label">Hauteur</div><div class="value">${fr(status.height)}</div><div class="sub">${last ? "dernier bloc " + ago(last.timestamp) : ""}</div></div>
-      <div class="tile"><div class="label">Protocole</div><div class="value">${status.protocol_version}</div><div class="sub">${esc(status.chain_id)}</div></div>
-      <div class="tile"><div class="label">Validateurs</div><div class="value">${status.validators.length}</div><div class="sub">gouvernance 2 sur 3</div></div>
-      <div class="tile"><div class="label">Jetons</div><div class="value">${a.assets.length}</div><div class="sub"><a href="#/jetons">voir la liste</a></div></div>
-      <div class="tile"><div class="label">Émis aux validateurs</div><div class="value">${e.emitted ? fmt(e.emitted).split(",")[0] : "0"}</div><div class="sub">VINX sur ${e.budget ? fmt(e.budget).split(",")[0] : "—"}</div></div>
+    <div class="stats">
+      ${stat("cube", "Hauteur", fr(status.height), [
+        ["Dernier bloc", last ? when(last.timestamp) : "—"], ["Temps moyen", avgGap ? avgGap.toFixed(1) + " s" : "—"],
+        [`Tx (${fr(window_.length)} blocs)`, fr(totalTx)], ["Tx max / bloc", fr(Math.max(0, ...txs))]])}
+      ${stat("coin", "VINX émis", `${e.emitted ? fmt(e.emitted).split(",")[0] : "0"} <small>VINX</small>`, [
+        ["Budget", e.budget ? fmt(e.budget).split(",")[0] : "—"], ["Pourcentage", pct.toLocaleString("fr-FR") + " %"],
+        ["Jetons créés", `<a href="#/jetons">${fr(a.assets.length)}</a>`], ["Frais de jeton", vinx(a.fee)]],
+        `<div class="progress" title="${pct} %"><span style="width:${Math.min(100, pct)}%"></span></div>`)}
+      ${stat("shield", "Validateurs", fr(status.validators.length), [
+        ["Gouvernance", "2 sur 3"], ["Quorum", fr(Math.floor(2 * status.validators.length / 3) + 1)],
+        ["Proposeurs actifs", fr(ranked.length)], ["Rounds > 0", fr(byRound)]])}
+      ${stat("layers", "Protocole", "v" + status.protocol_version, [
+        ["Chaîne", `<span class="mono">${esc(status.chain_id)}</span>`], ["Pairs", fr(status.peers ?? 0)],
+        ["En attente", fr(status.pending_transactions ?? 0)], ["Version du nœud", esc(status.node_version || "—")]])}
     </div>
-    <div class="grid2">
-      <section class="card"><h2>Derniers blocs</h2><div class="scroll"><table>
-        <thead><tr><th>Bloc</th><th>Heure</th><th>Transactions</th><th>Proposeur</th></tr></thead><tbody>
-        ${blocks.blocks.slice(0, 12).map((b) => `<tr class="link" onclick="location.hash='#/bloc/${b.height}'">
-          <td>${blockLink(b.height)}</td><td class="nowrap">${ago(b.timestamp)}</td><td>${fr(b.transactions + b.admin_transactions)}</td><td>n° ${b.proposer + 1}</td></tr>`).join("")}
-        </tbody></table></div><p><a href="#/blocs">Tous les blocs →</a></p></section>
-      <section class="card"><h2>Dernières transactions</h2>${txTable(recent.slice(0, 15))}</section>
-    </div>`;
+    <div class="home-grid">
+      <section class="card chart"><h2>Transactions par bloc <a class="more" href="#/blocs">Voir plus ›</a></h2>${area(txs, chrono.map(hours))}</section>
+      <section class="card chart"><h2>Temps entre les blocs</h2>${area(gaps, chrono.slice(1).map(hours), " s")}</section>
+      <section class="card"><h2>Validateurs les plus actifs <span class="sub">sur ${fr(window_.length)} blocs</span></h2><div class="scroll"><table>
+        <thead><tr><th>Validateur</th><th>Part des blocs</th><th class="num">Blocs</th><th class="num">Transactions</th></tr></thead><tbody>
+        ${ranked.slice(0, 8).map(([i, r], n) => { const share = 100 * r.blocks / Math.max(1, window_.length);
+          return `<tr><td><span class="rank" title="rang ${n + 1}">${initials(vnames[i] || `V ${+i + 1}`)}</span>${vnames[i] ? esc(vnames[i]) : `Validateur n° ${+i + 1}`}</td>
+          <td><div style="display:flex;gap:8px;align-items:center"><div class="bar" style="flex:1"><span style="width:${share.toFixed(1)}%"></span></div>${share.toFixed(0)} %</div></td>
+          <td class="num">${fr(r.blocks)}</td><td class="num">${fr(r.tx)}</td></tr>`; }).join("") || '<tr><td colspan="4" class="muted">Aucun bloc.</td></tr>'}
+        </tbody></table></div>
+        <div class="stats" style="margin-top:14px;grid-template-columns:repeat(3,1fr);gap:8px">
+          ${[["Validateurs", fr(status.validators.length)], ["Quorum", fr(Math.floor(2 * status.validators.length / 3) + 1)], ["Pannes tolérées", fr(status.validators.length - Math.floor(2 * status.validators.length / 3) - 1)]]
+            .map(([k, v]) => `<div class="stat" style="padding:10px;box-shadow:none;background:var(--panel)"><div class="label">${k}</div><div class="value" style="font-size:18px">${v}</div></div>`).join("")}
+        </div></section>
+      <section class="card" data-height="${status.height}"><h2>Derniers blocs <span class="live">en direct</span><a class="more" href="#/blocs">Voir plus ›</a></h2><div class="scroll"><table>
+        <thead><tr><th>Bloc</th><th>Heure</th><th class="num">Transactions</th><th>Proposeur</th></tr></thead><tbody>
+        ${blocks.blocks.slice(0, 8).map((b) => `<tr class="link${seenHeight !== null && b.height > seenHeight ? " fresh" : ""}" onclick="location.hash='#/bloc/${b.height}'">
+          <td>${blockLink(b.height)}</td><td class="nowrap">${when(b.timestamp)}</td><td class="num">${fr(b.transactions + b.admin_transactions)}</td><td>${vnames[b.proposer] ? esc(vnames[b.proposer]) : "n° " + (b.proposer + 1)}</td></tr>`).join("")}
+        </tbody></table></div></section>
+    </div>
+    <section class="card"><h2>Dernières transactions</h2>${txTable(recent.slice(0, 10))}</section>`;
 }
 
 async function blockList(before) {
@@ -149,7 +269,7 @@ async function blockList(before) {
   return `<section class="card"><h2>Blocs</h2><div class="scroll"><table>
     <thead><tr><th>Bloc</th><th>Heure</th><th>Transactions</th><th>Proposeur</th><th>Round</th><th>Hash</th></tr></thead><tbody>
     ${list.map((b) => `<tr class="link" onclick="location.hash='#/bloc/${b.height}'">
-      <td>${blockLink(b.height)}</td><td class="nowrap">${dateTime(b.timestamp)}</td><td>${fr(b.transactions + b.admin_transactions)}</td>
+      <td>${blockLink(b.height)}</td><td class="nowrap">${when(b.timestamp)}</td><td>${fr(b.transactions + b.admin_transactions)}</td>
       <td>n° ${b.proposer + 1}</td><td class="${b.round ? "warn" : ""}">${b.round ?? "—"}</td><td class="mono">${esc(short(b.hash, 16))}</td></tr>`).join("")}
     </tbody></table></div>
     <div class="crumbs" style="margin-top:10px">${before ? `<a href="#/blocs">← les plus récents</a>` : ""}
@@ -164,15 +284,15 @@ async function block(h) {
   const admin = b.admin_details.map((a) => ({ ...a, kind: `admin : ${a.kind}`, height: b.height }));
   return `<div class="crumbs">${b.height > 1 ? `<a href="#/bloc/${b.height - 1}">← bloc ${fr(b.height - 1)}</a>` : ""}<a href="#/bloc/${b.height + 1}">bloc ${fr(b.height + 1)} →</a></div>
     <section class="card"><h1>Bloc ${fr(b.height)}</h1><dl>
-      <dt>Heure</dt><dd>${dateTime(b.timestamp)} (${ago(b.timestamp)})</dd>
+      <dt>Heure</dt><dd>${when(b.timestamp)} <span class="muted">· ${dateTime(b.timestamp)}</span></dd>
       <dt>Proposeur</dt><dd>${v ? (v.name ? esc(v.name) + " " : "") + `<span class="muted">validateur n° ${v.index + 1}</span>` : "—"}</dd>
       <dt>Round</dt><dd>${b.round ?? "—"}</dd>
       <dt>Signé par</dt><dd>${b.signers.map((s) => s.name ? esc(s.name) : `n° ${s.index + 1}`).join(", ") || "—"}</dd>
       <dt>Protocole</dt><dd>${b.protocol_version}</dd>
       <dt>Transactions</dt><dd>${fr(count)}</dd>
-      <dt>Hash</dt><dd class="mono">${esc(b.hash)}</dd>
-      <dt>Parent</dt><dd class="mono">${esc(b.prev_hash)}</dd>
-      <dt>Racine d'état</dt><dd class="mono">${esc(b.state_root)}</dd>
+      <dt>Hash</dt><dd>${full(b.hash)}</dd>
+      <dt>Parent</dt><dd>${full(b.prev_hash)}</dd>
+      <dt>Racine d'état</dt><dd>${full(b.state_root)}</dd>
     </dl></section>
     ${count ? `<section class="card"><h2>Transactions</h2>${txTable([...admin, ...b.details], { withBlock: false })}
       ${b.transactions.length > b.details.length ? `<p class="muted">Les ${fr(b.details.length)} premières sur ${fr(b.transactions.length)}.</p>` : ""}</section>` : ""}`;
@@ -182,7 +302,7 @@ async function tx(id) {
   await loadAssets();
   const t = await get(`/transactions/${encodeURIComponent(id)}`);
   const rows = [
-    ["Statut", t.status === "finalisée" ? `<span class="ok">finalisée</span> au bloc ${blockLink(t.height)}, ${dateTime(t.timestamp)}` : `<span class="warn">${esc(t.status)}</span>`],
+    ["Statut", t.status === "finalisée" ? `<span class="ok">finalisée</span> au bloc ${blockLink(t.height)}, ${when(t.timestamp)} <span class="muted">· ${dateTime(t.timestamp)}</span>` : `<span class="warn">${esc(t.status)}</span>`],
     ["Type", esc(t.kind)],
   ];
   if (t.sender) rows.push(["Émetteur", addr(t.sender, 64)], ["Nonce", t.nonce], ["Frais", vinx(t.fee)]);
@@ -202,7 +322,7 @@ async function tx(id) {
   if (t.payments) rows.push(["Paiements", `${t.payments.length}<div>${t.payments.map((p) => `${addr(p.to)} ${vinx(p.amount)}${p.memo ? ` <span class="muted">${esc(p.memo)}</span>` : ""}`).join("<br>")}</div>`]);
   if (t.memo) rows.push(["Mémo", esc(t.memo)]);
   if (t.detail) rows.push(["Détail", esc(typeof t.detail === "string" ? t.detail : JSON.stringify(t.detail))]);
-  return `<section class="card"><h1>Transaction</h1><p class="mono">${esc(t.id)}</p>
+  return `<section class="card"><h1>Transaction</h1><p>${full(t.id)}</p>
     <dl>${rows.map(([k, v]) => `<dt>${k}</dt><dd>${v}</dd>`).join("")}</dl></section>`;
 }
 
@@ -216,7 +336,7 @@ async function account(a) {
   const tokens = acc.assets || [];
   const pol = acc.policy;
   const m = acc.mandates || { granted: [], received: [] };
-  return `<section class="card"><h1 class="mono">${esc(acc.address)}</h1><dl>
+  return `<section class="card"><h1 class="mono">${esc(acc.address)}${copyBtn(acc.address, "Copier l'adresse")}</h1><dl>
       <dt>Solde</dt><dd><b>${vinx(acc.balance)}</b></dd>
       ${acc.names.length ? `<dt>Noms</dt><dd>${acc.names.map((n) => `<a href="#/nom/${esc(n.name.replace(/\.vinx$/, ""))}">${esc(n.name)}</a>`).join(", ")}</dd>` : ""}
       <dt>Transactions envoyées</dt><dd>${fr(acc.nonce)}</dd>
@@ -291,6 +411,10 @@ async function search(q) {
   throw new Error("format non reconnu : adresse vinx1…, nom.vinx, jeton, identifiant de 64 caractères ou hauteur de bloc");
 }
 const go = (path) => { location.hash = "#" + path; };
+// Touche « / » : aller à la recherche, comme sur les explorateurs courants.
+document.addEventListener("keydown", (e) => {
+  if (e.key === "/" && !/^(INPUT|TEXTAREA|SELECT)$/.test(document.activeElement?.tagName)) { e.preventDefault(); $("q").focus(); }
+});
 $("searchForm").addEventListener("submit", async (e) => {
   e.preventDefault();
   try { await search($("q").value); }
@@ -298,21 +422,40 @@ $("searchForm").addEventListener("submit", async (e) => {
 });
 
 /* ---------- Navigation ---------- */
-let timer = null;
+let timer = null, seenHeight = null;
 async function route() {
   const [, view = "", arg = ""] = (location.hash.slice(1) || "/").split("/");
   const pages = { "": home, blocs: blockList, bloc: block, tx, adresse: account, jetons: tokens, jeton: token, nom: name };
   const page = pages[view] || home;
   const navView = { "": "accueil", blocs: "blocs", bloc: "blocs", jetons: "jetons", jeton: "jetons" }[view];
   document.querySelectorAll("nav a").forEach((a) => a.classList.toggle("active", a.dataset.view === navView));
+  $("hero").classList.toggle("compact", page !== home);
   clearInterval(timer);
+  // Chargement : des cartes grises animées tant que la page n'est pas prête.
+  $("page").innerHTML = page === home
+    ? `<div class="stats">${'<div class="skeleton skel-card"></div>'.repeat(4)}</div><div class="home-grid">${'<div class="skeleton skel-card" style="height:260px"></div>'.repeat(2)}</div>`
+    : '<div class="skeleton skel-card"></div>';
+  let shownHeight = null;
+  seenHeight = null;
   const run = async () => {
-    try { $("page").innerHTML = await page(decodeURIComponent(arg)); }
+    try {
+      // Accueil en direct : on ne recharge que si un bloc est arrivé, et les nouveaux blocs s'allument.
+      if (page === home && shownHeight !== null) {
+        const st = await get("/status");
+        if (st.height === shownHeight) return;
+        $("height").textContent = `bloc ${fr(st.height)}`;
+        seenHeight = shownHeight;
+      }
+      const html = await page(decodeURIComponent(arg));
+      const y = window.scrollY;
+      $("page").innerHTML = html; bindCharts($("page"));
+      if (page === home) { shownHeight = +($("page").querySelector("[data-height]")?.dataset.height ?? 0); window.scrollTo(0, y); }
+    }
     catch (e) { $("page").innerHTML = `<section class="card alert">${e.status === 404 ? "Introuvable : " : "Erreur : "}${esc(e.message)}</section>`; }
   };
   await run();
   // L'accueil se met à jour seul, sans charger le nœud : toutes les 10 s.
-  if (page === home) timer = setInterval(run, 10000);
+  if (page === home) timer = setInterval(run, 5000);
   get("/status").then((s) => { $("chain").textContent = s.chain_id; $("height").textContent = `bloc ${fr(s.height)}`; $("height").className = "pill ok"; })
     .catch(() => { $("height").textContent = "hors ligne"; $("height").className = "pill bad"; });
   window.scrollTo(0, 0);

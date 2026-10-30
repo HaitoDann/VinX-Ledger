@@ -64,6 +64,7 @@ pub fn router(shared: SharedRef) -> Router {
     Router::new()
         .route("/", get(dashboard))
         .route("/explorer", get(explorer))
+        .route("/fonts/{name}", get(font))
         .route("/metrics", get(metrics))
         .route("/governance", get(governance))
         .route("/blocks", get(recent_blocks))
@@ -110,6 +111,30 @@ async fn explorer() -> axum::response::Html<&'static str> {
     axum::response::Html(PAGE.as_str())
 }
 
+/// Polices de la charte (licence OFL), servies avec les pages : DM Sans pour
+/// le texte, et les seuls chiffres d'Inter (zéro barré, largeur fixe).
+pub(crate) async fn font(
+    axum::extract::Path(name): axum::extract::Path<String>,
+) -> axum::response::Response {
+    use axum::response::IntoResponse;
+    let bytes: &'static [u8] = match name.as_str() {
+        "dm-sans.woff2" => include_bytes!("../../../assets/fonts/dm-sans.woff2"),
+        "digits.woff2" => include_bytes!("../../../assets/fonts/digits.woff2"),
+        _ => return axum::http::StatusCode::NOT_FOUND.into_response(),
+    };
+    (
+        [
+            (axum::http::header::CONTENT_TYPE, "font/woff2"),
+            (
+                axum::http::header::CACHE_CONTROL,
+                "public, max-age=31536000, immutable",
+            ),
+        ],
+        bytes,
+    )
+        .into_response()
+}
+
 /// Page complète : feuille de style commune, logo et icône de la charte VinX
 /// (`assets/`), insérés dans le gabarit.
 fn render_page(template: &str) -> String {
@@ -124,6 +149,7 @@ fn render_page(template: &str) -> String {
     );
     template
         .replace("/*__THEME__*/", include_str!("../../../assets/theme.css"))
+        .replace("/*__CHARTS__*/", include_str!("../../../assets/charts.js"))
         .replace("<!--__LOGO__-->", logo)
         .replace("__FAVICON__", &favicon)
 }

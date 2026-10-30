@@ -10,9 +10,23 @@
 /* Propre au portefeuille : écrans d'accueil et gros solde. */
 .narrow { max-width: 560px; width: 100%; margin: 0 auto; }
 .hero { padding: 22px 20px; }
-.hero .label { color: var(--muted); font-size: 11px; text-transform: uppercase; letter-spacing: .12em; font-weight: 600; }
-.hero .balance { font-size: 40px; font-weight: 750; letter-spacing: -.02em; font-variant-numeric: tabular-nums; margin: 4px 0 2px; }
-.hero .balance small { font-size: 18px; color: var(--accent); font-weight: 700; margin-left: 6px; }
+.hero .label { color: var(--muted); font-size: 13px; }
+.hero .balance { font-size: 40px; font-weight: 600; letter-spacing: -.02em; font-variant-numeric: tabular-nums; margin: 4px 0 2px; }
+.hero.balance-card { padding: 24px; background: var(--stripes), radial-gradient(120% 140% at 100% 0, rgba(13, 220, 142, .08), transparent 55%), var(--card); }
+.balance-card .grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(min(100%, 300px), 1fr)); gap: 18px 24px; align-items: end; }
+.balance-card .panel { background: var(--panel); border: 1px solid var(--line); border-radius: 8px; padding: 10px 12px;
+                       display: grid; grid-template-columns: 1fr 1fr; gap: 0 12px; }
+.balance-card .panel > div { padding: 7px 0; min-width: 0; }
+.balance-card .panel > div:nth-child(n+3) { border-top: 1px dashed var(--line); }
+.balance-card .panel > div:nth-child(even) { text-align: right; }
+.balance-card .panel > div > span { font-size: 11px; color: var(--muted); }
+.balance-card .panel b { display: block; font-size: 14px; font-variant-numeric: tabular-nums; }
+.range { display: flex; gap: 4px; margin-left: auto; }
+.range button { padding: 3px 10px; font-size: 12px; border-radius: 999px; }
+.range button.on { border-color: var(--accent); color: var(--accent); background: var(--accent-soft); }
+#balanceChart.skeleton { min-height: 200px; } #recent.skeleton { min-height: 160px; } #balanceStats.skeleton { min-height: 110px; }
+#balanceChart svg { display: block; width: 100%; height: auto; }
+.hero .balance small { font-size: 18px; color: var(--muted); font-weight: 500; margin-left: 6px; }
 .words { display: grid; grid-template-columns: repeat(3, 1fr); gap: 8px; margin: 12px 0; counter-reset: w; }
 .words span { background: var(--bg); border: 1px solid var(--line); border-radius: 3px; padding: 8px 10px;
               font: 14px ui-monospace, "Cascadia Mono", Menlo, monospace; counter-increment: w; }
@@ -36,10 +50,44 @@ header select { width: auto; min-width: 180px; }
 <body>
 <header>
   <a class="brand" href="#"><!--__LOGO__--><span><b>VinX <span>Ledger</span></b><small>Portefeuille</small></span></a>
+  <nav id="tabs" hidden>
+    <a href="#home" data-view="home">Accueil</a>
+    <a href="#send" data-view="send">Envoyer</a>
+    <a href="#receive" data-view="receive">Recevoir</a>
+    <a href="#history" data-view="history">Historique</a>
+    <a href="#assets" data-view="assets">Jetons</a>
+    <details class="more" id="moreTabs">
+      <summary>Plus ▾</summary>
+      <div class="menu">
+        <a href="#names" data-view="names">Noms .vinx</a>
+        <a href="#deals" data-view="deals">Séquestres</a>
+        <a href="#stamp" data-view="stamp">Horodatage</a>
+        <a href="#mandates" data-view="mandates">Mandats</a>
+        <a href="#contacts" data-view="contacts">Contacts</a>
+        <a href="#settings" data-view="settings">Réglages</a>
+      </div>
+    </details>
+  </nav>
   <span class="spacer"></span>
   <select id="account" hidden aria-label="Compte"></select>
   <button id="lockBtn" hidden>Verrouiller</button>
+  <button class="theme-toggle" id="themeToggle" type="button" aria-label="Thème clair ou sombre" title="Thème clair ou sombre">
+    <svg class="moon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M21 12.8A9 9 0 1 1 11.2 3a7 7 0 0 0 9.8 9.8z"/></svg>
+    <svg class="sun" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="12" r="4"/><path d="M12 2v2M12 20v2M4.9 4.9l1.4 1.4M17.7 17.7l1.4 1.4M2 12h2M20 12h2M4.9 19.1l1.4-1.4M17.7 6.3l1.4-1.4"/></svg>
+  </button>
 </header>
+<script>
+/* Thème : sombre par défaut, le choix clair ou sombre est mémorisé. */
+(() => {
+  const root = document.documentElement, key = "vinx-theme";
+  try { const t = localStorage.getItem(key); if (t) root.dataset.theme = t; } catch (_) {}
+  document.getElementById("themeToggle").addEventListener("click", () => {
+    const t = root.dataset.theme === "light" ? "dark" : "light";
+    root.dataset.theme = t;
+    try { localStorage.setItem(key, t); } catch (_) {}
+  });
+})();
+</script>
 
 <!-- Accueil : création ou restauration. -->
 <main id="welcome" class="view">
@@ -100,27 +148,23 @@ header select { width: auto; min-width: 180px; }
 </main>
 
 <!-- Portefeuille ouvert. -->
-<nav id="tabs" hidden>
-  <a href="#home" data-view="home">Accueil</a>
-  <a href="#send" data-view="send">Envoyer</a>
-  <a href="#receive" data-view="receive">Recevoir</a>
-  <a href="#history" data-view="history">Historique</a>
-  <a href="#names" data-view="names">Noms .vinx</a>
-  <a href="#deals" data-view="deals">Séquestres</a>
-  <a href="#stamp" data-view="stamp">Horodatage</a>
-  <a href="#mandates" data-view="mandates">Mandats</a>
-  <a href="#assets" data-view="assets">Jetons</a>
-  <a href="#contacts" data-view="contacts">Contacts</a>
-  <a href="#settings" data-view="settings">Réglages</a>
-</nav>
 
 <main id="home" class="view">
-  <div class="card hero">
-    <div class="label" id="homeLabel">Solde</div>
-    <div class="balance"><span id="balance">—</span><small>VINX</small></div>
-    <div class="sub" id="homeNames"></div>
-    <div class="actions"><button class="primary" data-go="send">Envoyer</button><button data-go="receive">Recevoir</button></div>
+  <div class="card hero balance-card">
+    <div class="grid">
+      <div>
+        <div class="label" id="homeLabel">Solde</div>
+        <div class="balance"><span id="balance">—</span><small>VINX</small></div>
+        <div class="sub" id="homeNames"></div>
+        <div class="actions"><button class="primary" data-go="send">Envoyer</button><button data-go="receive">Recevoir</button></div>
+      </div>
+      <div class="panel" id="balanceStats"></div>
+    </div>
   </div>
+  <div class="card chart"><h2>Évolution du solde
+    <span class="range" id="balanceRange"><button data-days="7">7 j</button><button data-days="30" class="on">30 j</button><button data-days="0">Tout</button></span></h2>
+    <div id="balanceChart"></div>
+    <p class="note muted">Reconstitué à partir de l'historique du compte (VINX uniquement, frais compris).</p></div>
   <div class="card alert warning" id="netWarn" hidden></div>
   <div class="card"><h2>Dernières opérations</h2><div class="scroll" id="recent"></div></div>
 </main>
@@ -362,6 +406,7 @@ header select { width: auto; min-width: 180px; }
 <div id="toast"></div>
 <footer>Portefeuille VinX Ledger · tes clés restent sur cet ordinateur · verrouillage automatique après 15 minutes d'inactivité.</footer>
 
+<script>/*__CHARTS__*/</script>
 <script>
 const TOKEN = "__APP_TOKEN__";
 const $ = (id) => document.getElementById(id);
@@ -396,6 +441,7 @@ function dialog(title, html, { ok = "Confirmer", cancel = true } = {}) {
 }
 
 /* Unités (chaîne, 1 VINX = 10⁹) → texte en VINX. */
+const fullVinx = (u) => vinx(u);
 function vinx(u) {
   let n; try { n = BigInt(u || "0"); } catch (_) { return "—"; }
   const whole = (n / 1000000000n).toString().replace(/\B(?=(\d{3})+(?!\d))/g, " ");
@@ -411,7 +457,7 @@ function who(addr) {
   if (c) return esc(c.name);
   const me = (state?.accounts || []).find((a) => a.address === addr);
   if (me) return esc(me.label);
-  return `<span class="mono" title="${esc(addr)}">${esc(short(addr))}</span>`;
+  return `<span class="nowrap"><span class="mono" title="${esc(addr)}">${esc(short(addr))}</span>${copyBtn(addr, "Copier l'adresse")}</span>`;
 }
 
 /* ----- Écrans ----- */
@@ -421,6 +467,9 @@ function show(view) {
   const open = !PUBLIC.includes(view);
   $("tabs").hidden = !open; $("account").hidden = !open; $("lockBtn").hidden = !open;
   document.querySelectorAll("#tabs a").forEach((a) => a.classList.toggle("active", a.dataset.view === view));
+  // Onglet rangé dans « Plus » : le menu se referme et s'affiche comme actif.
+  $("moreTabs").open = false;
+  $("moreTabs").classList.toggle("active", !!$("moreTabs").querySelector(`a[data-view="${view}"]`));
   if (open && location.hash !== "#" + view) history.replaceState(null, "", "#" + view);
   if (view === "locked") setTimeout(() => $("unlockPw").focus(), 50);
 }
@@ -546,6 +595,7 @@ async function refresh() {
     return;
   }
   $("netWarn").hidden = true;
+  loaded();
   $("balance").textContent = vinx(data.balance);
   $("homeLabel").textContent = "Solde · " + data.label;
   const names = (data.names || []).map((n) => n.name);
@@ -555,9 +605,10 @@ async function refresh() {
   $("reserveNote").textContent = data.exists ? "" : `Ce compte n'existe pas encore sur le réseau : le premier versement doit être d'au moins ${vinx(data.network.min_reserve)} VINX.`;
   const v2 = data.network.protocol_version >= 2;
   $("netInfo").innerHTML = `Réseau <b>${esc(data.network.chain_id)}</b> · bloc ${esc(data.network.height)} · protocole ${esc(data.network.protocol_version)}${v2 ? "" : " (noms et séquestres pas encore actifs)"}`;
-  const rows = (list) => list.length ? `<table><thead><tr><th>Date</th><th>Opération</th><th>Avec</th><th style="text-align:right">Montant</th><th>Statut</th></tr></thead><tbody>${list.map(txRow).join("")}</tbody></table>` : `<p class="muted">Aucune opération pour l'instant.</p>`;
+  const rows = (list) => list.length ? `<table class="tx"><thead><tr><th>Date</th><th>Opération</th><th>Avec</th><th style="text-align:right">Montant</th><th>Statut</th></tr></thead><tbody>${list.map(txRow).join("")}</tbody></table>` : `<p class="muted">Aucune opération pour l'instant.</p>`;
   $("recent").innerHTML = rows(data.history.slice(0, 6));
   $("historyTable").innerHTML = rows(data.history);
+  renderBalance();
   renderNames(); renderDeals(); renderStamps(); renderMandates(); renderAssets();
   const pol = data.policy;
   $("policyInfo").innerHTML = !pol
@@ -567,6 +618,77 @@ async function refresh() {
        ${pol.signers.map((s) => `<div class="mono">${esc(s.address)}</div>`).join("")}
        <p class="note">Les opérations approuvées se préparent avec « vinx-wallet account propose » (guide du portefeuille).</p>`;
 }
+/* ----- Carte de solde et graphique ----- */
+/* Variation du solde VINX apportée par une opération (en unités, frais compris). */
+function vinxDelta(t) {
+  const me = data.address, big = (x) => { try { return BigInt(x || "0"); } catch (_) { return 0n; } };
+  let d = t.sender === me ? -big(t.fee) : 0n;
+  if (t.asset && t.units) return d;
+  if (t.kind === "prélèvement") return d + (t.payer === me ? -big(t.amount) : t.sender === me ? big(t.amount) : 0n);
+  if (t.kind === "paiement groupé") {
+    const list = t.payments || [];
+    if (t.sender === me) return d - list.reduce((s, p) => s + big(p.amount), 0n);
+    return d + list.filter((p) => p.to === me).reduce((s, p) => s + big(p.amount), 0n);
+  }
+  if (!t.amount) return d;
+  if (t.sender === me && t.to !== me) return d - big(t.amount);
+  if (t.to === me && t.sender !== me) return d + big(t.amount);
+  return d;
+}
+let balanceDays = 30;
+function renderBalance() {
+  const now = Date.now(), from = balanceDays ? now - balanceDays * 86400000 : 0;
+  // On remonte le temps depuis le solde actuel : le plus récent d'abord.
+  const done = data.history.filter((t) => t.status !== "en attente" && t.timestamp).sort((a, b) => b.timestamp - a.timestamp);
+  let bal = BigInt(data.balance || "0"), inSum = 0n, outSum = 0n, count = 0;
+  const pts = [[now, bal]];
+  for (const t of done) {
+    const d = vinxDelta(t);
+    if (t.timestamp >= from) { count++; if (d > 0n) inSum += d; else outSum -= d; }
+    pts.push([t.timestamp, bal]);
+    bal -= d;
+    pts.push([t.timestamp - 1, bal]);
+    if (t.timestamp < from) break;
+  }
+  const series = pts.reverse().filter(([ts]) => ts >= from);
+  if (series.length && series[0][0] > from && balanceDays) series.unshift([from, series[0][1]]);
+  const span = balanceDays ? `${balanceDays} j` : "total";
+  $("balanceStats").innerHTML = [["Reçu (" + span + ")", `<span class="in">+ ${vinx(inSum)}</span>`], ["Envoyé (" + span + ")", `− ${vinx(outSum)}`],
+    ["Opérations", count.toLocaleString("fr-FR")], ["Jetons détenus", (data.assets || []).length.toLocaleString("fr-FR")]]
+    .map(([k, v]) => `<div><span>${k}</span><b>${v}</b></div>`).join("");
+  $("balanceChart").innerHTML = balanceChart(series);
+  bindCharts($("balanceChart"));
+}
+function balanceChart(series) {
+  if (series.length < 2) return '<p class="muted">Pas encore d\'opérations sur cette période.</p>';
+  // Largeur réelle du conteneur : les légendes gardent leur taille sur mobile.
+  const W = Math.max(300, $("balanceChart").clientWidth || 700), H = W < 500 ? 170 : 220, L = 52, B = 20, T = 10;
+  const vals = series.map(([, v]) => Number(v) / 1e9);
+  const t0 = series[0][0], t1 = series[series.length - 1][0] || t0 + 1;
+  const hi = Math.max(...vals) * 1.12 || 1;
+  const x = (ts) => L + ((ts - t0) / Math.max(1, t1 - t0)) * (W - L - 6);
+  const y = (v) => T + (1 - v / hi) * (H - T - B);
+  const d = series.map(([ts], i) => `${i ? "L" : "M"}${x(ts).toFixed(1)},${y(vals[i]).toFixed(1)}`).join(" ");
+  const fmtAxis = (v) => v >= 1e6 ? (v / 1e6).toLocaleString("fr-FR", { maximumFractionDigits: 1 }) + " M" : v >= 1e3 ? (v / 1e3).toLocaleString("fr-FR", { maximumFractionDigits: 1 }) + " k" : v.toLocaleString("fr-FR", { maximumFractionDigits: 2 });
+  const grid = [0, .25, .5, .75, 1].map((f) => `<line x1="${L}" x2="${W}" y1="${y(hi * f)}" y2="${y(hi * f)}" stroke="var(--line)" stroke-dasharray="3 4"/>
+    <text x="${L - 6}" y="${y(hi * f) + 3}" text-anchor="end">${fmtAxis(hi * f)}</text>`).join("");
+  const ticks = [0, .25, .5, .75, 1].map((f) => { const ts = t0 + f * (t1 - t0);
+    return `<text x="${x(ts)}" y="${H - 4}" text-anchor="${f === 0 ? "start" : f === 1 ? "end" : "middle"}">${new Date(ts).toLocaleDateString("fr-FR", { day: "numeric", month: "short" })}</text>`; }).join("");
+  const hover = chartPoints(series.map(([ts], i) => [x(ts), y(vals[i]),
+    `${new Date(ts).toLocaleString("fr-FR", { dateStyle: "medium", timeStyle: "short" })} · <b>${vals[i].toLocaleString("fr-FR", { maximumFractionDigits: 4 })} VINX</b>`]));
+  return `<svg viewBox="0 0 ${W} ${H}" role="img" aria-label="Évolution du solde" data-chart="${hover}" style="font-size:11px;fill:var(--muted)">
+    <defs><linearGradient id="balGrad" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0" stop-color="var(--chart)" stop-opacity=".5"/><stop offset="1" stop-color="var(--chart)" stop-opacity="0"/></linearGradient></defs>
+    ${grid}<path d="${d} L${x(t1)},${H - B} L${L},${H - B}Z" fill="url(#balGrad)"/>
+    <path d="${d}" fill="none" stroke="var(--chart)" stroke-width="2" stroke-linejoin="round"/>
+    <circle cx="${x(t1)}" cy="${y(vals[vals.length - 1])}" r="4" fill="var(--chart)"/>${ticks}</svg>`;
+}
+$("balanceRange").addEventListener("click", (e) => {
+  const b = e.target.closest("button[data-days]"); if (!b || !data) return;
+  balanceDays = Number(b.dataset.days);
+  $("balanceRange").querySelectorAll("button").forEach((x) => x.classList.toggle("on", x === b));
+  renderBalance();
+});
 const isStamp = (t) => t.sender === data?.address && (t.kind === "horodatage" || (t.kind === "paiement" && t.amount === "1" && (t.memo_hex || "").length === 64));
 const stampDigestOf = (t) => t.digest || t.memo_hex;
 function renderStamps() {
@@ -795,6 +917,9 @@ $("csvBtn").onclick = () => {
     "\ufeff" + rows.map((r) => r.map(cell).join(";")).join("\r\n"), "text/csv");
 };
 function txRow(t) {
+  // Dans les listes : au plus 4 décimales, la valeur exacte au survol ; dates relatives.
+  const vinx = (u) => shortAmount(fullVinx(u));
+  const date = when;
   const out = t.sender === data.address;
   const kinds = { "paiement": out ? "Envoi" : "Réception", "nom": "Nom " + (t.name || ""), "cession de nom": "Cession " + (t.name || ""),
     "séquestre": out ? "Séquestre ouvert" : "Séquestre en votre faveur", "séquestre versé": "Séquestre versé", "séquestre remboursé": "Séquestre remboursé",
@@ -813,7 +938,7 @@ function txRow(t) {
     const inbound = collector ? t.sender === data.address : t.to === data.address;
     const moves = ["paiement en actif", "reprise forcée", "prélèvement", "séquestre"].includes(t.kind);
     const sign = inbound ? "+" : moves || t.kind === "destruction d'actif" ? "−" : "";
-    const shown = a ? units(t.units, a.decimals) : t.units;
+    const shown = shortAmount(a ? units(t.units, a.decimals) : t.units);
     return `<tr><td>${t.status === "en attente" ? "à l'instant" : date(t.timestamp)}</td><td>${esc(kinds[t.kind] || t.kind)}${t.memo ? `<div class="sub">${esc(t.memo)}</div>` : ""}</td>
       <td>${t.to && t.to !== data.address ? who(t.to) : t.from && t.from !== data.address ? who(t.from) : t.payer && t.payer !== data.address ? who(t.payer) : t.sender !== data.address ? who(t.sender) : ""}</td>
       <td style="text-align:right"><span class="${inbound ? "in" : "out"}">${sign} ${shown} ${esc(t.asset)}</span>${out ? `<div class="sub">frais ${vinx(t.fee)}</div>` : ""}</td>
@@ -827,6 +952,10 @@ function txRow(t) {
     return `<tr><td>${t.status === "en attente" ? "à l'instant" : date(t.timestamp)}</td><td>${payer ? "Prélèvement (mandat)" : "Prélèvement encaissé"}${t.memo ? `<div class="sub">${esc(t.memo)}</div>` : ""}</td>
       <td>${who(t.to)}</td><td style="text-align:right">${amount}${payer ? "" : `<div class="sub">frais ${vinx(t.fee)}</div>`}</td>
       <td>${t.status === "en attente" ? `<span class="pill warn">en attente</span>` : `<span class="pill ok">confirmée</span>`}</td></tr>`;
+  }
+  if (t.kind === "paiement groupé" && out) {
+    // Envoi groupé : le montant affiché est la somme des paiements.
+    t = { ...t, amount: (t.payments || []).reduce((s, p) => s + BigInt(p.amount || "0"), 0n).toString() };
   }
   if (t.kind === "paiement groupé" && !out) {
     const mine = (t.payments || []).filter((p) => p.to === data.address);
@@ -906,13 +1035,46 @@ async function operate(op, title, done) {
   op.account = current;
   let p;
   try { p = await api("/api/preview", op); } catch (e) { return toast(e.message, true); }
-  const mono = (l) => /^vinx1/.test(l.value) ? "mono" : "";
   const fr = (v) => String(v).replace(/^(\d+)\.(\d+)/, "$1,$2");
-  const html = `<dl>${p.lines.map((l) => `<dt>${esc(l.label)}</dt><dd class="${mono(l)}">${esc(fr(l.value))}</dd>`).join("")}
-    <dt>Frais du réseau</dt><dd>${esc(fr(p.fee))} VINX</dd><dt><b>Total débité</b></dt><dd><b>${esc(fr(p.total))} VINX</b></dd>
-    <dt>Solde après</dt><dd>${esc(fr(p.after))} VINX</dd></dl>
-    ${p.warnings.map((w) => `<p class="warn">⚠ ${esc(w)}</p>`).join("")}`;
-  if (!await dialog(title, html, { ok: "Confirmer" })) return;
+  const line = (label) => p.lines.find((l) => l.label === label)?.value;
+  const warnings = p.warnings.map((w) => `<p class="notice">⚠ ${esc(w)}</p>`);
+  let html, ok = "Confirmer";
+  const to = line("Destinataire");
+  if (op.action === "send" && to) {
+    // Envoi : montant en grand, de qui vers qui, détail des frais et solde avant / après.
+    const amount = fr(line("Montant") || "").replace(/ VINX$/, "");
+    const known = (state.contacts || []).some((c) => c.address === to) || (state.accounts || []).some((a) => a.address === to)
+      || (data?.history || []).some((t) => t.to === to || t.sender === to);
+    if (!known) warnings.unshift(`<p class="notice">⚠ Premier paiement vers cette adresse : vérifie-la caractère par caractère, un envoi ne peut pas être annulé.</p>`);
+    const num = (v) => Number(String(v).replace(/\s/g, "").replace(",", ".")) || 0;
+    const before = num(fr(p.after)) + num(fr(p.total));
+    const pct = before ? Math.max(0, Math.min(100, 100 * num(fr(p.after)) / before)) : 0;
+    const me = (state.accounts || []).find((a) => a.index === current);
+    html = `<div class="confirm-amount"><div class="label muted">Tu envoies</div><div class="big">${esc(amount)}<small>VINX</small></div></div>
+      <div class="flow">
+        <div><div class="lbl">De</div><div class="who">${esc(me?.label || "Mon compte")}</div><div class="mono sub">${esc(short(data.address))}</div></div>
+        <span class="arrow">→</span>
+        <div><div class="lbl">Vers</div><div class="who">${who(to).replace(/<button[\s\S]*<\/button>/, "")}</div>
+          <div class="sub">${esc(line("Trouvé par") || "")}</div></div>
+      </div>
+      <div class="mono sub" style="word-break:break-all;margin:-6px 0 12px">${esc(to)}${copyBtn(to)}</div>
+      <dl class="breakdown">
+        <dt>Montant</dt><dd>${esc(amount)} VINX</dd>
+        ${op.memo ? `<dt>Mémo</dt><dd>${esc(op.memo)}</dd>` : ""}
+        <dt>Frais du réseau</dt><dd>${esc(fr(p.fee))} VINX</dd>
+        <dt class="total">Total débité</dt><dd class="total">${esc(fr(p.total))} VINX</dd>
+      </dl>
+      <div class="balance-bar" title="Solde après l'envoi"><span style="width:${pct}%"></span><i style="width:${100 - pct}%"></i></div>
+      <div class="sub" style="display:flex;justify-content:space-between"><span>Solde après : <b>${esc(fr(p.after))} VINX</b></span><span>${(100 - pct).toLocaleString("fr-FR", { maximumFractionDigits: 1 })} % du solde</span></div>
+      ${warnings.join("")}`;
+    ok = `Envoyer ${amount} VINX`;
+  } else {
+    const mono = (l) => /^vinx1/.test(l.value) ? "mono" : "";
+    html = `<dl class="breakdown">${p.lines.map((l) => `<dt>${esc(l.label)}</dt><dd class="${mono(l)}">${esc(fr(l.value))}</dd>`).join("")}
+      <dt>Frais du réseau</dt><dd>${esc(fr(p.fee))} VINX</dd><dt class="total">Total débité</dt><dd class="total">${esc(fr(p.total))} VINX</dd>
+      <dt>Solde après</dt><dd>${esc(fr(p.after))} VINX</dd></dl>${warnings.join("")}`;
+  }
+  if (!await dialog(title, html, { ok })) return;
   try {
     await api("/api/execute", op);
     toast("Envoyé : confirmation dans quelques secondes.");
@@ -936,6 +1098,12 @@ $("copyAddr").onclick = async () => {
 };
 
 setInterval(() => { if (!$("tabs").hidden) refresh(); }, 10000);
+document.addEventListener("click", (e) => { if (!e.target.closest("#moreTabs")) $("moreTabs").open = false; });
+$("moreTabs").addEventListener("toggle", () => {
+  const r = $("moreTabs").querySelector("summary").getBoundingClientRect();
+  $("moreTabs").querySelector(".menu").style.top = innerWidth <= 860 ? `${r.bottom + 4}px` : "";
+});
+skeleton("#balance, #balanceStats, #balanceChart, #recent");
 boot().catch((e) => toast(e.message, true));
 </script>
 </body>

@@ -3,23 +3,29 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
-<meta name="theme-color" content="#0a0d0c">
+<meta name="theme-color" content="#0b2f23">
 <title>VinX</title>
 <link rel="manifest" href="manifest.webmanifest">
 <link rel="icon" href="icon.svg" type="image/svg+xml">
 <style>
+@font-face { font-family: "DM Sans"; src: url("fonts/dm-sans.woff2") format("woff2"); font-weight: 100 1000; font-display: swap; }
+@font-face { font-family: "VinX Chiffres"; src: url("fonts/digits.woff2") format("woff2"); font-weight: 100 900; font-display: swap; unicode-range: U+0030-0039; }
 :root {
   color-scheme: dark;
-  --bg: #0a0d0c; --card: #121715; --text: #e8efeb; --muted: #8c9a93; --line: #222b27;
+  --bg: #0c0e0f; --card: #15181a; --text: #eceff0; --muted: #8b9396; --line: #24292b;
   --accent: #0ddc8e; --accent-soft: rgba(13, 220, 142, .12); --accent-text: #05140d;
-  --warn: #f5a524; --bad: #ff6b6b;
+  --warn: #f5a524; --bad: #ff6b6b; --panel: #0b100e;
+  --hero: linear-gradient(180deg, #0b2f23 0, #0a2219 160px, #08140f 340px, var(--bg) 520px);
+  --stripes: repeating-linear-gradient(-45deg, rgba(255, 255, 255, .025) 0 10px, transparent 10px 20px);
 }
 @media (prefers-color-scheme: light) {
   :root { color-scheme: light; --bg: #f4f7f5; --card: #fff; --text: #111614; --muted: #5b6762; --line: #dde4e0;
-          --accent: #067a4e; --accent-soft: rgba(6, 122, 78, .09); --accent-text: #fff; --warn: #9a5b00; --bad: #c0362c; }
+          --accent: #067a4e; --accent-soft: rgba(6, 122, 78, .09); --accent-text: #fff; --warn: #9a5b00; --bad: #c0362c;
+          --panel: #f3f7f5; --hero: linear-gradient(180deg, #bff0d9 0, #dcf6ea 180px, var(--bg) 480px);
+          --stripes: repeating-linear-gradient(-45deg, rgba(6, 122, 78, .04) 0 10px, transparent 10px 20px); }
 }
 * { box-sizing: border-box; -webkit-tap-highlight-color: transparent; }
-html, body { margin: 0; background: var(--bg); color: var(--text); font: 16px/1.45 system-ui, -apple-system, Roboto, sans-serif; }
+html, body { margin: 0; background: var(--hero) no-repeat, var(--bg); color: var(--text); font: 16px/1.5 "VinX Chiffres", "DM Sans", system-ui, -apple-system, Roboto, sans-serif; -webkit-font-smoothing: antialiased; font-feature-settings: "tnum"; }
 body { padding: env(safe-area-inset-top) 0 calc(72px + env(safe-area-inset-bottom)); min-height: 100vh; }
 header { display: flex; align-items: center; gap: 10px; padding: 14px 16px; }
 header svg { width: 30px; color: var(--accent); }
@@ -27,18 +33,26 @@ header b { font-size: 18px; } header b span { color: var(--accent); }
 header select { margin-left: auto; max-width: 48%; }
 main { padding: 0 16px; max-width: 560px; margin: 0 auto; }
 .view { display: none; } .view.on { display: block; }
-.card { background: var(--card); border: 1px solid var(--line); padding: 16px; margin-bottom: 12px; }
-h2 { font-size: 12px; margin: 0 0 12px; color: var(--muted); text-transform: uppercase; letter-spacing: .1em; }
-.hero { text-align: center; padding: 26px 16px; }
-.hero .big { font-size: 38px; font-weight: 700; letter-spacing: -.01em; }
+.card { background: var(--card); border: 1px solid var(--line); border-radius: 12px; padding: 16px; margin-bottom: 12px; }
+h2 { font-size: 14px; margin: 0 0 12px; color: var(--text); font-weight: 500; }
+.hero { text-align: center; padding: 26px 16px; background: var(--stripes), radial-gradient(120% 140% at 100% 0, rgba(13, 220, 142, .08), transparent 55%), var(--card); }
+.panel { display: grid; grid-template-columns: 1fr 1fr; gap: 0 12px; margin-top: 16px; padding: 8px 12px; text-align: left;
+         background: var(--panel); border: 1px solid var(--line); border-radius: 6px; }
+.panel > div { padding: 6px 0; } .panel > div:nth-child(even) { text-align: right; }
+.panel > div > span { display: block; font-size: 11px; color: var(--muted); } .panel b { font-size: 14px; }
+#chart svg { display: block; width: 100%; height: auto; font-size: 11px; fill: var(--muted); }
+.skeleton { color: transparent !important; border-radius: 4px; display: inline-block; min-width: 3em;
+            background: linear-gradient(90deg, var(--line) 25%, var(--card) 50%, var(--line) 75%) 0 0 / 200% 100%; animation: shimmer 1.3s linear infinite; }
+@keyframes shimmer { to { background-position: -200% 0; } }
+.hero .big { font-size: 38px; font-weight: 600; letter-spacing: -.01em; }
 .hero .big small { font-size: 16px; color: var(--muted); margin-left: 6px; }
 .muted { color: var(--muted); } .warn { color: var(--warn); } .bad { color: var(--bad); }
 .mono { font-family: ui-monospace, Menlo, Consolas, monospace; word-break: break-all; font-size: 13px; }
-label { display: block; font-size: 12px; color: var(--muted); margin: 12px 0 4px; text-transform: uppercase; letter-spacing: .06em; }
-input, select, textarea { width: 100%; padding: 12px; font: inherit; background: var(--bg); color: var(--text); border: 1px solid var(--line); border-radius: 0; }
+label { display: block; font-size: 13px; color: var(--muted); margin: 12px 0 5px; }
+input, select, textarea { width: 100%; padding: 12px; font: inherit; background: var(--bg); color: var(--text); border: 1px solid var(--line); border-radius: 6px; }
 textarea { min-height: 96px; }
 input:focus, select:focus, textarea:focus { outline: 2px solid var(--accent); outline-offset: -1px; }
-button { font: inherit; font-weight: 600; padding: 13px 16px; border: 1px solid var(--line); background: var(--card); color: var(--text); width: 100%; margin-top: 12px; cursor: pointer; }
+button { font: inherit; font-weight: 500; padding: 13px 16px; border-radius: 8px; border: 1px solid var(--line); background: var(--card); color: var(--text); width: 100%; margin-top: 12px; cursor: pointer; }
 button.primary { background: var(--accent); color: var(--accent-text); border-color: var(--accent); }
 button.link { border: none; background: none; color: var(--accent); width: auto; padding: 8px 0; }
 .row { display: flex; gap: 10px; } .row > * { flex: 1; }
@@ -124,7 +138,8 @@ dialog::backdrop { background: rgba(0, 0, 0, .6); }
 <section id="v-home" class="view">
   <div class="card hero">
     <div class="muted" id="netLabel">—</div>
-    <div class="big"><span id="balance">—</span><small>VINX</small></div>
+    <div class="big"><span id="balance" class="skeleton">—</span><small>VINX</small></div>
+    <div class="panel" id="stats"></div>
   </div>
   <div class="actions3">
     <button class="primary" data-go="send">Envoyer</button>
@@ -132,6 +147,10 @@ dialog::backdrop { background: rgba(0, 0, 0, .6); }
     <button data-go="scan">Scanner</button>
   </div>
   <div class="card" style="margin-top:12px">
+    <h2>Évolution du solde · 30 jours</h2>
+    <div id="chart"><p class="muted">Chargement…</p></div>
+  </div>
+  <div class="card">
     <h2>Jetons</h2>
     <div class="list" id="tokens"></div>
     <button class="link" data-go="tokens">Accepter un jeton…</button>

@@ -13,22 +13,39 @@
     <!--__LOGO__-->
     <span><b>VinX <span>Ledger</span></b><small>Nœud</small></span>
   </a>
+  <nav>
+    <a href="#apercu" data-view="apercu">Aperçu</a>
+    <a href="#gouvernance" data-view="gouvernance">Gouvernance</a>
+    <a href="#mempool" data-view="mempool">Mempool</a>
+    <a href="#recherche" data-view="recherche">Recherche</a>
+    <a href="/explorer">Explorateur</a>
+  </nav>
   <span id="chain" class="mono"></span>
   <span id="role" class="pill"></span>
   <span id="health" class="pill"></span>
+  <button class="theme-toggle" id="themeToggle" type="button" aria-label="Thème clair ou sombre" title="Thème clair ou sombre">
+    <svg class="moon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M21 12.8A9 9 0 1 1 11.2 3a7 7 0 0 0 9.8 9.8z"/></svg>
+    <svg class="sun" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="12" r="4"/><path d="M12 2v2M12 20v2M4.9 4.9l1.4 1.4M17.7 17.7l1.4 1.4M2 12h2M20 12h2M4.9 19.1l1.4-1.4M17.7 6.3l1.4-1.4"/></svg>
+  </button>
 </header>
-<nav>
-  <a href="#apercu" data-view="apercu">Aperçu</a>
-  <a href="#gouvernance" data-view="gouvernance">Gouvernance</a>
-  <a href="#mempool" data-view="mempool">Mempool</a>
-  <a href="#recherche" data-view="recherche">Recherche</a>
-  <a href="/explorer">Explorateur</a>
-</nav>
+<script>
+/* Thème : sombre par défaut, le choix clair ou sombre est mémorisé. */
+(() => {
+  const root = document.documentElement, key = "vinx-theme";
+  try { const t = localStorage.getItem(key); if (t) root.dataset.theme = t; } catch (_) {}
+  document.getElementById("themeToggle").addEventListener("click", () => {
+    const t = root.dataset.theme === "light" ? "dark" : "light";
+    root.dataset.theme = t;
+    try { localStorage.setItem(key, t); } catch (_) {}
+  });
+})();
+</script>
 <main>
   <div id="error" class="card alert"></div>
 
   <!-- Aperçu -->
   <section id="view-apercu" class="view">
+    <div id="banner" class="status-banner skeleton" style="min-height:58px"></div>
     <div class="tiles">
       <div class="tile"><div class="label">Hauteur</div><div class="value" id="height">—</div><div class="sub" id="age"></div></div>
       <div class="tile"><div class="label">Rythme des blocs</div><div class="value" id="pace">—</div><div class="sub" id="pace-target"></div></div>
@@ -165,6 +182,7 @@
   </section>
 </main>
 
+<script>/*__CHARTS__*/</script>
 <script>
 const UNITS = 1000000000n;
 const REFRESH_MS = 3000;
@@ -208,22 +226,30 @@ function proposerName(index) {
   return n ? `${esc(n)} <span class="muted">(${index + 1})</span>` : String(index + 1);
 }
 
-/* Petit graphique en ligne, sans bibliothèque : une aire sous une courbe. */
-function chart(values, { min = 0, max, refLine } = {}) {
+/* Petit graphique en ligne, sans bibliothèque : une aire en dégradé sous une courbe. */
+let chartId = 0;
+function chart(values, { min = 0, max, refLine, labels = [], unit = "" } = {}) {
   if (values.length < 2) return '<div class="sub">pas encore assez de blocs</div>';
   const W = 600, H = 90, pad = 4;
-  const hi = Math.max(max ?? 0, ...values, refLine ?? 0) || 1;
+  // Échelle robuste : un arrêt du nœud ne doit pas écraser la courbe.
+  const { hi, capped } = chartScale(values, Math.max(max ?? 0, refLine ?? 0));
   const x = (i) => (i / (values.length - 1)) * W;
-  const y = (v) => H - pad - ((v - min) / (hi - min)) * (H - 2 * pad);
+  const y = (v) => H - pad - ((Math.min(v, hi) - min) / (hi - min)) * (H - 2 * pad);
   const pts = values.map((v, i) => `${x(i).toFixed(1)},${y(v).toFixed(1)}`).join(" ");
   const ref = refLine != null
     ? `<line x1="0" x2="${W}" y1="${y(refLine)}" y2="${y(refLine)}" stroke="var(--muted)" stroke-dasharray="4 4" stroke-width="1" vector-effect="non-scaling-stroke"/>`
     : "";
-  return `<svg viewBox="0 0 ${W} ${H}" preserveAspectRatio="none" role="img">
-    <polygon points="0,${H} ${pts} ${W},${H}" fill="var(--chart-soft)"/>
+  const id = `grad${chartId++}`;
+  const num = (v) => v.toLocaleString("fr-FR", { maximumFractionDigits: v < 10 ? 1 : 0 });
+  const hover = chartPoints(values.map((v, i) => [x(i), y(v), `${labels[i] ? esc(labels[i]) + " · " : ""}<b>${num(v)}${unit}</b>`]));
+  return `<svg viewBox="0 0 ${W} ${H}" preserveAspectRatio="none" role="img" data-chart="${hover}">
+    <defs><linearGradient id="${id}" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0" stop-color="var(--chart)" stop-opacity=".45"/><stop offset="1" stop-color="var(--chart)" stop-opacity="0"/>
+    </linearGradient></defs>
+    <polygon points="0,${H} ${pts} ${W},${H}" fill="url(#${id})"/>
     ${ref}
     <polyline points="${pts}" fill="none" stroke="var(--chart)" stroke-width="1.5" vector-effect="non-scaling-stroke"/>
-  </svg>`;
+  </svg>${capped ? `<div class="capped">▲ ${capped} pic(s) tronqué(s), max ${num(Math.max(...values))}${unit}</div>` : ""}`;
 }
 
 /* ---------- Aperçu ---------- */
@@ -237,7 +263,7 @@ async function refreshOverview() {
 
   $("height").textContent = fr(status.height);
   const last = blocks.blocks[0];
-  $("age").textContent = last ? "dernier bloc " + ago(last.timestamp) : "aucun bloc";
+  $("age").innerHTML = last ? "dernier bloc " + when(last.timestamp) : "aucun bloc";
   if (blocks.blocks.length > 1) {
     const b = blocks.blocks, span = b[0].timestamp - b[b.length - 1].timestamp;
     $("pace").textContent = (span / (b.length - 1) / 1000).toFixed(1) + " s";
@@ -280,6 +306,23 @@ async function refreshOverview() {
     </div>`);
   $("alerts").innerHTML = alerts.join("");
 
+  // Bandeau d'état : un seul coup d'œil pour savoir si tout va bien, et sinon pourquoi.
+  const n = status.validators.length;
+  const problems = [];
+  if (stalled) problems.push(["bad", "Chaîne à l'arrêt", `aucun bloc depuis ${relTime(last?.timestamp || 0).replace("il y a ", "")}`]);
+  if (evidence.evidence.length) problems.push(["bad", "Équivoque détectée", `${evidence.evidence.length} preuve(s) de double vote`]);
+  if (absent.length) problems.push(["warn", absent.length === 1 ? "Un validateur absent" : `${absent.length} validateurs absents`, `${n - absent.length} sur ${n} votent, quorum ${Math.floor(2 * n / 3) + 1}`]);
+  if (!stalled && lastAge >= interval * 3) problems.push(["warn", "Chaîne lente", `dernier bloc ${relTime(last.timestamp)}`]);
+  if (n > 1 && status.peers === 0) problems.push(["warn", "Aucun pair connecté", "ce nœud est isolé du réseau"]);
+  if (ratio !== null && ratio < 0.9) problems.push(["warn", "Rounds supplémentaires fréquents", `${(ratio * 100).toFixed(0)} % des blocs au 1er round`]);
+  const level = problems.some((p) => p[0] === "bad") ? "bad" : problems.length ? "warn" : "ok";
+  $("banner").className = "status-banner " + (level === "ok" ? "" : level);
+  $("banner").innerHTML = `<span class="big-dot"></span><div>
+      <b>${level === "ok" ? "Tout fonctionne normalement" : esc(problems[0][1])}</b>
+      <div class="sub">${level === "ok" ? `Blocs toutes les ${(interval / 1000).toFixed(0)} s environ, ${n} validateur(s) actif(s), ${status.peers} pair(s).`
+        : problems.map((p) => `${esc(p[1])} : ${esc(p[2])}`).join(" · ")}</div></div>
+    <div class="right">Bloc ${fr(status.height)}<br>vérifié ${new Date().toLocaleTimeString("fr-FR")}</div>`;
+
   // Validateurs.
   const cls = { "en ligne": "ok", "en retard": "warn", "absent": "bad", "nouveau": "muted" };
   $("validators").innerHTML = vals.validators.map(v => {
@@ -290,7 +333,7 @@ async function refreshOverview() {
       <td>${v.last_signed_ms ? `${ago(v.last_signed_ms)} <span class="muted">(${v.last_signed_height})</span>` : "—"}</td>
       <td>${pct === null ? "—" : `<div style="display:flex;gap:8px;align-items:center"><div class="bar"><span style="width:${(pct * 100).toFixed(1)}%;background:var(--${pct >= .99 ? "ok" : pct >= .9 ? "warn" : "bad"})"></span></div>${(pct * 100).toFixed(1)} %</div>`}</td>
       <td class="${v.missed_proposals ? "warn" : ""}">${v.missed_proposals}</td>
-      <td class="mono">${esc(short(v.key, 14))}</td>
+      <td class="mono nowrap">${esc(short(v.key, 14))}${copyBtn(v.key, "Copier la clé")}</td>
     </tr>`;
   }).join("");
 
@@ -298,21 +341,23 @@ async function refreshOverview() {
   const hb = hist.blocks;
   const gaps = hb.slice(1).map((b, i) => (b.timestamp - hb[i].timestamp) / 1000);
   const tps = hb.slice(1).map((b, i) => b.transactions / Math.max(0.001, (b.timestamp - hb[i].timestamp) / 1000));
-  $("c-interval").innerHTML = chart(gaps, { refLine: interval / 1000 });
+  const at = hb.slice(1).map((b) => new Date(b.timestamp).toLocaleTimeString("fr-FR", { hour: "2-digit", minute: "2-digit", second: "2-digit" }));
+  $("c-interval").innerHTML = chart(gaps, { refLine: interval / 1000, labels: at, unit: " s" });
   $("c-interval-now").textContent = gaps.length ? `${Math.max(...gaps).toFixed(1)} s au plus` : "—";
-  $("c-tps").innerHTML = chart(tps);
+  $("c-tps").innerHTML = chart(tps, { labels: at, unit: " tx/s" });
   $("c-tps-now").textContent = tps.length ? `${Math.round(Math.max(...tps))} au plus` : "—";
   const peers = hb.filter(b => b.peers !== null).map(b => b.peers);
-  $("c-peers").innerHTML = chart(peers, { max: status.validators.length - 1 });
+  $("c-peers").innerHTML = chart(peers, { max: status.validators.length - 1, labels: hb.filter(b => b.peers !== null).map(b => new Date(b.timestamp).toLocaleTimeString("fr-FR")), unit: " pair(s)" });
+  bindCharts();
   $("c-peers-now").textContent = `${status.peers} maintenant`;
 
   $("blocks").innerHTML = blocks.blocks.map(b => `
     <tr class="link" onclick="location.hash='#bloc/${b.height}'">
-      <td>${b.height}</td><td>${time(b.timestamp)}</td>
+      <td>${b.height}</td><td>${when(b.timestamp)}</td>
       <td class="${b.round === 0 ? "" : "warn"}">${b.round ?? "—"}</td>
       <td>${proposerName(b.proposer)}</td>
       <td>${b.transactions + b.admin_transactions}</td>
-      <td class="mono">${esc(short(b.hash, 16))}</td>
+      <td class="mono nowrap">${esc(short(b.hash, 16))}${copyBtn(b.hash, "Copier le hash")}</td>
     </tr>`).join("");
 }
 
@@ -394,7 +439,7 @@ async function refreshGovernance() {
 
   $("admin-history").innerHTML = history.actions.length ? history.actions.map(a => `
     <tr>
-      <td>${a.nonce}</td><td>${dateTime(a.timestamp)}</td><td>${esc(a.kind)}</td>
+      <td>${a.nonce}</td><td>${when(a.timestamp)}</td><td>${esc(a.kind)}</td>
       <td>${adminDetail(a)}</td>
       <td>${a.approvals.join(", ")}</td>
       <td><a href="#bloc/${a.height}">${a.height}</a></td>
@@ -422,9 +467,9 @@ async function refreshMempool() {
   $("mp-admin").textContent = mp.admin_transactions.length;
   $("mp-txs").innerHTML = mp.transactions.length ? mp.transactions.map(t => `
     <tr class="link" onclick="location.hash='#tx/${t.id}'">
-      <td class="mono">${esc(short(t.sender, 16))}</td><td>${t.nonce}</td><td>${esc(t.kind)}</td>
+      <td class="mono nowrap">${esc(short(t.sender, 16))}${copyBtn(t.sender)}</td><td>${t.nonce}</td><td>${esc(t.kind)}</td>
       <td>${t.amount ? vinx(t.amount) : "—"}</td><td>${vinx(t.fee)}</td>
-      <td class="mono">${esc(short(t.id, 16))}</td>
+      <td class="mono nowrap">${esc(short(t.id, 16))}${copyBtn(t.id)}</td>
     </tr>`).join("") : '<tr><td colspan="6" class="muted">aucune transaction en attente</td></tr>';
   $("mp-rejects").innerHTML = mp.rejects.length ? mp.rejects.map(r => `
     <tr><td>${time(r.at)}</td><td class="mono">${esc(short(r.sender, 16))}</td><td class="warn">${esc(r.reason)}</td></tr>`).join("")
@@ -434,12 +479,12 @@ async function refreshMempool() {
 /* ---------- Recherche et détails ---------- */
 function txRows(t) {
   const rows = [
-    ["Statut", t.status === "finalisée" ? `<span class="ok">finalisée</span> au bloc <a href="#bloc/${t.height}">${t.height}</a>, ${dateTime(t.timestamp)}` : `<span class="warn">${esc(t.status)}</span>`],
-    ["Identifiant", `<span class="mono">${esc(t.id)}</span>`],
+    ["Statut", t.status === "finalisée" ? `<span class="ok">finalisée</span> au bloc <a href="#bloc/${t.height}">${t.height}</a>, ${when(t.timestamp)} <span class="muted">· ${dateTime(t.timestamp)}</span>` : `<span class="warn">${esc(t.status)}</span>`],
+    ["Identifiant", `<span class="mono">${esc(t.id)}</span>${copyBtn(t.id)}`],
     ["Type", esc(t.kind)],
   ];
-  if (t.sender) rows.push(["Émetteur", `<a class="mono" href="#compte/${esc(t.sender)}">${esc(t.sender)}</a>`], ["Nonce", t.nonce], ["Frais", vinx(t.fee)]);
-  if (t.to) rows.push(["Destinataire", `<a class="mono" href="#compte/${esc(t.to)}">${esc(t.to)}</a>`]);
+  if (t.sender) rows.push(["Émetteur", `<a class="mono" href="#compte/${esc(t.sender)}">${esc(t.sender)}</a>${copyBtn(t.sender)}`], ["Nonce", t.nonce], ["Frais", vinx(t.fee)]);
+  if (t.to) rows.push(["Destinataire", `<a class="mono" href="#compte/${esc(t.to)}">${esc(t.to)}</a>${copyBtn(t.to)}`]);
   if (t.amount) rows.push(["Montant", vinx(t.amount)]);
   if (t.memo) rows.push(["Mémo", esc(t.memo)]);
   if (t.new_key) rows.push(["Nouvelle clé", `<span class="mono">${esc(t.new_key)}</span>`]);
@@ -456,7 +501,7 @@ async function showTx(id) {
 async function showAccount(addr) {
   const a = await get("/accounts/" + encodeURIComponent(addr));
   return `<h2>Compte</h2><dl>
-    <dt>Adresse</dt><dd class="mono">${esc(a.address)}</dd>
+    <dt>Adresse</dt><dd><span class="mono">${esc(a.address)}</span>${copyBtn(a.address)}</dd>
     <dt>Solde</dt><dd>${vinx(a.balance)}</dd>
     <dt>Transactions envoyées</dt><dd>${a.nonce}</dd>
     <dt>Mémo obligatoire</dt><dd>${a.memo_required ? "oui" : "non"}</dd>
@@ -481,14 +526,14 @@ async function showBlock(h) {
     <tr class="link" onclick="location.hash='#tx/${a.id}'"><td>admin n° ${a.nonce}</td><td>${esc(a.kind)}</td><td colspan="3">${adminDetail(a)}</td></tr>`).join("");
   return `${nav}<h2>Bloc ${b.height}</h2>
     <dl>
-      <dt>Heure</dt><dd>${dateTime(b.timestamp)}</dd>
+      <dt>Heure</dt><dd>${when(b.timestamp)} <span class="muted">· ${dateTime(b.timestamp)}</span></dd>
       <dt>Proposeur</dt><dd>${vname(b.proposer_validator)}</dd>
       <dt>Round</dt><dd class="${b.round ? "warn" : ""}">${b.round ?? "—"}${b.round ? " — le ou les proposeurs précédents n'ont pas proposé à temps" : ""}</dd>
       <dt>Certificat</dt><dd>${b.signers.map(vname).join(", ") || "—"} <span class="muted">— le quorum de signatures arrivé en premier</span></dd>
       <dt>Transactions</dt><dd>${fr(count)}</dd>
-      <dt>Hash</dt><dd class="mono">${esc(b.hash)}</dd>
-      <dt>Parent</dt><dd class="mono">${esc(b.prev_hash)}</dd>
-      <dt>Racine d'état</dt><dd class="mono">${esc(b.state_root)}</dd>
+      <dt>Hash</dt><dd><span class="mono">${esc(b.hash)}</span>${copyBtn(b.hash)}</dd>
+      <dt>Parent</dt><dd><span class="mono">${esc(b.prev_hash)}</span>${copyBtn(b.prev_hash)}</dd>
+      <dt>Racine d'état</dt><dd><span class="mono">${esc(b.state_root)}</span>${copyBtn(b.state_root)}</dd>
     </dl>
     ${count ? `<h3>Transactions${b.transactions.length > shown.length ? ` (les ${fr(shown.length)} premières sur ${fr(b.transactions.length)})` : ""}</h3>
     <div class="scroll"><table>
@@ -526,11 +571,14 @@ async function route() {
   const run = async () => {
     try {
       if (refresh) await refresh();
+      loaded();
       $("error").style.display = "none";
     } catch (e) {
       $("error").style.display = "block";
       $("error").textContent = "Nœud injoignable : " + e.message;
       $("health").textContent = "hors ligne"; $("health").className = "pill bad";
+      $("banner").className = "status-banner bad";
+      $("banner").innerHTML = `<span class="big-dot"></span><div><b>Nœud injoignable</b><div class="sub">${esc(e.message)}</div></div>`;
     }
   };
   if (detail) {
@@ -543,6 +591,7 @@ async function route() {
   if (refresh) timer = setInterval(run, REFRESH_MS);
 }
 window.addEventListener("hashchange", route);
+skeleton(".tile .value, .chart .now, #c-interval, #c-tps, #c-peers");
 route();
 </script>
 </body>

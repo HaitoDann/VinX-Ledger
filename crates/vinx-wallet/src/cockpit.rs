@@ -477,6 +477,30 @@ async fn page(State(c): State<Shared>) -> Html<String> {
     Html(render_page(include_str!("cockpit.html")).replace("__COCKPIT_TOKEN__", &c.token))
 }
 
+/// Polices de la charte (licence OFL), servies avec les pages : DM Sans pour
+/// le texte, et les seuls chiffres d'Inter (zéro barré, largeur fixe).
+pub(crate) async fn font(
+    axum::extract::Path(name): axum::extract::Path<String>,
+) -> axum::response::Response {
+    use axum::response::IntoResponse;
+    let bytes: &'static [u8] = match name.as_str() {
+        "dm-sans.woff2" => include_bytes!("../../../assets/fonts/dm-sans.woff2"),
+        "digits.woff2" => include_bytes!("../../../assets/fonts/digits.woff2"),
+        _ => return axum::http::StatusCode::NOT_FOUND.into_response(),
+    };
+    (
+        [
+            (axum::http::header::CONTENT_TYPE, "font/woff2"),
+            (
+                axum::http::header::CACHE_CONTROL,
+                "public, max-age=31536000, immutable",
+            ),
+        ],
+        bytes,
+    )
+        .into_response()
+}
+
 /// Page complète : feuille de style commune, logo et icône de la charte VinX
 /// (`assets/`), insérés dans le gabarit.
 pub(crate) fn render_page(template: &str) -> String {
@@ -491,6 +515,7 @@ pub(crate) fn render_page(template: &str) -> String {
     );
     template
         .replace("/*__THEME__*/", include_str!("../../../assets/theme.css"))
+        .replace("/*__CHARTS__*/", include_str!("../../../assets/charts.js"))
         .replace("<!--__LOGO__-->", logo)
         .replace("__FAVICON__", &favicon)
 }
@@ -800,6 +825,7 @@ pub fn router(dir: PathBuf, token: String, port: u16) -> Router {
     let shared = Arc::new(Cockpit { dir, token, port });
     Router::new()
         .route("/", get(page))
+        .route("/fonts/{name}", get(font))
         .route("/api/config", get(get_config).post(put_config))
         .route("/api/nodes", get(nodes))
         .route("/api/node", get(node_get))
