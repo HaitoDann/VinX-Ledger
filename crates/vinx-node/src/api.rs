@@ -125,7 +125,10 @@ pub(crate) async fn font(
     (
         [
             (axum::http::header::CONTENT_TYPE, "font/woff2"),
-            (axum::http::header::CACHE_CONTROL, "public, max-age=31536000, immutable"),
+            (
+                axum::http::header::CACHE_CONTROL,
+                "public, max-age=31536000, immutable",
+            ),
         ],
         bytes,
     )
