@@ -12,6 +12,19 @@
 .hero { padding: 22px 20px; }
 .hero .label { color: var(--muted); font-size: 11px; text-transform: uppercase; letter-spacing: .12em; font-weight: 600; }
 .hero .balance { font-size: 40px; font-weight: 750; letter-spacing: -.02em; font-variant-numeric: tabular-nums; margin: 4px 0 2px; }
+.hero.balance-card { padding: 24px; background: var(--stripes), radial-gradient(120% 140% at 100% 0, rgba(13, 220, 142, .22), transparent 55%), var(--card); }
+.balance-card .grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(min(100%, 300px), 1fr)); gap: 18px 24px; align-items: end; }
+.balance-card .panel { background: var(--panel); border: 1px solid var(--line); border-radius: 4px; padding: 10px 12px;
+                       display: grid; grid-template-columns: 1fr 1fr; gap: 0 12px; }
+.balance-card .panel > div { padding: 7px 0; min-width: 0; }
+.balance-card .panel > div:nth-child(n+3) { border-top: 1px dashed var(--line); }
+.balance-card .panel > div:nth-child(even) { text-align: right; }
+.balance-card .panel > div > span { font-size: 11px; color: var(--muted); }
+.balance-card .panel b { display: block; font-size: 14px; font-variant-numeric: tabular-nums; }
+.range { display: flex; gap: 4px; margin-left: auto; }
+.range button { padding: 3px 10px; font-size: 12px; text-transform: none; letter-spacing: 0; }
+.range button.on { border-color: var(--accent); color: var(--accent); background: var(--accent-soft); }
+#balanceChart svg { display: block; width: 100%; height: auto; }
 .hero .balance small { font-size: 18px; color: var(--accent); font-weight: 700; margin-left: 6px; }
 .words { display: grid; grid-template-columns: repeat(3, 1fr); gap: 8px; margin: 12px 0; counter-reset: w; }
 .words span { background: var(--bg); border: 1px solid var(--line); border-radius: 3px; padding: 8px 10px;
@@ -131,12 +144,21 @@ header select { width: auto; min-width: 180px; }
 </nav>
 
 <main id="home" class="view">
-  <div class="card hero">
-    <div class="label" id="homeLabel">Solde</div>
-    <div class="balance"><span id="balance">—</span><small>VINX</small></div>
-    <div class="sub" id="homeNames"></div>
-    <div class="actions"><button class="primary" data-go="send">Envoyer</button><button data-go="receive">Recevoir</button></div>
+  <div class="card hero balance-card">
+    <div class="grid">
+      <div>
+        <div class="label" id="homeLabel">Solde</div>
+        <div class="balance"><span id="balance">—</span><small>VINX</small></div>
+        <div class="sub" id="homeNames"></div>
+        <div class="actions"><button class="primary" data-go="send">Envoyer</button><button data-go="receive">Recevoir</button></div>
+      </div>
+      <div class="panel" id="balanceStats"></div>
+    </div>
   </div>
+  <div class="card chart"><h2>Évolution du solde
+    <span class="range" id="balanceRange"><button data-days="7">7 j</button><button data-days="30" class="on">30 j</button><button data-days="0">Tout</button></span></h2>
+    <div id="balanceChart"></div>
+    <p class="note muted">Reconstitué à partir de l'historique du compte (VINX uniquement, frais compris).</p></div>
   <div class="card alert warning" id="netWarn" hidden></div>
   <div class="card"><h2>Dernières opérations</h2><div class="scroll" id="recent"></div></div>
 </main>
@@ -574,6 +596,7 @@ async function refresh() {
   const rows = (list) => list.length ? `<table><thead><tr><th>Date</th><th>Opération</th><th>Avec</th><th style="text-align:right">Montant</th><th>Statut</th></tr></thead><tbody>${list.map(txRow).join("")}</tbody></table>` : `<p class="muted">Aucune opération pour l'instant.</p>`;
   $("recent").innerHTML = rows(data.history.slice(0, 6));
   $("historyTable").innerHTML = rows(data.history);
+  renderBalance();
   renderNames(); renderDeals(); renderStamps(); renderMandates(); renderAssets();
   const pol = data.policy;
   $("policyInfo").innerHTML = !pol
@@ -583,6 +606,74 @@ async function refresh() {
        ${pol.signers.map((s) => `<div class="mono">${esc(s.address)}</div>`).join("")}
        <p class="note">Les opérations approuvées se préparent avec « vinx-wallet account propose » (guide du portefeuille).</p>`;
 }
+/* ----- Carte de solde et graphique ----- */
+/* Variation du solde VINX apportée par une opération (en unités, frais compris). */
+function vinxDelta(t) {
+  const me = data.address, big = (x) => { try { return BigInt(x || "0"); } catch (_) { return 0n; } };
+  let d = t.sender === me ? -big(t.fee) : 0n;
+  if (t.asset && t.units) return d;
+  if (t.kind === "prélèvement") return d + (t.payer === me ? -big(t.amount) : t.sender === me ? big(t.amount) : 0n);
+  if (t.kind === "paiement groupé") {
+    const list = t.payments || [];
+    if (t.sender === me) return d - list.reduce((s, p) => s + big(p.amount), 0n);
+    return d + list.filter((p) => p.to === me).reduce((s, p) => s + big(p.amount), 0n);
+  }
+  if (!t.amount) return d;
+  if (t.sender === me && t.to !== me) return d - big(t.amount);
+  if (t.to === me && t.sender !== me) return d + big(t.amount);
+  return d;
+}
+let balanceDays = 30;
+function renderBalance() {
+  const now = Date.now(), from = balanceDays ? now - balanceDays * 86400000 : 0;
+  // On remonte le temps depuis le solde actuel : le plus récent d'abord.
+  const done = data.history.filter((t) => t.status !== "en attente" && t.timestamp).sort((a, b) => b.timestamp - a.timestamp);
+  let bal = BigInt(data.balance || "0"), inSum = 0n, outSum = 0n, count = 0;
+  const pts = [[now, bal]];
+  for (const t of done) {
+    const d = vinxDelta(t);
+    if (t.timestamp >= from) { count++; if (d > 0n) inSum += d; else outSum -= d; }
+    pts.push([t.timestamp, bal]);
+    bal -= d;
+    pts.push([t.timestamp - 1, bal]);
+    if (t.timestamp < from) break;
+  }
+  const series = pts.reverse().filter(([ts]) => ts >= from);
+  if (series.length && series[0][0] > from && balanceDays) series.unshift([from, series[0][1]]);
+  const span = balanceDays ? `${balanceDays} j` : "total";
+  $("balanceStats").innerHTML = [["Reçu (" + span + ")", `<span class="in">+ ${vinx(inSum)}</span>`], ["Envoyé (" + span + ")", `− ${vinx(outSum)}`],
+    ["Opérations", count.toLocaleString("fr-FR")], ["Jetons détenus", (data.assets || []).length.toLocaleString("fr-FR")]]
+    .map(([k, v]) => `<div><span>${k}</span><b>${v}</b></div>`).join("");
+  $("balanceChart").innerHTML = balanceChart(series);
+}
+function balanceChart(series) {
+  if (series.length < 2) return '<p class="muted">Pas encore d\'opérations sur cette période.</p>';
+  // Largeur réelle du conteneur : les légendes gardent leur taille sur mobile.
+  const W = Math.max(300, $("balanceChart").clientWidth || 700), H = W < 500 ? 170 : 220, L = 52, B = 20, T = 10;
+  const vals = series.map(([, v]) => Number(v) / 1e9);
+  const t0 = series[0][0], t1 = series[series.length - 1][0] || t0 + 1;
+  const hi = Math.max(...vals) * 1.12 || 1;
+  const x = (ts) => L + ((ts - t0) / Math.max(1, t1 - t0)) * (W - L - 6);
+  const y = (v) => T + (1 - v / hi) * (H - T - B);
+  const d = series.map(([ts], i) => `${i ? "L" : "M"}${x(ts).toFixed(1)},${y(vals[i]).toFixed(1)}`).join(" ");
+  const fmtAxis = (v) => v >= 1e6 ? (v / 1e6).toLocaleString("fr-FR", { maximumFractionDigits: 1 }) + " M" : v >= 1e3 ? (v / 1e3).toLocaleString("fr-FR", { maximumFractionDigits: 1 }) + " k" : v.toLocaleString("fr-FR", { maximumFractionDigits: 2 });
+  const grid = [0, .25, .5, .75, 1].map((f) => `<line x1="${L}" x2="${W}" y1="${y(hi * f)}" y2="${y(hi * f)}" stroke="var(--line)" stroke-dasharray="3 4"/>
+    <text x="${L - 6}" y="${y(hi * f) + 3}" text-anchor="end">${fmtAxis(hi * f)}</text>`).join("");
+  const ticks = [0, .25, .5, .75, 1].map((f) => { const ts = t0 + f * (t1 - t0);
+    return `<text x="${x(ts)}" y="${H - 4}" text-anchor="${f === 0 ? "start" : f === 1 ? "end" : "middle"}">${new Date(ts).toLocaleDateString("fr-FR", { day: "numeric", month: "short" })}</text>`; }).join("");
+  return `<svg viewBox="0 0 ${W} ${H}" role="img" aria-label="Évolution du solde" style="font-size:11px;fill:var(--muted)">
+    <defs><linearGradient id="balGrad" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0" stop-color="var(--chart)" stop-opacity=".5"/><stop offset="1" stop-color="var(--chart)" stop-opacity="0"/></linearGradient></defs>
+    ${grid}<path d="${d} L${x(t1)},${H - B} L${L},${H - B}Z" fill="url(#balGrad)"/>
+    <path d="${d}" fill="none" stroke="var(--chart)" stroke-width="2" stroke-linejoin="round"/>
+    <circle cx="${x(t1)}" cy="${y(vals[vals.length - 1])}" r="4" fill="var(--chart)"/>${ticks}</svg>`;
+}
+$("balanceRange").addEventListener("click", (e) => {
+  const b = e.target.closest("button[data-days]"); if (!b || !data) return;
+  balanceDays = Number(b.dataset.days);
+  $("balanceRange").querySelectorAll("button").forEach((x) => x.classList.toggle("on", x === b));
+  renderBalance();
+});
 const isStamp = (t) => t.sender === data?.address && (t.kind === "horodatage" || (t.kind === "paiement" && t.amount === "1" && (t.memo_hex || "").length === 64));
 const stampDigestOf = (t) => t.digest || t.memo_hex;
 function renderStamps() {
