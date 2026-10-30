@@ -27,7 +27,7 @@ Le thème sombre est celui par défaut. Le bouton rond de l'en-tête bascule en 
 
 ## Police
 
-**DM Sans** (licence SIL Open Font License, `assets/fonts/`), intégrée aux binaires et servie par le nœud et le portefeuille à `/fonts/dm-sans.woff2` : aucune dépendance à Internet. Poids 400 pour le texte, 500 pour les titres, 600 pour les grands chiffres. Les adresses, clés et hash restent en police à chasse fixe.
+**DM Sans** (licence SIL Open Font License, `assets/fonts/`), intégrée aux binaires et servie par le nœud et le portefeuille à `/fonts/dm-sans.woff2` : aucune dépendance à Internet. Poids 400 pour le texte, 500 pour les titres, 600 pour les grands chiffres. Les adresses, clés et hash restent en police à chasse fixe. Les chiffres viennent d'Inter (fichier `digits.woff2`, chiffres seuls) : zéro barré pour ne pas le confondre avec un O, et largeur fixe pour aligner les colonnes.
 
 ## Formes
 
@@ -35,7 +35,10 @@ Le thème sombre est celui par défaut. Le bouton rond de l'en-tête bascule en 
 - **Titres de carte** : en minuscules, 14 px, sur un bandeau légèrement hachuré.
 - **Pastilles d'état** : fond teinté, sans bordure (vert, orange, rouge).
 - **Liens** : émeraude, soulignés seulement au survol.
-- **Onglets** : soulignés en émeraude.
+- **En-tête** : une seule ligne fine, fixée en haut : logo, onglets, contexte (chaîne, hauteur), actions. Sur petit écran, les onglets passent sur une seconde ligne qui défile.
+- **Onglets** : liens texte ; l'onglet actif en blanc sur un fond discret.
+- **Icônes** : grises et fines, dans des pastilles rondes neutres. Les validateurs sont représentés par leurs initiales.
+- **Espacement** : 20 px entre les cartes, pages de 1 200 px de large au plus.
 - **Bouton principal** : émeraude plein. Les autres boutons sont bordés.
 
 ## Logo

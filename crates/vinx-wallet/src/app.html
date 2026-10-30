@@ -50,6 +50,24 @@ header select { width: auto; min-width: 180px; }
 <body>
 <header>
   <a class="brand" href="#"><!--__LOGO__--><span><b>VinX <span>Ledger</span></b><small>Portefeuille</small></span></a>
+  <nav id="tabs" hidden>
+    <a href="#home" data-view="home">Accueil</a>
+    <a href="#send" data-view="send">Envoyer</a>
+    <a href="#receive" data-view="receive">Recevoir</a>
+    <a href="#history" data-view="history">Historique</a>
+    <a href="#assets" data-view="assets">Jetons</a>
+    <details class="more" id="moreTabs">
+      <summary>Plus ▾</summary>
+      <div class="menu">
+        <a href="#names" data-view="names">Noms .vinx</a>
+        <a href="#deals" data-view="deals">Séquestres</a>
+        <a href="#stamp" data-view="stamp">Horodatage</a>
+        <a href="#mandates" data-view="mandates">Mandats</a>
+        <a href="#contacts" data-view="contacts">Contacts</a>
+        <a href="#settings" data-view="settings">Réglages</a>
+      </div>
+    </details>
+  </nav>
   <span class="spacer"></span>
   <select id="account" hidden aria-label="Compte"></select>
   <button id="lockBtn" hidden>Verrouiller</button>
@@ -130,24 +148,6 @@ header select { width: auto; min-width: 180px; }
 </main>
 
 <!-- Portefeuille ouvert. -->
-<nav id="tabs" hidden>
-  <a href="#home" data-view="home">Accueil</a>
-  <a href="#send" data-view="send">Envoyer</a>
-  <a href="#receive" data-view="receive">Recevoir</a>
-  <a href="#history" data-view="history">Historique</a>
-  <a href="#assets" data-view="assets">Jetons</a>
-  <details class="more" id="moreTabs">
-    <summary>Plus ▾</summary>
-    <div class="menu">
-      <a href="#names" data-view="names">Noms .vinx</a>
-      <a href="#deals" data-view="deals">Séquestres</a>
-      <a href="#stamp" data-view="stamp">Horodatage</a>
-      <a href="#mandates" data-view="mandates">Mandats</a>
-      <a href="#contacts" data-view="contacts">Contacts</a>
-      <a href="#settings" data-view="settings">Réglages</a>
-    </div>
-  </details>
-</nav>
 
 <main id="home" class="view">
   <div class="card hero balance-card">
@@ -1099,6 +1099,10 @@ $("copyAddr").onclick = async () => {
 
 setInterval(() => { if (!$("tabs").hidden) refresh(); }, 10000);
 document.addEventListener("click", (e) => { if (!e.target.closest("#moreTabs")) $("moreTabs").open = false; });
+$("moreTabs").addEventListener("toggle", () => {
+  const r = $("moreTabs").querySelector("summary").getBoundingClientRect();
+  $("moreTabs").querySelector(".menu").style.top = innerWidth <= 860 ? `${r.bottom + 4}px` : "";
+});
 skeleton("#balance, #balanceStats, #balanceChart, #recent");
 boot().catch((e) => toast(e.message, true));
 </script>

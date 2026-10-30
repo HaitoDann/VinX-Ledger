@@ -26,6 +26,12 @@ td .mono, td.mono, td.nowrap { word-break: normal; white-space: nowrap; }
     <!--__LOGO__-->
     <span><b>VinX <span>Ledger</span></b><small>Explorateur</small></span>
   </a>
+  <nav>
+    <a href="#/" data-view="accueil">Accueil</a>
+    <a href="#/blocs" data-view="blocs">Blocs</a>
+    <a href="#/jetons" data-view="jetons">Jetons</a>
+    <a href="/" data-view="noeud">Nœud</a>
+  </nav>
   <span id="chain" class="mono"></span>
   <span id="height" class="pill"></span>
   <button class="theme-toggle" id="themeToggle" type="button" aria-label="Thème clair ou sombre" title="Thème clair ou sombre">
@@ -45,18 +51,13 @@ td .mono, td.mono, td.nowrap { word-break: normal; white-space: nowrap; }
   });
 })();
 </script>
-<nav>
-  <a href="#/" data-view="accueil">Accueil</a>
-  <a href="#/blocs" data-view="blocs">Blocs</a>
-  <a href="#/jetons" data-view="jetons">Jetons</a>
-  <a href="/" data-view="noeud">Tableau de bord du nœud</a>
-</nav>
 <main>
   <section class="explore-hero" id="hero">
     <h1>Explorer <span>VinX Ledger</span></h1>
     <form class="big-search" id="searchForm">
       <input id="q" placeholder="Rechercher une adresse, un nom .vinx, un jeton, une transaction ou un bloc" autocomplete="off" spellcheck="false">
-      <button class="primary">Chercher</button>
+      <kbd title="Raccourci : touche /">/</kbd>
+      <button class="primary" aria-label="Chercher" title="Chercher"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round"><circle cx="11" cy="11" r="7"/><path d="m20 20-3.5-3.5"/></svg></button>
     </form>
   </section>
   <div id="page"></div>
@@ -179,6 +180,9 @@ function area(values, labels, unit = "") {
     ${capped ? `<div class="capped">▲ ${capped} pic(s) au-dessus de ${num(hi)}${unit}, tronqué(s) — max ${num(Math.max(...values))}${unit}</div>` : ""}`;
 }
 
+/* Pastille d'un validateur : ses initiales (« Validateur-3 » → « V3 »). */
+const initials = (name) => esc(String(name).split(/[\s_-]+/).filter(Boolean).map((w) => w[0]).slice(0, 2).join("").toUpperCase());
+
 /* ---------- Pages ---------- */
 async function home() {
   const [status, blocks, gov, a, vals] = await Promise.all([get("/status"), get("/blocks"), get("/governance"), loadAssets(),
@@ -240,7 +244,7 @@ async function home() {
       <section class="card"><h2>Validateurs les plus actifs <span class="sub">sur ${fr(window_.length)} blocs</span></h2><div class="scroll"><table>
         <thead><tr><th>Validateur</th><th>Part des blocs</th><th class="num">Blocs</th><th class="num">Transactions</th></tr></thead><tbody>
         ${ranked.slice(0, 8).map(([i, r], n) => { const share = 100 * r.blocks / Math.max(1, window_.length);
-          return `<tr><td><span class="rank">${n + 1}</span>${vnames[i] ? esc(vnames[i]) : `Validateur n° ${+i + 1}`}</td>
+          return `<tr><td><span class="rank" title="rang ${n + 1}">${initials(vnames[i] || `V ${+i + 1}`)}</span>${vnames[i] ? esc(vnames[i]) : `Validateur n° ${+i + 1}`}</td>
           <td><div style="display:flex;gap:8px;align-items:center"><div class="bar" style="flex:1"><span style="width:${share.toFixed(1)}%"></span></div>${share.toFixed(0)} %</div></td>
           <td class="num">${fr(r.blocks)}</td><td class="num">${fr(r.tx)}</td></tr>`; }).join("") || '<tr><td colspan="4" class="muted">Aucun bloc.</td></tr>'}
         </tbody></table></div>
@@ -407,6 +411,10 @@ async function search(q) {
   throw new Error("format non reconnu : adresse vinx1…, nom.vinx, jeton, identifiant de 64 caractères ou hauteur de bloc");
 }
 const go = (path) => { location.hash = "#" + path; };
+// Touche « / » : aller à la recherche, comme sur les explorateurs courants.
+document.addEventListener("keydown", (e) => {
+  if (e.key === "/" && !/^(INPUT|TEXTAREA|SELECT)$/.test(document.activeElement?.tagName)) { e.preventDefault(); $("q").focus(); }
+});
 $("searchForm").addEventListener("submit", async (e) => {
   e.preventDefault();
   try { await search($("q").value); }

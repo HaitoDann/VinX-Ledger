@@ -3,6 +3,9 @@
    police DM Sans, coins arrondis. Voir docs/CHARTE-GRAPHIQUE.md. */
 @font-face { font-family: "DM Sans"; src: url("/fonts/dm-sans.woff2") format("woff2");
              font-weight: 100 1000; font-style: normal; font-display: swap; }
+/* Chiffres d'Inter : zéro barré (0 ≠ O) et largeur fixe, pour lire et aligner les montants. */
+@font-face { font-family: "VinX Chiffres"; src: url("/fonts/digits.woff2") format("woff2");
+             font-weight: 100 900; font-style: normal; font-display: swap; unicode-range: U+0030-0039; }
 :root {
   color-scheme: dark;
   --bg: #0c0e0f; --card: #15181a; --card-2: #1a1e20; --panel: #111416; --text: #eceff0; --muted: #8b9396;
@@ -11,7 +14,7 @@
   --chart: #0ddc8e; --chart-soft: rgba(13, 220, 142, .14);
   --shadow: none;
   /* Dégradé émeraude du haut de page, inspiré du halo du logo. */
-  --hero: linear-gradient(180deg, #0b2f23 0, #0a2219 200px, #08140f 420px, var(--bg) 640px);
+  --hero: linear-gradient(180deg, #0b2a20 0, #0b1d17 220px, #0c1311 440px, var(--bg) 640px);
   --stripes: repeating-linear-gradient(-45deg, rgba(255, 255, 255, .018) 0 8px, transparent 8px 16px);
 }
 /* Thème clair : choisi avec le bouton de l'en-tête (mémorisé dans le navigateur). */
@@ -27,18 +30,25 @@
 }
 * { box-sizing: border-box; }
 body { margin: 0; background: var(--hero) no-repeat, var(--bg); color: var(--text); min-height: 100vh;
-       font: 15px/1.5 "DM Sans", system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
-       -webkit-font-smoothing: antialiased; font-optical-sizing: auto; }
+       font: 15px/1.5 "VinX Chiffres", "DM Sans", system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
+       -webkit-font-smoothing: antialiased; font-optical-sizing: auto;
+       font-feature-settings: "zero", "tnum"; }
 button, input, select, textarea { font-family: inherit; }
 
-/* En-tête : logo, nom, contexte. */
-header { padding: 20px 16px 10px; max-width: 1120px; margin: 0 auto;
-         display: flex; flex-wrap: wrap; gap: 10px 14px; align-items: center; }
-.brand { display: flex; align-items: center; gap: 10px; text-decoration: none; color: var(--text); margin-right: 6px; }
-.brand svg { width: 34px; height: auto; color: var(--accent); flex: none; }
-.brand b { font-size: 20px; font-weight: 600; letter-spacing: -.01em; }
+/* En-tête : une seule ligne fine sur toute la largeur — logo, onglets, contexte, actions. */
+:root { --page: 1200px; }
+header { display: flex; align-items: center; gap: 8px 14px; min-height: 64px;
+         padding: 10px max(16px, calc((100% - var(--page)) / 2 + 16px));
+         border-bottom: 1px solid var(--line); background: color-mix(in srgb, var(--bg) 35%, transparent);
+         -webkit-backdrop-filter: blur(10px); backdrop-filter: blur(10px); position: sticky; top: 0; z-index: 30; }
+header > * { flex: none; }
+.brand { display: flex; align-items: center; gap: 10px; text-decoration: none; color: var(--text); margin-right: 14px; }
+.brand:hover { text-decoration: none; }
+.brand svg { width: 28px; height: auto; color: var(--accent); flex: none; }
+.brand b { font-size: 18px; font-weight: 600; letter-spacing: -.01em; display: block; line-height: 1.1; }
 .brand b span { color: var(--accent); }
-.brand small { display: block; font-size: 11px; color: var(--muted); letter-spacing: .14em; text-transform: uppercase; }
+.brand small { display: block; font-size: 11px; color: var(--muted); }
+header .pill, header #chain { font-size: 12px; }
 h1 { font-size: 20px; margin: 0; font-weight: 600; }
 /* Titres de carte : en minuscules, discrets, comme sur un explorateur. */
 h2 { font-size: 14px; margin: 0 0 12px; color: var(--text); font-weight: 500;
@@ -50,28 +60,36 @@ h2 { font-size: 14px; margin: 0 0 12px; color: var(--text); font-weight: 500;
 h2 .sub { text-transform: none; letter-spacing: 0; font-weight: 400; }
 h3 { font-size: 13px; margin: 16px 0 6px; color: var(--muted); font-weight: 500; }
 
-/* Navigation : onglets soulignés. */
-nav { max-width: 1120px; margin: 0 auto 6px; padding: 0 16px; display: flex; flex-wrap: wrap; gap: 2px;
-      border-bottom: 1px solid var(--line); }
-nav a { padding: 9px 14px; color: var(--muted); text-decoration: none; font-size: 14px; font-weight: 550;
-        border-bottom: 2px solid transparent; margin-bottom: -1px; }
-nav a:hover { color: var(--text); }
-nav a.active { color: var(--accent); border-bottom-color: var(--accent); }
+/* Navigation : liens texte dans l'en-tête, l'onglet actif en blanc sur fond discret. */
+nav { display: flex; gap: 2px; align-items: center; margin-right: auto; }
+nav[hidden] { display: none; }
+nav a { padding: 6px 12px; color: var(--muted); text-decoration: none; font-size: 14px; font-weight: 500; border-radius: 8px; white-space: nowrap; }
+nav a:hover { color: var(--text); text-decoration: none; }
+nav a.active { color: var(--text); background: var(--card-2); }
+/* Petit écran : les onglets passent sur une seconde ligne qui défile. */
+@media (max-width: 860px) {
+  header { flex-wrap: wrap; }
+  nav { order: 10; flex: 1 0 100%; margin: 0 -4px; overflow-x: auto; scrollbar-width: none; }
+  nav::-webkit-scrollbar { display: none; }
+  header #chain { display: none; }
+  /* La barre d'onglets défile : le menu « Plus » s'ouvre par-dessus, placé par le script. */
+  header nav details.more .menu { position: fixed; right: 16px; }
+}
 nav a .count { display: inline-block; min-width: 18px; padding: 0 5px; margin-left: 6px; border-radius: 2px;
                background: var(--warn); color: #000; font-size: 11px; font-weight: 700; text-align: center; }
 nav a .count[hidden] { display: none; }
 
-main { max-width: 1120px; margin: 0 auto; padding: 14px 16px 40px; display: grid; gap: 14px; }
+main { max-width: var(--page); margin: 0 auto; padding: 24px 16px 48px; display: grid; gap: 20px; }
 
 /* Cartes : angles nets, coin supérieur droit coupé comme les chevrons du logo. */
 .tile, .card { background: var(--card); border: 1px solid var(--line); border-radius: 12px; padding: 16px 18px; overflow: hidden;
                min-width: 0; box-shadow: var(--shadow); }
-.tiles { display: grid; grid-template-columns: repeat(auto-fit, minmax(160px, 1fr)); gap: 10px; }
+.tiles { display: grid; grid-template-columns: repeat(auto-fit, minmax(170px, 1fr)); gap: 16px; }
 .tile .label { color: var(--muted); font-size: 13px; }
 .tile .value { font-size: 24px; font-weight: 600; font-variant-numeric: tabular-nums; margin-top: 4px; letter-spacing: -.01em; }
 .tile .sub, .sub { color: var(--muted); font-size: 12px; }
-.grid2 { display: grid; grid-template-columns: repeat(auto-fit, minmax(320px, 1fr)); gap: 14px; }
-.grid3 { display: grid; grid-template-columns: repeat(auto-fit, minmax(280px, 1fr)); gap: 14px; }
+.grid2 { display: grid; grid-template-columns: repeat(auto-fit, minmax(320px, 1fr)); gap: 20px; }
+.grid3 { display: grid; grid-template-columns: repeat(auto-fit, minmax(280px, 1fr)); gap: 20px; }
 .nodes { display: grid; grid-template-columns: repeat(auto-fit, minmax(230px, 1fr)); gap: 10px; }
 
 table { width: 100%; border-collapse: collapse; font-variant-numeric: tabular-nums; }
@@ -104,13 +122,13 @@ dd { margin: 0; min-width: 0; }
 /* Formulaires. Police à chasse fixe pour les adresses et les clés. */
 label { display: block; font-size: 13px; color: var(--muted); margin: 12px 0 5px; font-weight: 500; }
 input, select { width: 100%; padding: 9px 12px; border-radius: 8px; border: 1px solid var(--line);
-                background: var(--panel); color: var(--text); font: 14px "DM Sans", system-ui, sans-serif; }
+                background: var(--panel); color: var(--text); font: 14px "VinX Chiffres", "DM Sans", system-ui, sans-serif; }
 input.mono, #lookup { font: 13px ui-monospace, "Cascadia Mono", SFMono-Regular, Menlo, monospace; }
 input:focus, select:focus { outline: none; border-color: var(--accent); box-shadow: 0 0 0 3px var(--accent-soft); }
 .row { display: flex; gap: 8px; align-items: end; flex-wrap: wrap; }
 .row > * { flex: 1 1 140px; }
 button { padding: 8px 16px; border-radius: 8px; border: 1px solid var(--line); background: var(--card-2);
-         color: var(--text); font: 500 14px "DM Sans", system-ui, sans-serif; cursor: pointer; }
+         color: var(--text); font: 500 14px "VinX Chiffres", "DM Sans", system-ui, sans-serif; cursor: pointer; }
 button:hover { border-color: var(--accent); }
 button.primary { background: var(--accent); border-color: var(--accent); color: var(--accent-text); }
 button.primary:hover { filter: brightness(1.08); }
@@ -144,10 +162,10 @@ dialog::backdrop { background: rgba(0, 0, 0, .6); }
              border-radius: 3px; padding: 10px 12px; font-size: 13px; box-shadow: 0 6px 20px rgba(0,0,0,.3); }
 #toast div.err { border-left-color: var(--bad); }
 
-footer { max-width: 1120px; margin: 0 auto; padding: 0 16px 24px; color: var(--muted); font-size: 12px; }
+footer { max-width: var(--page); margin: 0 auto; padding: 0 16px 24px; color: var(--muted); font-size: 12px; }
 
 /* Bouton clair / sombre. */
-.theme-toggle { margin-left: auto; width: 36px; height: 36px; padding: 0; display: inline-grid; place-items: center;
+.theme-toggle { width: 36px; height: 36px; padding: 0; display: inline-grid; place-items: center;
                 border-radius: 50%; background: var(--card); }
 .theme-toggle svg { width: 16px; height: 16px; }
 .theme-toggle .sun { display: none; }
@@ -155,7 +173,7 @@ footer { max-width: 1120px; margin: 0 auto; padding: 0 16px 24px; color: var(--m
 :root[data-theme="light"] .theme-toggle .moon { display: none; }
 
 /* Accueil façon explorateur : grand titre et grande barre de recherche. */
-.explore-hero { text-align: center; padding: 34px 0 22px; }
+.explore-hero { text-align: center; padding: 48px 0 32px; }
 .explore-hero h1 { font-size: clamp(26px, 5vw, 38px); font-weight: 600; letter-spacing: -.02em; margin: 0 0 20px; word-break: normal; }
 
 .big-search { display: flex; max-width: 640px; margin: 0 auto; padding: 5px; gap: 6px; border-radius: 999px;
@@ -163,16 +181,20 @@ footer { max-width: 1120px; margin: 0 auto; padding: 0 16px 24px; color: var(--m
               box-shadow: 0 10px 40px rgba(0, 0, 0, .25); }
 .big-search:focus-within { border-color: var(--accent); }
 .big-search input { border: none; background: transparent; padding: 10px 16px; box-shadow: none !important; }
-.big-search button { border-radius: 999px; padding: 0 20px; }
+/* Bouton loupe rond, à droite du champ. */
+.big-search button { border-radius: 50%; width: 42px; height: 42px; padding: 0; flex: none; display: grid; place-items: center; }
+.big-search button svg { width: 18px; height: 18px; }
+.big-search kbd { align-self: center; font: 12px "DM Sans", sans-serif; color: var(--muted); border: 1px solid var(--line);
+                  border-radius: 6px; padding: 1px 7px; margin-right: 2px; }
 
 /* Cartes de statistiques : valeur principale, puis un panneau de sous-indicateurs. */
-.stats { display: grid; grid-template-columns: repeat(auto-fit, minmax(240px, 1fr)); gap: 12px; }
+.stats { display: grid; grid-template-columns: repeat(auto-fit, minmax(240px, 1fr)); gap: 16px; }
 .stat { background: var(--card); border: 1px solid var(--line); border-radius: 12px; padding: 14px; box-shadow: var(--shadow); min-width: 0; }
 .stat .top { display: flex; gap: 12px; align-items: center; justify-content: space-between; margin-bottom: 12px; }
 .stat .top > div { display: flex; gap: 12px; align-items: center; min-width: 0; }
 .stat .ico { width: 34px; height: 34px; flex: none; display: grid; place-items: center; border-radius: 50%;
-             background: var(--accent-soft); color: var(--accent); }
-.stat .ico svg { width: 16px; height: 16px; }
+             background: var(--card-2); border: 1px solid var(--line); color: var(--muted); }
+.stat .ico svg { width: 16px; height: 16px; stroke-width: 1.6; }
 .stat .label { color: var(--muted); font-size: 12px; }
 .stat .value { font-size: 22px; font-weight: 600; font-variant-numeric: tabular-nums; letter-spacing: -.01em; }
 .stat .value small { font-size: 12px; color: var(--muted); font-weight: 500; }
@@ -187,8 +209,8 @@ footer { max-width: 1120px; margin: 0 auto; padding: 0 16px 24px; color: var(--m
 .progress > span { display: block; height: 100%; background: var(--accent); border-radius: 3px; }
 
 /* Classements : rang, pastille et deux colonnes chiffrées. */
-.rank { display: inline-grid; place-items: center; width: 26px; height: 26px; border-radius: 50%; margin-right: 10px;
-        background: var(--accent-soft); color: var(--accent); font-size: 11px; font-weight: 600; vertical-align: middle; }
+.rank { display: inline-grid; place-items: center; width: 28px; height: 28px; border-radius: 50%; margin-right: 10px;
+        background: var(--card-2); border: 1px solid var(--line); color: var(--muted); font-size: 11px; font-weight: 600; vertical-align: middle; }
 td.num, th.num { text-align: right; }
 
 /* Survol des graphiques. */
@@ -213,11 +235,11 @@ div.skeleton, section.skeleton { display: block; min-height: 1.2em; }
 
 /* Menu « Plus » des onglets. */
 nav details.more { position: relative; }
-nav details.more summary { list-style: none; cursor: pointer; padding: 9px 14px; color: var(--muted); font-size: 14px; font-weight: 550;
-                           border-bottom: 2px solid transparent; margin-bottom: -1px; }
+nav details.more summary { list-style: none; cursor: pointer; white-space: nowrap; padding: 6px 12px; color: var(--muted);
+                           font-size: 14px; font-weight: 500; border-radius: 8px; }
 nav details.more summary::-webkit-details-marker { display: none; }
 nav details.more summary:hover, nav details.more[open] summary { color: var(--text); }
-nav details.more.active summary { color: var(--accent); border-bottom-color: var(--accent); }
+nav details.more.active summary { color: var(--text); background: var(--card-2); }
 nav details.more .menu { position: absolute; right: 0; top: calc(100% + 4px); z-index: 20; min-width: 190px; display: grid; padding: 6px;
                          background: var(--card); border: 1px solid var(--line); border-radius: 6px; box-shadow: 0 10px 30px rgba(0, 0, 0, .35); }
 nav details.more .menu a { border: none; margin: 0; border-radius: 4px; padding: 8px 12px; }
