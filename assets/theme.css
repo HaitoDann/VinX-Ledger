@@ -3,7 +3,7 @@
    police DM Sans, coins arrondis. Voir docs/CHARTE-GRAPHIQUE.md. */
 @font-face { font-family: "DM Sans"; src: url("/fonts/dm-sans.woff2") format("woff2");
              font-weight: 100 1000; font-style: normal; font-display: swap; }
-/* Chiffres d'Inter : zéro barré (0 ≠ O) et largeur fixe, pour lire et aligner les montants. */
+/* Chiffres d'Inter en largeur fixe (tabulaires), pour aligner les montants. */
 @font-face { font-family: "VinX Chiffres"; src: url("/fonts/digits.woff2") format("woff2");
              font-weight: 100 900; font-style: normal; font-display: swap; unicode-range: U+0030-0039; }
 :root {
@@ -32,7 +32,7 @@
 body { margin: 0; background: var(--hero) no-repeat, var(--bg); color: var(--text); min-height: 100vh;
        font: 15px/1.5 "VinX Chiffres", "DM Sans", system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
        -webkit-font-smoothing: antialiased; font-optical-sizing: auto;
-       font-feature-settings: "zero", "tnum"; }
+       font-feature-settings: "tnum"; }
 button, input, select, textarea { font-family: inherit; }
 
 /* En-tête : une seule ligne fine sur toute la largeur — logo, onglets, contexte, actions. */

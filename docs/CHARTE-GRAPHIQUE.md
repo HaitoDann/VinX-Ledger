@@ -27,7 +27,7 @@ Le thème sombre est celui par défaut. Le bouton rond de l'en-tête bascule en 
 
 ## Police
 
-**DM Sans** (licence SIL Open Font License, `assets/fonts/`), intégrée aux binaires et servie par le nœud et le portefeuille à `/fonts/dm-sans.woff2` : aucune dépendance à Internet. Poids 400 pour le texte, 500 pour les titres, 600 pour les grands chiffres. Les adresses, clés et hash restent en police à chasse fixe. Les chiffres viennent d'Inter (fichier `digits.woff2`, chiffres seuls) : zéro barré pour ne pas le confondre avec un O, et largeur fixe pour aligner les colonnes.
+**DM Sans** (licence SIL Open Font License, `assets/fonts/`), intégrée aux binaires et servie par le nœud et le portefeuille à `/fonts/dm-sans.woff2` : aucune dépendance à Internet. Poids 400 pour le texte, 500 pour les titres, 600 pour les grands chiffres. Les adresses, clés et hash restent en police à chasse fixe. Les chiffres viennent d'Inter (fichier `digits.woff2`, chiffres seuls) : chiffres tabulaires (largeur fixe) pour aligner les colonnes, zéro rond, plus étroit que le O.
 
 ## Formes
 
