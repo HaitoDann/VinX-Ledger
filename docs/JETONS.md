@@ -76,8 +76,11 @@ vinx-wallet asset show EURV             # émetteur, supply, pouvoirs
 vinx-wallet asset balances vinx1…       # soldes d'une adresse
 ```
 
-API du nœud : `/assets`, `/assets/{symbole}`, et le champ `assets` de
-`/accounts/{adresse}`. Les montants y sont en unités du jeton (`units`,
+API du nœud : `/assets`, `/assets/{symbole}` (avec le nombre de détenteurs),
+`/assets/{symbole}/holders` (détenteurs, du plus gros solde au plus petit),
+`/assets/{symbole}/transactions` (historique du jeton), et le champ `assets` de
+`/accounts/{adresse}`. Toute l'API est décrite, avec des exemples à essayer,
+sur la page `/docs` de chaque nœud. Les montants y sont en unités du jeton (`units`,
 `supply_units`) : divisez par 10^`decimals`.
 
 ## 5. Séquestres et abonnements en jetons

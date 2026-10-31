@@ -16,16 +16,25 @@ cargo run --release -p vinx-node -- run \
 
 `devnet` crée trois clés admin et une clé de validateur, chiffrées par le mot de
 passe, ainsi que la genèse. Le tableau de bord du nœud est sur
-`http://127.0.0.1:8545/`, l'explorateur sur `/explorer`, ses métriques Prometheus sur `/metrics`. L'API :
-`/status`, `/governance`, `/accounts/{adresse}`, `/blocks`, `/blocks/{hauteur}`,
-`/escrow`, `/fees`,
-`/evidence` (preuves de validateurs fautifs), `/validators` (état de chaque
-validateur), `/history`, `/mempool`, `/admin-history`, `/transactions/{id}`,
-`/accounts/{adresse}/transactions`, `/names/{nom}`, `/deals/{id}`,
-`/attestations/{empreinte}`, `/assets`, `/assets/{symbole}`, `/blocks?before={hauteur}&limit={n}` (pagination, 100 blocs au plus), `/transactions/recent?limit={n}` (50 au plus),
-et en `POST`
-`/transactions` et `/admin-transactions`.
+`http://127.0.0.1:8545/`, l'explorateur sur `/explorer`, ses métriques
+Prometheus sur `/metrics`.
 
+## L'API
+
+Chaque nœud décrit son API sur **`/docs`** : conventions (montants en unités,
+erreurs, limites), chaque point d'accès avec ses paramètres, un exemple de
+réponse et un bouton « Essayer ». La même description, au format OpenAPI 3,
+est sur **`/openapi.json`** : elle s'importe dans Postman ou Insomnia, ou sert
+à générer un client dans le langage de votre choix.
+
+Sur le testnet : <https://vinx-ledger.vinxlabs.fr/docs>.
+
+Pour suivre un jeton : `/assets/{symbole}`, `/assets/{symbole}/holders` et
+`/assets/{symbole}/transactions` (voir [`JETONS.md`](./JETONS.md)).
+
+Les transactions s'envoient en `POST /transactions`, signées et encodées en
+Borsh (format dans [`SPEC.md`](../SPEC.md)) : signez-les avec `vinx-wallet` ou
+le module WebAssembly du portefeuille mobile (`crates/vinx-mobile`).
 
 ## Plusieurs validateurs
 
