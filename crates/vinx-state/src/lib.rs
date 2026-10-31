@@ -8,6 +8,7 @@ pub mod genesis;
 pub mod mandate;
 pub mod policy;
 pub mod registry;
+pub mod reserve;
 pub mod sigcache;
 pub mod smt;
 pub mod state;

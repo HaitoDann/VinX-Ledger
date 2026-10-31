@@ -325,6 +325,7 @@ async fn governance(State(shared): State<SharedRef>) -> ApiResult {
             "min_block_interval_ms": p.min_block_interval_ms,
             "name_fee": amount_to_string(st.registry.name_fee),
             "asset_fee": amount_to_string(st.assets.fee),
+            "object_reserve": amount_to_string(st.reserves.per_object),
         },
         "protocol_version": st.protocol_version,
         "upgrade": st.upgrade.as_ref().map(|u| json!({
@@ -425,6 +426,7 @@ async fn status(State(shared): State<SharedRef>) -> ApiResult {
             "min_block_interval_ms": st.params.min_block_interval_ms,
             "name_fee": amount_to_string(st.registry.name_fee),
             "asset_fee": amount_to_string(st.assets.fee),
+            "object_reserve": amount_to_string(st.reserves.per_object),
         },
     })))
 }
@@ -439,6 +441,12 @@ async fn account(State(shared): State<SharedRef>, Path(address): Path<String>) -
         .accounts
         .get(&address)
         .ok_or_else(|| error(StatusCode::NOT_FOUND, "compte inconnu"))?;
+    let objects = st.reserves.count(&address);
+    let reserve = if st.protocol_version >= 6 {
+        st.reserves.required(objects, st.params.min_reserve)
+    } else {
+        0
+    };
     let reg = &st.registry;
     let names: Vec<Value> = reg
         .names_of(&address, reg.now)
@@ -488,6 +496,10 @@ async fn account(State(shared): State<SharedRef>, Path(address): Path<String>) -
         "balance": amount_to_string(account.balance),
         "nonce": account.nonce,
         "memo_required": account.memo_required,
+        // Protocole 6 : objets possédés et solde que le compte doit garder.
+        "objects": objects,
+        "reserve": amount_to_string(reserve),
+        "spendable": amount_to_string(account.balance.saturating_sub(reserve)),
         "public_key": account.key.as_ref().map(key_to_hex),
         "names": names,
         "deals": deals,
@@ -1212,6 +1224,7 @@ pub fn param_name(p: ParamId) -> &'static str {
         ParamId::MinBlockInterval => "min_block_interval",
         ParamId::NameFee => "name_fee",
         ParamId::AssetFee => "asset_fee",
+        ParamId::ObjectReserve => "object_reserve",
     }
 }
 

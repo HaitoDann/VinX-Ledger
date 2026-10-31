@@ -61,6 +61,8 @@ pub enum ParamId {
     NameFee = 0x0B,
     /// Protocole 5 : prix de la création d'un actif, tenu hors de [`Params`].
     AssetFee = 0x0C,
+    /// Protocole 6 : réserve immobilisée par objet possédé, tenue hors de [`Params`].
+    ObjectReserve = 0x0D,
 }
 
 impl Params {
@@ -68,7 +70,7 @@ impl Params {
     /// ailleurs dans l'état.
     pub fn set(&mut self, id: ParamId, value: u64) {
         let slot = match id {
-            ParamId::NameFee | ParamId::AssetFee => return,
+            ParamId::NameFee | ParamId::AssetFee | ParamId::ObjectReserve => return,
             ParamId::MinFee => &mut self.min_fee,
             ParamId::MinReserve => &mut self.min_reserve,
             ParamId::MaxMemoBytes => &mut self.max_memo_bytes,
@@ -93,7 +95,7 @@ mod tests {
         assert_eq!(crate::encode(&ParamId::MinFee), [0x01]);
         assert_eq!(crate::encode(&ParamId::MinBlockInterval), [0x0A]);
         assert!(crate::decode::<ParamId>(&[0x00]).is_err());
-        assert!(crate::decode::<ParamId>(&[0x0D]).is_err());
+        assert!(crate::decode::<ParamId>(&[0x0E]).is_err());
     }
 
     #[test]

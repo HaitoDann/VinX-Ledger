@@ -42,9 +42,8 @@ référence pour toute nouvelle proposition.
    des programmes.
 6. **Occuper l'état a un coût** : tout objet durable (compte, ligne de jeton,
    titre, séquestre) doit immobiliser une réserve, rendue à sa suppression.
-   Aujourd'hui, seuls les comptes en ont une ; pour les jetons, l'accord
-   préalable empêche déjà de remplir l'état des autres. La réserve par objet
-   reste à faire.
+   Depuis le protocole 6, les jetons acceptés, les mandats et les règles de
+   compte immobilisent chacun 0,1 VINX ; les noms se paient chaque année.
 
 ## 3. Les briques
 
@@ -66,8 +65,8 @@ référence pour toute nouvelle proposition.
 | | Arbres pour tout l'état | Noms, séquestres, règles et mandats rangés comme les comptes (voir §6) | Fait (0.14, lot 4d) |
 | **Protocole 5** | Jetons de tiers | Monnaies, points, crédits : symbole lié à un nom `.vinx`, accord préalable, pouvoirs déclarés (émission, gel, reprise forcée) et abandonnables, création payante (100 VINX) | Règles faites (0.15, lot 5a), API et ligne de commande faites (0.16, lot 5b) ; portefeuille fait (0.17, lot 5c) ; séquestres et mandats en jetons faits (0.18, lot 5d) |
 | | Titres (non fongibles) | Collections d'objets uniques : billets, certificats, cartes de membre | Prévu |
-| | Réserve par objet | Chaque ligne de jeton ou titre immobilise un dépôt | Prévu |
-| **Protocole 6** | Canaux de paiement | Un dépôt, des reçus signés hors chaîne, un règlement : micropaiements | Prévu |
+| **Protocole 6** | Réserve par objet | Chaque jeton accepté, mandat ou règle de compte immobilise 0,1 VINX, rendus à sa suppression | Fait (0.21, lot 1c) |
+| **Protocole 7** | Canaux de paiement | Un dépôt, des reçus signés hors chaîne, un règlement : micropaiements | Prévu |
 | Plus tard | Paiements conditionnels | Secret et délai : échanges sûrs avec d'autres chaînes | Si besoin |
 | Plus tard | Clés post-quantiques | ML-DSA, via la rotation de clé | Avant que ça presse |
 
@@ -147,8 +146,9 @@ référence pour toute nouvelle proposition.
 | Ensuite | Logiciel, lot A2 | Application Android (`.apk`) publiée dans les releases (fait) |
 | **0.20** | Logiciel, lot 1a | Explorateur public (`/explorer`) : blocs, transactions, comptes, jetons, noms, recherche |
 | — | Exercices, lot 1b | Exercices de panne sur le testnet 2 : 4 sur 4 réussis (`docs/EXERCICES-DE-PANNE.md`) |
+| **0.21** | Protocole 6, lot 1c | Réserve par objet ; première mise à jour du protocole sans remise à zéro (`docs/MISE-A-JOUR-PROTOCOLE-6.md`) |
 | Protocole 5 | Règles | Jetons et titres, réserve par objet |
-| Protocole 6 | Règles | Canaux de paiement |
+| Protocole 7 | Règles | Canaux de paiement |
 | En parallèle | Hors chaîne | Pilote VinX Ping (premier subnet), conception des subnets |
 
 Une règle de protocole ne se retire pas : chaque version de protocole n'est

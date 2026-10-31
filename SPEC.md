@@ -114,6 +114,7 @@ puis :
 | 3 et plus | `borsh(emission)` |
 | 4 et plus | `borsh(registry.now, registry.name_fee, racine(names), racine(deals))`, puis `borsh(racine(policies), racine(mandates))` (§4.5) |
 | 5 et plus | `borsh(assets.fee, racine(assets), racine(holdings), racine(assets.deals), racine(assets.mandates))` |
+| 6 et plus | `borsh(reserves.per_object, racine(reserves.owned))` (§4.6) |
 
 **Arbre des comptes (SMT).** Arbre binaire compact indexé par les 160 bits de
 l'adresse, du bit de poids fort au bit de poids faible :
@@ -206,6 +207,37 @@ pour engagement un arbre de même forme que celui des comptes (§4.1) :
 Une modification ne recalcule que le chemin de sa ligne. L'encodage borsh d'une
 table, utilisé jusqu'au protocole 3, est celui d'une table triée : nombre de
 lignes, puis paires dans l'ordre des clés.
+
+### 4.6 Réserve par objet (protocole 6)
+
+Chaque objet durable possédé par un compte immobilise `object_reserve` (§11)
+sur ce compte, en plus de `min_reserve`. Les fonds restent au compte et
+redeviennent disponibles quand l'objet disparaît.
+
+| Objet | Propriétaire |
+|---|---|
+| Ligne d'actif (`holdings`, §5.11), y compris celle de l'émetteur | le détenteur |
+| Mandat en VINX ou en actif (§5.9, §5.11) | le payeur |
+| Règles de compte (§5.8) | le compte |
+
+Les noms, les actifs créés et les séquestres ne sont pas comptés : les uns se
+paient chaque année ou à la création, les autres immobilisent déjà leur montant.
+
+- `reserves.owned : Map<Address, Owned { count: u32 }>` (table, étiquette 9)
+  tient le nombre d'objets de chaque compte ; un compte sans objet n'a pas de
+  ligne.
+- Solde exigé d'un compte à `n` objets : `0` si `n = 0`, sinon
+  `min_reserve + n × object_reserve`.
+- Une transaction est refusée si, après elle, le solde de l'émetteur est sous
+  ce montant **et** qu'elle augmente son nombre d'objets ou débite plus que ses
+  propres frais. Payer des frais reste toujours permis (par exemple pour
+  supprimer des objets après une hausse de `object_reserve`).
+- `Collect` est refusé s'il laisse le payeur sous son solde exigé.
+- Un compte qui reçoit un objet sans l'avoir demandé (acceptation implicite
+  d'un actif par un séquestre ou une reprise forcée) n'est pas bloqué : il ne
+  pourra simplement plus dépenser sous sa réserve.
+- À l'activation du protocole 6, les objets existants sont comptés à partir
+  des tables, sans rien refuser rétroactivement.
 
 ## 5. Transactions
 
@@ -680,6 +712,7 @@ hauteur `H + 2`. `validators_hash` du bloc `H + 1` reflète déjà le nouvel ens
 | 3 | Émission des validateurs et frais aux validateurs (§4.4, ADR 0002) |
 | 4 | Paiements groupés (§5.6), horodatage natif (§5.7), règles de compte (§5.8), mandats (§5.9), frais payés par un parrain (§5.10) |
 | 5 | Actifs natifs (§5.11), séquestres et mandats en actifs, paramètre `asset_fee` |
+| 6 | Réserve par objet (§4.6), paramètre `object_reserve` |
 
 ## 10. Étiquettes de domaine
 
@@ -732,6 +765,7 @@ premier round, de façon soutenue, en conditions réelles.
 | `0x0A` | `min_block_interval` | 5 000 | ms |
 | `0x0B` | `name_fee` | 10 000 000 000 (10 VINX) | unités par an ; protocole 2 |
 | `0x0C` | `asset_fee` | 100 000 000 000 (100 VINX) | unités par actif créé ; protocole 5 |
+| `0x0D` | `object_reserve` | 100 000 000 (0,1 VINX) | unités par objet possédé ; protocole 6 |
 
 Paramètres non modifiables par `SetParam` :
 

@@ -1278,11 +1278,46 @@ fn plan(app: &App, op: &Operation) -> Result<Plan> {
             format_vinx(mine.balance)
         )
     })?;
+    // Protocole 6 : chaque objet possédé (jeton accepté, mandat, règles)
+    // immobilise une réserve en plus de celle du compte.
+    let objects = at(&account_json, "/objects").as_u64().unwrap_or(0);
+    let per_object: Amount = at(&status, "/params/object_reserve")
+        .as_str()
+        .and_then(|v| v.parse().ok())
+        .filter(|_| protocol >= 6)
+        .unwrap_or(0);
+    let creates = matches!(
+        body,
+        TxBody::AcceptAsset { accept: true, .. }
+            | TxBody::GrantMandate { .. }
+            | TxBody::GrantAssetMandate { .. }
+    );
+    let count = objects.saturating_add(u64::from(creates && per_object > 0));
+    let required = if count == 0 {
+        0
+    } else {
+        per_object.saturating_mul(count).saturating_add(min_reserve)
+    };
+    if required > 0 && after < required {
+        bail!(
+            "il doit rester au moins {} VINX sur le compte : réserve du compte et de ses {} \
+             objet(s) (jetons acceptés, mandats, règles), à {} VINX chacun",
+            format_vinx(required),
+            count,
+            format_vinx(per_object)
+        );
+    }
     if after != 0 && after < min_reserve {
         bail!(
             "il doit rester au moins {} VINX sur le compte (réserve du réseau), ou rien du tout",
             format_vinx(min_reserve)
         );
+    }
+    if required > 0 {
+        lines.push((
+            "Réserve immobilisée".into(),
+            format!("{} VINX ({count} objet(s))", format_vinx(required)),
+        ));
     }
     Ok(Plan {
         body,
