@@ -54,6 +54,13 @@ async fn cors(
     res
 }
 
+/// Copie de l'état courant, prise sous le verrou puis relâchée : les tables
+/// sont persistantes, la copie ne coûte presque rien. Une route qui parcourt
+/// l'état travaille ainsi sans bloquer le consensus.
+fn view(shared: &SharedRef) -> vinx_state::State {
+    lock(shared).chain.state.clone()
+}
+
 type ApiResult = Result<Json<Value>, (StatusCode, Json<Value>)>;
 
 fn error(status: StatusCode, message: impl std::fmt::Display) -> (StatusCode, Json<Value>) {
@@ -61,6 +68,14 @@ fn error(status: StatusCode, message: impl std::fmt::Display) -> (StatusCode, Js
 }
 
 pub fn router(shared: SharedRef) -> Router {
+    router_with_limit(shared, 0)
+}
+
+/// Comme [`router`], avec au plus `per_minute` requêtes par minute et par
+/// adresse IP (0 : sans limite). L'adresse vient de la connexion ; derrière un
+/// proxy local (Caddy), de son en-tête `X-Forwarded-For`.
+pub fn router_with_limit(shared: SharedRef, per_minute: u32) -> Router {
+    let limiter = std::sync::Arc::new(RateLimiter::new(per_minute));
     Router::new()
         .route("/", get(dashboard))
         .route("/explorer", get(explorer))
@@ -68,6 +83,7 @@ pub fn router(shared: SharedRef) -> Router {
         .route("/metrics", get(metrics))
         .route("/governance", get(governance))
         .route("/blocks", get(recent_blocks))
+        .route("/transactions/recent", get(recent_transactions))
         .route("/status", get(status))
         .route("/accounts/{address}", get(account))
         .route("/accounts/{address}/transactions", get(account_history))
@@ -93,9 +109,86 @@ pub fn router(shared: SharedRef) -> Router {
         .layer(tower::limit::ConcurrencyLimitLayer::new(
             MAX_CONCURRENT_REQUESTS,
         ))
+        .layer(axum::middleware::from_fn_with_state(limiter, rate_limit))
         // Le portefeuille mobile appelle l'API depuis sa propre origine.
         .layer(axum::middleware::from_fn(cors))
         .with_state(shared)
+}
+
+/// Compteur de requêtes par adresse IP, par fenêtre d'une minute.
+pub struct RateLimiter {
+    per_minute: u32,
+    seen: std::sync::Mutex<std::collections::HashMap<std::net::IpAddr, (u64, u32)>>,
+}
+
+/// Adresses suivies au plus ; au-delà, les fenêtres passées sont oubliées.
+const MAX_TRACKED_IPS: usize = 100_000;
+
+impl RateLimiter {
+    pub fn new(per_minute: u32) -> Self {
+        Self {
+            per_minute,
+            seen: std::sync::Mutex::new(std::collections::HashMap::new()),
+        }
+    }
+
+    /// Compte une requête de `ip` à l'instant `now_ms` ; faux si la limite
+    /// de la minute en cours est dépassée.
+    pub fn allow(&self, ip: std::net::IpAddr, now_ms: u64) -> bool {
+        if self.per_minute == 0 {
+            return true;
+        }
+        let window = now_ms / 60_000;
+        let mut seen = self.seen.lock().unwrap_or_else(|e| e.into_inner());
+        if seen.len() >= MAX_TRACKED_IPS {
+            seen.retain(|_, (w, _)| *w == window);
+        }
+        let entry = seen.entry(ip).or_insert((window, 0));
+        if entry.0 != window {
+            *entry = (window, 0);
+        }
+        entry.1 = entry.1.saturating_add(1);
+        entry.1 <= self.per_minute
+    }
+}
+
+/// Adresse du client : celle de la connexion, ou, si la connexion vient de la
+/// machine elle-même (proxy local), la dernière de `X-Forwarded-For`, celle
+/// que le proxy a ajoutée.
+fn client_ip(req: &axum::extract::Request) -> Option<std::net::IpAddr> {
+    let peer = req
+        .extensions()
+        .get::<axum::extract::ConnectInfo<std::net::SocketAddr>>()?
+        .0
+        .ip();
+    if !peer.is_loopback() {
+        return Some(peer);
+    }
+    let forwarded = req
+        .headers()
+        .get("x-forwarded-for")
+        .and_then(|v| v.to_str().ok())
+        .and_then(|v| v.rsplit(',').next())
+        .and_then(|v| v.trim().parse().ok());
+    Some(forwarded.unwrap_or(peer))
+}
+
+async fn rate_limit(
+    State(limiter): State<std::sync::Arc<RateLimiter>>,
+    req: axum::extract::Request,
+    next: axum::middleware::Next,
+) -> axum::response::Response {
+    use axum::response::IntoResponse;
+    if let Some(ip) = client_ip(&req) {
+        if !limiter.allow(ip, crate::node::now_ms()) {
+            return error(
+                StatusCode::TOO_MANY_REQUESTS,
+                "trop de requêtes depuis cette adresse : réessaie dans une minute",
+            )
+            .into_response();
+        }
+    }
+    next.run(req).await
 }
 
 /// Tableau de bord web : une page autonome qui interroge l'API.
@@ -287,8 +380,8 @@ async fn metrics(
 /// Tout ce qui relève de la gouvernance : multisig, validateurs, paramètres,
 /// mise à jour programmée, escrow et trésorerie.
 async fn governance(State(shared): State<SharedRef>) -> ApiResult {
-    let s = lock(&shared);
-    let st = &s.chain.state;
+    let state = view(&shared);
+    let st = &state;
     let p = &st.params;
     let pending: Vec<Value> = st
         .validators
@@ -365,11 +458,55 @@ async fn governance(State(shared): State<SharedRef>) -> ApiResult {
     })))
 }
 
+/// Dernières transactions des blocs conservés (50 au plus, sur les 500
+/// derniers blocs), recalculées une fois par bloc : l'explorateur n'a plus
+/// à parcourir les blocs un par un.
+async fn recent_transactions(
+    State(shared): State<SharedRef>,
+    axum::extract::Query(q): axum::extract::Query<Limit>,
+) -> ApiResult {
+    let limit = q.limit.unwrap_or(10).clamp(1, RECENT_TXS);
+    let mut s = lock(&shared);
+    let height = s.chain.state.height;
+    let fresh = s.recent_txs.as_ref().filter(|(h, _)| *h == height);
+    let list = match fresh {
+        Some((_, list)) => list.clone(),
+        None => {
+            let mut list = Vec::new();
+            let mut h = height;
+            let oldest = height.saturating_sub(500);
+            while h > oldest && list.len() < RECENT_TXS {
+                let Ok(Some(b)) = s.store.block(h) else { break };
+                for t in b.txs.iter().rev() {
+                    let mut v = tx_json(t);
+                    if let Some(o) = v.as_object_mut() {
+                        o.insert("height".into(), json!(h));
+                        o.insert("timestamp".into(), json!(b.header.timestamp));
+                    }
+                    list.push(v);
+                }
+                h = h.saturating_sub(1);
+            }
+            list.truncate(RECENT_TXS);
+            s.recent_txs = Some((height, list.clone()));
+            list
+        }
+    };
+    drop(s);
+    let list: Vec<Value> = list.into_iter().take(limit).collect();
+    Ok(Json(json!({ "transactions": list })))
+}
+
+/// Transactions récentes gardées en cache.
+const RECENT_TXS: usize = 50;
+
 /// Les 20 derniers blocs conservés, du plus récent au plus ancien.
 #[derive(Deserialize)]
 struct Before {
     /// Blocs strictement sous cette hauteur (pagination) ; les derniers sinon.
     before: Option<u64>,
+    /// Nombre de blocs, 20 par défaut, 100 au plus.
+    limit: Option<usize>,
 }
 
 async fn recent_blocks(
@@ -381,7 +518,8 @@ async fn recent_blocks(
     let mut h = q.before.map_or(s.chain.state.height, |b| {
         b.saturating_sub(1).min(s.chain.state.height)
     });
-    while h > 0 && out.len() < 20 {
+    let limit = q.limit.unwrap_or(20).clamp(1, 100);
+    while h > 0 && out.len() < limit {
         let Ok(Some(b)) = s.store.block(h) else { break };
         let round = s.store.certificate(h).ok().flatten().map(|c| c.round);
         out.push(json!({
@@ -435,8 +573,8 @@ async fn account(State(shared): State<SharedRef>, Path(address): Path<String>) -
     let address: Address = address
         .parse()
         .map_err(|e| error(StatusCode::BAD_REQUEST, e))?;
-    let s = lock(&shared);
-    let st = &s.chain.state;
+    let state = view(&shared);
+    let st = &state;
     let account = st
         .accounts
         .get(&address)
@@ -650,8 +788,8 @@ async fn name(State(shared): State<SharedRef>, Path(name): Path<String>) -> ApiR
             "nom invalide : 3 à 32 caractères a-z, 0-9 et tiret",
         ));
     }
-    let s = lock(&shared);
-    let reg = &s.chain.state.registry;
+    let state = view(&shared);
+    let reg = &state.registry;
     let record = reg.names.get(&name);
     let grace_end = record.map(|r| {
         r.expires_at
@@ -663,7 +801,7 @@ async fn name(State(shared): State<SharedRef>, Path(name): Path<String>) -> ApiR
         "expires_at": record.map(|r| r.expires_at),
         "available": grace_end.is_none_or(|g| reg.now >= g),
         "fee": amount_to_string(reg.name_fee),
-        "active": s.chain.state.protocol_version >= 2,
+        "active": state.protocol_version >= 2,
     })))
 }
 
@@ -686,8 +824,8 @@ fn asset_json(symbol: &str, a: &vinx_state::Asset) -> Value {
 }
 
 async fn assets(State(shared): State<SharedRef>) -> ApiResult {
-    let s = lock(&shared);
-    let st = &s.chain.state;
+    let state = view(&shared);
+    let st = &state;
     Ok(Json(json!({
         "active": st.protocol_version >= 5,
         "fee": amount_to_string(st.assets.fee),
@@ -699,8 +837,8 @@ async fn assets(State(shared): State<SharedRef>) -> ApiResult {
 
 async fn asset(State(shared): State<SharedRef>, Path(symbol): Path<String>) -> ApiResult {
     let symbol = symbol.trim().to_ascii_uppercase();
-    let s = lock(&shared);
-    let st = &s.chain.state;
+    let state = view(&shared);
+    let st = &state;
     let a = st
         .assets
         .assets
@@ -714,8 +852,8 @@ async fn deal(State(shared): State<SharedRef>, Path(id): Path<String>) -> ApiRes
         .ok()
         .and_then(|b| <[u8; 32]>::try_from(b).ok())
         .ok_or_else(|| error(StatusCode::BAD_REQUEST, "identifiant invalide"))?;
-    let s = lock(&shared);
-    let st = &s.chain.state;
+    let state = view(&shared);
+    let st = &state;
     let now = st.registry.now;
     if let Some(d) = st.registry.deals.get(&id) {
         return Ok(Json(deal_json(&id, d, now)));
@@ -1405,4 +1543,22 @@ async fn mempool(State(shared): State<SharedRef>) -> ApiResult {
         "admin_transactions": admin,
         "rejects": rejects,
     })))
+}
+
+#[cfg(test)]
+#[allow(clippy::unwrap_used)] // code de test
+mod rate_tests {
+    use super::RateLimiter;
+
+    #[test]
+    fn limit_is_per_ip_and_per_minute() {
+        let l = RateLimiter::new(3);
+        let (a, b) = ("10.0.0.1".parse().unwrap(), "10.0.0.2".parse().unwrap());
+        assert!((0..3).all(|_| l.allow(a, 1_000)));
+        assert!(!l.allow(a, 2_000), "4e requête de la minute");
+        assert!(l.allow(b, 2_000), "autre adresse");
+        assert!(l.allow(a, 61_000), "minute suivante");
+        let off = RateLimiter::new(0);
+        assert!((0..100).all(|_| off.allow(a, 0)), "0 : sans limite");
+    }
 }

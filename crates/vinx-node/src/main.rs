@@ -118,6 +118,11 @@ enum Command {
         /// de mémoire par transaction.
         #[arg(long, default_value_t = vinx_node::mempool::MAX_PENDING)]
         mempool_size: usize,
+        /// Requêtes par minute et par adresse IP sur l'API (0 : sans limite).
+        /// Derrière un proxy local (Caddy), l'adresse du visiteur est lue dans
+        /// `X-Forwarded-For`.
+        #[arg(long, default_value_t = 600)]
+        rate_limit: u32,
         /// Fichier JSON des noms de validateurs pour le tableau de bord :
         /// `{ "01…clé…": "Validateur-3", … }`.
         #[arg(long)]
@@ -346,6 +351,7 @@ async fn main() -> Result<()> {
             archive,
             block_retention_hours,
             mempool_size,
+            rate_limit,
             validator_names,
         } => {
             let genesis = GenesisFile::load(genesis)?;
@@ -393,11 +399,11 @@ async fn main() -> Result<()> {
                 .with_context(|| format!("écoute sur {addr}"))?;
             info!(%addr, "API démarrée");
             let mut api_stop = stop_rx.clone();
-            let server = axum::serve(listener, api::router(shared.clone())).with_graceful_shutdown(
-                async move {
-                    let _ = api_stop.changed().await;
-                },
-            );
+            let app = api::router_with_limit(shared.clone(), *rate_limit)
+                .into_make_service_with_connect_info::<std::net::SocketAddr>();
+            let server = axum::serve(listener, app).with_graceful_shutdown(async move {
+                let _ = api_stop.changed().await;
+            });
             let stop_tx = std::sync::Arc::new(stop_tx);
             let on_failure = stop_tx.clone();
             // Si le consensus s'arrête (erreur), l'API s'arrête aussi.

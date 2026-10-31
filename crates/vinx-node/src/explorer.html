@@ -185,27 +185,13 @@ const initials = (name) => esc(String(name).split(/[\s_-]+/).filter(Boolean).map
 
 /* ---------- Pages ---------- */
 async function home() {
-  const [status, blocks, gov, a, vals] = await Promise.all([get("/status"), get("/blocks"), get("/governance"), loadAssets(),
-    get("/validators").catch(() => ({ validators: [] }))]);
-  // Fenêtre d'analyse : les derniers blocs, sur quelques pages.
-  let window_ = blocks.blocks.slice();
-  for (let i = 0; i < 3 && window_.length; i++) {
-    const oldest = window_[window_.length - 1].height;
-    if (oldest <= 1) break;
-    window_ = window_.concat((await get(`/blocks?before=${oldest}`)).blocks);
-  }
-  // Transactions récentes : on remonte jusqu'à 200 blocs pour en trouver.
-  const recent = [];
-  let page = blocks.blocks;
-  for (let i = 0; i < 10 && page.length && recent.length < 10; i++) {
-    for (const b of page.filter((b) => b.transactions > 0)) {
-      const d = await get(`/blocks/${b.height}`);
-      d.details.forEach((t) => recent.push({ ...t, height: b.height }));
-      if (recent.length >= 10) break;
-    }
-    const oldest = page[page.length - 1].height;
-    page = oldest > 1 ? (await get(`/blocks?before=${oldest}`)).blocks : [];
-  }
+  // Fenêtre d'analyse (80 blocs) et transactions récentes : préparées par le
+  // nœud, au lieu de parcourir les blocs un par un.
+  const [status, win, rec, gov, a, vals] = await Promise.all([get("/status"), get("/blocks?limit=80"),
+    get("/transactions/recent?limit=10"), get("/governance"), loadAssets(), get("/validators").catch(() => ({ validators: [] }))]);
+  const window_ = win.blocks;
+  const blocks = { blocks: win.blocks.slice(0, 20) };
+  const recent = rec.transactions;
   const e = gov.emission || {};
   const last = blocks.blocks[0];
   const chrono = window_.slice().reverse();

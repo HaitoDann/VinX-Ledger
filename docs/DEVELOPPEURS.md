@@ -22,7 +22,7 @@ passe, ainsi que la genèse. Le tableau de bord du nœud est sur
 `/evidence` (preuves de validateurs fautifs), `/validators` (état de chaque
 validateur), `/history`, `/mempool`, `/admin-history`, `/transactions/{id}`,
 `/accounts/{adresse}/transactions`, `/names/{nom}`, `/deals/{id}`,
-`/attestations/{empreinte}`, `/assets`, `/assets/{symbole}`, `/blocks?before={hauteur}` (pagination),
+`/attestations/{empreinte}`, `/assets`, `/assets/{symbole}`, `/blocks?before={hauteur}&limit={n}` (pagination, 100 blocs au plus), `/transactions/recent?limit={n}` (50 au plus),
 et en `POST`
 `/transactions` et `/admin-transactions`.
 
