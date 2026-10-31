@@ -148,7 +148,8 @@ référence pour toute nouvelle proposition.
 | — | Exercices, lot 1b | Exercices de panne sur le testnet 2 : 4 sur 4 réussis (`docs/EXERCICES-DE-PANNE.md`) |
 | **0.21** | Protocole 6, lot 1c | Réserve par objet ; première mise à jour du protocole sans remise à zéro (`docs/MISE-A-JOUR-PROTOCOLE-6.md`) |
 | **0.22** | Logiciel, lot D1 | API documentée (`/docs`, `/openapi.json`) ; détenteurs et historique d'un jeton |
-| Ensuite | Logiciel, lots I1 à I4 | Console émetteur, page jeton de l'explorateur, parcours jeton du portefeuille, cockpit |
+| **0.23** | Logiciel, lot I2 | Console émetteur (onglet « Émettre ») : création guidée, fiche du jeton, détenteurs, distribution en lot |
+| Ensuite | Logiciel, lots I1, I3, I4 | Page jeton de l'explorateur, parcours jeton du portefeuille, cockpit |
 | Protocole 5 | Règles | Jetons et titres, réserve par objet |
 | Protocole 7 | Règles | Canaux de paiement |
 | En parallèle | Hors chaîne | Pilote VinX Ping (premier subnet), conception des subnets |

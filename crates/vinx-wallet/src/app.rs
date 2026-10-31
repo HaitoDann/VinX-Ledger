@@ -1036,6 +1036,34 @@ fn plan(app: &App, op: &Operation) -> Result<Plan> {
                         } else {
                             resolve(app, &client, &op.to)?.0
                         };
+                        let theirs = if to == me {
+                            me_json.clone()
+                        } else {
+                            client
+                                .get_json(&format!("/accounts/{to}"))?
+                                .unwrap_or(Value::Null)
+                        };
+                        if holding(&theirs, &symbol).is_none() {
+                            bail!(
+                                "ce bénéficiaire n'a pas encore accepté {symbol} : il doit \
+                                 l'accepter avant de recevoir des unités"
+                            );
+                        }
+                        let supply: Amount = at(&asset, "/supply_units")
+                            .as_str()
+                            .and_then(|v| v.parse().ok())
+                            .unwrap_or(0);
+                        let max: Option<Amount> = at(&asset, "/max_supply_units")
+                            .as_str()
+                            .and_then(|v| v.parse().ok());
+                        if let Some(m) = max {
+                            if supply.saturating_add(amount) > m {
+                                bail!(
+                                    "au-delà du plafond : {} {symbol} peuvent encore être émis",
+                                    format_units(m.saturating_sub(supply), d)
+                                );
+                            }
+                        }
                         lines.push(("Bénéficiaire".into(), to.to_string()));
                         lines.push((
                             "Émis".into(),
@@ -1666,6 +1694,283 @@ async fn run(State(app): State<Shared>, Json(op): Json<Operation>) -> ApiResult 
 }
 
 #[derive(Deserialize)]
+struct AssetQuery {
+    symbol: String,
+    #[serde(default)]
+    offset: usize,
+    before: Option<u64>,
+}
+
+/// Console émetteur : fiche d'un jeton, ses détenteurs et son historique.
+/// `holders` et `history` sont `null` sur un nœud antérieur à la 0.22.
+async fn get_asset(
+    State(app): State<Shared>,
+    axum::extract::Query(q): axum::extract::Query<AssetQuery>,
+) -> ApiResult {
+    blocking(move || {
+        let client = app.client()?;
+        let (asset, _) = asset_info(&client, &q.symbol)?;
+        let symbol = q.symbol.trim().to_ascii_uppercase();
+        let holders = client.get_json(&format!(
+            "/assets/{symbol}/holders?limit=100&offset={}",
+            q.offset
+        ))?;
+        let before = q.before.map(|b| format!("&before={b}")).unwrap_or_default();
+        let history =
+            client.get_json(&format!("/assets/{symbol}/transactions?limit=30{before}"))?;
+        Ok(json!({ "asset": asset, "holders": holders, "history": history }))
+    })
+    .await
+}
+
+/// Lignes au plus d'une distribution : la file d'attente d'un compte en
+/// accepte 100.
+const MAX_DISTRIBUTION: usize = 100;
+
+#[derive(Deserialize)]
+struct Distribution {
+    account: u32,
+    symbol: String,
+    /// `send` : depuis le solde du compte ; `mint` : émission (émetteur).
+    mode: String,
+    /// Une ligne « destinataire ; montant ; mémo » par versement.
+    lines: String,
+    /// Signer et envoyer ; sinon, seulement vérifier.
+    #[serde(default)]
+    execute: bool,
+}
+
+async fn distribute_route(State(app): State<Shared>, Json(d): Json<Distribution>) -> ApiResult {
+    blocking(move || distribute(&app, &d)).await
+}
+
+/// Vérifie chaque ligne d'une distribution de jetons ; avec `execute`, et si
+/// aucune ligne n'est en erreur, signe et envoie une transaction par ligne,
+/// avec des nonces consécutifs.
+fn distribute(app: &App, d: &Distribution) -> Result<Value> {
+    let seed = app.seed()?;
+    let me = address_of(&seed, d.account);
+    app.account(d.account)?;
+    let mint = match d.mode.as_str() {
+        "mint" => true,
+        "send" => false,
+        other => bail!("mode inconnu : {other}"),
+    };
+    let client = app.client()?;
+    let status = client.status_json()?;
+    let max_memo = at(&status, "/params/max_memo_bytes").as_u64().unwrap_or(32);
+    let fee = client.recommended_fee()?;
+    let (asset, dec) = asset_info(&client, &d.symbol)?;
+    let symbol = d.symbol.trim().to_ascii_uppercase();
+    let me_json = client
+        .get_json(&format!("/accounts/{me}"))?
+        .ok_or_else(|| anyhow!("ce compte est vide : il doit d'abord recevoir des VINX"))?;
+    if at(&asset, "/frozen") == &Value::Bool(true) {
+        bail!("{symbol} est entièrement gelé : plus aucune unité ne circule");
+    }
+    let mine = holding(&me_json, &symbol);
+    let my_units: Amount = mine
+        .as_ref()
+        .and_then(|h| at(h, "/units").as_str()?.parse().ok())
+        .unwrap_or(0);
+    let supply: Amount = at(&asset, "/supply_units")
+        .as_str()
+        .and_then(|v| v.parse().ok())
+        .unwrap_or(0);
+    let max: Option<Amount> = at(&asset, "/max_supply_units")
+        .as_str()
+        .and_then(|v| v.parse().ok());
+    if mint {
+        if at(&asset, "/issuer").as_str() != Some(me.to_string().as_str()) {
+            bail!("seul l'émetteur de {symbol} peut en émettre");
+        }
+        if at(&asset, "/powers/mint") != &Value::Bool(true) {
+            bail!("l'émetteur a renoncé au pouvoir d'émettre {symbol}");
+        }
+        if !at(&me_json, "/policy").is_null() {
+            bail!(
+                "ce compte a des règles : émettre exige l'approbation de ses signataires \
+                 (« vinx-wallet account propose »)"
+            );
+        }
+    } else if mine
+        .as_ref()
+        .is_some_and(|h| at(h, "/frozen") == &Value::Bool(true))
+    {
+        bail!("{symbol} est gelé sur ce compte");
+    }
+
+    let mut rows = Vec::new();
+    let mut bodies = Vec::new();
+    let mut total: Amount = 0;
+    let mut errors = 0usize;
+    let mut seen = std::collections::BTreeSet::new();
+    let mut warnings = Vec::new();
+    for (n, raw) in d.lines.lines().enumerate() {
+        let line = raw.trim();
+        if line.is_empty() || line.starts_with('#') {
+            continue;
+        }
+        let row = n.saturating_add(1);
+        let mut cols = line.split([';', '\t']).map(str::trim);
+        let who = cols.next().unwrap_or_default().to_owned();
+        let amount_text = cols.next().unwrap_or_default().replace(',', ".");
+        let memo = cols.next().unwrap_or_default().to_owned();
+        let checked = (|| -> Result<(Address, String, Amount, TxBody)> {
+            let amount = parse_units(&amount_text, dec)?;
+            if amount == 0 {
+                bail!("montant nul");
+            }
+            let memo_b = memo_bytes(&memo);
+            if memo_b
+                .as_ref()
+                .is_some_and(|m| u64::try_from(m.len()).map_or(true, |l| l > max_memo))
+            {
+                bail!("mémo trop long ({max_memo} octets au plus)");
+            }
+            let (to, how) = resolve(app, &client, &who)?;
+            if to == me && !mint {
+                bail!("c'est l'adresse de ce compte");
+            }
+            let theirs = if to == me {
+                me_json.clone()
+            } else {
+                client
+                    .get_json(&format!("/accounts/{to}"))?
+                    .unwrap_or(Value::Null)
+            };
+            let Some(h) = holding(&theirs, &symbol) else {
+                bail!("n'a pas encore accepté {symbol}");
+            };
+            if at(&h, "/frozen") == &Value::Bool(true) {
+                bail!("{symbol} est gelé sur ce compte");
+            }
+            let body = if mint {
+                TxBody::MintAsset {
+                    symbol: symbol.clone(),
+                    to,
+                    amount,
+                }
+            } else {
+                if at(&theirs, "/memo_required") == &Value::Bool(true) && memo_b.is_none() {
+                    bail!("exige un mémo");
+                }
+                TxBody::TransferAsset {
+                    symbol: symbol.clone(),
+                    to,
+                    amount,
+                    memo: memo_b,
+                }
+            };
+            Ok((to, how, amount, body))
+        })();
+        match checked {
+            Ok((to, how, amount, body)) => {
+                if !seen.insert(to) {
+                    warnings.push(format!("ligne {row} : destinataire déjà présent plus haut"));
+                }
+                total = total.saturating_add(amount);
+                rows.push(json!({
+                    "row": row, "input": who, "to": to.to_string(), "how": how,
+                    "amount": format_units(amount, dec), "memo": memo, "error": null,
+                }));
+                bodies.push(body);
+            }
+            Err(e) => {
+                errors = errors.saturating_add(1);
+                rows.push(json!({
+                    "row": row, "input": who, "to": null, "how": null,
+                    "amount": amount_text, "memo": memo, "error": format!("{e:#}"),
+                }));
+            }
+        }
+    }
+    let mut problems = Vec::new();
+    if rows.is_empty() {
+        problems.push(
+            "aucune ligne : une ligne « destinataire ; montant ; mémo » par versement".to_owned(),
+        );
+    }
+    if rows.len() > MAX_DISTRIBUTION {
+        problems.push(format!(
+            "{} lignes : {MAX_DISTRIBUTION} au plus par distribution, découpe la liste",
+            rows.len()
+        ));
+    }
+    if mint {
+        if let Some(m) = max {
+            if supply.saturating_add(total) > m {
+                problems.push(format!(
+                    "au-delà du plafond : {} {symbol} peuvent encore être émis",
+                    format_units(m.saturating_sub(supply), dec)
+                ));
+            }
+        }
+    } else if total > my_units {
+        problems.push(format!(
+            "solde insuffisant : {} {symbol} à verser, {} disponibles",
+            format_units(total, dec),
+            format_units(my_units, dec)
+        ));
+    }
+    let count = u64::try_from(rows.len()).unwrap_or(u64::MAX);
+    let fees = fee.saturating_mul(count);
+    let spendable: Amount = at(&me_json, "/spendable")
+        .as_str()
+        .or_else(|| at(&me_json, "/balance").as_str())
+        .and_then(|v| v.parse().ok())
+        .unwrap_or(0);
+    if fees > spendable {
+        problems.push(format!(
+            "VINX insuffisants pour les frais : {} VINX nécessaires, {} disponibles",
+            format_vinx(fees),
+            format_vinx(spendable)
+        ));
+    }
+    let mut sent = Vec::new();
+    let mut failed = Value::Null;
+    if d.execute {
+        if errors > 0 || !problems.is_empty() {
+            bail!("corrige les lignes en erreur avant d'envoyer");
+        }
+        let keypair = derive_account(&seed, d.account);
+        let chain_id = client.status()?.chain_id;
+        let (first, has_key) = next_nonce(&client, &me)?;
+        for (i, body) in bodies.into_iter().enumerate() {
+            let nonce = first.saturating_add(u64::try_from(i)?);
+            let tx = Transaction {
+                chain_id: chain_id.clone(),
+                sender: me,
+                nonce,
+                fee,
+                body,
+            };
+            match client.submit(&tx.sign(&keypair, !has_key && i == 0)) {
+                Ok(id) => sent.push(id),
+                Err(e) => {
+                    let row = rows.get(i).map_or(&Value::Null, |r| at(r, "/row"));
+                    failed = json!(format!("ligne {row} : {e:#}"));
+                    break;
+                }
+            }
+        }
+    }
+    Ok(json!({
+        "symbol": symbol,
+        "mode": d.mode,
+        "rows": rows,
+        "count": rows.len(),
+        "errors": errors,
+        "problems": problems,
+        "warnings": warnings,
+        "total": format_units(total, dec),
+        "fees": format_vinx(fees),
+        "sent": sent,
+        "failed": failed,
+    }))
+}
+
+#[derive(Deserialize)]
 struct QrBody {
     text: String,
 }
@@ -1775,6 +2080,8 @@ fn router_with_kdf(dir: PathBuf, token: String, port: u16, kdf: Kdf) -> Router {
         .route("/api/verify", post(verify))
         .route("/api/preview", post(preview))
         .route("/api/execute", post(run))
+        .route("/api/asset", get(get_asset))
+        .route("/api/distribute", post(distribute_route))
         .layer(axum::middleware::from_fn_with_state(shared.clone(), guard))
         .layer(axum::extract::DefaultBodyLimit::max(64 * 1024))
         .with_state(shared)

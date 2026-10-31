@@ -6,9 +6,30 @@ monnaie stable. Il n'y a pas de contrat intelligent à écrire : le jeton est un
 fonction native de la chaîne, avec des règles connues et vérifiées par tous les
 nœuds (SPEC §5.11).
 
-Les frais de chaque opération restent payés en VINX. Tout se fait dans
-l'onglet « Jetons » du portefeuille ; les exemples ci-dessous utilisent la
-ligne de commande `vinx-wallet`, utile pour automatiser.
+Les frais de chaque opération restent payés en VINX.
+
+## La console émetteur
+
+Le plus simple : l'onglet **« Émettre »** du portefeuille.
+
+- **Créer un jeton** : un assistant en cinq étapes (symbole, identité,
+  quantités, pouvoirs, vérification). Il réserve le nom `.vinx` si besoin et
+  propose trois points de départ : quantité fixe, points ou bons, monnaie
+  régulée.
+- **La fiche du jeton** : quantité en circulation et plafond, nombre de
+  détenteurs, pouvoirs encore détenus (chacun avec son bouton « Abandonner »),
+  liste des détenteurs avec leur part (geler, dégeler, reprendre sur un
+  compte), historique complet, et un message prêt à envoyer aux futurs
+  détenteurs.
+- **Distribuer en lot** : collez ou importez un CSV
+  `destinataire ; montant ; mémo` (jusqu'à 100 lignes), depuis votre solde ou
+  par émission. Chaque ligne est vérifiée (accord du destinataire, mémo exigé,
+  gel, plafond, solde, frais) avant que rien ne soit signé.
+
+La fiche et la distribution utilisent l'API des nœuds 0.22 ou plus récents.
+
+Les sections suivantes montrent la ligne de commande `vinx-wallet`, utile pour
+automatiser.
 
 ## 1. Réserver le symbole
 

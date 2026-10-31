@@ -243,6 +243,10 @@ Si le compte émetteur a des règles (multisig), émettre, geler, reprendre ou
 abandonner un pouvoir passe par `vinx-wallet account propose`. Guide complet de
 l'émetteur : [`JETONS.md`](./JETONS.md).
 
+Pour **émettre** un jeton, l'onglet « Émettre » rassemble la création guidée,
+la distribution en lot, les détenteurs, l'historique et les pouvoirs (voir
+[`JETONS.md`](./JETONS.md)).
+
 ## 12. Plusieurs comptes
 
 **Réglages → Nouveau compte** crée un autre compte, par exemple « Épargne ».
