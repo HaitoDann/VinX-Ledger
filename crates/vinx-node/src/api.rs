@@ -547,6 +547,7 @@ async fn status(State(shared): State<SharedRef>) -> ApiResult {
         "chain_id": st.chain_id,
         "node_version": env!("CARGO_PKG_VERSION"),
         "protocol_version": st.protocol_version,
+        "supported_protocol": vinx_state::state::SUPPORTED_PROTOCOL,
         "height": st.height,
         "last_block_hash": s.chain.last.as_ref().map(|h| hash_to_hex(&h.hash())),
         "state_root": hash_to_hex(&st.state_root()),

@@ -6,6 +6,17 @@
 <title>VinX Ledger — cockpit</title>
 <link rel="icon" href="__FAVICON__">
 <style>/*__THEME__*/</style>
+<style>
+.todo { display: grid; gap: 8px; }
+.todo-item { display: flex; gap: 10px; align-items: center; padding: 10px 12px; border: 1px solid var(--line); border-radius: 8px; background: var(--panel); }
+.todo-item span:nth-child(2) { flex: 1; }
+.dot.ok { color: var(--ok); } .dot.warn { color: var(--warn); } .dot.bad { color: var(--bad); }
+.dot:not(.ok):not(.warn):not(.bad) { color: var(--muted); }
+.signer { display: flex; gap: 10px; align-items: center; padding: 6px 0; border-top: 1px solid var(--line); flex-wrap: wrap; }
+.bar { height: 6px; border-radius: 999px; background: var(--line); overflow: hidden; margin-top: 10px; }
+.bar span { display: block; height: 100%; background: var(--accent); }
+.narrow { max-width: 760px; width: 100%; }
+</style>
 </head>
 <body>
 <header>
@@ -15,6 +26,7 @@
   </a>
   <nav>
     <a href="#reseau" data-view="reseau">Réseau</a>
+    <a href="#gouvernance" data-view="gouvernance">Gouvernance<span id="govTodo" class="count" hidden></span></a>
     <a href="#actions" data-view="actions">Actions</a>
     <a href="#propositions" data-view="propositions">Propositions<span id="todo" class="count" hidden></span></a>
     <a href="#comptes" data-view="comptes">Comptes</a>
@@ -68,6 +80,43 @@
         <div><label>URL de l'API</label><input id="nc-url" class="mono" placeholder="http://127.0.0.1:18541"></div>
         <div style="flex:0 0 auto"><button onclick="addNode()">Ajouter</button></div>
       </div>
+    </section>
+  </section>
+
+  <!-- Gouvernance -->
+  <section id="view-gouvernance" class="view">
+    <section class="card">
+      <h2>À faire</h2>
+      <div id="g-todo" class="todo"><div class="skeleton skel-card"></div></div>
+    </section>
+    <div class="grid2">
+      <section class="card">
+        <h2>Protocole</h2>
+        <div id="g-protocol"></div>
+      </section>
+      <section class="card">
+        <h2>Gouvernance admin</h2>
+        <div id="g-admin"></div>
+      </section>
+    </div>
+    <section class="card">
+      <h2>Préparation des nœuds <span class="sub">version installée et protocole qu'elle sait exécuter</span></h2>
+      <div class="scroll"><table>
+        <thead><tr><th>Nœud</th><th>Version</th><th>Protocole maximal</th><th>Hauteur</th><th>Prêt pour</th></tr></thead>
+        <tbody id="g-nodes"></tbody>
+      </table></div>
+      <div class="note muted">Seuls les nœuds suivis (onglet Réseau) sont vérifiés : ajoute chaque validateur pour un contrôle complet. Les nœuds antérieurs à la 0.26 ne publient pas leur protocole maximal.</div>
+    </section>
+    <section class="card narrow">
+      <h2>Programmer une mise à jour du protocole</h2>
+      <p class="sub">Procédure : installer d'abord la nouvelle version sur <b>tous</b> les nœuds, vérifier le tableau ci-dessus, puis programmer l'activation au moins 17 280 blocs (environ 24 h) plus tard. Un nœud resté sur l'ancienne version s'arrête à la hauteur d'activation.</p>
+      <div class="row">
+        <div><label for="up-version">Nouvelle version</label><input id="up-version" inputmode="numeric" oninput="upgradeHelp()"></div>
+        <div><label for="up-height">Hauteur d'activation</label><input id="up-height" inputmode="numeric" oninput="upgradeHelp()"></div>
+        <div style="flex:0 0 auto;align-self:flex-end"><button onclick="suggestHeight()">Hauteur conseillée</button></div>
+      </div>
+      <div class="note" id="up-note"></div>
+      <div class="actions"><button class="danger" onclick="proposeUpgrade()">Programmer la mise à jour</button></div>
     </section>
   </section>
 
@@ -131,13 +180,7 @@
           <div><input id="rs-key" class="mono" placeholder="nouvelle clé publique 01…"></div>
         </div>
         <div class="actions"><button class="danger" onclick="proposeReplace()">Proposer le remplacement</button></div>
-        <h3>Mise à jour du protocole</h3>
-        <div class="row">
-          <div><label>Nouvelle version</label><input id="up-version" inputmode="numeric"></div>
-          <div><label>Hauteur d'activation</label><input id="up-height" inputmode="numeric"></div>
-        </div>
-        <div class="note muted" id="up-note"></div>
-        <div class="actions"><button class="danger" onclick="proposeUpgrade()">Programmer la mise à jour</button></div>
+        <div class="note muted">La mise à jour du protocole se programme dans l'onglet <a href="#gouvernance">Gouvernance</a>, avec le contrôle des nœuds.</div>
       </section>
     </div>
   </section>
@@ -464,7 +507,6 @@ async function refreshActions() {
     const here = keys.admins.find(a => a.index === i);
     return `<div>${i}. <span class="mono">${esc(short(k, 18))}</span> ${here ? `<span class="ok">— sur ce poste (${esc(here.file)})</span>` : '<span class="muted">— pas sur ce poste</span>'}</div>`;
   }).join("");
-  $("up-note").textContent = `Hauteur actuelle : ${fr(status.height)}. Préavis minimal : 17 280 blocs (24 h à 5 s). Tous les nœuds doivent avoir la nouvelle version avant l'activation.`;
 }
 
 function paramValue(i) {
@@ -572,9 +614,106 @@ async function proposeUpgrade() {
   const version = $("up-version").value.trim(), h = $("up-height").value.trim();
   if (!/^\d+$/.test(version) || !/^\d+$/.test(h)) return toast("Version et hauteur : nombres entiers", true);
   if (Number(h) < status.height + 17280) return toast("Hauteur trop proche : au moins " + fr(status.height + 17280), true);
+  if (Number(version) <= status.protocol_version) return toast(`La version doit être supérieure à ${status.protocol_version}`, true);
+  const late = govNodes.filter((n) => n.ok && n.status.supported_protocol != null && n.status.supported_protocol < Number(version));
   await propose({ kind: "schedule-upgrade", version, activation_height: h }, "Programmer une mise à jour du protocole",
-    `<p>Passage à la version <strong>${esc(version)}</strong> à la hauteur <strong>${fr(h)}</strong>.</p>
+    `<p>Passage à la version <strong>${esc(version)}</strong> à la hauteur <strong>${fr(h)}</strong>, vers le ${esc(etaDate(Number(h) - status.height))}.</p>
+     ${late.length ? `<p class="bad">Pas prêts : ${late.map((n) => esc(n.name)).join(", ")}.</p>` : ""}
      <p class="warn">Tout nœud qui n'aura pas la nouvelle version s'arrêtera à cette hauteur.</p>`, { danger: true });
+}
+
+/* ---------- Gouvernance ---------- */
+const NOTICE = 17280;
+let govNodes = [], blockMs = 5000;
+/* Durée lisible d'un nombre de blocs, au rythme moyen observé. */
+function inBlocks(n) {
+  const s = Math.max(0, n) * blockMs / 1000;
+  if (s < 3600) return `${Math.round(s / 60)} min`;
+  if (s < 172800) return `${(s / 3600).toLocaleString("fr-FR", { maximumFractionDigits: 1 })} h`;
+  return `${(s / 86400).toLocaleString("fr-FR", { maximumFractionDigits: 1 })} jours`;
+}
+const etaDate = (n) => new Date(Date.now() + Math.max(0, n) * blockMs).toLocaleString("fr-FR", { dateStyle: "full", timeStyle: "short" });
+async function refreshGovernance() {
+  const [nodes, blocks, props, escrow] = await Promise.all([api("/api/nodes"), node("/blocks?limit=100").catch(() => null),
+    api("/api/proposals").catch(() => ({ proposals: [] })), node("/escrow").catch(() => null)]);
+  govNodes = nodes.nodes;
+  const ts = (blocks?.blocks || []).map((b) => b.timestamp);
+  // Médiane des intervalles : une panne passée ne fausse pas l'estimation.
+  const gaps = ts.slice(1).map((t, i) => Math.abs(ts[i] - t)).sort((x, y) => x - y);
+  if (gaps.length) blockMs = Math.max(1, gaps[Math.floor(gaps.length / 2)]);
+  const up = gov.upgrade, target = up ? up.version : status.protocol_version + 1;
+  const readyFor = (st) => st?.supported_protocol ?? null;
+
+  /* À faire */
+  const todo = [];
+  const toSign = props.proposals.filter((p) => p.status === "à signer"), ready = props.proposals.filter((p) => p.status === "prête");
+  if (ready.length) todo.push(["ok", `${ready.length} proposition(s) prête(s) à envoyer`, "#propositions"]);
+  if (toSign.length) todo.push(["warn", `${toSign.length} proposition(s) à signer`, "#propositions"]);
+  if (keys.admins.length < 2) todo.push(["warn", `${keys.admins.length} clé admin sur ce poste : il en faut deux, ou faire signer l'autre signataire (export / import)`, "#propositions"]);
+  const down = govNodes.filter((n) => !n.ok);
+  if (down.length) todo.push(["bad", `${down.length} nœud(s) suivi(s) injoignable(s) : ${down.map((n) => esc(n.name)).join(", ")}`, "#reseau"]);
+  if (up) {
+    const late = govNodes.filter((n) => n.ok && readyFor(n.status) !== null && readyFor(n.status) < up.version);
+    if (late.length) todo.push(["bad", `${late.length} nœud(s) pas prêt(s) pour le protocole ${up.version} : ${late.map((n) => esc(n.name)).join(", ")}. Ils s'arrêteront au bloc ${fr(up.activation_height)}.`, ""]);
+  }
+  if (escrow?.next && escrow.next.matures_at * 1000 <= Date.now()) todo.push(["ok", `Tranche d'escrow libérable : ${vinx(escrow.next.amount)}`, "#actions"]);
+  $("g-todo").innerHTML = todo.length ? todo.map(([c, t, href]) => `<div class="todo-item ${c}"><span class="dot ${c}"></span><span>${t}</span>${href ? `<a href="${href}">Ouvrir ›</a>` : ""}</div>`).join("")
+    : `<p class="ok">Rien à faire : les nœuds suivis répondent, aucune proposition en attente.</p>`;
+  $("govTodo").hidden = !todo.length; $("govTodo").textContent = todo.length;
+
+  /* Protocole */
+  if (up) {
+    const left = up.activation_height - status.height;
+    const total = Math.max(NOTICE, left);
+    const pct = Math.max(0, Math.min(100, 100 - (100 * left) / total));
+    $("g-protocol").innerHTML = `<dl><dt>Version actuelle</dt><dd><b>${status.protocol_version}</b></dd>
+      <dt>Mise à jour programmée</dt><dd>vers la version <b>${up.version}</b> au bloc <b>${fr(up.activation_height)}</b></dd>
+      <dt>Reste</dt><dd>${left > 0 ? `${fr(left)} blocs, environ ${inBlocks(left)}` : "activation imminente"}</dd>
+      <dt>Date estimée</dt><dd>${esc(etaDate(left))}</dd></dl>
+      <div class="bar"><span style="width:${pct}%"></span></div>
+      <p class="note muted">Une nouvelle programmation remplace celle-ci (par exemple pour la repousser).</p>`;
+  } else {
+    $("g-protocol").innerHTML = `<dl><dt>Version actuelle</dt><dd><b>${status.protocol_version}</b></dd>
+      <dt>Ce nœud sait exécuter</dt><dd>${status.supported_protocol ? `jusqu'à la version ${status.supported_protocol}` : "inconnu (nœud antérieur à la 0.26)"}</dd>
+      <dt>Mise à jour programmée</dt><dd>aucune</dd><dt>Rythme des blocs</dt><dd>un bloc toutes les ${(blockMs / 1000).toLocaleString("fr-FR", { maximumFractionDigits: 1 })} s</dd></dl>`;
+  }
+
+  /* Admin */
+  $("g-admin").innerHTML = `<p>Une action s'applique avec <b>${gov.admin.threshold} signatures sur ${gov.admin.signers.length}</b>. Prochaine proposition : n° ${gov.admin.nonce + 1}.</p>
+    ${gov.admin.signers.map((k, i) => { const here = keys.admins.find((a) => a.index === i);
+      return `<div class="signer"><span class="dot ${here ? "ok" : ""}"></span><span>Signataire ${i}</span><span class="mono sub">${esc(short(k, 18))}</span>${here ? `<span class="ok">sur ce poste</span>` : '<span class="muted">ailleurs</span>'}</div>`; }).join("")}
+    <p class="note muted">Les clés présentes sur ce poste sont lues dans <span class="mono">${esc(keys.dir)}</span>.</p>`;
+
+  /* Nœuds */
+  $("g-nodes").innerHTML = govNodes.length ? govNodes.map((n) => {
+    if (!n.ok) return `<tr><td>${esc(n.name)}</td><td colspan="3" class="bad">injoignable</td><td class="bad">—</td></tr>`;
+    const sp = readyFor(n.status);
+    const verdict = sp === null ? '<span class="muted">inconnu</span>' : sp >= target ? `<span class="ok">✓ protocole ${target}</span>` : `<span class="bad">✗ protocole ${target}</span>`;
+    return `<tr><td>${esc(n.name)}</td><td class="mono">${esc(n.status.node_version || "—")}</td><td>${sp ?? "—"}</td><td>${fr(n.status.height)}</td><td>${verdict}</td></tr>`;
+  }).join("") : `<tr><td colspan="5" class="muted">Aucun nœud suivi : ajoute-les dans l'onglet Réseau.</td></tr>`;
+
+  if (!$("up-version").value) $("up-version").value = up ? up.version : status.protocol_version + 1;
+  upgradeHelp();
+}
+function suggestHeight() { $("up-height").value = status.height + 18000; upgradeHelp(); }
+function upgradeHelp() {
+  const v = Number($("up-version").value), h = Number($("up-height").value);
+  const lines = [`Hauteur actuelle : ${fr(status.height)}. Minimum : ${fr(status.height + NOTICE)}.`];
+  if (h) {
+    const left = h - status.height;
+    lines.push(left < NOTICE ? `<span class="bad">Trop proche : il faut au moins ${fr(NOTICE)} blocs de préavis.</span>`
+      : `Activation dans ${fr(left)} blocs, environ ${inBlocks(left)} : <b>${esc(etaDate(left))}</b>.`);
+  }
+  if (v) {
+    const known = govNodes.filter((n) => n.ok && n.status.supported_protocol != null);
+    const late = known.filter((n) => n.status.supported_protocol < v);
+    const unknown = govNodes.filter((n) => !n.ok || n.status.supported_protocol == null);
+    if (v <= status.protocol_version) lines.push(`<span class="bad">La version doit être supérieure à ${status.protocol_version}.</span>`);
+    else if (late.length) lines.push(`<span class="bad">Pas prêts pour la version ${v} : ${late.map((n) => esc(n.name)).join(", ")}. Mets-les à jour avant de programmer.</span>`);
+    else if (known.length) lines.push(`<span class="ok">${known.length} nœud(s) suivi(s) prêt(s) pour la version ${v}.</span>`);
+    if (unknown.length) lines.push(`<span class="warn">Non vérifiés : ${unknown.map((n) => esc(n.name)).join(", ")}.</span>`);
+  }
+  $("up-note").innerHTML = lines.join("<br>");
 }
 
 /* ---------- Propositions ---------- */
@@ -722,7 +861,7 @@ function setBadge(list) {
   const todo = list.filter(p => p.status === "à signer" || p.status === "prête").length;
   $("todo").hidden = !todo; $("todo").textContent = todo;
 }
-const VIEWS = { reseau: refreshNetwork, actions: refreshActions, propositions: refreshProposals, comptes: refreshAccounts, journal: refreshJournal };
+const VIEWS = { reseau: refreshNetwork, gouvernance: refreshGovernance, actions: refreshActions, propositions: refreshProposals, comptes: refreshAccounts, journal: refreshJournal };
 let current = "reseau", timer = null;
 async function refresh() {
   try {
@@ -745,6 +884,7 @@ function route() {
   refresh();
   // Pas de rafraîchissement automatique pendant la saisie d'un formulaire.
   if (current === "reseau" || current === "propositions" || current === "journal") timer = setInterval(refresh, 5000);
+  if (current === "gouvernance") timer = setInterval(() => { if (!["up-version", "up-height"].includes(document.activeElement?.id)) refresh(); }, 10000);
 }
 window.addEventListener("hashchange", route);
 route();

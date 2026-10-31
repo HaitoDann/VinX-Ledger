@@ -151,7 +151,7 @@ référence pour toute nouvelle proposition.
 | **0.23** | Logiciel, lot I2 | Console émetteur (onglet « Émettre ») : création guidée, fiche du jeton, détenteurs, distribution en lot |
 | **0.24** | Logiciel, lot I1 | Page jeton de l'explorateur : circulation, détenteurs et répartition, pouvoirs expliqués, historique |
 | **0.25** | Logiciel, lot I3 | Parcours du détenteur : découvrir et accepter un jeton, cartes de jetons, réserve expliquée, demandes de paiement en jeton (bureau et mobile) |
-| Ensuite | Logiciel, lot I4 | Cockpit |
+| **0.26** | Logiciel, lot I4 | Cockpit : onglet Gouvernance (à faire, compte à rebours de la mise à jour, préparation des nœuds, programmation guidée) ; `supported_protocol` dans `/status` |
 | Protocole 5 | Règles | Jetons et titres, réserve par objet |
 | Protocole 7 | Règles | Canaux de paiement |
 | En parallèle | Hors chaîne | Pilote VinX Ping (premier subnet), conception des subnets |

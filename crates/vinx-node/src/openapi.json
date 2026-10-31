@@ -127,6 +127,11 @@
              "example": 5000
             }
            }
+          },
+          "supported_protocol": {
+           "type": "integer",
+           "example": 6,
+           "description": "Version de protocole la plus récente que ce nœud sait exécuter : une mise à jour vers une version plus haute l'arrêterait."
           }
          }
         }
