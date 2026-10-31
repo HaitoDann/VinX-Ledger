@@ -177,7 +177,10 @@ dialog::backdrop { background: rgba(0, 0, 0, .6); }
     <div id="qr"></div>
     <p class="mono" id="myAddr" style="text-align:center"></p>
     <button id="copyAddr">Copier l'adresse</button>
-    <label for="reqAmount">Demander un montant (facultatif)</label><input id="reqAmount" inputmode="decimal">
+    <div class="row">
+      <div><label for="reqAmount">Demander un montant (facultatif)</label><input id="reqAmount" inputmode="decimal"></div>
+      <div><label for="reqCur">Monnaie</label><select id="reqCur"><option value="">VINX</option></select></div>
+    </div>
     <label for="reqMemo">Mémo (facultatif)</label><input id="reqMemo" maxlength="32">
   </div>
 </section>

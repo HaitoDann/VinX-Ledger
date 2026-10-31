@@ -224,28 +224,30 @@ vinx-wallet account submit  --file p.json --key toi.json
 L'onglet **Jetons** gère les jetons émis par les utilisateurs de VinX Ledger :
 points de fidélité, bons d'achat, monnaies.
 
-- **Accepter un jeton** : indique son symbole (par exemple `EURV`). L'aperçu
-  montre qui l'émet et ce que l'émetteur peut faire (émettre, geler, reprendre).
-  On ne reçoit un jeton qu'après l'avoir accepté : personne ne peut t'envoyer
-  de jetons que tu n'as pas demandés.
-- **Envoyer** : choisis le jeton, le destinataire et le montant. Le
-  destinataire doit avoir accepté le jeton. Les frais sont payés en VINX.
-- **Retirer** un jeton dont le solde est nul, ou **Détruire** des unités.
-- **Créer un jeton** : il faut d'abord posséder le nom `.vinx` du symbole
-  (`eurv.vinx` pour `EURV`). Choisis les décimales, la quantité initiale, un
-  plafond éventuel et les pouvoirs que tu gardes. La création coûte 100 VINX.
-- **Jetons que j'émets** : émettre, geler ou dégeler un compte (ou tout le
-  jeton), reprise forcée, abandon définitif d'un pouvoir.
+- **Découvrir des jetons** : la liste de tous les jetons du réseau, avec leur
+  circulation, leur nombre de détenteurs et ce que l'émetteur peut faire
+  (« gel possible », « reprise possible », ou « règles figées »). « Accepter »
+  montre l'aperçu avant de confirmer ; « fiche » ouvre la page publique du
+  jeton dans l'explorateur. On ne reçoit un jeton qu'après l'avoir accepté :
+  personne ne peut t'envoyer de jetons que tu n'as pas demandés.
+- **La réserve** : chaque jeton accepté immobilise 0,1 VINX sur le compte,
+  rendus quand tu le retires. L'onglet affiche la réserve du compte et ce qui
+  reste disponible.
+- **Mes jetons** : une carte par jeton, avec son solde et ses actions :
+  envoyer, recevoir, fiche, retirer (solde nul) ou détruire des unités.
+- **Envoyer** : le destinataire doit avoir accepté le jeton. Les frais sont
+  payés en VINX.
+- **Recevoir** : dans l'onglet Recevoir, choisis la monnaie de la demande de
+  paiement (VINX ou un jeton accepté). Le lien et le QR code contiennent le
+  jeton ; le payeur qui les ouvre arrive directement sur l'envoi du bon jeton.
 - **Séquestres et mandats en jetons** : dans les onglets Séquestres et
   Mandats, choisis la monnaie (VINX ou un jeton accepté) à côté du montant.
 
-Si le compte émetteur a des règles (multisig), émettre, geler, reprendre ou
-abandonner un pouvoir passe par `vinx-wallet account propose`. Guide complet de
-l'émetteur : [`JETONS.md`](./JETONS.md).
-
 Pour **émettre** un jeton, l'onglet « Émettre » rassemble la création guidée,
 la distribution en lot, les détenteurs, l'historique et les pouvoirs (voir
-[`JETONS.md`](./JETONS.md)).
+[`JETONS.md`](./JETONS.md)). Si le compte émetteur a des règles (multisig),
+émettre, geler, reprendre ou abandonner un pouvoir passe par
+`vinx-wallet account propose`.
 
 ## 12. Plusieurs comptes
 

@@ -943,6 +943,16 @@ fn plan(app: &App, op: &Operation) -> Result<Plan> {
                                     .into(),
                             );
                         }
+                        let per_object = at(&status, "/params/object_reserve")
+                            .as_str()
+                            .and_then(|v| v.parse::<Amount>().ok())
+                            .filter(|p| protocol >= 6 && *p > 0);
+                        if let Some(per) = per_object {
+                            lines.push((
+                                "Réserve pour ce jeton".into(),
+                                format!("{} VINX, rendus si tu retires le jeton", format_vinx(per)),
+                            ));
+                        }
                         TxBody::AcceptAsset {
                             symbol,
                             accept: true,
@@ -1430,12 +1440,16 @@ fn overview(app: &App, index: u32) -> Result<Value> {
         .map(|h| at(&h, "/transactions").clone())
         .unwrap_or(Value::Array(Vec::new()));
     let me = entry.address.to_string();
-    let issued: Vec<Value> = client
+    // Tous les jetons du réseau : ceux de ce compte (console émetteur) et
+    // le catalogue « Découvrir des jetons ».
+    let catalog: Vec<Value> = client
         .get_json("/assets")?
         .and_then(|v| at(&v, "/assets").as_array().cloned())
-        .unwrap_or_default()
-        .into_iter()
+        .unwrap_or_default();
+    let issued: Vec<Value> = catalog
+        .iter()
         .filter(|a| at(a, "/issuer").as_str() == Some(me.as_str()))
+        .cloned()
         .collect();
     Ok(json!({
         "address": entry.address,
@@ -1448,6 +1462,10 @@ fn overview(app: &App, index: u32) -> Result<Value> {
         "mandates": account.as_ref().map_or(Value::Null, |a| at(a, "/mandates").clone()),
         "assets": account.as_ref().map_or(Value::Array(Vec::new()), |a| at(a, "/assets").clone()),
         "issued": issued,
+        "catalog": catalog,
+        "reserve": account.as_ref().map_or(Value::Null, |a| at(a, "/reserve").clone()),
+        "spendable": account.as_ref().map_or(Value::Null, |a| at(a, "/spendable").clone()),
+        "objects": account.as_ref().map_or(Value::Null, |a| at(a, "/objects").clone()),
         "history": history,
         "network": {
             "chain_id": at(&status, "/chain_id"),
@@ -1456,6 +1474,7 @@ fn overview(app: &App, index: u32) -> Result<Value> {
             "min_reserve": at(&status, "/params/min_reserve"),
             "name_fee": at(&status, "/params/name_fee"),
             "asset_fee": at(&status, "/params/asset_fee"),
+            "object_reserve": at(&status, "/params/object_reserve"),
         },
     }))
 }

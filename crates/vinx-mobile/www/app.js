@@ -9,7 +9,7 @@
 import init, { phrase, seed, account_address, sign, to_units, valid_address, qr_svg, scan_qr }
   from "./pkg/vinx_mobile.js";
 
-const VERSION = "0.24.0";
+const VERSION = "0.25.0";
 const VAULT = "vinx.vault";
 const DEFAULT_NODE = "https://vinx-ledger.vinxlabs.fr";
 const PBKDF2_ROUNDS = 600000;
@@ -145,7 +145,10 @@ async function refresh() {
   $("tokens").innerHTML = tokens.length
     ? tokens.map((t) => `<div><span><b>${esc(t.symbol)}</b> <span class="muted">${esc(t.name || "")}</span>${t.frozen ? ' <span class="warn">gelé</span>' : ""}</span><span>${fmt(t.units, t.decimals)}</span></div>`).join("")
     : `<p class="muted">Aucun jeton accepté.</p>`;
-  $("sendCur").innerHTML = `<option value="">VINX</option>` + tokens.map((t) => `<option value="${esc(t.symbol)}">${esc(t.symbol)}</option>`).join("");
+  if (status.protocol_version >= 6 && acc && BigInt(acc.reserve || "0") > 0n)
+    $("tokens").innerHTML += `<p class="muted">Réserve immobilisée : ${fmt(acc.reserve)} VINX pour ${acc.objects ?? 0} objet(s), rendus quand tu les retires. Disponible : ${fmt(acc.spendable ?? acc.balance)} VINX.</p>`;
+  const opts = `<option value="">VINX</option>` + tokens.map((t) => `<option value="${esc(t.symbol)}">${esc(t.symbol)}</option>`).join("");
+  for (const id of ["sendCur", "reqCur"]) { const k = $(id).value; $(id).innerHTML = opts; $(id).value = tokens.some((t) => t.symbol === k) ? k : ""; }
 }
 
 /* ----- Évolution du solde ----- */
@@ -287,7 +290,8 @@ async function accept() {
 function receiveLink() {
   const q = new URLSearchParams();
   const a = $("reqAmount").value.trim().replace(",", "."); const m = $("reqMemo").value.trim();
-  if (a) q.set("amount", a); if (m) q.set("memo", m);
+  const cur = $("reqCur")?.value || "";
+  if (a) q.set("amount", a); if (cur) q.set("asset", cur); if (m) q.set("memo", m);
   return "vinx:" + me() + (q.toString() ? "?" + q.toString() : "");
 }
 function renderReceive() {
@@ -301,12 +305,14 @@ function parseLink(text) {
   const m = /^vinx:([^?\s]+)(?:\?(\S*))?$/i.exec(String(text).trim());
   if (!m) return null;
   const q = new URLSearchParams(m[2] || "");
-  return { to: decodeURIComponent(m[1]), amount: q.get("amount") || "", memo: q.get("memo") || "" };
+  return { to: decodeURIComponent(m[1]), amount: q.get("amount") || "", memo: q.get("memo") || "", asset: (q.get("asset") || "").toUpperCase() };
 }
 function useLink(text) {
   const r = parseLink(text);
   if (!r) return toast("Ce n'est pas un QR de paiement VinX.", true);
-  $("sendTo").value = r.to; $("sendAmount").value = r.amount.replace(".", ","); $("sendMemo").value = r.memo; $("sendCur").value = "";
+  if (r.asset && !(data?.acc?.assets || []).some((t) => t.symbol === r.asset))
+    return toast(`Cette demande est en ${r.asset} : accepte d'abord ce jeton (onglet Jetons).`, true);
+  $("sendTo").value = r.to; $("sendAmount").value = r.amount.replace(".", ","); $("sendMemo").value = r.memo; $("sendCur").value = r.asset || "";
   show("send");
   toast("Demande de paiement lue : vérifie puis envoie.");
 }
@@ -400,6 +406,7 @@ async function main() {
   $("acceptBtn").onclick = guard(accept);
   $("pasteBtn").onclick = () => useLink($("pasteLink").value);
   ["reqAmount", "reqMemo"].forEach((i) => $(i).addEventListener("input", guard(renderReceive)));
+  $("reqCur").addEventListener("change", guard(renderReceive));
   $("copyAddr").onclick = guard(async () => { await navigator.clipboard.writeText(me()); toast("Adresse copiée."); });
 
   $("saveNode").onclick = guard(async () => {
