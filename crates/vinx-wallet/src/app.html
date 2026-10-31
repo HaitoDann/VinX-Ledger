@@ -42,6 +42,31 @@ textarea { width: 100%; min-height: 90px; padding: 8px 10px; border-radius: 3px;
 .in { color: var(--ok); } .out { color: var(--text); }
 .check { display: flex; gap: 8px; align-items: flex-start; text-transform: none; letter-spacing: 0; font-size: 13px; color: var(--text); }
 .check input { width: auto; margin-top: 3px; }
+/* Console émetteur */
+.issue-list { display: grid; grid-template-columns: repeat(auto-fill, minmax(min(100%, 260px), 1fr)); gap: 14px; }
+.issue-list .tile { cursor: pointer; transition: border-color .15s; }
+.issue-list .tile:hover { border-color: var(--accent); }
+.issue-list .tile .value { font-size: 20px; }
+.issue-head { display: flex; gap: 12px; align-items: center; flex-wrap: wrap; }
+.issue-head h2 { margin: 0; }
+.issue-head .actions { margin: 0 0 0 auto; }
+.steps { display: flex; gap: 6px; margin: 4px 0 16px; flex-wrap: wrap; }
+.steps span { flex: 1 1 90px; font-size: 12px; color: var(--muted); border-top: 3px solid var(--line); padding-top: 6px; }
+.steps span.on { color: var(--text); border-color: var(--accent); }
+.steps span.done { border-color: var(--accent); }
+.profiles { display: grid; grid-template-columns: repeat(auto-fit, minmax(min(100%, 170px), 1fr)); gap: 10px; margin: 8px 0 14px; }
+.profiles button { text-align: left; padding: 12px; height: auto; white-space: normal; line-height: 1.4; }
+.profiles button b { display: block; margin-bottom: 4px; }
+.profiles button.on { border-color: var(--accent); background: var(--accent-soft); }
+.power { display: flex; gap: 12px; align-items: flex-start; padding: 10px 0; border-top: 1px solid var(--line); }
+.power:first-child { border-top: 0; }
+.power > div { flex: 1; min-width: 0; }
+.power > input[type="checkbox"] { width: auto; flex: none; margin-top: 4px; }
+.power .sub { margin-top: 2px; }
+.bar { height: 6px; border-radius: 999px; background: var(--line); overflow: hidden; margin-top: 8px; }
+#issue .grid2 { grid-template-columns: repeat(auto-fit, minmax(min(100%, 340px), 1fr)); }
+.bar span { display: block; height: 100%; background: var(--accent); }
+tr.bad td { color: var(--bad); }
 header .spacer { flex: 1; }
 header select { width: auto; min-width: 180px; }
 @media (max-width: 520px) { .words { grid-template-columns: repeat(2, 1fr); } .hero .balance { font-size: 32px; } }
@@ -56,6 +81,7 @@ header select { width: auto; min-width: 180px; }
     <a href="#receive" data-view="receive">Recevoir</a>
     <a href="#history" data-view="history">Historique</a>
     <a href="#assets" data-view="assets">Jetons</a>
+    <a href="#issue" data-view="issue">Émettre</a>
     <details class="more" id="moreTabs">
       <summary>Plus ▾</summary>
       <div class="menu">
@@ -327,27 +353,120 @@ header select { width: auto; min-width: 180px; }
     <label for="acceptSymbol">Symbole</label><input id="acceptSymbol" class="mono" placeholder="EURV" autocomplete="off">
     <div class="actions"><button class="primary" id="acceptBtn">Vérifier avant d'accepter</button></div>
   </div>
-  <div class="card">
-    <h2>Jetons que j'émets</h2>
-    <div class="scroll" id="issuedTable"></div>
-  </div>
   <div class="card narrow">
-    <h2>Créer un jeton</h2>
-    <p class="sub">Le symbole est un nom .vinx de ce compte, en majuscules : <span class="mono">eurv.vinx</span> donne <span class="mono">EURV</span>. Création : <span id="assetFee">—</span> VINX.</p>
-    <div class="row">
-      <div><label for="newAssetSymbol">Symbole</label><select id="newAssetSymbol"></select></div>
-      <div><label for="newAssetDecimals">Décimales</label><input id="newAssetDecimals" type="number" min="0" max="9" value="2"></div>
+    <h2>Lancer ou gérer un jeton</h2>
+    <p class="sub">Création guidée, émission, distribution en lot, détenteurs et pouvoirs : tout est dans la console émetteur.</p>
+    <div class="actions"><button class="primary" data-go="issue">Ouvrir la console émetteur</button></div>
+  </div>
+</main>
+
+<main id="issue" class="view">
+  <div id="issueHome">
+    <div class="card">
+      <div class="issue-head"><h2>Mes jetons émis</h2>
+        <div class="actions"><button class="primary" id="wizOpen">Créer un jeton</button></div></div>
+      <p class="sub">Points de fidélité, bons, monnaie d'une communauté ou d'une entreprise : un jeton VinX se crée sans code, ses règles sont publiques et vérifiables par tous.</p>
+      <div class="issue-list" id="issuedList"></div>
     </div>
-    <label for="newAssetName">Nom affiché</label><input id="newAssetName" maxlength="64" placeholder="Euro VinX, Points Boulangerie…">
-    <div class="row">
-      <div><label for="newAssetSupply">Supply initiale</label><input id="newAssetSupply" inputmode="decimal" placeholder="0"></div>
-      <div><label for="newAssetMax">Plafond (facultatif)</label><input id="newAssetMax" inputmode="decimal" placeholder="aucun"></div>
+  </div>
+
+  <div id="wizard" hidden>
+    <div class="card narrow">
+      <div class="issue-head"><h2>Créer un jeton</h2><div class="actions"><button id="wizClose">Annuler</button></div></div>
+      <div class="steps" id="wizSteps"><span>1 · Symbole</span><span>2 · Identité</span><span>3 · Quantités</span><span>4 · Pouvoirs</span><span>5 · Vérifier</span></div>
+
+      <div data-step="1">
+        <p class="sub">Le symbole d'un jeton est un nom <span class="mono">.vinx</span> de ce compte, en majuscules : <span class="mono">eurv.vinx</span> donne <span class="mono">EURV</span>. Personne d'autre ne pourra l'utiliser.</p>
+        <div id="wizOwned"></div>
+        <label for="wizNewName">Ou réserver un nouveau nom</label>
+        <div class="row"><div><input id="wizNewName" class="mono" placeholder="monjeton" autocomplete="off" spellcheck="false"></div>
+          <div style="flex:none"><button id="wizRegister">Réserver</button></div></div>
+        <div class="found" id="wizNameFound"></div>
+      </div>
+
+      <div data-step="2" hidden>
+        <label for="wizName">Nom affiché</label>
+        <input id="wizName" maxlength="64" placeholder="Euro VinX, Points Boulangerie…">
+        <label for="wizDecimals">Décimales</label>
+        <input id="wizDecimals" type="number" min="0" max="9" value="2">
+        <p class="sub" id="wizDecHelp"></p>
+      </div>
+
+      <div data-step="3" hidden>
+        <label for="wizSupply">Quantité créée tout de suite</label>
+        <input id="wizSupply" inputmode="decimal" placeholder="0">
+        <p class="sub">Créditée sur ce compte, que tu distribues ensuite.</p>
+        <label for="wizMax">Plafond (facultatif)</label>
+        <input id="wizMax" inputmode="decimal" placeholder="aucun">
+        <p class="sub">La quantité totale ne pourra jamais le dépasser, même avec le pouvoir d'émettre.</p>
+      </div>
+
+      <div data-step="4" hidden>
+        <p class="sub">Choisis un point de départ, puis ajuste. Les pouvoirs sont visibles par tous les détenteurs, et pourront être abandonnés, <b>jamais ajoutés</b>.</p>
+        <div class="profiles" id="wizProfiles">
+          <button type="button" data-profile="fixed"><b>Quantité fixe</b><span class="sub">Aucun pouvoir : personne ne peut créer, geler ni reprendre. Le plus rassurant pour les détenteurs.</span></button>
+          <button type="button" data-profile="points"><b>Points, bons</b><span class="sub">Émettre au fil de l'eau (fidélité, récompenses), sans toucher aux soldes des détenteurs.</span></button>
+          <button type="button" data-profile="regulated"><b>Monnaie régulée</b><span class="sub">Émettre, geler et reprendre : ce qu'exige un émetteur soumis à une réglementation.</span></button>
+        </div>
+        <div class="power"><input type="checkbox" id="wizMint"><div><label class="check" for="wizMint" style="margin:0"><b>Émettre</b></label><div class="sub">Créer de nouvelles unités plus tard, dans la limite du plafond.</div></div></div>
+        <div class="power"><input type="checkbox" id="wizFreeze"><div><label class="check" for="wizFreeze" style="margin:0"><b>Geler</b></label><div class="sub">Bloquer le jeton sur un compte, ou tout le jeton (fraude, décision de justice).</div></div></div>
+        <div class="power"><input type="checkbox" id="wizClawback"><div><label class="check" for="wizClawback" style="margin:0"><b>Reprise forcée</b></label><div class="sub">Reprendre des unités sur un compte, sans son accord. Les détenteurs seront prévenus avant d'accepter.</div></div></div>
+      </div>
+
+      <div data-step="5" hidden>
+        <dl class="breakdown" id="wizSummary"></dl>
+        <p class="sub">Après la création : chaque détenteur accepte le jeton dans son onglet Jetons, puis tu lui verses des unités depuis la fiche du jeton.</p>
+      </div>
+
+      <p class="notice" id="wizError" hidden></p>
+      <div class="actions"><button id="wizBack">Retour</button><button class="primary" id="wizNext">Continuer</button></div>
     </div>
-    <label class="check"><input type="checkbox" id="newAssetMint"> Garder le pouvoir d'émettre de nouvelles unités</label>
-    <label class="check"><input type="checkbox" id="newAssetFreeze"> Garder le pouvoir de geler des comptes</label>
-    <label class="check"><input type="checkbox" id="newAssetClawback"> Garder le pouvoir de reprise forcée</label>
-    <p class="sub">Ces pouvoirs sont visibles par tous et pourront être abandonnés, jamais ajoutés. Sans aucun pouvoir, la supply est fixe pour toujours.</p>
-    <div class="actions"><button class="primary" id="newAssetBtn">Vérifier avant de créer</button></div>
+  </div>
+
+  <div id="assetPage" hidden>
+    <div class="card">
+      <div class="issue-head">
+        <button id="assetBack" aria-label="Retour à mes jetons">‹ Mes jetons</button>
+        <h2 id="apTitle"></h2>
+        <div class="actions"><a id="apExplorer" target="_blank" rel="noopener">Voir dans l'explorateur ↗</a></div>
+      </div>
+    </div>
+    <div class="tiles" id="apTiles"></div>
+    <div class="grid2">
+      <div class="card">
+        <h2>Émettre et distribuer</h2>
+        <p class="sub">Une ligne par versement : <span class="mono">destinataire ; montant ; mémo</span>. Le destinataire peut être une adresse, un contact ou un nom .vinx, et doit avoir accepté le jeton. Jusqu'à 100 lignes.</p>
+        <div class="row">
+          <div><label for="distMode">Unités versées</label><select id="distMode"><option value="send">depuis mon solde</option><option value="mint">nouvellement émises</option></select></div>
+          <div><label for="distFile">Importer un CSV</label><input type="file" id="distFile" accept=".csv,.txt,text/csv,text/plain"></div>
+        </div>
+        <label for="distLines">Versements</label>
+        <textarea id="distLines" rows="6" class="mono" placeholder="vinx1…; 25&#10;boulangerie.vinx; 10; FAC-12"></textarea>
+        <div class="actions"><button class="primary" id="distCheck">Vérifier</button></div>
+        <div id="distResult"></div>
+      </div>
+      <div class="card">
+        <h2>Pouvoirs de l'émetteur</h2>
+        <div id="apPowers"></div>
+      </div>
+    </div>
+    <div class="card">
+      <div class="issue-head"><h2>Détenteurs</h2><span class="sub" id="apHoldersCount"></span></div>
+      <p class="sub">Comptes qui ont accepté le jeton, du plus gros solde au plus petit.</p>
+      <div class="scroll" id="apHolders"></div>
+      <div class="actions" id="apHoldersMore"></div>
+    </div>
+    <div class="card">
+      <h2>Historique du jeton</h2>
+      <div class="scroll" id="apHistory"></div>
+      <div class="actions" id="apHistoryMore"></div>
+    </div>
+    <div class="card narrow">
+      <h2>Faire connaître le jeton</h2>
+      <p class="sub">Message à envoyer à tes futurs détenteurs :</p>
+      <textarea id="apShare" rows="6" readonly></textarea>
+      <div class="actions"><button id="apShareCopy">Copier le message</button></div>
+    </div>
   </div>
 </main>
 
@@ -771,7 +890,6 @@ const powersOf = (p) => [p.mint && "émission", p.freeze && "gel", p.clawback &&
 const num = (v) => String(v || "").trim().replace(",", ".");
 function renderAssets() {
   const h = data.assets || [], issued = data.issued || [];
-  $("assetFee").textContent = vinx(data.network.asset_fee);
   $("holdingsTable").innerHTML = h.length ? `<table><thead><tr><th>Jeton</th><th style="text-align:right">Solde</th><th></th></tr></thead><tbody>${h.map((x) =>
     `<tr><td><b class="mono">${esc(x.symbol)}</b><div class="sub">${esc(x.name || "")}</div></td>
      <td style="text-align:right">${units(x.units, x.decimals)}${x.frozen ? ` <span class="pill warn">gelé</span>` : ""}</td>
@@ -785,60 +903,279 @@ function renderAssets() {
   const sel = $("assetSendSymbol"), keep = sel.value;
   sel.innerHTML = h.map((x) => `<option value="${esc(x.symbol)}">${esc(x.symbol)}</option>`).join("");
   if (keep) sel.value = keep;
-  const owned = (data.names || []).map((n) => n.name.replace(/\.vinx$/, "").toUpperCase()).filter((n) => !issued.some((a) => a.symbol === n));
-  const ns = $("newAssetSymbol"), keepN = ns.value;
-  ns.innerHTML = owned.length ? owned.map((n) => `<option>${esc(n)}</option>`).join("") : `<option value="">— réserve d'abord un nom .vinx —</option>`;
-  if (keepN) ns.value = keepN;
-  $("issuedTable").innerHTML = issued.length ? `<table><thead><tr><th>Jeton</th><th style="text-align:right">En circulation</th><th>Pouvoirs</th><th></th></tr></thead><tbody>${issued.map((a) =>
-    `<tr><td><b class="mono">${esc(a.symbol)}</b><div class="sub">${esc(a.name)}${a.frozen ? ` <span class="pill warn">gelé</span>` : ""}</div></td>
-     <td style="text-align:right">${units(a.supply_units, a.decimals)}${a.max_supply_units ? `<div class="sub">plafond ${units(a.max_supply_units, a.decimals)}</div>` : ""}</td>
-     <td>${powersOf(a.powers)}</td>
-     <td>${a.powers.mint ? `<button data-mint="${esc(a.symbol)}">Émettre</button> ` : ""}${a.powers.freeze ? `<button data-freeze="${esc(a.symbol)}">Geler</button> ` : ""}${a.powers.freeze || a.frozen ? `<button data-unfreeze="${esc(a.symbol)}">Dégeler</button> ` : ""}
-       ${a.powers.clawback ? `<button class="danger" data-clawback="${esc(a.symbol)}">Reprendre</button> ` : ""}${a.powers.mint || a.powers.freeze || a.powers.clawback ? `<button data-renounce="${esc(a.symbol)}">Abandonner un pouvoir</button>` : ""}</td></tr>`).join("")}</tbody></table>`
-    : `<p class="muted">Ce compte n'émet aucun jeton.</p>`;
   const each = (attr, f) => document.querySelectorAll(`[data-${attr}]`).forEach((b) => b.onclick = () => f(b.dataset[attr]));
   each("leave", (symbol) => operate({ action: "leave-asset", symbol }, `Retirer ${symbol}`));
-  each("burn", (symbol) => {
-    const amount = prompt(`Quantité de ${symbol} à détruire définitivement`); if (!amount) return;
-    operate({ action: "burn-asset", symbol, amount: num(amount) }, `Détruire des ${symbol}`);
+  each("burn", async (symbol) => {
+    const v = await ask(`Détruire des ${symbol}`, [{ id: "amount", label: "Quantité à détruire définitivement", decimal: true }], "Continuer");
+    if (v?.amount) operate({ action: "burn-asset", symbol, amount: num(v.amount) }, `Détruire des ${symbol}`);
   });
-  each("mint", (symbol) => {
-    const amount = prompt(`Quantité de ${symbol} à émettre`); if (!amount) return;
-    const to = prompt("Bénéficiaire (adresse, contact ou nom .vinx ; vide : ce compte)") || "";
-    operate({ action: "mint-asset", symbol, amount: num(amount), to }, `Émettre des ${symbol}`);
-  });
-  const freeze = (action, verb) => (symbol) => {
-    const to = prompt(`${verb} quel compte ? (adresse, contact ou nom .vinx ; vide : tout le jeton)`);
-    if (to === null) return;
-    operate({ action, symbol, to }, `${verb} ${symbol}`);
-  };
-  each("freeze", freeze("freeze-asset", "Geler"));
-  each("unfreeze", freeze("unfreeze-asset", "Dégeler"));
-  each("clawback", (symbol) => {
-    const to = prompt("Reprendre sur quel compte ? (adresse, contact ou nom .vinx)"); if (!to) return;
-    const amount = prompt(`Quantité de ${symbol} à reprendre`); if (!amount) return;
-    operate({ action: "clawback-asset", symbol, to, amount: num(amount) }, `Reprise forcée de ${symbol}`);
-  });
-  each("renounce", (symbol) => {
-    const which = prompt("Pouvoir à abandonner définitivement : emission, gel ou reprise"); if (!which) return;
-    const w = which.trim().toLowerCase();
-    const op = { action: "renounce-asset", symbol, mint: w.startsWith("é") || w.startsWith("e"), freeze: w.startsWith("g"), clawback: w.startsWith("r") };
-    operate(op, `Abandonner un pouvoir sur ${symbol}`);
-  });
+  renderIssue();
 }
 $("assetSendBtn").onclick = () => operate(
   { action: "send-asset", symbol: $("assetSendSymbol").value, to: $("assetSendTo").value, amount: num($("assetSendAmount").value), memo: $("assetSendMemo").value },
   "Envoyer un jeton", () => { $("assetSendTo").value = $("assetSendAmount").value = $("assetSendMemo").value = ""; });
 $("acceptBtn").onclick = () => operate({ action: "accept-asset", symbol: $("acceptSymbol").value }, "Accepter un jeton",
   () => { $("acceptSymbol").value = ""; });
-$("newAssetBtn").onclick = () => operate({
-  action: "create-asset", symbol: $("newAssetSymbol").value, name: $("newAssetName").value, decimals: +$("newAssetDecimals").value,
-  amount: num($("newAssetSupply").value), max_supply: num($("newAssetMax").value),
-  mint: $("newAssetMint").checked, freeze: $("newAssetFreeze").checked, clawback: $("newAssetClawback").checked,
-}, "Créer un jeton", () => {
-  ["newAssetName", "newAssetSupply", "newAssetMax"].forEach((i) => $(i).value = "");
-  ["newAssetMint", "newAssetFreeze", "newAssetClawback"].forEach((i) => $(i).checked = false);
+/* ----- Console émetteur ----- */
+/* Petite fenêtre de saisie : renvoie { id: valeur } ou null si annulée. */
+async function ask(title, fields, ok = "Continuer") {
+  const html = fields.map((f) => `<label for="ask_${f.id}">${esc(f.label)}</label>
+    <input id="ask_${f.id}" class="${f.mono ? "mono" : ""}" ${f.decimal ? 'inputmode="decimal"' : ""} placeholder="${esc(f.placeholder || "")}" value="${esc(f.value || "")}" autocomplete="off" spellcheck="false" ${f.list ? 'list="contactList"' : ""}>
+    ${f.help ? `<p class="sub">${esc(f.help)}</p>` : ""}`).join("");
+  setTimeout(() => $(`ask_${fields[0].id}`)?.focus(), 30);
+  if (!await dialog(title, html, { ok })) return null;
+  return Object.fromEntries(fields.map((f) => [f.id, $(`ask_${f.id}`).value.trim()]));
+}
+let issueSym = null, apData = null, apOffset = 0, apHist = [], apMoreHist = true;
+const wiz = { step: 1, symbol: "", profile: "" };
+const nodeUrl = () => String(state?.node || "").replace(/\/+$/, "");
+function issueShow(part) {
+  $("issueHome").hidden = part !== "home"; $("wizard").hidden = part !== "wizard"; $("assetPage").hidden = part !== "asset";
+}
+function renderIssue() {
+  const issued = data.issued || [];
+  $("issuedList").innerHTML = issued.length ? issued.map((a) => `<div class="tile" data-open="${esc(a.symbol)}" tabindex="0" role="button">
+      <div class="label">${esc(a.name)}${a.frozen ? ' <span class="pill warn">gelé</span>' : ""}</div>
+      <div class="value mono">${esc(a.symbol)}</div>
+      <div class="sub">${units(a.supply_units, a.decimals)} en circulation${a.max_supply_units ? ` · plafond ${units(a.max_supply_units, a.decimals)}` : ""}</div>
+      <div class="sub">Pouvoirs : ${esc(powersOf(a.powers))}</div></div>`).join("")
+    : `<p class="muted">Ce compte n'émet encore aucun jeton. « Créer un jeton » te guide en cinq étapes.</p>`;
+  document.querySelectorAll("[data-open]").forEach((t) => {
+    t.onclick = () => openAsset(t.dataset.open);
+    t.onkeydown = (e) => { if (e.key === "Enter") openAsset(t.dataset.open); };
+  });
+  if (!$("wizard").hidden) renderWizard();
+  if (issueSym && !$("assetPage").hidden && $("issue").classList.contains("active")) loadAsset(false);
+}
+
+/* Assistant de création */
+const ownedFree = () => (data.names || []).map((n) => n.name.replace(/\.vinx$/, "").toUpperCase())
+  .filter((n) => !(data.issued || []).some((a) => a.symbol === n));
+$("wizOpen").onclick = () => { Object.assign(wiz, { step: 1, symbol: "", profile: "" }); issueShow("wizard"); renderWizard(); };
+$("wizClose").onclick = () => issueShow("home");
+$("wizBack").onclick = () => { if (wiz.step > 1) { wiz.step--; renderWizard(); } else issueShow("home"); };
+$("wizDecimals").oninput = () => renderWizard();
+$("wizRegister").onclick = () => {
+  const name = $("wizNewName").value.trim().toLowerCase().replace(/\.vinx$/, "");
+  operate({ action: "register-name", name }, "Réserver le nom", () => {
+    $("wizNewName").value = ""; wiz.symbol = name.toUpperCase();
+    $("wizNameFound").textContent = `${name}.vinx sera à toi dans quelques secondes : il apparaîtra alors ci-dessus.`;
+  });
+};
+$("wizNewName").addEventListener("input", () => {
+  const v = $("wizNewName").value.trim().toLowerCase();
+  $("wizNameFound").textContent = v ? `Symbole du jeton : ${v.replace(/\.vinx$/, "").toUpperCase()}` : "";
 });
+document.querySelectorAll("[data-profile]").forEach((b) => b.onclick = () => {
+  wiz.profile = b.dataset.profile;
+  const set = { fixed: [0, 0, 0], points: [1, 0, 0], regulated: [1, 1, 1] }[wiz.profile];
+  ["wizMint", "wizFreeze", "wizClawback"].forEach((id, i) => $(id).checked = !!set[i]);
+  renderWizard();
+});
+function renderWizard() {
+  const owned = ownedFree();
+  if (wiz.symbol && !owned.includes(wiz.symbol) && wiz.step > 1) wiz.step = 1;
+  $("wizOwned").innerHTML = owned.length
+    ? `<label>Mes noms disponibles</label>` + owned.map((n) => `<label class="check"><input type="radio" name="wizSym" value="${esc(n)}" ${wiz.symbol === n ? "checked" : ""}> <b class="mono">${esc(n)}</b> <span class="sub">(${esc(n.toLowerCase())}.vinx)</span></label>`).join("")
+    : `<p class="muted">Aucun nom .vinx libre sur ce compte : réserves-en un ci-dessous (${vinx(data.network.name_fee || "0")} VINX pour un an).</p>`;
+  document.querySelectorAll('input[name="wizSym"]').forEach((r) => r.onchange = () => { wiz.symbol = r.value; });
+  document.querySelectorAll("#wizSteps span").forEach((sp, i) => {
+    sp.classList.toggle("on", i + 1 === wiz.step); sp.classList.toggle("done", i + 1 < wiz.step);
+  });
+  document.querySelectorAll("[data-step]").forEach((d) => d.hidden = +d.dataset.step !== wiz.step);
+  document.querySelectorAll("[data-profile]").forEach((b) => b.classList.toggle("on", b.dataset.profile === wiz.profile));
+  const d = Math.max(0, Math.min(9, +$("wizDecimals").value || 0)), sym = wiz.symbol || "JETON";
+  $("wizDecHelp").textContent = d === 0
+    ? `Avec 0 décimale, ${sym} est indivisible : on compte en unités entières (tickets, places, parts).`
+    : `Avec ${d} décimale(s), la plus petite quantité est 0,${"0".repeat(d - 1)}1 ${sym}${d === 2 ? " (comme des centimes)" : ""}.`;
+  $("wizNext").textContent = wiz.step === 5 ? `Créer ${sym} (${vinx(data.network.asset_fee)} VINX)` : "Continuer";
+  $("wizError").hidden = true;
+  if (wiz.step === 5) {
+    const p = { mint: $("wizMint").checked, freeze: $("wizFreeze").checked, clawback: $("wizClawback").checked };
+    $("wizSummary").innerHTML = `<dt>Symbole</dt><dd class="mono">${esc(sym)}</dd><dt>Nom affiché</dt><dd>${esc($("wizName").value)}</dd>
+      <dt>Décimales</dt><dd>${d}</dd><dt>Créé tout de suite</dt><dd>${esc($("wizSupply").value || "0")} ${esc(sym)}</dd>
+      <dt>Plafond</dt><dd>${esc($("wizMax").value || "aucun")}</dd><dt>Pouvoirs</dt><dd>${esc(powersOf(p))}</dd>
+      <dt class="total">Prix de création</dt><dd class="total">${vinx(data.network.asset_fee)} VINX</dd>`;
+  }
+}
+$("wizNext").onclick = () => {
+  const err = (m) => { $("wizError").textContent = "⚠ " + m; $("wizError").hidden = false; };
+  const isNum = (v) => v === "" || /^\d+([.,]\d+)?$/.test(v.trim());
+  if (wiz.step === 1 && !wiz.symbol) return err("Choisis un nom .vinx, ou réserves-en un.");
+  if (wiz.step === 1 && !ownedFree().includes(wiz.symbol)) return err(`${wiz.symbol.toLowerCase()}.vinx n'est pas encore confirmé sur ce compte : patiente quelques secondes.`);
+  if (wiz.step === 2 && !$("wizName").value.trim()) return err("Donne un nom affiché au jeton.");
+  if (wiz.step === 2 && !(+$("wizDecimals").value >= 0 && +$("wizDecimals").value <= 9)) return err("Décimales : de 0 à 9.");
+  if (wiz.step === 3 && (!isNum($("wizSupply").value) || !isNum($("wizMax").value))) return err("Quantités : des nombres, par exemple 1000 ou 12,5.");
+  if (wiz.step === 4 && !num($("wizSupply").value).replace(/[0.]/g, "") && !$("wizMint").checked)
+    return err("Sans quantité créée tout de suite, garde au moins le pouvoir d'émettre : sinon le jeton n'existerait jamais.");
+  if (wiz.step < 5) { wiz.step++; return renderWizard(); }
+  const symbol = wiz.symbol;
+  operate({
+    action: "create-asset", symbol, name: $("wizName").value.trim(), decimals: +$("wizDecimals").value,
+    amount: num($("wizSupply").value), max_supply: num($("wizMax").value),
+    mint: $("wizMint").checked, freeze: $("wizFreeze").checked, clawback: $("wizClawback").checked,
+  }, `Créer le jeton ${symbol}`, () => {
+    ["wizName", "wizSupply", "wizMax"].forEach((i) => $(i).value = "");
+    issueShow("home");
+    toast(`${symbol} sera créé dans quelques secondes : sa fiche s'ouvre dès qu'il apparaît.`);
+    const wait = setInterval(() => { if ((data.issued || []).some((a) => a.symbol === symbol)) { clearInterval(wait); openAsset(symbol); } }, 2000);
+    setTimeout(() => clearInterval(wait), 60000);
+  });
+};
+
+/* Fiche d'un jeton */
+function openAsset(sym) {
+  issueSym = sym; apOffset = 0; apHist = []; apMoreHist = true;
+  $("distResult").innerHTML = "";
+  issueShow("asset"); show("issue");
+  loadAsset(true);
+}
+$("assetBack").onclick = () => { issueSym = null; issueShow("home"); };
+async function loadAsset(withHistory) {
+  const sym = issueSym;
+  let d; try { d = await api(`/api/asset?symbol=${encodeURIComponent(sym)}&offset=${apOffset}`); } catch (e) { return toast(e.message, true); }
+  if (sym !== issueSym) return;
+  apData = d;
+  if (withHistory || !apHist.length) { apHist = d.history?.transactions || []; apMoreHist = apHist.length >= 30; }
+  else if (d.history?.transactions) {
+    const known = new Set(apHist.map((t) => t.id));
+    apHist = [...d.history.transactions.filter((t) => !known.has(t.id)), ...apHist];
+  }
+  renderAsset();
+}
+function renderAsset() {
+  const a = apData.asset, dec = a.decimals, sym = a.symbol;
+  const mine = (data.assets || []).find((x) => x.symbol === sym);
+  const total = apData.holders?.total;
+  $("apTitle").innerHTML = `<span class="mono">${esc(sym)}</span> <span class="sub" style="font-size:14px">${esc(a.name)}</span>${a.frozen ? ' <span class="pill warn">tout le jeton est gelé</span>' : ""}`;
+  $("apExplorer").href = `${nodeUrl()}/explorer#/jeton/${encodeURIComponent(sym)}`;
+  let pct = 0, left = "";
+  try { if (a.max_supply_units) { pct = Number(BigInt(a.supply_units) * 1000n / BigInt(a.max_supply_units)) / 10; left = units((BigInt(a.max_supply_units) - BigInt(a.supply_units)).toString(), dec); } } catch (_) {}
+  $("apTiles").innerHTML = `
+    <div class="tile"><div class="label">En circulation</div><div class="value">${units(a.supply_units, dec)}</div><div class="sub">${esc(sym)}</div></div>
+    <div class="tile"><div class="label">Plafond</div><div class="value">${a.max_supply_units ? units(a.max_supply_units, dec) : "aucun"}</div>
+      ${a.max_supply_units ? `<div class="bar"><span style="width:${pct}%"></span></div><div class="sub">${pct.toLocaleString("fr-FR")} % émis · ${left} restants</div>` : `<div class="sub">${a.powers.mint ? "émission libre" : "quantité fixe"}</div>`}</div>
+    <div class="tile"><div class="label">Détenteurs</div><div class="value">${a.holders ?? "—"}</div><div class="sub">${total != null ? `${total} compte(s) l'ont accepté` : "avec un solde"}</div></div>
+    <div class="tile"><div class="label">Sur ce compte</div><div class="value">${mine ? units(mine.units, dec) : "0"}</div><div class="sub">${mine ? "" : "jeton pas accepté sur ce compte"}</div></div>`;
+  const pw = (key, title, held, gone, extra) => `<div class="power"><div><b>${title}</b> ${a.powers[key] ? '<span class="pill ok">détenu</span>' : '<span class="pill">abandonné</span>'}
+      <div class="sub">${a.powers[key] ? held : gone}</div>${extra || ""}</div>
+      ${a.powers[key] ? `<button data-renounce1="${key}">Abandonner</button>` : ""}</div>`;
+  $("apPowers").innerHTML =
+    pw("mint", "Émettre", "Tu peux créer de nouvelles unités" + (a.max_supply_units ? ", jusqu'au plafond." : ", sans limite."), "Plus personne ne peut créer d'unités : la quantité ne peut que baisser.",
+      a.powers.mint ? `<div class="actions" style="justify-content:flex-start"><button class="primary" id="apMint">Émettre des ${esc(sym)}</button></div>` : "")
+    + pw("freeze", "Geler", "Tu peux bloquer le jeton sur un compte (depuis la liste des détenteurs) ou partout.", "Personne ne peut plus geler ce jeton.",
+      a.powers.freeze || a.frozen ? `<div class="actions" style="justify-content:flex-start">${a.frozen ? `<button id="apUnfreezeAll">Dégeler tout le jeton</button>` : `<button class="danger" id="apFreezeAll">Geler tout le jeton</button>`}</div>` : "")
+    + pw("clawback", "Reprise forcée", "Tu peux reprendre des unités sur un compte, depuis la liste des détenteurs.", "Personne ne peut plus reprendre d'unités : les soldes appartiennent pleinement aux détenteurs.")
+    + `<p class="sub" style="margin-top:10px">Abandonner un pouvoir est définitif, et rassure les détenteurs.</p>`;
+  document.querySelectorAll("[data-renounce1]").forEach((b) => b.onclick = () => {
+    const k = b.dataset.renounce1;
+    operate({ action: "renounce-asset", symbol: sym, mint: k === "mint", freeze: k === "freeze", clawback: k === "clawback" }, `Abandonner un pouvoir sur ${sym}`, () => setTimeout(() => loadAsset(false), 6000));
+  });
+  if ($("apMint")) $("apMint").onclick = async () => {
+    const v = await ask(`Émettre des ${sym}`, [
+      { id: "amount", label: "Quantité", decimal: true },
+      { id: "to", label: "Bénéficiaire", mono: true, list: true, placeholder: "vide : ce compte", help: "Adresse, contact ou nom .vinx ; il doit avoir accepté le jeton." }]);
+    if (v?.amount) operate({ action: "mint-asset", symbol: sym, amount: num(v.amount), to: v.to }, `Émettre des ${sym}`, () => setTimeout(() => loadAsset(true), 6000));
+  };
+  if ($("apFreezeAll")) $("apFreezeAll").onclick = () => operate({ action: "freeze-asset", symbol: sym, to: "" }, `Geler tout ${sym}`, () => setTimeout(() => loadAsset(true), 6000));
+  if ($("apUnfreezeAll")) $("apUnfreezeAll").onclick = () => operate({ action: "unfreeze-asset", symbol: sym, to: "" }, `Dégeler ${sym}`, () => setTimeout(() => loadAsset(true), 6000));
+
+  /* Détenteurs */
+  const h = apData.holders;
+  if (!h) {
+    $("apHolders").innerHTML = `<p class="muted">Ce nœud ne donne pas encore la liste des détenteurs : il doit passer en version 0.22 ou plus.</p>`;
+    $("apHoldersMore").innerHTML = ""; $("apHoldersCount").textContent = "";
+  } else {
+    let supply = 0n; try { supply = BigInt(a.supply_units); } catch (_) {}
+    const share = (u) => { try { return supply ? (Number(BigInt(u) * 10000n / supply) / 100).toLocaleString("fr-FR") + " %" : "—"; } catch (_) { return "—"; } };
+    $("apHoldersCount").textContent = `${h.total} au total`;
+    $("apHolders").innerHTML = h.holders.length ? `<table><thead><tr><th>Compte</th><th style="text-align:right">Solde</th><th style="text-align:right">Part</th><th></th></tr></thead><tbody>${h.holders.map((x) => {
+      const self = x.address === data.address;
+      const btns = self ? '<span class="sub">ce compte</span>' : [
+        x.frozen ? `<button data-hunfreeze="${esc(x.address)}">Dégeler</button>` : a.powers.freeze ? `<button data-hfreeze="${esc(x.address)}">Geler</button>` : "",
+        a.powers.clawback && x.units !== "0" ? `<button class="danger" data-hclaw="${esc(x.address)}">Reprendre</button>` : ""].join(" ");
+      return `<tr><td>${who(x.address)}${x.frozen ? ' <span class="pill warn">gelé</span>' : ""}</td><td style="text-align:right">${units(x.units, dec)}</td><td style="text-align:right">${share(x.units)}</td><td class="nowrap">${btns}</td></tr>`;
+    }).join("")}</tbody></table>` : `<p class="muted">Personne n'a encore accepté ${esc(sym)}. Envoie le message ci-dessous à tes futurs détenteurs.</p>`;
+    $("apHoldersMore").innerHTML = (apOffset > 0 ? `<button id="apPrev">Précédents</button>` : "") + (h.total > apOffset + 100 ? `<button id="apNext">Suivants</button>` : "");
+    if ($("apPrev")) $("apPrev").onclick = () => { apOffset = Math.max(0, apOffset - 100); loadAsset(false); };
+    if ($("apNext")) $("apNext").onclick = () => { apOffset += 100; loadAsset(false); };
+    const reload = () => setTimeout(() => loadAsset(true), 6000);
+    document.querySelectorAll("[data-hfreeze]").forEach((b) => b.onclick = () => operate({ action: "freeze-asset", symbol: sym, to: b.dataset.hfreeze }, `Geler ${sym} sur ce compte`, reload));
+    document.querySelectorAll("[data-hunfreeze]").forEach((b) => b.onclick = () => operate({ action: "unfreeze-asset", symbol: sym, to: b.dataset.hunfreeze }, `Dégeler ${sym} sur ce compte`, reload));
+    document.querySelectorAll("[data-hclaw]").forEach((b) => b.onclick = async () => {
+      const x = h.holders.find((y) => y.address === b.dataset.hclaw);
+      const v = await ask(`Reprendre des ${sym}`, [{ id: "amount", label: `Quantité (solde : ${units(x.units, dec)})`, decimal: true }]);
+      if (v?.amount) operate({ action: "clawback-asset", symbol: sym, to: x.address, amount: num(v.amount) }, `Reprise forcée de ${sym}`, reload);
+    });
+  }
+
+  /* Historique */
+  if (!apData.history) {
+    $("apHistory").innerHTML = `<p class="muted">Ce nœud ne donne pas encore l'historique d'un jeton : il doit passer en version 0.22 ou plus.</p>`;
+    $("apHistoryMore").innerHTML = "";
+  } else {
+    const amountOf = (t) => t.units ? `${units(t.units, dec)} ${esc(sym)}` : "";
+    const with_ = (t) => t.to ? `${who(t.sender)} → ${who(t.to)}` : (t.account ? who(t.account) : who(t.sender));
+    $("apHistory").innerHTML = apHist.length ? `<table><thead><tr><th>Date</th><th>Opération</th><th>Comptes</th><th style="text-align:right">Montant</th></tr></thead><tbody>${apHist.map((t) =>
+      `<tr><td class="nowrap">${date(t.timestamp)}</td><td>${esc(t.kind)}${t.memo ? `<div class="sub">${esc(t.memo)}</div>` : ""}</td><td>${with_(t)}</td><td style="text-align:right" class="nowrap">${amountOf(t)}</td></tr>`).join("")}</tbody></table>`
+      : `<p class="muted">Aucune opération dans les blocs conservés par ce nœud.</p>`;
+    $("apHistoryMore").innerHTML = apMoreHist && apHist.length ? `<button id="apOlder">Plus ancien</button>` : "";
+    if ($("apOlder")) $("apOlder").onclick = async () => {
+      const before = Math.min(...apHist.map((t) => t.height));
+      try {
+        const d = await api(`/api/asset?symbol=${encodeURIComponent(sym)}&offset=${apOffset}&before=${before}`);
+        const more = d.history?.transactions || [];
+        apHist = [...apHist, ...more]; apMoreHist = more.length >= 30; renderAsset();
+      } catch (e) { toast(e.message, true); }
+    };
+  }
+
+  $("apShare").value = `Je lance ${a.name} (${sym}) sur VinX Ledger.\nPour le recevoir : dans ton portefeuille VinX, onglet Jetons → « Accepter un jeton » → ${sym}.\nPouvoirs de l'émetteur : ${powersOf(a.powers)}.\nFiche publique : ${nodeUrl()}/explorer#/jeton/${sym}`;
+  $("distMode").querySelector('[value="mint"]').disabled = !a.powers.mint;
+  if (!a.powers.mint) $("distMode").value = "send";
+}
+$("apShareCopy").onclick = async () => {
+  try { await navigator.clipboard.writeText($("apShare").value); toast("Message copié."); }
+  catch (_) { $("apShare").select(); toast("Copie impossible : sélectionne le texte à la main.", true); }
+};
+
+/* Distribution en lot */
+$("distFile").onchange = async () => {
+  const f = $("distFile").files[0]; if (!f) return;
+  const rows = (await f.text()).split(/\r?\n/).map((l) => l.trim()).filter(Boolean).map((l) => {
+    // CSV à virgules (« adresse,montant,mémo ») : converti au format « ; ».
+    if (!/[;\t]/.test(l)) { const [w, amt, ...m] = l.split(","); l = [w, amt, m.join(",")].filter((x, i) => i < 2 || x).join(";"); }
+    const amt = (l.split(/[;\t]/)[1] || "").trim();
+    return /^\d+([.,]\d+)?$/.test(amt) ? l : "# " + l; // en-tête ou ligne illisible : ignorée
+  });
+  $("distLines").value = rows.join("\n");
+  $("distFile").value = "";
+  toast(`${rows.filter((r) => !r.startsWith("#")).length} ligne(s) importée(s) : vérifie-les avant d'envoyer.`);
+};
+async function distribute(execute) {
+  const body = { account: current, symbol: issueSym, mode: $("distMode").value, lines: $("distLines").value, execute };
+  let r; try { r = await api("/api/distribute", body); } catch (e) { return toast(e.message, true); }
+  const ok = !r.errors && !r.problems.length;
+  if (execute) {
+    $("distResult").innerHTML = `<p class="notice">${r.sent.length} versement(s) envoyé(s)${r.failed ? `, puis arrêt : ${esc(r.failed)}` : " : confirmation dans quelques secondes."}</p>`;
+    if (!r.failed) $("distLines").value = "";
+    setTimeout(() => loadAsset(true), 6000); setTimeout(refresh, 6000);
+    return;
+  }
+  $("distResult").innerHTML = `<div class="scroll"><table><thead><tr><th>Ligne</th><th>Destinataire</th><th style="text-align:right">Montant</th><th>Mémo</th><th>Statut</th></tr></thead><tbody>${r.rows.map((x) =>
+    `<tr class="${x.error ? "bad" : ""}"><td>${x.row}</td><td>${x.to ? who(x.to) : `<span class="mono" style="word-break:break-all">${esc(x.input)}</span>`}${x.how && x.how !== "adresse" ? `<div class="sub">${esc(x.input)}</div>` : ""}${x.error ? `<div>⚠ ${esc(x.error)}</div>` : ""}</td>
+     <td style="text-align:right" class="nowrap">${esc(String(x.amount).replace(".", ","))}</td><td>${esc(x.memo)}</td><td>${x.error ? '<span class="pill bad">erreur</span>' : '<span class="pill ok">prêt</span>'}</td></tr>`).join("")}</tbody></table></div>
+    <dl class="breakdown"><dt>Versements</dt><dd>${r.count}</dd><dt>Total</dt><dd>${esc(r.total.replace(".", ","))} ${esc(r.symbol)} ${r.mode === "mint" ? "émis" : "pris sur ton solde"}</dd>
+    <dt class="total">Frais du réseau</dt><dd class="total">${esc(r.fees.replace(".", ","))} VINX</dd></dl>
+    ${r.problems.map((p) => `<p class="notice">⚠ ${esc(p)}</p>`).join("")}${r.errors ? `<p class="notice">⚠ ${r.errors} ligne(s) en erreur : corrige-les ou retire-les.</p>` : ""}
+    ${r.warnings.map((w) => `<p class="notice">${esc(w)}</p>`).join("")}
+    ${ok ? `<div class="actions"><button class="primary" id="distGo">Envoyer ${r.count} versement(s)</button></div>` : ""}`;
+  if ($("distGo")) $("distGo").onclick = async () => {
+    if (!await dialog("Confirmer la distribution", `<p>${r.count} transaction(s) seront signées et envoyées : <b>${esc(r.total.replace(".", ","))} ${esc(r.symbol)}</b> au total, ${esc(r.fees.replace(".", ","))} VINX de frais.</p><p class="notice">⚠ Un versement ne peut pas être annulé.</p>`, { ok: "Signer et envoyer" })) return;
+    distribute(true);
+  };
+}
+$("distCheck").onclick = () => distribute(false);
 
 /* ----- Horodatage ----- */
 let stampDigest = null;
