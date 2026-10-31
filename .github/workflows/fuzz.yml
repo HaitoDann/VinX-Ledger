@@ -1,0 +1,47 @@
+name: Fuzzing
+
+# Fuzzing long (cargo-fuzz, libFuzzer) des entrées venues de l'extérieur :
+# messages des pairs et transactions. Chaque nuit, 10 minutes par cible ; les
+# tests rapides du même genre tournent déjà à chaque PR (tests/decoding.rs,
+# tests/fuzz_assets.rs, test de l'API).
+# En cas de plantage, l'entrée fautive est jointe à l'exécution (artefact
+# « crashes ») : la rejouer avec `cargo +nightly fuzz run CIBLE FICHIER`.
+on:
+  schedule:
+    - cron: "17 2 * * *"
+  workflow_dispatch:
+  pull_request:
+    paths:
+      - "fuzz/**"
+      - ".github/workflows/fuzz.yml"
+
+jobs:
+  fuzz:
+    name: Fuzzing ${{ matrix.target }}
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        target: [net_message, transaction]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@nightly
+      - uses: taiki-e/install-action@v2
+        with:
+          tool: cargo-fuzz
+      - uses: actions/cache@v4
+        with:
+          path: fuzz/corpus/${{ matrix.target }}
+          key: fuzz-corpus-${{ matrix.target }}-${{ github.run_id }}
+          restore-keys: fuzz-corpus-${{ matrix.target }}-
+      - name: Fuzzing
+        run: |
+          # 10 minutes la nuit, 1 minute pour vérifier une PR qui touche au fuzzing.
+          secs=600
+          [ "${{ github.event_name }}" = pull_request ] && secs=60
+          cargo fuzz run ${{ matrix.target }} -- -max_total_time=$secs -rss_limit_mb=4096
+      - if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: crashes-${{ matrix.target }}
+          path: fuzz/artifacts/${{ matrix.target }}

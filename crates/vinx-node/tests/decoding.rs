@@ -109,7 +109,47 @@ fn samples() -> Vec<Vec<u8>> {
         block: block.clone(),
     }
     .sign(&kp);
+    // Transactions des protocoles 5 et 6 : actifs, séquestre en actif, parrainage.
+    let asset_tx = |body| {
+        Transaction {
+            chain_id: "vinx-fuzz".into(),
+            sender: Address::from_public_key(&kp.public_key()),
+            nonce: 2,
+            fee: 1_000_000,
+            body,
+        }
+        .sign(&kp, false)
+    };
+    let create = asset_tx(TxBody::CreateAsset {
+        symbol: "EURV".into(),
+        name: "Euro VinX".into(),
+        decimals: 2,
+        initial_supply: 1_000,
+        max_supply: Some(50_000),
+        powers: vinx_core::AssetPowers {
+            mint: true,
+            freeze: true,
+            clawback: false,
+        },
+    });
+    let deal = asset_tx(TxBody::OpenAssetDeal {
+        symbol: "EURV".into(),
+        seller: Address::treasury(),
+        arbiter: Some(Address::treasury()),
+        amount: 10,
+        deadline: 99,
+        memo: Some(b"x".to_vec()),
+    });
+    let collect = asset_tx(TxBody::CollectAsset {
+        symbol: "EURV".into(),
+        payer: Address::treasury(),
+        amount: 3,
+        memo: None,
+    });
     vec![
+        borsh::to_vec(&create).unwrap(),
+        borsh::to_vec(&deal).unwrap(),
+        borsh::to_vec(&NetMessage::Txs(vec![collect])).unwrap(),
         borsh::to_vec(&tx).unwrap(),
         borsh::to_vec(&admin).unwrap(),
         borsh::to_vec(&block).unwrap(),
@@ -191,10 +231,11 @@ proptest! {
 
     #[test]
     fn mutated_messages_never_crash(
-        which in 0usize..10,
+        which in 0usize..1_000,
         mutations in prop::collection::vec(mutation(), 1..6),
     ) {
-        let bytes = mutate(samples()[which].clone(), &mutations);
+        let all = samples();
+        let bytes = mutate(all[which % all.len()].clone(), &mutations);
         check_all(&bytes)?;
     }
 
@@ -207,7 +248,7 @@ proptest! {
     ) {
         let bytes = mutate(samples()[which].clone(), &mutations);
         let k = || KeyPair::generate().public_key();
-        let mut state = Genesis::legacy("vinx-fuzz", 1_800_000_000, [k(), k(), k()], vec![k()])
+        let mut state = Genesis::standard("vinx-fuzz", 1_800_000_000, [k(), k(), k()], vec![k()])
             .unwrap()
             .into_state()
             .unwrap();

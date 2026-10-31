@@ -87,3 +87,40 @@ wallet admin approve --file p.json --key devnet/admin-1.json --index 0
 wallet admin approve --file p.json --key devnet/admin-2.json --index 1
 wallet admin submit --file p.json
 ```
+
+## Tests de robustesse
+
+À chaque PR, la CI rejoue automatiquement :
+
+- **les exercices de panne** (`crates/vinx-node/tests/network.rs`, `sync.rs`) :
+  quatre validateurs réels en local ; un validateur tombe et la chaîne
+  continue, puis il rattrape ; deux tombent et la chaîne s'arrête, puis
+  repart à leur retour ; les quatre s'arrêtent brutalement ensemble et
+  repartent depuis leurs disques, sans équivoque ; un nouveau nœud rejoint par
+  instantané ou depuis un nœud archive ;
+- **le fuzzing rapide** :
+  - `tests/decoding.rs` : messages réseau et transactions aléatoires ou
+    mutés (protocoles 1 à 6), jamais de plantage, encodage canonique seul
+    accepté ;
+  - `crates/vinx-state/tests/fuzz_assets.rs` : suites aléatoires
+    d'opérations sur les jetons, correctement signées ; la supply de chaque
+    jeton reste égale à ses soldes plus ses séquestres, et l'état relu
+    redonne la même racine ;
+  - `tests/node.rs` (`the_public_api_survives_garbage`) : 3 000 requêtes
+    absurdes à l'API, jamais d'erreur interne.
+
+### Fuzzing long
+
+Chaque nuit, `.github/workflows/fuzz.yml` lance [cargo-fuzz](https://rust-fuzz.github.io/book/)
+10 minutes par cible (`fuzz/fuzz_targets/`) : `net_message` (tout message d'un
+pair) et `transaction` (toute transaction, appliquée au dernier protocole).
+En local :
+
+```bash
+rustup toolchain install nightly && cargo install cargo-fuzz
+cd fuzz && cargo +nightly fuzz run net_message -- -max_total_time=600
+```
+
+Un plantage laisse l'entrée fautive dans `fuzz/artifacts/` (en CI : artefact
+« crashes » de l'exécution) ; `cargo +nightly fuzz run CIBLE FICHIER` la
+rejoue.

@@ -44,6 +44,18 @@ impl Running {
         }
     }
 
+    /// Arrêt brutal, comme un `kill -9` : les tâches sont abandonnées en
+    /// plein travail, sans arrêt propre. La base est relâchée une fois les
+    /// tâches terminées.
+    async fn crash(self) {
+        for t in &self.tasks {
+            t.abort();
+        }
+        for t in self.tasks {
+            let _ = t.await;
+        }
+    }
+
     fn height(&self) -> u64 {
         node::lock(&self.shared).chain.state.height
     }
@@ -423,6 +435,98 @@ async fn one_validator_grows_to_four_without_restart() {
         nodes.iter().flatten().all(|n| n.height() >= h + 3)
     })
     .await;
+    for n in nodes.into_iter().flatten() {
+        n.stop().await;
+    }
+}
+
+/// Exercices de panne n° 2 et 4 (docs/EXERCICES-DE-PANNE.md), rejoués à chaque
+/// modification : deux validateurs sur quatre tombent, la chaîne s'arrête
+/// (plus de quorum) puis repart à leur retour ; enfin les quatre s'arrêtent
+/// brutalement ensemble et la chaîne repart depuis les disques, sans
+/// équivoque.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn halts_without_quorum_then_survives_a_full_crash() {
+    let root = tempfile::tempdir().unwrap();
+    let admins = [
+        KeyPair::generate(),
+        KeyPair::generate(),
+        KeyPair::generate(),
+    ];
+    let validators: Vec<KeyPair> = (0..4).map(|_| KeyPair::generate()).collect();
+    let mut genesis = Genesis::standard(
+        CHAIN,
+        node::now_ms() / 1000 - 1,
+        [
+            admins[0].public_key(),
+            admins[1].public_key(),
+            admins[2].public_key(),
+        ],
+        validators.iter().map(KeyPair::public_key).collect(),
+    )
+    .unwrap();
+    genesis.params.min_block_interval_ms = 200;
+    genesis.params.timeout_propose_ms = 1_500;
+    genesis.params.timeout_vote_ms = 800;
+
+    let specs: Vec<Spec> = (0..4).map(|i| spec(root.path(), i)).collect();
+    let others = |i: usize| -> Vec<&Spec> {
+        specs
+            .iter()
+            .enumerate()
+            .filter(|(j, _)| *j != i)
+            .map(|(_, s)| s)
+            .collect()
+    };
+    let launch = |i: usize| start(&genesis, &specs[i], &others(i), Some(validators[i].clone()));
+    let mut nodes: Vec<Option<Running>> = (0..4).map(|i| Some(launch(i))).collect();
+    let height = |nodes: &[Option<Running>], i: usize| nodes[i].as_ref().unwrap().height();
+    wait_until("hauteur 3 partout", || {
+        nodes.iter().flatten().all(|n| n.height() >= 3)
+    })
+    .await;
+
+    // 1. Deux validateurs sur quatre tombent : plus de quorum (3 voix), la
+    // chaîne s'arrête. Un bloc déjà en cours peut encore se finaliser.
+    nodes[2].take().unwrap().crash().await;
+    nodes[3].take().unwrap().crash().await;
+    tokio::time::sleep(Duration::from_secs(2)).await;
+    let stalled = height(&nodes, 0);
+    tokio::time::sleep(Duration::from_secs(4)).await;
+    assert_eq!(height(&nodes, 0), stalled, "la chaîne avance sans quorum");
+    assert_eq!(height(&nodes, 1), stalled, "les deux survivants divergent");
+
+    // 2. Leur retour rétablit le quorum : la chaîne repart d'elle-même.
+    nodes[2] = Some(launch(2));
+    nodes[3] = Some(launch(3));
+    wait_until("reprise après le retour du quorum", || {
+        nodes.iter().flatten().all(|n| n.height() >= stalled + 3)
+    })
+    .await;
+
+    // 3. Les quatre s'arrêtent brutalement en même temps, puis redémarrent
+    // depuis leurs disques.
+    let before = (0..4).map(|i| height(&nodes, i)).min().unwrap();
+    for n in nodes.iter_mut() {
+        n.take().unwrap().crash().await;
+    }
+    for (i, n) in nodes.iter_mut().enumerate() {
+        *n = Some(launch(i));
+    }
+    let target = before + 3;
+    wait_until("reprise après l'arrêt brutal de tous", || {
+        nodes.iter().flatten().all(|n| n.height() >= target)
+    })
+    .await;
+
+    // Même chaîne partout, aucune preuve d'équivoque, invariants respectés.
+    let reference = nodes[0].as_ref().unwrap().block_hash(target);
+    for n in nodes.iter().flatten() {
+        assert_eq!(n.block_hash(target), reference);
+        let s = node::lock(&n.shared);
+        assert!(s.store.evidence().unwrap().is_empty(), "équivoque détectée");
+        assert!(s.chain.state.check_invariant().is_ok());
+    }
     for n in nodes.into_iter().flatten() {
         n.stop().await;
     }
