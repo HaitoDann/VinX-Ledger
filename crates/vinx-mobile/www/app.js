@@ -9,7 +9,7 @@
 import init, { phrase, seed, account_address, sign, to_units, valid_address, qr_svg, scan_qr }
   from "./pkg/vinx_mobile.js";
 
-const VERSION = "0.23.0";
+const VERSION = "0.24.0";
 const VAULT = "vinx.vault";
 const DEFAULT_NODE = "https://vinx-ledger.vinxlabs.fr";
 const PBKDF2_ROUNDS = 600000;

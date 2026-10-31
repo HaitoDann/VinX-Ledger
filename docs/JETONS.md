@@ -28,6 +28,12 @@ Le plus simple : l'onglet **« Émettre »** du portefeuille.
 
 La fiche et la distribution utilisent l'API des nœuds 0.22 ou plus récents.
 
+Chaque jeton a aussi sa **page publique** dans l'explorateur
+(`/explorer#/jeton/SYMBOLE`) : circulation et plafond, détenteurs et
+répartition, ce que l'émetteur peut encore faire (expliqué en clair),
+courbe de la circulation et historique. C'est le lien à donner aux futurs
+détenteurs pour qu'ils vérifient le jeton avant de l'accepter.
+
 Les sections suivantes montrent la ligne de commande `vinx-wallet`, utile pour
 automatiser.
 

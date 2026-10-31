@@ -149,7 +149,8 @@ référence pour toute nouvelle proposition.
 | **0.21** | Protocole 6, lot 1c | Réserve par objet ; première mise à jour du protocole sans remise à zéro (`docs/MISE-A-JOUR-PROTOCOLE-6.md`) |
 | **0.22** | Logiciel, lot D1 | API documentée (`/docs`, `/openapi.json`) ; détenteurs et historique d'un jeton |
 | **0.23** | Logiciel, lot I2 | Console émetteur (onglet « Émettre ») : création guidée, fiche du jeton, détenteurs, distribution en lot |
-| Ensuite | Logiciel, lots I1, I3, I4 | Page jeton de l'explorateur, parcours jeton du portefeuille, cockpit |
+| **0.24** | Logiciel, lot I1 | Page jeton de l'explorateur : circulation, détenteurs et répartition, pouvoirs expliqués, historique |
+| Ensuite | Logiciel, lots I3, I4 | Parcours jeton du portefeuille, cockpit |
 | Protocole 5 | Règles | Jetons et titres, réserve par objet |
 | Protocole 7 | Règles | Canaux de paiement |
 | En parallèle | Hors chaîne | Pilote VinX Ping (premier subnet), conception des subnets |

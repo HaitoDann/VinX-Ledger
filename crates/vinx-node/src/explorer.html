@@ -18,6 +18,22 @@ main { display: grid; gap: 14px; }
 h1 { margin: 0 0 4px; font-size: 18px; word-break: break-all; }
 /* Dans les tableaux, une adresse reste sur une ligne : le tableau défile. */
 td .mono, td.mono, td.nowrap { word-break: normal; white-space: nowrap; }
+/* Page d'un jeton */
+.token-head { display: flex; gap: 14px; align-items: center; flex-wrap: wrap; }
+.token-head .badge { width: 46px; height: 46px; flex: none; border-radius: 50%; display: grid; place-items: center; font-weight: 700; font-size: 15px;
+  background: var(--accent-soft); color: var(--accent); border: 1px solid var(--line); }
+.token-head h1 { margin: 0; }
+.token-head .pills { display: flex; gap: 6px; flex-wrap: wrap; }
+.trust { display: grid; gap: 10px; }
+.trust > div { display: flex; gap: 10px; align-items: flex-start; }
+.trust .mark { flex: none; width: 22px; height: 22px; border-radius: 50%; display: grid; place-items: center; font-size: 12px; font-weight: 700; }
+.trust .mark.yes { background: rgba(245, 165, 36, .15); color: var(--warn); }
+.trust .mark.no { background: var(--accent-soft); color: var(--ok); }
+.hbars { display: grid; gap: 8px; }
+.hbar { display: grid; grid-template-columns: minmax(0, 1fr) auto; gap: 2px 10px; font-size: 13px; }
+.hbar .track { grid-column: 1 / -1; height: 6px; border-radius: 999px; background: var(--line); overflow: hidden; }
+.hbar .track span { display: block; height: 100%; background: var(--chart); border-radius: 999px; }
+.pager { display: flex; gap: 10px; justify-content: flex-end; margin-top: 10px; flex-wrap: wrap; }
 </style>
 </head>
 <body>
@@ -341,26 +357,113 @@ async function account(a) {
 async function tokens() {
   const a = await loadAssets();
   return `<section class="card"><h2>Jetons</h2>${a.assets.length ? `<div class="scroll"><table>
-    <thead><tr><th>Jeton</th><th>Nom</th><th class="amount">En circulation</th><th>Pouvoirs de l'émetteur</th><th>Émetteur</th></tr></thead><tbody>
-    ${a.assets.map((x) => `<tr class="link" onclick="location.hash='#/jeton/${esc(x.symbol)}'"><td>${assetLink(x.symbol)}</td><td>${esc(x.name)}${x.frozen ? ' <span class="pill warn">gelé</span>' : ""}</td>
-      <td class="amount">${fmt(x.supply_units, x.decimals)}</td><td>${powers(x.powers)}</td><td>${addr(x.issuer)}</td></tr>`).join("")}
+    <thead><tr><th>Jeton</th><th>Nom</th><th class="amount">En circulation</th><th class="amount">Détenteurs</th><th>Pouvoirs de l'émetteur</th><th>Émetteur</th></tr></thead><tbody>
+    ${[...a.assets].sort((p, q) => (q.holders ?? 0) - (p.holders ?? 0)).map((x) => `<tr class="link" onclick="location.hash='#/jeton/${esc(x.symbol)}'"><td>${assetLink(x.symbol)}</td><td>${esc(x.name)}${x.frozen ? ' <span class="pill warn">gelé</span>' : ""}</td>
+      <td class="amount">${fmt(x.supply_units, x.decimals)}</td><td class="amount">${x.holders == null ? "—" : fr(x.holders)}</td><td>${powers(x.powers)}</td><td>${addr(x.issuer)}</td></tr>`).join("")}
     </tbody></table></div>` : `<p class="muted">Aucun jeton n'a encore été créé.</p>`}
     <p class="muted">Créer un jeton coûte ${vinx(a.fee)} et exige le nom .vinx du symbole.</p></section>`;
 }
 const powers = (p) => [p.mint && "émission", p.freeze && "gel", p.clawback && "reprise forcée"].filter(Boolean).join(", ") || "aucun (supply fixe)";
 
-async function token(sym) {
+/* Nombre d'unités (texte) → nombre décimal approché, pour les graphiques et les parts. */
+const asNumber = (u, d) => { try { return Number(BigInt(u || "0")) / 10 ** d; } catch (_) { return 0; } };
+const percent = (part, whole) => { try { const w = BigInt(whole || "0"); return w > 0n ? Number(BigInt(part || "0") * 10000n / w) / 100 : 0; } catch (_) { return 0; } };
+const pctText = (v) => v.toLocaleString("fr-FR", { maximumFractionDigits: 2 }) + " %";
+
+async function token(arg) {
+  const [sym, qs = ""] = arg.split("?");
+  const q = new URLSearchParams(qs);
+  const off = Math.max(0, parseInt(q.get("o"), 10) || 0), before = Math.max(0, parseInt(q.get("b"), 10) || 0);
   await loadAssets();
-  const x = await get(`/assets/${encodeURIComponent(sym)}`);
-  return `<section class="card"><h1>${esc(x.symbol)} <span class="muted">${esc(x.name)}</span></h1><dl>
-    <dt>Émetteur</dt><dd>${addr(x.issuer, 64)}</dd>
-    <dt>En circulation</dt><dd><b>${fmt(x.supply_units, x.decimals)}</b> ${esc(x.symbol)}</dd>
-    <dt>Plafond</dt><dd>${x.max_supply_units ? fmt(x.max_supply_units, x.decimals) : "aucun"}</dd>
-    <dt>Décimales</dt><dd>${x.decimals}</dd>
-    <dt>Pouvoirs de l'émetteur</dt><dd>${powers(x.powers)}</dd>
-    <dt>État</dt><dd>${x.frozen ? '<span class="warn">gelé : plus aucun transfert</span>' : '<span class="ok">en circulation</span>'}</dd>
-    <dt>Nom .vinx</dt><dd><a href="#/nom/${esc(x.symbol.toLowerCase())}">${esc(x.symbol.toLowerCase())}.vinx</a></dd>
-  </dl><p class="muted">Pour recevoir ce jeton, il faut d'abord l'accepter dans son portefeuille.</p></section>`;
+  const enc = encodeURIComponent(sym);
+  const [x, hold, hist] = await Promise.all([
+    get(`/assets/${enc}`),
+    get(`/assets/${enc}/holders?limit=50&offset=${off}`).catch(() => null),
+    get(`/assets/${enc}/transactions?limit=50${before ? `&before=${before}` : ""}`).catch(() => null),
+  ]);
+  const d = x.decimals, S = esc(x.symbol), base = `#/jeton/${esc(x.symbol)}`;
+  const p = x.powers, held = [p.mint, p.freeze, p.clawback].filter(Boolean).length;
+  const emitted = x.max_supply_units ? percent(x.supply_units, x.max_supply_units) : null;
+  const holders = hold?.holders || [];
+  const top = off === 0 ? holders.slice(0, 10) : [];
+  const topShare = top.reduce((sum, h) => sum + percent(h.units, x.supply_units), 0);
+  const pills = [x.frozen ? '<span class="pill bad">gelé</span>' : '<span class="pill ok">en circulation</span>',
+    held === 0 ? '<span class="pill ok">règles figées</span>' : "",
+    !p.mint ? '<span class="pill">quantité ' + (x.max_supply_units || held === 0 ? "plafonnée" : "fixe") + "</span>" : ""].join("");
+
+  const head = `<section class="card"><div class="token-head"><div class="badge">${esc(x.symbol.slice(0, 2))}</div>
+      <div><h1>${S} <span class="muted">${esc(x.name)}</span></h1>
+      <div class="sub">Émis par ${addr(x.issuer, 20)} · symbole réservé par <a href="#/nom/${esc(x.symbol.toLowerCase())}">${esc(x.symbol.toLowerCase())}.vinx</a></div></div>
+      <div class="pills">${pills}</div></div></section>`;
+
+  const stats = `<div class="stats">
+    ${stat("coin", "En circulation", `${fmt(x.supply_units, d)} <small>${S}</small>`, [
+      ["Plafond", x.max_supply_units ? fmt(x.max_supply_units, d) : "aucun"], ["Émis du plafond", emitted === null ? "—" : pctText(emitted)],
+      ["Décimales", d], ["Plus petite unité", d ? "0," + "0".repeat(d - 1) + "1" : "1"]],
+      emitted === null ? "" : `<div class="progress" title="${pctText(emitted)}"><span style="width:${Math.min(100, emitted)}%"></span></div>`)}
+    ${stat("shield", "Détenteurs", x.holders == null ? "—" : fr(x.holders), [
+      ["Ont accepté le jeton", hold ? fr(hold.total) : "—"], ["Plus gros détenteur", top[0] ? pctText(percent(top[0].units, x.supply_units)) : "—"],
+      ["10 plus gros", top.length ? pctText(topShare) : "—"], ["Comptes gelés", hold ? fr(holders.filter((h) => h.frozen).length) + (hold.total > holders.length ? "+" : "") : "—"]])}
+    ${stat("layers", "Pouvoirs de l'émetteur", `${held} <small>sur 3</small>`, [
+      ["Émettre", p.mint ? "oui" : "abandonné"], ["Geler", p.freeze ? "oui" : "abandonné"],
+      ["Reprise forcée", p.clawback ? "oui" : "abandonné"], ["Gel général", x.frozen ? '<span class="warn">actif</span>' : "non"]])}
+  </div>`;
+
+  const line = (yes, title, ifYes, ifNo) => `<div><span class="mark ${yes ? "yes" : "no"}">${yes ? "!" : "✓"}</span>
+    <div><b>${title}</b><div class="sub">${yes ? ifYes : ifNo}</div></div></div>`;
+  const renounced = (hist?.transactions || []).filter((t) => t.kind === "abandon de pouvoirs");
+  const trust = `<section class="card"><h2>Ce que l'émetteur peut faire</h2><div class="trust">
+      ${line(p.mint, "Créer de nouvelles unités", x.max_supply_units ? `Oui, jusqu'au plafond de ${fmt(x.max_supply_units, d)} ${S}.` : "Oui, sans plafond : la quantité peut augmenter.", x.max_supply_units ? "Non : la quantité ne peut plus augmenter." : "Non : la quantité ne peut plus augmenter, seulement baisser si des détenteurs détruisent leurs unités.")}
+      ${line(p.freeze, "Geler des soldes", "Oui : il peut bloquer le jeton sur un compte, ou partout.", "Non : personne ne peut bloquer ce jeton.")}
+      ${line(p.clawback, "Reprendre des unités", "Oui : il peut reprendre des unités sur un compte, sans son accord.", "Non : chaque détenteur est seul maître de son solde.")}
+    </div>
+    <p class="muted">Ces règles sont appliquées par tous les nœuds du réseau. Un pouvoir peut être abandonné à tout moment, jamais rajouté.${renounced.length ? ` Abandons enregistrés : ${renounced.map((t) => `${blockLink(t.height)}`).join(", ")}.` : ""}</p></section>`;
+
+  // Circulation dans le temps, reconstituée depuis l'historique (du plus récent au plus ancien).
+  let chart = "";
+  const events = (hist?.transactions || []).filter((t) => ["création d'actif", "émission d'actif", "destruction d'actif"].includes(t.kind));
+  if (!before && events.length) {
+    let cur = asNumber(x.supply_units, d);
+    const pts = [[Date.now(), cur]];
+    for (const t of events) {
+      pts.push([t.timestamp, cur]);
+      const u = asNumber(t.units, d);
+      cur = t.kind === "destruction d'actif" ? cur + u : cur - u;
+      pts.push([t.timestamp - 1, Math.max(0, cur)]);
+    }
+    if (events.at(-1).kind !== "création d'actif") pts.pop();
+    pts.reverse();
+    const sameDay = pts.at(-1)[0] - pts[0][0] < 86400000;
+    const label = (ms) => sameDay ? new Date(ms).toLocaleTimeString("fr-FR", { hour: "2-digit", minute: "2-digit" })
+      : new Date(ms).toLocaleDateString("fr-FR", { day: "2-digit", month: "2-digit" });
+    chart = `<section class="card chart"><h2>Circulation <span class="sub">${events.length} création(s), émission(s) ou destruction(s)</span></h2>
+      ${pts.length >= 2 ? area(pts.map((v) => v[1]), pts.map((v) => label(v[0]))) : '<p class="muted">Pas encore assez d\'historique.</p>'}</section>`;
+  }
+
+  const bars = top.length ? `<section class="card"><h2>Répartition <span class="sub">part de la circulation</span></h2><div class="hbars">
+      ${top.filter((h) => h.units !== "0").map((h) => { const v = percent(h.units, x.supply_units); return `<div class="hbar"><span>${addr(h.address)}${h.address === x.issuer ? ' <span class="pill">émetteur</span>' : ""}</span><b>${pctText(v)}</b><div class="track"><span style="width:${Math.max(0.5, v)}%"></span></div></div>`; }).join("")
+      || '<p class="muted">Aucun solde pour l\'instant.</p>'}</div></section>` : "";
+
+  const holderTable = !hold ? `<section class="card"><h2>Détenteurs</h2><p class="muted">Ce nœud ne publie pas encore la liste des détenteurs (version 0.22 ou plus requise).</p></section>`
+    : `<section class="card"><h2>Détenteurs <span class="sub">${fr(hold.total)} compte(s) ont accepté ${S}</span></h2>
+      ${holders.length ? `<div class="scroll"><table><thead><tr><th>#</th><th>Compte</th><th class="amount">Solde</th><th class="amount">Part</th></tr></thead><tbody>
+      ${holders.map((h, i) => `<tr class="link" onclick="location.hash='#/adresse/${esc(h.address)}'"><td class="muted">${fr(off + i + 1)}</td>
+        <td>${addr(h.address)}${h.address === x.issuer ? ' <span class="pill">émetteur</span>' : ""}${h.frozen ? ' <span class="pill warn">gelé</span>' : ""}</td>
+        <td class="amount">${fmt(h.units, d)}</td><td class="amount">${pctText(percent(h.units, x.supply_units))}</td></tr>`).join("")}
+      </tbody></table></div>` : '<p class="muted">Personne n\'a encore accepté ce jeton.</p>'}
+      <div class="pager">${off > 0 ? `<a href="${base}?o=${Math.max(0, off - 50)}">‹ Précédents</a>` : ""}${hold.total > off + 50 ? `<a href="${base}?o=${off + 50}">Suivants ›</a>` : ""}</div></section>`;
+
+  const list = hist?.transactions || [];
+  const older = list.length >= 50 ? Math.min(...list.map((t) => t.height)) : 0;
+  const history = !hist ? "" : `<section class="card"><h2>Historique${before ? ` <span class="sub">avant le bloc ${fr(before)}</span>` : ""}</h2>${txTable(list)}
+      <div class="pager">${before ? `<a href="${base}">‹ Plus récent</a>` : ""}${older ? `<a href="${base}?b=${older}">Plus ancien ›</a>` : ""}</div>
+      <p class="muted">Un nœud ordinaire garde 24 heures de blocs ; un nœud archive garde tout l'historique.</p></section>`;
+
+  const howTo = `<section class="card"><h2>Recevoir ${S}</h2><p>Dans le portefeuille VinX : onglet <b>Jetons</b> → « Accepter un jeton » → <span class="mono">${S}</span>.
+      L'aperçu montre l'émetteur et ses pouvoirs avant de confirmer. Accepter un jeton immobilise 0,1 VINX de réserve, rendus quand on le retire.</p></section>`;
+
+  if (before || off) return head + holderTable + history;
+  return head + stats + `<div class="home-grid">${trust}${chart || howTo}</div>` + `<div class="home-grid">${bars}${chart ? howTo : ""}</div>` + holderTable + history;
 }
 
 async function name(n) {
