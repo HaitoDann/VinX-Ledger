@@ -1,0 +1,1522 @@
+{
+ "openapi": "3.0.3",
+ "info": {
+  "title": "API de VinX Ledger",
+  "version": "__VERSION__",
+  "description": "API HTTP publique d'un nœud VinX Ledger : lire la chaîne (comptes, jetons, blocs) et envoyer des transactions signées. Elle est servie par chaque nœud, par exemple `https://vinx-ledger.vinxlabs.fr`. Cette page est générée depuis [`/openapi.json`](/openapi.json), à importer dans Postman, Insomnia ou un générateur de client.\n\n**Conventions**\n\n- Les montants sont des **textes** en unités entières, pour ne jamais perdre de précision : 1 VINX = 1 000 000 000 unités. Les jetons ont leurs propres décimales (`decimals`) : `1250` unités d'un jeton à 2 décimales valent 12,50.\n- Adresses en bech32 `vinx1…` ; identifiants et clés en hexadécimal.\n- Horodatages de blocs en millisecondes Unix ; échéances (noms, séquestres, mandats) en secondes Unix.\n- Erreurs : `{\"error\": \"message\"}` avec le code HTTP (`400` requête invalide, `404` inconnu, `422` transaction refusée, `429` trop de requêtes).\n- Les réponses JSON autorisent toutes les origines (CORS) : un site web peut interroger un nœud directement.\n- Limite par défaut : 600 requêtes par minute et par adresse IP (option `--rate-limit` du nœud).\n\n**Créer un jeton, pas à pas**\n\n- Enregistrer un nom `.vinx` (son symbole sera le nom en majuscules : `eurv.vinx` → `EURV`).\n- Envoyer `CreateAsset` : nom affiché, décimales, supply initiale, plafond éventuel, et pouvoirs gardés (émettre, geler, reprendre). Les pouvoirs ne peuvent ensuite qu'être abandonnés.\n- Chaque détenteur accepte le jeton (`AcceptAsset`) avant de pouvoir le recevoir ; cela immobilise 0,1 VINX de réserve sur son compte.\n- Suivre le jeton avec `/assets/{symbol}`, `/assets/{symbol}/holders` et `/assets/{symbol}/transactions`.\n\nLe détail des règles est dans le [guide des jetons](https://github.com/HaitoDann/VinX-Ledger/blob/main/docs/JETONS.md).",
+  "license": {
+   "name": "Voir le dépôt",
+   "url": "https://github.com/HaitoDann/VinX-Ledger"
+  }
+ },
+ "servers": [
+  {
+   "url": "/",
+   "description": "Ce nœud"
+  },
+  {
+   "url": "https://vinx-ledger.vinxlabs.fr",
+   "description": "Nœud public du testnet"
+  }
+ ],
+ "tags": [
+  {
+   "name": "Réseau",
+   "description": "État du réseau, paramètres et validateurs."
+  },
+  {
+   "name": "Comptes et noms",
+   "description": "Soldes, réserve, historique et noms `.vinx`."
+  },
+  {
+   "name": "Jetons",
+   "description": "Actifs natifs créés par les utilisateurs (protocole 5), et séquestres."
+  },
+  {
+   "name": "Blocs et transactions",
+   "description": "Lecture des blocs et des transactions."
+  },
+  {
+   "name": "Envoyer",
+   "description": "Soumettre une transaction signée."
+  }
+ ],
+ "paths": {
+  "/status": {
+   "get": {
+    "tags": [
+     "Réseau"
+    ],
+    "summary": "État du nœud",
+    "description": "Chaîne, hauteur, version du protocole et paramètres courants. Point de départ de toute intégration : `chain_id` doit figurer dans chaque transaction signée.",
+    "parameters": [],
+    "responses": {
+     "200": {
+      "description": "Succès",
+      "content": {
+       "application/json": {
+        "schema": {
+         "type": "object",
+         "properties": {
+          "chain_id": {
+           "type": "string",
+           "example": "vinx-testnet-2"
+          },
+          "node_version": {
+           "type": "string",
+           "example": "0.22.0"
+          },
+          "protocol_version": {
+           "type": "integer",
+           "example": 6
+          },
+          "height": {
+           "type": "integer",
+           "example": 11
+          },
+          "last_block_hash": {
+           "type": "string",
+           "example": "0fd0…"
+          },
+          "state_root": {
+           "type": "string",
+           "example": "c62e…"
+          },
+          "pending_transactions": {
+           "type": "integer",
+           "example": 0
+          },
+          "peers": {
+           "type": "integer",
+           "example": 4
+          },
+          "params": {
+           "type": "object",
+           "properties": {
+            "min_fee": {
+             "type": "string",
+             "example": "1000000",
+             "description": "Montant en unités, sous forme de texte (1 VINX = 1 000 000 000 unités)."
+            },
+            "min_reserve": {
+             "type": "string",
+             "example": "100000000",
+             "description": "Montant en unités, sous forme de texte (1 VINX = 1 000 000 000 unités)."
+            },
+            "object_reserve": {
+             "type": "string",
+             "example": "100000000",
+             "description": "Montant en unités, sous forme de texte (1 VINX = 1 000 000 000 unités)."
+            },
+            "name_fee": {
+             "type": "string",
+             "example": "10000000000",
+             "description": "Montant en unités, sous forme de texte (1 VINX = 1 000 000 000 unités)."
+            },
+            "asset_fee": {
+             "type": "string",
+             "example": "100000000000",
+             "description": "Montant en unités, sous forme de texte (1 VINX = 1 000 000 000 unités)."
+            },
+            "max_memo_bytes": {
+             "type": "integer",
+             "example": 32
+            },
+            "min_block_interval_ms": {
+             "type": "integer",
+             "example": 5000
+            }
+           }
+          }
+         }
+        }
+       }
+      }
+     }
+    }
+   }
+  },
+  "/fees": {
+   "get": {
+    "tags": [
+     "Réseau"
+    ],
+    "summary": "Frais conseillés",
+    "description": "Frais minimum et frais conseillés selon l'encombrement.",
+    "parameters": [],
+    "responses": {
+     "200": {
+      "description": "Succès",
+      "content": {
+       "application/json": {
+        "schema": {
+         "type": "object",
+         "properties": {
+          "min_fee": {
+           "type": "string",
+           "example": "1000000",
+           "description": "Montant en unités, sous forme de texte (1 VINX = 1 000 000 000 unités)."
+          },
+          "recommended_fee": {
+           "type": "string",
+           "example": "1000000",
+           "description": "Montant en unités, sous forme de texte (1 VINX = 1 000 000 000 unités)."
+          },
+          "pending_transactions": {
+           "type": "integer",
+           "example": 0
+          },
+          "max_block_txs": {
+           "type": "integer",
+           "example": 5000
+          }
+         }
+        }
+       }
+      }
+     }
+    }
+   }
+  },
+  "/validators": {
+   "get": {
+    "tags": [
+     "Réseau"
+    ],
+    "summary": "Validateurs",
+    "description": "Présence et activité de chaque validateur.",
+    "parameters": [],
+    "responses": {
+     "200": {
+      "description": "Succès",
+      "content": {
+       "application/json": {
+        "schema": {
+         "type": "object",
+         "properties": {
+          "window_blocks": {
+           "type": "integer",
+           "example": 11
+          },
+          "validators": {
+           "type": "array",
+           "items": {
+            "type": "object",
+            "properties": {
+             "index": {
+              "type": "integer",
+              "example": 0
+             },
+             "key": {
+              "type": "string",
+              "example": "013e…"
+             },
+             "name": {
+              "type": "string",
+              "example": "Cinnamon",
+              "nullable": true
+             },
+             "presence": {
+              "type": "string",
+              "example": "en ligne"
+             },
+             "signed": {
+              "type": "integer",
+              "example": 11
+             },
+             "last_signed_height": {
+              "type": "integer",
+              "example": 11
+             }
+            }
+           }
+          }
+         }
+        }
+       }
+      }
+     }
+    }
+   }
+  },
+  "/governance": {
+   "get": {
+    "tags": [
+     "Réseau"
+    ],
+    "summary": "Gouvernance",
+    "description": "Signataires admin, paramètres, émission, escrow, trésorerie et mise à jour du protocole programmée (`upgrade`).",
+    "parameters": [],
+    "responses": {
+     "200": {
+      "description": "Succès",
+      "content": {
+       "application/json": {
+        "schema": {
+         "type": "object",
+         "properties": {
+          "protocol_version": {
+           "type": "integer",
+           "example": 6
+          },
+          "upgrade": {
+           "type": "object",
+           "properties": {
+            "version": {
+             "type": "integer",
+             "example": 7
+            },
+            "activation_height": {
+             "type": "integer",
+             "example": 123456
+            }
+           },
+           "description": "Mise à jour programmée, ou `null`."
+          },
+          "params": {
+           "type": "object",
+           "properties": {}
+          },
+          "treasury": {
+           "type": "object",
+           "properties": {
+            "address": {
+             "type": "string",
+             "example": "vinx1z6gt9tr9v7m9vj2lt9rvrmjxc7sa2g9d0fx633",
+             "description": "Adresse bech32 `vinx1…`."
+            },
+            "balance": {
+             "type": "string",
+             "example": "999110000000000",
+             "description": "Montant en unités, sous forme de texte (1 VINX = 1 000 000 000 unités)."
+            }
+           }
+          }
+         }
+        }
+       }
+      }
+     }
+    }
+   }
+  },
+  "/accounts/{address}": {
+   "get": {
+    "tags": [
+     "Comptes et noms"
+    ],
+    "summary": "Compte",
+    "description": "Solde, part dépensable, réserve, nonce, jetons détenus, mandats et séquestres d'une adresse. Avant d'envoyer, utilisez `nonce + 1` (ajoutez vos transactions encore en attente).",
+    "parameters": [
+     {
+      "name": "address",
+      "in": "path",
+      "description": "Adresse `vinx1…`.",
+      "required": true,
+      "schema": {
+       "type": "string",
+       "example": "vinx1cdlrapuw5z6cc5j3wx9xgmutd4056aazrq6f3f"
+      }
+     }
+    ],
+    "responses": {
+     "200": {
+      "description": "Succès",
+      "content": {
+       "application/json": {
+        "schema": {
+         "type": "object",
+         "properties": {
+          "address": {
+           "type": "string",
+           "example": "vinx1cdlrapuw5z6cc5j3wx9xgmutd4056aazrq6f3f",
+           "description": "Adresse bech32 `vinx1…`."
+          },
+          "balance": {
+           "type": "string",
+           "example": "4999000000",
+           "description": "Montant en unités, sous forme de texte (1 VINX = 1 000 000 000 unités)."
+          },
+          "spendable": {
+           "type": "string",
+           "example": "4799000000",
+           "description": "Solde moins la réserve."
+          },
+          "reserve": {
+           "type": "string",
+           "example": "200000000",
+           "description": "Réserve du compte plus 0,1 VINX par objet (protocole 6)."
+          },
+          "objects": {
+           "type": "integer",
+           "example": 1,
+           "description": "Jetons acceptés, mandats et règles de compte."
+          },
+          "nonce": {
+           "type": "integer",
+           "example": 1
+          },
+          "public_key": {
+           "type": "string",
+           "example": "0100…",
+           "nullable": true,
+           "description": "`null` tant que le compte n'a rien envoyé : joindre alors la clé publique à la première transaction."
+          },
+          "memo_required": {
+           "type": "boolean",
+           "example": false
+          },
+          "names": {
+           "type": "array",
+           "items": {
+            "type": "string",
+            "example": "boutique.vinx"
+           }
+          },
+          "assets": {
+           "type": "array",
+           "items": {
+            "type": "object",
+            "properties": {
+             "symbol": {
+              "type": "string",
+              "example": "DEMO"
+             },
+             "name": {
+              "type": "string",
+              "example": "Jeton démo"
+             },
+             "decimals": {
+              "type": "integer",
+              "example": 2
+             },
+             "units": {
+              "type": "string",
+              "example": "1250"
+             },
+             "frozen": {
+              "type": "boolean",
+              "example": false
+             }
+            }
+           }
+          },
+          "policy": {
+           "type": "object",
+           "properties": {},
+           "description": "Règles du compte (multisignature, plafond), ou `null`."
+          },
+          "mandates": {
+           "type": "object",
+           "properties": {
+            "granted": {
+             "type": "array",
+             "items": {
+              "type": "object",
+              "properties": {}
+             }
+            },
+            "received": {
+             "type": "array",
+             "items": {
+              "type": "object",
+              "properties": {}
+             }
+            }
+           }
+          },
+          "deals": {
+           "type": "array",
+           "items": {
+            "type": "object",
+            "properties": {}
+           }
+          }
+         }
+        }
+       }
+      }
+     },
+     "400": {
+      "description": "Erreur",
+      "content": {
+       "application/json": {
+        "schema": {
+         "$ref": "#/components/schemas/Error"
+        }
+       }
+      }
+     }
+    }
+   }
+  },
+  "/accounts/{address}/transactions": {
+   "get": {
+    "tags": [
+     "Comptes et noms"
+    ],
+    "summary": "Historique d'une adresse",
+    "description": "Transactions en attente puis finalisées, de la plus récente à la plus ancienne. Un nœud ordinaire ne garde que 24 heures de blocs : interrogez un nœud archive pour tout l'historique.",
+    "parameters": [
+     {
+      "name": "address",
+      "in": "path",
+      "description": "Adresse `vinx1…`.",
+      "required": true,
+      "schema": {
+       "type": "string",
+       "example": "vinx1cdlrapuw5z6cc5j3wx9xgmutd4056aazrq6f3f"
+      }
+     },
+     {
+      "name": "limit",
+      "in": "query",
+      "description": "Nombre d'entrées, 50 par défaut, 200 au plus.",
+      "required": false,
+      "schema": {
+       "type": "integer"
+      }
+     }
+    ],
+    "responses": {
+     "200": {
+      "description": "Succès",
+      "content": {
+       "application/json": {
+        "schema": {
+         "type": "object",
+         "properties": {
+          "transactions": {
+           "type": "array",
+           "items": {
+            "$ref": "#/components/schemas/Transaction"
+           }
+          }
+         }
+        }
+       }
+      }
+     },
+     "400": {
+      "description": "Erreur",
+      "content": {
+       "application/json": {
+        "schema": {
+         "$ref": "#/components/schemas/Error"
+        }
+       }
+      }
+     }
+    }
+   }
+  },
+  "/names/{name}": {
+   "get": {
+    "tags": [
+     "Comptes et noms"
+    ],
+    "summary": "Nom .vinx",
+    "description": "Titulaire, échéance (secondes Unix) et prix d'un nom ; `available` indique s'il peut être enregistré.",
+    "parameters": [
+     {
+      "name": "name",
+      "in": "path",
+      "description": "Nom, avec ou sans `.vinx`.",
+      "required": true,
+      "schema": {
+       "type": "string",
+       "example": "demo"
+      }
+     }
+    ],
+    "responses": {
+     "200": {
+      "description": "Succès",
+      "content": {
+       "application/json": {
+        "schema": {
+         "type": "object",
+         "properties": {
+          "name": {
+           "type": "string",
+           "example": "demo.vinx"
+          },
+          "owner": {
+           "type": "string",
+           "example": "vinx1z6gt9tr9v7m9vj2lt9rvrmjxc7sa2g9d0fx633",
+           "description": "Adresse bech32 `vinx1…`."
+          },
+          "expires_at": {
+           "type": "integer",
+           "example": 1825024294
+          },
+          "available": {
+           "type": "boolean",
+           "example": false
+          },
+          "active": {
+           "type": "boolean",
+           "example": true
+          },
+          "fee": {
+           "type": "string",
+           "example": "10000000000",
+           "description": "Montant en unités, sous forme de texte (1 VINX = 1 000 000 000 unités)."
+          }
+         }
+        }
+       }
+      }
+     },
+     "400": {
+      "description": "Erreur",
+      "content": {
+       "application/json": {
+        "schema": {
+         "$ref": "#/components/schemas/Error"
+        }
+       }
+      }
+     }
+    }
+   }
+  },
+  "/assets": {
+   "get": {
+    "tags": [
+     "Jetons"
+    ],
+    "summary": "Tous les jetons",
+    "description": "Liste des actifs natifs et prix de création (`fee`).",
+    "parameters": [],
+    "responses": {
+     "200": {
+      "description": "Succès",
+      "content": {
+       "application/json": {
+        "schema": {
+         "type": "object",
+         "properties": {
+          "active": {
+           "type": "boolean",
+           "example": true,
+           "description": "Actifs disponibles (protocole 5 ou plus)."
+          },
+          "fee": {
+           "type": "string",
+           "example": "100000000000",
+           "description": "Montant en unités, sous forme de texte (1 VINX = 1 000 000 000 unités)."
+          },
+          "assets": {
+           "type": "array",
+           "items": {
+            "$ref": "#/components/schemas/Asset"
+           }
+          }
+         }
+        }
+       }
+      }
+     }
+    }
+   }
+  },
+  "/assets/{symbol}": {
+   "get": {
+    "tags": [
+     "Jetons"
+    ],
+    "summary": "Un jeton",
+    "description": "Émetteur, supply, décimales, pouvoirs restants et nombre de détenteurs (solde non nul).",
+    "parameters": [
+     {
+      "name": "symbol",
+      "in": "path",
+      "description": "Symbole, insensible à la casse.",
+      "required": true,
+      "schema": {
+       "type": "string",
+       "example": "DEMO"
+      }
+     }
+    ],
+    "responses": {
+     "200": {
+      "description": "Succès",
+      "content": {
+       "application/json": {
+        "schema": {
+         "type": "object",
+         "properties": {
+          "symbol": {
+           "type": "string",
+           "example": "DEMO"
+          },
+          "name": {
+           "type": "string",
+           "example": "Jeton démo"
+          },
+          "issuer": {
+           "type": "string",
+           "example": "vinx1z6gt9tr9v7m9vj2lt9rvrmjxc7sa2g9d0fx633",
+           "description": "Adresse bech32 `vinx1…`."
+          },
+          "decimals": {
+           "type": "integer",
+           "example": 2
+          },
+          "supply_units": {
+           "type": "string",
+           "example": "10000000",
+           "description": "En circulation, en unités de l'actif."
+          },
+          "max_supply_units": {
+           "type": "string",
+           "description": "Plafond, ou `null` sans plafond.",
+           "nullable": true
+          },
+          "powers": {
+           "type": "object",
+           "properties": {
+            "mint": {
+             "type": "boolean",
+             "example": true
+            },
+            "freeze": {
+             "type": "boolean",
+             "example": true
+            },
+            "clawback": {
+             "type": "boolean",
+             "example": false
+            }
+           },
+           "description": "Pouvoirs que l'émetteur détient encore. Ils ne peuvent qu'être abandonnés."
+          },
+          "frozen": {
+           "type": "boolean",
+           "example": false,
+           "description": "Tout l'actif est gelé."
+          },
+          "holders": {
+           "type": "integer",
+           "example": 2,
+           "description": "Comptes au solde non nul."
+          }
+         }
+        }
+       }
+      }
+     },
+     "404": {
+      "description": "Erreur",
+      "content": {
+       "application/json": {
+        "schema": {
+         "$ref": "#/components/schemas/Error"
+        }
+       }
+      }
+     }
+    }
+   }
+  },
+  "/assets/{symbol}/holders": {
+   "get": {
+    "tags": [
+     "Jetons"
+    ],
+    "summary": "Détenteurs d'un jeton",
+    "description": "Comptes qui ont accepté le jeton, du plus gros solde au plus petit, y compris à solde nul. Pagination par `offset`.",
+    "parameters": [
+     {
+      "name": "symbol",
+      "in": "path",
+      "description": "Symbole.",
+      "required": true,
+      "schema": {
+       "type": "string",
+       "example": "DEMO"
+      }
+     },
+     {
+      "name": "limit",
+      "in": "query",
+      "description": "Nombre d'entrées, 50 par défaut, 200 au plus.",
+      "required": false,
+      "schema": {
+       "type": "integer"
+      }
+     },
+     {
+      "name": "offset",
+      "in": "query",
+      "description": "Entrées à sauter, 0 par défaut.",
+      "required": false,
+      "schema": {
+       "type": "integer"
+      }
+     }
+    ],
+    "responses": {
+     "200": {
+      "description": "Succès",
+      "content": {
+       "application/json": {
+        "schema": {
+         "type": "object",
+         "properties": {
+          "symbol": {
+           "type": "string",
+           "example": "DEMO"
+          },
+          "total": {
+           "type": "integer",
+           "example": 2,
+           "description": "Nombre total de lignes."
+          },
+          "offset": {
+           "type": "integer",
+           "example": 0
+          },
+          "holders": {
+           "type": "array",
+           "items": {
+            "type": "object",
+            "properties": {
+             "address": {
+              "type": "string",
+              "example": "vinx1z6gt9tr9v7m9vj2lt9rvrmjxc7sa2g9d0fx633",
+              "description": "Adresse bech32 `vinx1…`."
+             },
+             "units": {
+              "type": "string",
+              "example": "9998750"
+             },
+             "frozen": {
+              "type": "boolean",
+              "example": false
+             }
+            }
+           }
+          }
+         }
+        }
+       }
+      }
+     },
+     "404": {
+      "description": "Erreur",
+      "content": {
+       "application/json": {
+        "schema": {
+         "$ref": "#/components/schemas/Error"
+        }
+       }
+      }
+     }
+    }
+   }
+  },
+  "/assets/{symbol}/transactions": {
+   "get": {
+    "tags": [
+     "Jetons"
+    ],
+    "summary": "Historique d'un jeton",
+    "description": "Création, émissions, paiements, acceptations, gels, reprises… du plus récent au plus ancien, dans les blocs conservés. Les versements et remboursements de séquestre (`ReleaseDeal`, `RefundDeal`) n'y figurent pas : ils ne nomment pas l'actif.",
+    "parameters": [
+     {
+      "name": "symbol",
+      "in": "path",
+      "description": "Symbole.",
+      "required": true,
+      "schema": {
+       "type": "string",
+       "example": "DEMO"
+      }
+     },
+     {
+      "name": "limit",
+      "in": "query",
+      "description": "Nombre d'entrées, 20 par défaut, 100 au plus.",
+      "required": false,
+      "schema": {
+       "type": "integer"
+      }
+     },
+     {
+      "name": "before",
+      "in": "query",
+      "description": "Seulement sous cette hauteur (page suivante : la plus petite hauteur reçue).",
+      "required": false,
+      "schema": {
+       "type": "integer"
+      }
+     }
+    ],
+    "responses": {
+     "200": {
+      "description": "Succès",
+      "content": {
+       "application/json": {
+        "schema": {
+         "type": "object",
+         "properties": {
+          "symbol": {
+           "type": "string",
+           "example": "DEMO"
+          },
+          "transactions": {
+           "type": "array",
+           "items": {
+            "$ref": "#/components/schemas/Transaction"
+           }
+          }
+         }
+        }
+       }
+      }
+     },
+     "404": {
+      "description": "Erreur",
+      "content": {
+       "application/json": {
+        "schema": {
+         "$ref": "#/components/schemas/Error"
+        }
+       }
+      }
+     }
+    }
+   }
+  },
+  "/deals/{id}": {
+   "get": {
+    "tags": [
+     "Jetons"
+    ],
+    "summary": "Séquestre",
+    "description": "Séquestre en VINX ou en jeton (`asset`, `units`) encore ouvert.",
+    "parameters": [
+     {
+      "name": "id",
+      "in": "path",
+      "description": "Identifiant hexadécimal (64 caractères).",
+      "required": true,
+      "schema": {
+       "type": "string"
+      }
+     }
+    ],
+    "responses": {
+     "200": {
+      "description": "Succès",
+      "content": {
+       "application/json": {
+        "schema": {
+         "type": "object",
+         "properties": {
+          "id": {
+           "type": "string",
+           "example": "9a3f…"
+          },
+          "buyer": {
+           "type": "string",
+           "example": "vinx1z6gt9tr9v7m9vj2lt9rvrmjxc7sa2g9d0fx633",
+           "description": "Adresse bech32 `vinx1…`."
+          },
+          "seller": {
+           "type": "string",
+           "example": "vinx1cdlrapuw5z6cc5j3wx9xgmutd4056aazrq6f3f",
+           "description": "Adresse bech32 `vinx1…`."
+          },
+          "amount": {
+           "type": "string",
+           "example": "1000000000",
+           "description": "Montant en unités, sous forme de texte (1 VINX = 1 000 000 000 unités)."
+          },
+          "deadline": {
+           "type": "integer",
+           "example": 1793466729
+          }
+         }
+        }
+       }
+      }
+     },
+     "400": {
+      "description": "Erreur",
+      "content": {
+       "application/json": {
+        "schema": {
+         "$ref": "#/components/schemas/Error"
+        }
+       }
+      }
+     },
+     "404": {
+      "description": "Erreur",
+      "content": {
+       "application/json": {
+        "schema": {
+         "$ref": "#/components/schemas/Error"
+        }
+       }
+      }
+     }
+    }
+   }
+  },
+  "/blocks": {
+   "get": {
+    "tags": [
+     "Blocs et transactions"
+    ],
+    "summary": "Derniers blocs",
+    "description": "Du plus récent au plus ancien.",
+    "parameters": [
+     {
+      "name": "limit",
+      "in": "query",
+      "description": "Nombre d'entrées, 20 par défaut, 100 au plus.",
+      "required": false,
+      "schema": {
+       "type": "integer"
+      }
+     },
+     {
+      "name": "before",
+      "in": "query",
+      "description": "Seulement sous cette hauteur (page suivante : la plus petite hauteur reçue).",
+      "required": false,
+      "schema": {
+       "type": "integer"
+      }
+     }
+    ],
+    "responses": {
+     "200": {
+      "description": "Succès",
+      "content": {
+       "application/json": {
+        "schema": {
+         "type": "object",
+         "properties": {
+          "blocks": {
+           "type": "array",
+           "items": {
+            "$ref": "#/components/schemas/Block"
+           }
+          }
+         }
+        }
+       }
+      }
+     }
+    }
+   }
+  },
+  "/blocks/{height}": {
+   "get": {
+    "tags": [
+     "Blocs et transactions"
+    ],
+    "summary": "Un bloc",
+    "description": "En-tête et transactions détaillées (`details`).",
+    "parameters": [
+     {
+      "name": "height",
+      "in": "path",
+      "description": "Hauteur.",
+      "required": true,
+      "schema": {
+       "type": "integer",
+       "example": 1
+      }
+     }
+    ],
+    "responses": {
+     "200": {
+      "description": "Succès",
+      "content": {
+       "application/json": {
+        "schema": {
+         "type": "object",
+         "properties": {
+          "height": {
+           "type": "integer",
+           "example": 11
+          },
+          "hash": {
+           "type": "string",
+           "example": "0fd0…"
+          },
+          "details": {
+           "type": "array",
+           "items": {
+            "$ref": "#/components/schemas/Transaction"
+           }
+          }
+         }
+        }
+       }
+      }
+     },
+     "404": {
+      "description": "Erreur",
+      "content": {
+       "application/json": {
+        "schema": {
+         "$ref": "#/components/schemas/Error"
+        }
+       }
+      }
+     }
+    }
+   }
+  },
+  "/transactions/recent": {
+   "get": {
+    "tags": [
+     "Blocs et transactions"
+    ],
+    "summary": "Dernières transactions",
+    "description": "Les plus récentes du réseau, toutes adresses confondues.",
+    "parameters": [
+     {
+      "name": "limit",
+      "in": "query",
+      "description": "Nombre d'entrées, 10 par défaut, 50 au plus.",
+      "required": false,
+      "schema": {
+       "type": "integer"
+      }
+     }
+    ],
+    "responses": {
+     "200": {
+      "description": "Succès",
+      "content": {
+       "application/json": {
+        "schema": {
+         "type": "object",
+         "properties": {
+          "transactions": {
+           "type": "array",
+           "items": {
+            "$ref": "#/components/schemas/Transaction"
+           }
+          }
+         }
+        }
+       }
+      }
+     }
+    }
+   }
+  },
+  "/transactions/{id}": {
+   "get": {
+    "tags": [
+     "Blocs et transactions"
+    ],
+    "summary": "Une transaction",
+    "description": "Statut et détail. Interrogez-la après un envoi pour savoir quand elle est finalisée (quelques secondes).",
+    "parameters": [
+     {
+      "name": "id",
+      "in": "path",
+      "description": "Identifiant renvoyé par l'envoi.",
+      "required": true,
+      "schema": {
+       "type": "string",
+       "example": "fdeb89a1a90e6541f82eae9409c8cbf4f4ef4433f9cd99ccfadec09f9804be93"
+      }
+     }
+    ],
+    "responses": {
+     "200": {
+      "description": "Succès",
+      "content": {
+       "application/json": {
+        "schema": {
+         "$ref": "#/components/schemas/Transaction"
+        }
+       }
+      }
+     },
+     "400": {
+      "description": "Erreur",
+      "content": {
+       "application/json": {
+        "schema": {
+         "$ref": "#/components/schemas/Error"
+        }
+       }
+      }
+     },
+     "404": {
+      "description": "Erreur",
+      "content": {
+       "application/json": {
+        "schema": {
+         "$ref": "#/components/schemas/Error"
+        }
+       }
+      }
+     }
+    }
+   }
+  },
+  "/mempool": {
+   "get": {
+    "tags": [
+     "Blocs et transactions"
+    ],
+    "summary": "Transactions en attente",
+    "description": "Transactions reçues, pas encore dans un bloc.",
+    "parameters": [],
+    "responses": {
+     "200": {
+      "description": "Succès",
+      "content": {
+       "application/json": {
+        "schema": {
+         "type": "object",
+         "properties": {
+          "transactions": {
+           "type": "array",
+           "items": {
+            "$ref": "#/components/schemas/Transaction"
+           }
+          }
+         }
+        }
+       }
+      }
+     }
+    }
+   }
+  },
+  "/attestations/{digest}": {
+   "get": {
+    "tags": [
+     "Blocs et transactions"
+    ],
+    "summary": "Horodatages d'une empreinte",
+    "description": "Blocs où l'empreinte (BLAKE3 ou SHA-256 d'un document, en hexadécimal) a été horodatée.",
+    "parameters": [
+     {
+      "name": "digest",
+      "in": "path",
+      "description": "Empreinte hexadécimale (64 caractères).",
+      "required": true,
+      "schema": {
+       "type": "string"
+      }
+     }
+    ],
+    "responses": {
+     "200": {
+      "description": "Succès",
+      "content": {
+       "application/json": {
+        "schema": {
+         "type": "object",
+         "properties": {
+          "digest": {
+           "type": "string",
+           "example": "5d1e…"
+          },
+          "attestations": {
+           "type": "array",
+           "items": {
+            "type": "object",
+            "properties": {
+             "height": {
+              "type": "integer",
+              "example": 11
+             },
+             "timestamp": {
+              "type": "integer",
+              "example": 1793466729038
+             },
+             "sender": {
+              "type": "string",
+              "example": "vinx1z6gt9tr9v7m9vj2lt9rvrmjxc7sa2g9d0fx633",
+              "description": "Adresse bech32 `vinx1…`."
+             }
+            }
+           }
+          }
+         }
+        }
+       }
+      }
+     },
+     "400": {
+      "description": "Erreur",
+      "content": {
+       "application/json": {
+        "schema": {
+         "$ref": "#/components/schemas/Error"
+        }
+       }
+      }
+     }
+    }
+   }
+  },
+  "/transactions": {
+   "post": {
+    "tags": [
+     "Envoyer"
+    ],
+    "summary": "Envoyer une transaction",
+    "description": "Corps : `{\"tx\": \"<hex>\"}`, la transaction signée encodée en **Borsh** puis en hexadécimal. Réponse : son identifiant. Elle est refusée (`422`) si la signature, le nonce, les frais, le solde ou la réserve ne conviennent pas ; le message dit pourquoi.\n\nLe format exact (champs, ordre, préfixe de domaine signé) est dans la [spécification](https://github.com/HaitoDann/VinX-Ledger/blob/main/SPEC.md). En pratique, signez avec un outil existant : `vinx-wallet` (ligne de commande) ou le module WebAssembly du portefeuille mobile (`crates/vinx-mobile`).",
+    "requestBody": {
+     "required": true,
+     "content": {
+      "application/json": {
+       "schema": {
+        "type": "object",
+        "properties": {
+         "tx": {
+          "type": "string",
+          "example": "0e0000007669…",
+          "description": "Transaction signée, Borsh, hexadécimal."
+         }
+        }
+       }
+      }
+     }
+    },
+    "responses": {
+     "200": {
+      "description": "Acceptée dans la file d'attente",
+      "content": {
+       "application/json": {
+        "schema": {
+         "type": "object",
+         "properties": {
+          "id": {
+           "type": "string",
+           "example": "fdeb89a1a90e6541f82eae9409c8cbf4f4ef4433f9cd99ccfadec09f9804be93"
+          }
+         }
+        }
+       }
+      }
+     },
+     "400": {
+      "description": "Erreur",
+      "content": {
+       "application/json": {
+        "schema": {
+         "$ref": "#/components/schemas/Error"
+        }
+       }
+      }
+     },
+     "422": {
+      "description": "Erreur",
+      "content": {
+       "application/json": {
+        "schema": {
+         "$ref": "#/components/schemas/Error"
+        }
+       }
+      }
+     },
+     "429": {
+      "description": "Erreur",
+      "content": {
+       "application/json": {
+        "schema": {
+         "$ref": "#/components/schemas/Error"
+        }
+       }
+      }
+     }
+    }
+   }
+  }
+ },
+ "components": {
+  "schemas": {
+   "Error": {
+    "type": "object",
+    "properties": {
+     "error": {
+      "type": "string",
+      "example": "actif inconnu",
+      "description": "Message lisible, en français."
+     }
+    }
+   },
+   "Transaction": {
+    "type": "object",
+    "properties": {
+     "id": {
+      "type": "string",
+      "example": "fdeb89a1a90e6541f82eae9409c8cbf4f4ef4433f9cd99ccfadec09f9804be93",
+      "description": "Identifiant (BLAKE3, hexadécimal)."
+     },
+     "kind": {
+      "type": "string",
+      "example": "paiement en actif",
+      "description": "Nature lisible : `paiement`, `paiement groupé`, `nom`, `séquestre`, `création d'actif`, `émission d'actif`, `paiement en actif`, `actif accepté`…"
+     },
+     "sender": {
+      "type": "string",
+      "example": "vinx1z6gt9tr9v7m9vj2lt9rvrmjxc7sa2g9d0fx633",
+      "description": "Adresse bech32 `vinx1…`."
+     },
+     "nonce": {
+      "type": "integer",
+      "example": 4
+     },
+     "fee": {
+      "type": "string",
+      "example": "1000000",
+      "description": "Montant en unités, sous forme de texte (1 VINX = 1 000 000 000 unités)."
+     },
+     "to": {
+      "type": "string",
+      "example": "vinx1cdlrapuw5z6cc5j3wx9xgmutd4056aazrq6f3f",
+      "description": "Adresse bech32 `vinx1…`."
+     },
+     "amount": {
+      "type": "string",
+      "example": "12500000000",
+      "description": "Montant en VINX (unités), pour les paiements en VINX."
+     },
+     "asset": {
+      "type": "string",
+      "example": "DEMO",
+      "description": "Symbole, pour les opérations sur un actif."
+     },
+     "units": {
+      "type": "string",
+      "example": "1250",
+      "description": "Montant en unités de l'actif (diviser par 10^décimales)."
+     },
+     "memo": {
+      "type": "string",
+      "example": "FAC-1",
+      "description": "Mémo en texte, s'il est lisible."
+     },
+     "memo_hex": {
+      "type": "string",
+      "example": "4641432d31"
+     },
+     "height": {
+      "type": "integer",
+      "example": 11,
+      "description": "Bloc qui l'a finalisée."
+     },
+     "timestamp": {
+      "type": "integer",
+      "example": 1793466729038,
+      "description": "Horodatage du bloc, en millisecondes."
+     },
+     "status": {
+      "type": "string",
+      "example": "finalisée",
+      "description": "`finalisée` ou `en attente` (historique d'adresse)."
+     }
+    },
+    "description": "Transaction lisible. Les champs présents dépendent de `kind`."
+   },
+   "Asset": {
+    "type": "object",
+    "properties": {
+     "symbol": {
+      "type": "string",
+      "example": "DEMO"
+     },
+     "name": {
+      "type": "string",
+      "example": "Jeton démo"
+     },
+     "issuer": {
+      "type": "string",
+      "example": "vinx1z6gt9tr9v7m9vj2lt9rvrmjxc7sa2g9d0fx633",
+      "description": "Adresse bech32 `vinx1…`."
+     },
+     "decimals": {
+      "type": "integer",
+      "example": 2
+     },
+     "supply_units": {
+      "type": "string",
+      "example": "10000000",
+      "description": "En circulation, en unités de l'actif."
+     },
+     "max_supply_units": {
+      "type": "string",
+      "description": "Plafond, ou `null` sans plafond.",
+      "nullable": true
+     },
+     "powers": {
+      "type": "object",
+      "properties": {
+       "mint": {
+        "type": "boolean",
+        "example": true
+       },
+       "freeze": {
+        "type": "boolean",
+        "example": true
+       },
+       "clawback": {
+        "type": "boolean",
+        "example": false
+       }
+      },
+      "description": "Pouvoirs que l'émetteur détient encore. Ils ne peuvent qu'être abandonnés."
+     },
+     "frozen": {
+      "type": "boolean",
+      "example": false,
+      "description": "Tout l'actif est gelé."
+     }
+    }
+   },
+   "Block": {
+    "type": "object",
+    "properties": {
+     "height": {
+      "type": "integer",
+      "example": 11
+     },
+     "hash": {
+      "type": "string",
+      "example": "0fd0c250…"
+     },
+     "timestamp": {
+      "type": "integer",
+      "example": 1793466729038
+     },
+     "proposer": {
+      "type": "integer",
+      "example": 0
+     },
+     "round": {
+      "type": "integer",
+      "example": 0
+     },
+     "transactions": {
+      "type": "integer",
+      "example": 1
+     },
+     "admin_transactions": {
+      "type": "integer",
+      "example": 0
+     }
+    }
+   }
+  }
+ }
+}

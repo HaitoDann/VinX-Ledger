@@ -73,6 +73,7 @@ compte à créer : tes clés restent sur ton ordinateur.
 | Ouvrir un nœud public | [Nœud public](./docs/NOEUD-PUBLIC.md) |
 | Lancer le testnet 2 | [Testnet 2](./docs/TESTNET-2.md) |
 | Développer, compiler, tester | [Développeurs](./docs/DEVELOPPEURS.md), [Spécification](./SPEC.md), [Décisions d'architecture](./docs/adr/) |
+| Intégrer VinX dans une application | [API du nœud](https://vinx-ledger.vinxlabs.fr/docs) (aussi sur `/docs` de chaque nœud) |
 
 Les versions prêtes à l'emploi (Windows, macOS, Linux) sont dans les
 [Releases](../../releases).

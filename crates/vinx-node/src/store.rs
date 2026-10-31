@@ -40,6 +40,11 @@ const ADDR_INDEX: TableDefinition<(&[u8; 20], u64, u32), ()> = TableDefinition::
 const ROWS: TableDefinition<&[u8], &[u8]> = TableDefinition::new("rows");
 const ATTEST_INDEX: TableDefinition<(&[u8; 32], u64, u32), ()> =
     TableDefinition::new("attest_index");
+/// (symbole, hauteur, rang) des transactions d'actifs, pour l'historique
+/// d'un jeton. Suit l'élagage des blocs.
+const ASSET_INDEX: TableDefinition<(&str, u64, u32), ()> = TableDefinition::new("asset_index");
+/// Présent quand [`ASSET_INDEX`] couvre tous les blocs conservés.
+const ASSET_INDEX_READY: &str = "asset_index_ready";
 
 /// Preuves d'équivoque conservées au plus.
 pub const MAX_EVIDENCE: u64 = 1_000;
@@ -143,6 +148,36 @@ fn address_keys(block: &Block) -> Result<Vec<(Address, u32)>> {
     Ok(keys)
 }
 
+/// Symbole de l'actif concerné par une transaction, s'il y en a un.
+pub fn asset_symbol(t: &SignedTransaction) -> Option<&str> {
+    match t.tx.body.inner() {
+        TxBody::CreateAsset { symbol, .. }
+        | TxBody::MintAsset { symbol, .. }
+        | TxBody::BurnAsset { symbol, .. }
+        | TxBody::TransferAsset { symbol, .. }
+        | TxBody::FreezeAsset { symbol, .. }
+        | TxBody::ClawbackAsset { symbol, .. }
+        | TxBody::RenounceAssetPowers { symbol, .. }
+        | TxBody::AcceptAsset { symbol, .. }
+        | TxBody::OpenAssetDeal { symbol, .. }
+        | TxBody::GrantAssetMandate { symbol, .. }
+        | TxBody::RevokeAssetMandate { symbol, .. }
+        | TxBody::CollectAsset { symbol, .. } => Some(symbol.as_str()),
+        _ => None,
+    }
+}
+
+/// Clés de [`ASSET_INDEX`] d'un bloc.
+fn asset_keys(block: &Block) -> Result<Vec<(String, u32)>> {
+    let mut keys = Vec::new();
+    for (rank, t) in block.txs.iter().enumerate() {
+        if let Some(symbol) = asset_symbol(t) {
+            keys.push((symbol.to_owned(), u32::try_from(rank)?));
+        }
+    }
+    Ok(keys)
+}
+
 /// Clés de [`ATTEST_INDEX`] d'un bloc.
 fn attest_keys(block: &Block) -> Result<Vec<(Hash, u32)>> {
     let mut keys = Vec::new();
@@ -195,6 +230,10 @@ fn index_block(tx: &redb::WriteTransaction, block: &Block) -> Result<()> {
     for (digest, rank) in attest_keys(block)? {
         attests.insert((&digest, height, rank), ())?;
     }
+    let mut by_asset = tx.open_table(ASSET_INDEX)?;
+    for (symbol, rank) in asset_keys(block)? {
+        by_asset.insert((symbol.as_str(), height, rank), ())?;
+    }
     let mut log = tx.open_table(ADMIN_LOG)?;
     for t in &block.admin_txs {
         index.insert(&t.id(), height)?;
@@ -223,6 +262,7 @@ impl Store {
             tx.open_table(ADMIN_LOG)?;
             tx.open_table(ADDR_INDEX)?;
             tx.open_table(ATTEST_INDEX)?;
+            tx.open_table(ASSET_INDEX)?;
             tx.open_table(ROWS)?;
             let mut meta = tx.open_table(META)?;
             if meta.get(LEGACY_STATE)?.is_some() {
@@ -253,7 +293,33 @@ impl Store {
             }
         }
         tx.commit()?;
-        Ok(Self { db })
+        let store = Self { db };
+        store.backfill_asset_index()?;
+        Ok(store)
+    }
+
+    /// Indexe une fois les transactions d'actifs des blocs enregistrés avant
+    /// l'existence de [`ASSET_INDEX`] (nœuds antérieurs à la 0.22).
+    fn backfill_asset_index(&self) -> Result<()> {
+        let tx = self.db.begin_write()?;
+        {
+            let mut meta = tx.open_table(META)?;
+            if meta.get(ASSET_INDEX_READY)?.is_some() {
+                return Ok(());
+            }
+            let blocks = tx.open_table(BLOCKS)?;
+            let mut by_asset = tx.open_table(ASSET_INDEX)?;
+            for entry in blocks.iter()? {
+                let (height, bytes) = entry?;
+                let block: Block = decode(bytes.value(), "bloc")?;
+                for (symbol, rank) in asset_keys(&block)? {
+                    by_asset.insert((symbol.as_str(), height.value(), rank), ())?;
+                }
+            }
+            meta.insert(ASSET_INDEX_READY, [1u8].as_slice())?;
+        }
+        tx.commit()?;
+        Ok(())
     }
 
     fn meta<T: BorshDeserialize>(&self, key: &str) -> Result<Option<T>> {
@@ -337,6 +403,7 @@ impl Store {
         tx.delete_table(TX_INDEX)?;
         tx.delete_table(ADDR_INDEX)?;
         tx.delete_table(ATTEST_INDEX)?;
+        tx.delete_table(ASSET_INDEX)?;
         tx.open_table(BLOCKS)?
             .insert(height, encode(block).as_slice())?;
         tx.open_table(CERTS)?
@@ -387,6 +454,10 @@ impl Store {
                 let mut attests = tx.open_table(ATTEST_INDEX)?;
                 for (digest, rank) in attest_keys(&block)? {
                     attests.remove((&digest, height, rank))?;
+                }
+                let mut by_asset = tx.open_table(ASSET_INDEX)?;
+                for (symbol, rank) in asset_keys(&block)? {
+                    by_asset.remove((symbol.as_str(), height, rank))?;
                 }
                 for t in &block.admin_txs {
                     index.remove(&t.id())?;
@@ -491,6 +562,41 @@ impl Store {
             };
             if let Some(e) = entry {
                 out.push((height, block.header.timestamp, e));
+            }
+        }
+        Ok(out)
+    }
+
+    /// Dernières transactions de l'actif `symbol` encore dans les blocs
+    /// conservés, de la plus récente à la plus ancienne, strictement sous la
+    /// hauteur `before` si elle est donnée : hauteur, horodatage, transaction.
+    pub fn asset_history(
+        &self,
+        symbol: &str,
+        before: Option<u64>,
+        limit: usize,
+    ) -> Result<Vec<(u64, u64, SignedTransaction)>> {
+        let tx = self.db.begin_read()?;
+        let index = tx.open_table(ASSET_INDEX)?;
+        let blocks = tx.open_table(BLOCKS)?;
+        let end = before.map_or((u64::MAX, u32::MAX), |h| (h.saturating_sub(1), u32::MAX));
+        let mut out = Vec::new();
+        if before == Some(0) {
+            return Ok(out);
+        }
+        for entry in index
+            .range((symbol, 0, 0)..=(symbol, end.0, end.1))?
+            .rev()
+            .take(limit)
+        {
+            let (k, _) = entry?;
+            let (_, height, rank) = k.value();
+            let Some(bytes) = blocks.get(height)? else {
+                continue;
+            };
+            let block: Block = decode(bytes.value(), "bloc")?;
+            if let Some(t) = block.txs.get(usize::try_from(rank)?) {
+                out.push((height, block.header.timestamp, t.clone()));
             }
         }
         Ok(out)
@@ -715,6 +821,91 @@ mod tests {
         assert_eq!(reloaded.registry.names.len(), 19);
         assert!(reloaded.registry.names.get("nom-4").is_none());
         assert_eq!(reloaded.registry.names.get("nom-3"), Some(&record(99)));
+    }
+
+    #[test]
+    fn asset_history_is_indexed_and_backfilled() {
+        use vinx_core::{BlockHeader, Transaction, TxBody};
+        use vinx_crypto::KeyPair;
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("db");
+        let k = || KeyPair::generate().public_key();
+        let mut state = vinx_state::Genesis::standard("vinx-test", 1, [k(), k(), k()], vec![k()])
+            .unwrap()
+            .into_state()
+            .unwrap();
+        let alice = KeyPair::generate();
+        let tx = |nonce, body| {
+            Transaction {
+                chain_id: "vinx-test".into(),
+                sender: Address::from_public_key(&alice.public_key()),
+                nonce,
+                fee: 1,
+                body,
+            }
+            .sign(&alice, false)
+        };
+        let accept = |symbol: &str| TxBody::AcceptAsset {
+            symbol: symbol.into(),
+            accept: true,
+        };
+        let block = |height, txs| Block {
+            header: BlockHeader {
+                protocol_version: 6,
+                chain_id: "vinx-test".into(),
+                height,
+                timestamp: height,
+                prev_hash: [0; 32],
+                tx_root: [0; 32],
+                state_root: [0; 32],
+                validators_hash: [0; 32],
+                proposer: 0,
+            },
+            admin_txs: vec![],
+            txs,
+        };
+        let cert = CommitCertificate {
+            height: 1,
+            round: 0,
+            block_hash: [0; 32],
+            signatures: vec![],
+        };
+        let store = Store::open(&path, [1; 32]).unwrap();
+        let memo = TxBody::SetMemoRequired { required: true };
+        for h in 1..=3u64 {
+            state.height = h;
+            let txs = vec![tx(h * 2, accept("AAA")), tx(h * 2 + 1, memo.clone())];
+            store
+                .commit_block(&block(h, txs), &cert, &mut state)
+                .unwrap();
+        }
+        state.height = 4;
+        store
+            .commit_block(&block(4, vec![tx(9, accept("BBB"))]), &cert, &mut state)
+            .unwrap();
+        let heights = |s: &Store, sym, before| {
+            s.asset_history(sym, before, 10)
+                .unwrap()
+                .iter()
+                .map(|(h, _, _)| *h)
+                .collect::<Vec<_>>()
+        };
+        assert_eq!(heights(&store, "AAA", None), [3, 2, 1]);
+        assert_eq!(heights(&store, "AAA", Some(3)), [2, 1]);
+        assert_eq!(heights(&store, "AAA", Some(1)), Vec::<u64>::new());
+        assert_eq!(heights(&store, "BBB", None), [4]);
+        // Une base d'avant l'index : effacé, il est reconstruit à l'ouverture.
+        let tx_ = store.db.begin_write().unwrap();
+        tx_.delete_table(ASSET_INDEX).unwrap();
+        tx_.open_table(META)
+            .unwrap()
+            .remove(ASSET_INDEX_READY)
+            .unwrap();
+        tx_.commit().unwrap();
+        drop(store);
+        let store = Store::open(&path, [1; 32]).unwrap();
+        assert_eq!(heights(&store, "AAA", None), [3, 2, 1]);
+        assert_eq!(heights(&store, "BBB", None), [4]);
     }
 
     #[test]

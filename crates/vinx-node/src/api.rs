@@ -91,6 +91,10 @@ pub fn router_with_limit(shared: SharedRef, per_minute: u32) -> Router {
         .route("/deals/{id}", get(deal))
         .route("/assets", get(assets))
         .route("/assets/{symbol}", get(asset))
+        .route("/assets/{symbol}/holders", get(asset_holders))
+        .route("/assets/{symbol}/transactions", get(asset_history))
+        .route("/openapi.json", get(openapi))
+        .route("/docs", get(docs))
         .route("/attestations/{digest}", get(attestation))
         .route("/blocks/{height}", get(block))
         .route("/escrow", get(escrow))
@@ -844,7 +848,119 @@ async fn asset(State(shared): State<SharedRef>, Path(symbol): Path<String>) -> A
         .assets
         .get(symbol.as_str())
         .ok_or_else(|| error(StatusCode::NOT_FOUND, "actif inconnu"))?;
-    Ok(Json(asset_json(&symbol, a)))
+    let holders = st
+        .assets
+        .holdings
+        .iter()
+        .filter(|((s, _), h)| *s == symbol && h.amount > 0)
+        .count();
+    let mut v = asset_json(&symbol, a);
+    if let Some(o) = v.as_object_mut() {
+        o.insert("holders".into(), json!(holders));
+    }
+    Ok(Json(v))
+}
+
+/// Pagination par décalage.
+#[derive(Deserialize)]
+struct Page {
+    /// Nombre d'entrées, 50 par défaut, 200 au plus.
+    limit: Option<usize>,
+    /// Entrées à sauter, 0 par défaut.
+    offset: Option<usize>,
+}
+
+/// Comptes qui ont accepté l'actif, du plus gros solde au plus petit.
+async fn asset_holders(
+    State(shared): State<SharedRef>,
+    Path(symbol): Path<String>,
+    axum::extract::Query(q): axum::extract::Query<Page>,
+) -> ApiResult {
+    let symbol = symbol.trim().to_ascii_uppercase();
+    let state = view(&shared);
+    if !state.assets.assets.contains_key(symbol.as_str()) {
+        return Err(error(StatusCode::NOT_FOUND, "actif inconnu"));
+    }
+    let mut rows: Vec<_> = state
+        .assets
+        .holdings
+        .iter()
+        .filter(|((s, _), _)| *s == symbol)
+        .map(|((_, a), h)| (*a, h.clone()))
+        .collect();
+    rows.sort_by(|x, y| y.1.amount.cmp(&x.1.amount).then(x.0.cmp(&y.0)));
+    let total = rows.len();
+    let limit = q.limit.unwrap_or(50).clamp(1, 200);
+    let offset = q.offset.unwrap_or(0);
+    let holders: Vec<Value> = rows
+        .into_iter()
+        .skip(offset)
+        .take(limit)
+        .map(|(a, h)| {
+            json!({
+                "address": a.to_string(),
+                "units": amount_to_string(h.amount),
+                "frozen": h.frozen,
+            })
+        })
+        .collect();
+    Ok(Json(json!({
+        "symbol": symbol,
+        "total": total,
+        "offset": offset,
+        "holders": holders,
+    })))
+}
+
+/// Historique d'un actif dans les blocs conservés.
+async fn asset_history(
+    State(shared): State<SharedRef>,
+    Path(symbol): Path<String>,
+    axum::extract::Query(q): axum::extract::Query<Before>,
+) -> ApiResult {
+    let symbol = symbol.trim().to_ascii_uppercase();
+    let limit = q.limit.unwrap_or(20).clamp(1, 100);
+    let s = lock(&shared);
+    if !s.chain.state.assets.assets.contains_key(symbol.as_str()) {
+        return Err(error(StatusCode::NOT_FOUND, "actif inconnu"));
+    }
+    let done = s
+        .store
+        .asset_history(&symbol, q.before, limit)
+        .map_err(|e| error(StatusCode::INTERNAL_SERVER_ERROR, e))?;
+    drop(s);
+    let out: Vec<Value> = done
+        .into_iter()
+        .map(|(height, timestamp, t)| {
+            let mut v = tx_json(&t);
+            if let Some(o) = v.as_object_mut() {
+                o.insert("height".into(), json!(height));
+                o.insert("timestamp".into(), json!(timestamp));
+            }
+            v
+        })
+        .collect();
+    Ok(Json(json!({ "symbol": symbol, "transactions": out })))
+}
+
+/// Description OpenAPI 3 de l'API, avec la version du nœud.
+async fn openapi() -> axum::response::Response {
+    use axum::response::IntoResponse;
+    static SPEC: std::sync::LazyLock<String> = std::sync::LazyLock::new(|| {
+        include_str!("openapi.json").replace("__VERSION__", env!("CARGO_PKG_VERSION"))
+    });
+    (
+        [(axum::http::header::CONTENT_TYPE, "application/json")],
+        SPEC.as_str(),
+    )
+        .into_response()
+}
+
+/// Documentation lisible de l'API, construite depuis `/openapi.json`.
+async fn docs() -> axum::response::Html<&'static str> {
+    static PAGE: std::sync::LazyLock<String> =
+        std::sync::LazyLock::new(|| render_page(include_str!("docs.html")));
+    axum::response::Html(PAGE.as_str())
 }
 
 async fn deal(State(shared): State<SharedRef>, Path(id): Path<String>) -> ApiResult {
