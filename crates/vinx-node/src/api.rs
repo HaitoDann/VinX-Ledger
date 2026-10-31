@@ -830,11 +830,25 @@ fn asset_json(symbol: &str, a: &vinx_state::Asset) -> Value {
 async fn assets(State(shared): State<SharedRef>) -> ApiResult {
     let state = view(&shared);
     let st = &state;
+    // Détenteurs (solde non nul) de chaque actif, en un seul passage.
+    let mut holders: std::collections::HashMap<&str, usize> = std::collections::HashMap::new();
+    for ((symbol, _), h) in st.assets.holdings.iter() {
+        if h.amount > 0 {
+            let n = holders.entry(symbol.as_str()).or_insert(0);
+            *n = n.saturating_add(1);
+        }
+    }
     Ok(Json(json!({
         "active": st.protocol_version >= 5,
         "fee": amount_to_string(st.assets.fee),
         "assets": st.assets.assets.iter()
-            .map(|(symbol, a)| asset_json(symbol, a))
+            .map(|(symbol, a)| {
+                let mut v = asset_json(symbol, a);
+                if let Some(o) = v.as_object_mut() {
+                    o.insert("holders".into(), json!(holders.get(symbol.as_str()).copied().unwrap_or(0)));
+                }
+                v
+            })
             .collect::<Vec<_>>(),
     })))
 }

@@ -587,7 +587,7 @@
      "Jetons"
     ],
     "summary": "Tous les jetons",
-    "description": "Liste des actifs natifs et prix de création (`fee`).",
+    "description": "Liste des actifs natifs, avec leur nombre de détenteurs (`holders`, soldes non nuls), et prix de création (`fee`).",
     "parameters": [],
     "responses": {
      "200": {
