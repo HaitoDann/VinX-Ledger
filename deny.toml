@@ -1,0 +1,56 @@
+# Contrôle des dépendances (cargo-deny), exécuté par la CI à chaque PR :
+#   cargo deny check
+# - advisories : aucune faille connue (base RustSec) n'est tolérée ;
+# - licenses   : seulement des licences compatibles avec Apache-2.0 ;
+# - bans       : pas de crate interdite (doublons signalés sans bloquer) ;
+# - sources    : uniquement crates.io.
+
+[graph]
+all-features = false
+
+[advisories]
+version = 2
+# Crates non maintenues, sans faille connue, tirées par libp2p : à retirer
+# quand libp2p les remplacera. Toute autre alerte bloque la CI.
+ignore = [
+    { id = "RUSTSEC-2024-0384", reason = "instant, non maintenu, via libp2p ; aucune faille" },
+    { id = "RUSTSEC-2024-0436", reason = "paste, non maintenu, via netlink (libp2p-tcp) ; macro de compilation, aucune faille" },
+]
+
+[licenses]
+version = 2
+confidence-threshold = 0.9
+allow = [
+    "Apache-2.0",
+    "Apache-2.0 WITH LLVM-exception",
+    "MIT",
+    "MIT-0",
+    "BSD-1-Clause",
+    "BSD-2-Clause",
+    "BSD-3-Clause",
+    "BSL-1.0",
+    "ISC",
+    "Zlib",
+    "Unlicense",
+    "CC0-1.0",
+    "CDLA-Permissive-2.0",
+    "Unicode-3.0",
+    "MPL-2.0",
+    "OpenSSL",
+]
+
+# ring 0.16 (via libp2p) n'indique pas sa licence dans Cargo.toml : ISC,
+# licence d'OpenSSL et MIT, d'après son fichier LICENSE.
+[[licenses.clarify]]
+crate = "ring"
+expression = "MIT AND ISC AND OpenSSL"
+license-files = [{ path = "LICENSE", hash = 0xbd0eed23 }]
+
+[bans]
+multiple-versions = "allow"
+# Les dépendances internes du dépôt (path = "…") n'ont pas de version.
+wildcards = "allow"
+
+[sources]
+unknown-registry = "deny"
+unknown-git = "deny"

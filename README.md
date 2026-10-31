@@ -72,6 +72,7 @@ compte à créer : tes clés restent sur ton ordinateur.
 | Faire tourner un validateur | [Déployer un validateur](./docs/DEPLOYER-UN-VALIDATEUR.md), [Exploitation](./docs/EXPLOITATION.md) |
 | Ouvrir un nœud public | [Nœud public](./docs/NOEUD-PUBLIC.md) |
 | Lancer le testnet 2 | [Testnet 2](./docs/TESTNET-2.md) |
+| Vérifier qu'un binaire est authentique | [Vérifier une release](./docs/VERIFIER-UNE-RELEASE.md) |
 | Développer, compiler, tester | [Développeurs](./docs/DEVELOPPEURS.md), [Spécification](./SPEC.md), [Décisions d'architecture](./docs/adr/) |
 | Intégrer VinX dans une application | [API du nœud](https://vinx-ledger.vinxlabs.fr/docs) (aussi sur `/docs` de chaque nœud) |
 

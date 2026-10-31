@@ -20,13 +20,11 @@ pub fn submit(
 ) -> Result<String> {
     let status = client.status()?;
     let sender = from.unwrap_or_else(|| Address::from_public_key(&keypair.public_key()));
-    let Some(account) = client.account(&sender)? else {
+    // Les transactions encore en attente comptent : deux commandes rapprochées
+    // reçoivent des nonces consécutifs au lieu de se gêner.
+    let Some((nonce, has_key)) = client.next_nonce(&sender)? else {
         bail!("le compte {sender} n'existe pas encore : il doit d'abord recevoir des VINX");
     };
-    let nonce = account
-        .nonce
-        .checked_add(1)
-        .ok_or_else(|| anyhow::anyhow!("nonce épuisé"))?;
     let tx = Transaction {
         chain_id: status.chain_id,
         sender,
@@ -38,7 +36,7 @@ pub fn submit(
         body,
     };
     // La clé publique n'est jointe qu'à la première dépense du compte.
-    client.submit(&tx.sign(keypair, !account.has_key))
+    client.submit(&tx.sign(keypair, !has_key))
 }
 
 pub fn transfer(

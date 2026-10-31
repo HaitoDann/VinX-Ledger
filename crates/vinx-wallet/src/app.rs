@@ -1382,29 +1382,7 @@ fn plan_json(p: &Plan) -> Value {
 /// Prochain nonce et présence de la clé publique, en tenant compte des
 /// transactions du compte encore en attente.
 fn next_nonce(client: &Client, me: &Address) -> Result<(u64, bool)> {
-    let account = client.account(me)?.ok_or_else(|| anyhow!("compte vide"))?;
-    let history = client
-        .get_json(&format!("/accounts/{me}/transactions?limit=1"))?
-        .unwrap_or(Value::Null);
-    let me_s = me.to_string();
-    let pending: Vec<u64> = at(&history, "/transactions")
-        .as_array()
-        .map(|a| {
-            a.iter()
-                .filter(|t| at(t, "/status").as_str() == Some("en attente"))
-                .filter(|t| at(t, "/sender").as_str() == Some(me_s.as_str()))
-                .filter_map(|t| at(t, "/nonce").as_u64())
-                .collect()
-        })
-        .unwrap_or_default();
-    let last = pending
-        .iter()
-        .copied()
-        .max()
-        .unwrap_or(0)
-        .max(account.nonce);
-    let nonce = last.checked_add(1).ok_or_else(|| anyhow!("nonce épuisé"))?;
-    Ok((nonce, account.has_key || !pending.is_empty()))
+    client.next_nonce(me)?.ok_or_else(|| anyhow!("compte vide"))
 }
 
 fn execute(app: &App, op: &Operation) -> Result<Value> {
