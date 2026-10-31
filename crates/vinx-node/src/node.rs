@@ -46,6 +46,8 @@ pub struct Shared {
     pub names: BTreeMap<PublicKey, String>,
     /// Dernières transactions refusées par l'API de ce nœud, la plus récente en tête.
     pub rejects: VecDeque<Reject>,
+    /// Dernières transactions (`/transactions/recent`), calculées pour une hauteur.
+    pub recent_txs: Option<(u64, Vec<serde_json::Value>)>,
 }
 
 /// Transaction refusée à la soumission.
@@ -228,6 +230,7 @@ pub fn open(genesis: Genesis, data_dir: &Path) -> Result<SharedRef> {
         },
         names: BTreeMap::new(),
         rejects: VecDeque::new(),
+        recent_txs: None,
     }));
     {
         let mut s = lock(&shared);

@@ -143,6 +143,14 @@ nœud ne suit plus la chaîne.
 | L'envoi de transactions signées (`POST /transactions`) | Aucune clé : le nœud n'en a pas |
 | | Le port P2P : uniquement des connexions sortantes |
 
-Limite actuelle : le nœud borne le nombre de requêtes simultanées, mais pas le
-débit par visiteur. Ça convient à un testnet. Avant une ouverture large, ajoute
-une limite par adresse IP, par exemple au niveau de la box ou d'un pare-feu.
+Protections du nœud :
+
+- au plus 64 requêtes traitées en même temps ;
+- au plus **600 requêtes par minute et par visiteur** (`--rate-limit`, 0 pour
+  désactiver) ; au-delà, le nœud répond 429 « trop de requêtes ». Derrière
+  Caddy, l'adresse du visiteur est lue dans l'en-tête `X-Forwarded-For` que
+  Caddy ajoute ; un visiteur ne peut pas la falsifier ;
+- les routes qui parcourent l'état (comptes, jetons, noms…) travaillent sur une
+  copie de l'état et ne bloquent pas le consensus ;
+- la page d'accueil de l'explorateur fait 7 requêtes par rafraîchissement,
+  dont `/transactions/recent`, calculée une fois par bloc.
