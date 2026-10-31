@@ -150,7 +150,8 @@ référence pour toute nouvelle proposition.
 | **0.22** | Logiciel, lot D1 | API documentée (`/docs`, `/openapi.json`) ; détenteurs et historique d'un jeton |
 | **0.23** | Logiciel, lot I2 | Console émetteur (onglet « Émettre ») : création guidée, fiche du jeton, détenteurs, distribution en lot |
 | **0.24** | Logiciel, lot I1 | Page jeton de l'explorateur : circulation, détenteurs et répartition, pouvoirs expliqués, historique |
-| Ensuite | Logiciel, lots I3, I4 | Parcours jeton du portefeuille, cockpit |
+| **0.25** | Logiciel, lot I3 | Parcours du détenteur : découvrir et accepter un jeton, cartes de jetons, réserve expliquée, demandes de paiement en jeton (bureau et mobile) |
+| Ensuite | Logiciel, lot I4 | Cockpit |
 | Protocole 5 | Règles | Jetons et titres, réserve par objet |
 | Protocole 7 | Règles | Canaux de paiement |
 | En parallèle | Hors chaîne | Pilote VinX Ping (premier subnet), conception des subnets |
@@ -165,7 +166,10 @@ vinx:DESTINATAIRE?amount=12.5&memo=FAC-42&label=Pizza+de+vendredi
 ```
 
 - `DESTINATAIRE` : une adresse `vinx1…` ou un nom `.vinx`.
-- `amount` : en VINX, point décimal, 9 décimales au plus (facultatif).
+- `amount` : point décimal, 9 décimales au plus en VINX, ou les décimales du
+  jeton (facultatif).
+- `asset` : le symbole d'un jeton, pour une demande en jeton (facultatif ; sans
+  lui, la demande est en VINX). Le payeur doit avoir accepté ce jeton.
 - `memo` : la référence, recopiée dans le mémo du paiement (facultatif).
 - `label` : le motif affiché au payeur, jamais envoyé sur la chaîne (facultatif).
 

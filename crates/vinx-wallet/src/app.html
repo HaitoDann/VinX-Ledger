@@ -42,6 +42,17 @@ textarea { width: 100%; min-height: 90px; padding: 8px 10px; border-radius: 3px;
 .in { color: var(--ok); } .out { color: var(--text); }
 .check { display: flex; gap: 8px; align-items: flex-start; text-transform: none; letter-spacing: 0; font-size: 13px; color: var(--text); }
 .check input { width: auto; margin-top: 3px; }
+/* Jetons détenus */
+.token-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(min(100%, 280px), 1fr)); gap: 14px; margin-top: 6px; }
+.token { border: 1px solid var(--line); border-radius: 12px; padding: 14px; background: var(--panel); display: grid; gap: 8px; }
+.token .top { display: flex; gap: 10px; align-items: center; }
+.token .badge { width: 36px; height: 36px; flex: none; border-radius: 50%; display: grid; place-items: center; font-weight: 700; font-size: 13px; background: var(--accent-soft); color: var(--accent); }
+.token .amount { font-size: 22px; font-weight: 600; font-variant-numeric: tabular-nums; }
+.token .amount small { font-size: 12px; color: var(--muted); font-weight: 500; margin-left: 4px; }
+.token .acts { display: flex; gap: 6px; flex-wrap: wrap; }
+.token .acts button { padding: 5px 10px; font-size: 12px; }
+.chips { display: flex; gap: 4px; flex-wrap: wrap; }
+#catalogQ { width: min(100%, 260px); }
 /* Console émetteur */
 .issue-list { display: grid; grid-template-columns: repeat(auto-fill, minmax(min(100%, 260px), 1fr)); gap: 14px; }
 .issue-list .tile { cursor: pointer; transition: border-color .15s; }
@@ -230,16 +241,17 @@ header select { width: auto; min-width: 180px; }
     <h2>Demander un paiement</h2>
     <p class="sub">Crée un lien et un QR code avec le montant et la référence : la personne qui paie n'a rien à recopier.</p>
     <div class="row">
-      <div><label for="reqAmount">Montant (VINX, facultatif)</label><input id="reqAmount" inputmode="decimal" placeholder="12.5"></div>
-      <div><label for="reqMemo">Référence (mémo)</label><input id="reqMemo" placeholder="facture 42"></div>
+      <div><label for="reqAmount">Montant (facultatif)</label><input id="reqAmount" inputmode="decimal" placeholder="12.5"></div>
+      <div><label for="reqCur">Monnaie</label><select id="reqCur" data-currency></select></div>
     </div>
+    <label for="reqMemo">Référence (mémo)</label><input id="reqMemo" placeholder="facture 42">
     <label for="reqLabel">Motif affiché au payeur (facultatif)</label><input id="reqLabel" placeholder="Pizza de vendredi">
     <div class="actions"><button class="primary" id="reqBtn">Créer la demande</button></div>
     <div class="qr" id="reqOut" hidden>
       <div id="reqQr"></div>
       <div class="link"><label>Lien à envoyer</label><div class="address" id="reqLink"></div>
         <div class="actions"><button id="copyReq">Copier le lien</button></div>
-        <p class="note muted">Le payeur le colle dans l'onglet Envoyer de son portefeuille. Sur téléphone, il scannera le QR (prochaine version).</p></div>
+        <p class="note muted">Le payeur le colle dans l'onglet Envoyer de son portefeuille, ou scanne le QR avec le portefeuille mobile. Pour un jeton, il doit l'avoir accepté.</p></div>
     </div>
   </div>
 </main>
@@ -335,28 +347,32 @@ header select { width: auto; min-width: 180px; }
   <div class="card">
     <h2>Mes jetons</h2>
     <p class="sub">Jetons émis sur VinX Ledger par ses utilisateurs : points, bons, monnaies. On ne reçoit un jeton qu'après l'avoir accepté. Les frais restent payés en VINX.</p>
-    <div class="scroll" id="holdingsTable"></div>
+    <div class="token-grid" id="holdingsCards"></div>
+    <p class="note muted" id="assetReserve"></p>
   </div>
-  <div class="card narrow">
-    <h2>Envoyer un jeton</h2>
-    <div class="row">
-      <div><label for="assetSendSymbol">Jeton</label><select id="assetSendSymbol"></select></div>
-      <div><label for="assetSendAmount">Montant</label><input id="assetSendAmount" inputmode="decimal"></div>
+  <div class="grid2">
+    <div class="card" id="assetSendCard">
+      <h2>Envoyer un jeton</h2>
+      <div class="row">
+        <div><label for="assetSendSymbol">Jeton</label><select id="assetSendSymbol"></select></div>
+        <div><label for="assetSendAmount">Montant</label><input id="assetSendAmount" inputmode="decimal"></div>
+      </div>
+      <p class="sub" id="assetSendHave"></p>
+      <label for="assetSendTo">Destinataire</label><input id="assetSendTo" class="mono" placeholder="vinx1…, contact ou nom.vinx" list="contactList" autocomplete="off">
+      <label for="assetSendMemo">Mémo (facultatif)</label><input id="assetSendMemo" maxlength="32">
+      <div class="actions"><button class="primary" id="assetSendBtn">Vérifier avant d'envoyer</button></div>
     </div>
-    <label for="assetSendTo">Destinataire</label><input id="assetSendTo" class="mono" placeholder="vinx1…, contact ou nom.vinx" list="contactList" autocomplete="off">
-    <label for="assetSendMemo">Mémo (facultatif)</label><input id="assetSendMemo" maxlength="32">
-    <div class="actions"><button class="primary" id="assetSendBtn">Vérifier avant d'envoyer</button></div>
+    <div class="card">
+      <h2>Lancer ou gérer un jeton</h2>
+      <p class="sub">Création guidée, émission, distribution en lot, détenteurs et pouvoirs : tout est dans la console émetteur.</p>
+      <div class="actions"><button class="primary" data-go="issue">Ouvrir la console émetteur</button></div>
+    </div>
   </div>
-  <div class="card narrow">
-    <h2>Accepter un jeton</h2>
-    <p class="sub">Indique son symbole : l'aperçu montre son émetteur et ses pouvoirs avant que tu confirmes.</p>
-    <label for="acceptSymbol">Symbole</label><input id="acceptSymbol" class="mono" placeholder="EURV" autocomplete="off">
-    <div class="actions"><button class="primary" id="acceptBtn">Vérifier avant d'accepter</button></div>
-  </div>
-  <div class="card narrow">
-    <h2>Lancer ou gérer un jeton</h2>
-    <p class="sub">Création guidée, émission, distribution en lot, détenteurs et pouvoirs : tout est dans la console émetteur.</p>
-    <div class="actions"><button class="primary" data-go="issue">Ouvrir la console émetteur</button></div>
+  <div class="card">
+    <div class="issue-head"><h2>Découvrir des jetons</h2>
+      <div class="actions"><input id="catalogQ" placeholder="Rechercher un symbole ou un nom" autocomplete="off" spellcheck="false" aria-label="Rechercher un jeton"></div></div>
+    <p class="sub">Tous les jetons du réseau. Avant d'accepter, regarde ce que l'émetteur peut faire : les jetons sans pouvoir de gel ni de reprise ne peuvent jamais être bloqués sur ton compte.</p>
+    <div class="scroll" id="catalogList"></div>
   </div>
 </main>
 
@@ -718,7 +734,9 @@ async function refresh() {
   $("balance").textContent = vinx(data.balance);
   $("homeLabel").textContent = "Solde · " + data.label;
   const names = (data.names || []).map((n) => n.name);
-  $("homeNames").innerHTML = names.length ? "Mes noms : " + names.map((n) => `<b>${esc(n)}</b>`).join(", ") : "";
+  const held = (data.assets || []).filter((x) => x.units !== "0");
+  $("homeNames").innerHTML = [names.length ? "Mes noms : " + names.map((n) => `<b>${esc(n)}</b>`).join(", ") : "",
+    held.length ? "Mes jetons : " + held.map((x) => `<b>${units(x.units, x.decimals)} ${esc(x.symbol)}</b>`).join(" · ") : ""].filter(Boolean).join("<br>");
   $("myAddress").textContent = data.address;
   $("receiveNames").innerHTML = names.length ? `On peut aussi te payer avec : ${names.map((n) => `<b class="mono">${esc(n)}</b>`).join(", ")}` : `Astuce : réserve un nom .vinx pour qu'on te paie sans recopier l'adresse.`;
   $("reserveNote").textContent = data.exists ? "" : `Ce compte n'existe pas encore sur le réseau : le premier versement doit être d'au moins ${vinx(data.network.min_reserve)} VINX.`;
@@ -890,11 +908,44 @@ const powersOf = (p) => [p.mint && "émission", p.freeze && "gel", p.clawback &&
 const num = (v) => String(v || "").trim().replace(",", ".");
 function renderAssets() {
   const h = data.assets || [], issued = data.issued || [];
-  $("holdingsTable").innerHTML = h.length ? `<table><thead><tr><th>Jeton</th><th style="text-align:right">Solde</th><th></th></tr></thead><tbody>${h.map((x) =>
-    `<tr><td><b class="mono">${esc(x.symbol)}</b><div class="sub">${esc(x.name || "")}</div></td>
-     <td style="text-align:right">${units(x.units, x.decimals)}${x.frozen ? ` <span class="pill warn">gelé</span>` : ""}</td>
-     <td>${x.units === "0" ? `<button data-leave="${esc(x.symbol)}">Retirer</button>` : `<button data-burn="${esc(x.symbol)}">Détruire</button>`}</td></tr>`).join("")}</tbody></table>`
-    : `<p class="muted">Aucun jeton accepté sur ce compte.</p>`;
+  const catalog = Object.fromEntries((data.catalog || []).map((a) => [a.symbol, a]));
+  const chips = (p) => p ? [p.freeze && '<span class="pill warn">gel possible</span>', p.clawback && '<span class="pill warn">reprise possible</span>',
+    p.mint && '<span class="pill">émission ouverte</span>', !p.mint && !p.freeze && !p.clawback && '<span class="pill ok">règles figées</span>'].filter(Boolean).join("") : "";
+  const explorer = (sym) => `${String(state?.node || "").replace(/\/+$/, "")}/explorer#/jeton/${encodeURIComponent(sym)}`;
+  $("holdingsCards").innerHTML = h.length ? h.map((x) => {
+    const a = catalog[x.symbol];
+    return `<div class="token"><div class="top"><div class="badge">${esc(x.symbol.slice(0, 2))}</div>
+        <div style="min-width:0"><b class="mono">${esc(x.symbol)}</b><div class="sub">${esc(x.name || a?.name || "")}</div></div></div>
+      <div class="amount">${units(x.units, x.decimals)}<small>${esc(x.symbol)}</small>${x.frozen ? ' <span class="pill bad">gelé sur ce compte</span>' : ""}${a?.frozen ? ' <span class="pill bad">jeton gelé</span>' : ""}</div>
+      <div class="chips">${chips(a?.powers)}</div>
+      <div class="acts">${x.units !== "0" && !x.frozen ? `<button class="primary" data-asend="${esc(x.symbol)}">Envoyer</button>` : ""}
+        <button data-areq="${esc(x.symbol)}">Recevoir</button>
+        <button data-fiche="${esc(explorer(x.symbol))}" title="Page publique du jeton dans l'explorateur">Fiche ↗</button>
+        ${x.units === "0" ? `<button data-leave="${esc(x.symbol)}">Retirer</button>` : `<button data-burn="${esc(x.symbol)}">Détruire</button>`}</div></div>`;
+  }).join("") : `<p class="muted">Aucun jeton accepté sur ce compte. Choisis-en un dans « Découvrir des jetons » ci-dessous.</p>`;
+  const per = BigInt(data.network.object_reserve || "0");
+  $("assetReserve").innerHTML = data.network.protocol_version >= 6 && per > 0n
+    ? `Chaque jeton accepté immobilise <b>${vinx(data.network.object_reserve)} VINX</b>, rendus quand tu le retires. Ce compte immobilise ${vinx(data.reserve || "0")} VINX pour ${data.objects ?? 0} objet(s) (jetons, mandats, règles) ; disponible : <b>${vinx(data.spendable ?? data.balance)} VINX</b>.`
+    : "";
+  const q = $("catalogQ").value.trim().toUpperCase();
+  const mine = new Set(h.map((x) => x.symbol));
+  const list = (data.catalog || []).filter((a) => !q || a.symbol.includes(q) || String(a.name).toUpperCase().includes(q))
+    .sort((p, r) => (r.holders ?? 0) - (p.holders ?? 0));
+  $("catalogList").innerHTML = list.length ? `<table><thead><tr><th>Jeton</th><th style="text-align:right">En circulation</th><th style="text-align:right">Détenteurs</th><th>Ce que l'émetteur peut faire</th><th></th></tr></thead><tbody>${list.map((a) =>
+    `<tr><td><b class="mono">${esc(a.symbol)}</b><div class="sub">${esc(a.name)}</div></td>
+      <td style="text-align:right" class="nowrap">${units(a.supply_units, a.decimals)}</td><td style="text-align:right">${a.holders ?? "—"}</td>
+      <td><div class="chips">${chips(a.powers)}${a.frozen ? '<span class="pill bad">gelé</span>' : ""}</div></td>
+      <td class="nowrap">${mine.has(a.symbol) ? '<span class="pill ok">accepté</span>' : a.issuer === data.address ? '<span class="sub">ton jeton</span>' : `<button class="primary" data-accept="${esc(a.symbol)}">Accepter</button>`}
+        <a href="${esc(explorer(a.symbol))}" target="_blank" rel="noopener" class="sub">fiche ↗</a></td></tr>`).join("")}</tbody></table>`
+    : `<p class="muted">${q ? "Aucun jeton ne correspond." : "Aucun jeton sur ce réseau pour l'instant."}</p>`;
+  document.querySelectorAll("[data-fiche]").forEach((b) => b.onclick = () => window.open(b.dataset.fiche, "_blank", "noopener"));
+  document.querySelectorAll("[data-accept]").forEach((b) => b.onclick = () => operate({ action: "accept-asset", symbol: b.dataset.accept }, `Accepter ${b.dataset.accept}`));
+  document.querySelectorAll("[data-asend]").forEach((b) => b.onclick = () => {
+    $("assetSendSymbol").value = b.dataset.asend; updateHave(); $("assetSendCard").scrollIntoView({ behavior: "smooth" }); $("assetSendAmount").focus();
+  });
+  document.querySelectorAll("[data-areq]").forEach((b) => b.onclick = () => {
+    show("receive"); $("reqCur").value = b.dataset.areq; $("reqAmount").focus();
+  });
   document.querySelectorAll("[data-currency]").forEach((c) => {
     const k = c.value;
     c.innerHTML = `<option value="">VINX</option>` + h.map((x) => `<option value="${esc(x.symbol)}">${esc(x.symbol)}</option>`).join("");
@@ -903,6 +954,7 @@ function renderAssets() {
   const sel = $("assetSendSymbol"), keep = sel.value;
   sel.innerHTML = h.map((x) => `<option value="${esc(x.symbol)}">${esc(x.symbol)}</option>`).join("");
   if (keep) sel.value = keep;
+  updateHave();
   const each = (attr, f) => document.querySelectorAll(`[data-${attr}]`).forEach((b) => b.onclick = () => f(b.dataset[attr]));
   each("leave", (symbol) => operate({ action: "leave-asset", symbol }, `Retirer ${symbol}`));
   each("burn", async (symbol) => {
@@ -914,8 +966,12 @@ function renderAssets() {
 $("assetSendBtn").onclick = () => operate(
   { action: "send-asset", symbol: $("assetSendSymbol").value, to: $("assetSendTo").value, amount: num($("assetSendAmount").value), memo: $("assetSendMemo").value },
   "Envoyer un jeton", () => { $("assetSendTo").value = $("assetSendAmount").value = $("assetSendMemo").value = ""; });
-$("acceptBtn").onclick = () => operate({ action: "accept-asset", symbol: $("acceptSymbol").value }, "Accepter un jeton",
-  () => { $("acceptSymbol").value = ""; });
+function updateHave() {
+  const x = (data?.assets || []).find((y) => y.symbol === $("assetSendSymbol").value);
+  $("assetSendHave").textContent = x ? `Disponible : ${units(x.units, x.decimals)} ${x.symbol}${x.frozen ? " (gelé)" : ""}` : "";
+}
+$("assetSendSymbol").onchange = updateHave;
+$("catalogQ").oninput = () => { if (data) renderAssets(); };
 /* ----- Console émetteur ----- */
 /* Petite fenêtre de saisie : renvoie { id: valeur } ou null si annulée. */
 async function ask(title, fields, ok = "Continuer") {
@@ -1208,8 +1264,10 @@ $("reqBtn").onclick = async () => {
   if (!data) return;
   const q = new URLSearchParams();
   const amount = $("reqAmount").value.trim().replace(",", ".");
-  if (amount && !/^\d+(\.\d{1,9})?$/.test(amount)) return toast("Montant invalide (exemple : 12.5).", true);
+  const dec = $("reqCur").value ? ((data.assets || []).find((x) => x.symbol === $("reqCur").value)?.decimals ?? 0) : 9;
+  if (amount && !new RegExp(`^\\d+${dec ? `(\\.\\d{1,${dec}})?` : ""}$`).test(amount)) return toast(`Montant invalide : ${dec} décimale(s) au plus.`, true);
   if (amount) q.set("amount", amount);
+  if ($("reqCur").value) q.set("asset", $("reqCur").value);
   if ($("reqMemo").value.trim()) q.set("memo", $("reqMemo").value.trim());
   if ($("reqLabel").value.trim()) q.set("label", $("reqLabel").value.trim());
   const link = "vinx:" + data.address + (q.toString() ? "?" + q.toString() : "");
@@ -1226,13 +1284,25 @@ function parseRequest(text) {
   const m = /^vinx:([^?\s]+)(?:\?(\S*))?$/i.exec(text.trim());
   if (!m) return null;
   const q = new URLSearchParams(m[2] || "");
-  return { to: decodeURIComponent(m[1]), amount: q.get("amount") || "", memo: q.get("memo") || "", label: q.get("label") || "" };
+  return { to: decodeURIComponent(m[1]), amount: q.get("amount") || "", memo: q.get("memo") || "", label: q.get("label") || "", asset: (q.get("asset") || "").toUpperCase() };
 }
 $("sendLink").addEventListener("input", () => {
   const v = $("sendLink").value.trim();
   if (!v) { $("linkFound").textContent = ""; return; }
   const r = parseRequest(v);
   if (!r) { $("linkFound").innerHTML = `<span class="warn">Ce n'est pas un lien vinx: valide.</span>`; return; }
+  if (r.asset) {
+    // Demande en jeton : l'envoi se fait depuis l'onglet Jetons.
+    if (!(data?.assets || []).some((x) => x.symbol === r.asset)) {
+      $("linkFound").innerHTML = `<span class="warn">Cette demande est en ${esc(r.asset)}, que ce compte n'a pas accepté : accepte-le d'abord (onglet Jetons, « Découvrir des jetons »).</span>`;
+      return;
+    }
+    $("assetSendSymbol").value = r.asset; $("assetSendTo").value = r.to; $("assetSendAmount").value = r.amount; $("assetSendMemo").value = r.memo;
+    $("sendLink").value = ""; $("linkFound").textContent = "";
+    show("assets"); $("assetSendCard").scrollIntoView({ behavior: "smooth" });
+    toast(`Demande de paiement en ${r.asset} lue${r.label ? ` : « ${r.label} »` : ""}. Vérifie les champs avant d'envoyer.`);
+    return;
+  }
   $("sendTo").value = r.to; $("sendAmount").value = r.amount; $("sendMemo").value = r.memo;
   $("linkFound").innerHTML = `<span class="ok">✓ Demande lue${r.label ? ` : « ${esc(r.label)} »` : ""}.</span> Vérifie les champs ci-dessous.`;
   lookupLater("sendTo", "sendFound");
