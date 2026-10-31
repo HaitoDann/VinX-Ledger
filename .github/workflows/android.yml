@@ -7,9 +7,13 @@ name: Android
 # - depuis release.yml, pour une version publiée ;
 # - à la demande (onglet Actions → Android → Run workflow).
 #
-# L'APK est signée avec une clé de débogage, différente à chaque compilation :
-# pour passer d'une version à l'autre, désinstaller puis réinstaller, et
-# restaurer le portefeuille avec ses 12 mots.
+# Signature : si les secrets ANDROID_KEYSTORE_B64, ANDROID_KEYSTORE_PASSWORD et
+# ANDROID_KEY_ALIAS sont configurés (Settings → Secrets and variables →
+# Actions), l'APK est compilée en version « release » et signée avec cette clé
+# fixe : une version s'installe alors par-dessus la précédente. Sans eux, elle
+# est signée avec une clé de débogage différente à chaque compilation (il faut
+# désinstaller, réinstaller et restaurer le portefeuille avec ses 12 mots).
+# Créer la clé : docs/VERIFIER-UNE-RELEASE.md, section « Clé de l'APK ».
 
 on:
   pull_request:
@@ -20,6 +24,13 @@ on:
       - ".github/workflows/android.yml"
   workflow_dispatch:
   workflow_call:
+    secrets:
+      ANDROID_KEYSTORE_B64:
+        required: false
+      ANDROID_KEYSTORE_PASSWORD:
+        required: false
+      ANDROID_KEY_ALIAS:
+        required: false
 
 env:
   CARGO_TERM_COLOR: always
@@ -56,15 +67,32 @@ jobs:
           echo "VERSION=$v" >>"$GITHUB_ENV"
       - name: Projet Android
         run: crates/vinx-mobile/capacitor/prepare.sh "$VERSION"
-      - name: Compilation de l'APK
+      - name: Compilation et signature de l'APK
         working-directory: crates/vinx-mobile/capacitor/android
-        run: ./gradlew --no-daemon assembleDebug
-      - name: Renomme l'APK
+        env:
+          KEYSTORE_B64: ${{ secrets.ANDROID_KEYSTORE_B64 }}
+          KEYSTORE_PASSWORD: ${{ secrets.ANDROID_KEYSTORE_PASSWORD }}
+          KEY_ALIAS: ${{ secrets.ANDROID_KEY_ALIAS }}
         run: |
-          mkdir dist
-          cp crates/vinx-mobile/capacitor/android/app/build/outputs/apk/debug/app-debug.apk \
-            "dist/vinx-$VERSION-android.apk"
-          ls -la dist
+          mkdir -p "$GITHUB_WORKSPACE/dist"
+          out="$GITHUB_WORKSPACE/dist/vinx-$VERSION-android.apk"
+          if [ -n "$KEYSTORE_B64" ] && [ -n "$KEYSTORE_PASSWORD" ] && [ -n "$KEY_ALIAS" ]; then
+            ./gradlew --no-daemon assembleRelease
+            tools="$ANDROID_HOME/build-tools/$(ls "$ANDROID_HOME/build-tools" | sort -V | tail -1)"
+            ks="$RUNNER_TEMP/vinx.keystore"
+            echo "$KEYSTORE_B64" | base64 -d >"$ks"
+            "$tools/zipalign" -f -p 4 app/build/outputs/apk/release/app-release-unsigned.apk "$RUNNER_TEMP/aligned.apk"
+            "$tools/apksigner" sign --ks "$ks" --ks-pass env:KEYSTORE_PASSWORD \
+              --ks-key-alias "$KEY_ALIAS" --out "$out" "$RUNNER_TEMP/aligned.apk"
+            rm -f "$ks"
+            "$tools/apksigner" verify --print-certs "$out" | grep -E "SHA-256|DN"
+            echo "APK signée avec la clé fixe du projet."
+          else
+            ./gradlew --no-daemon assembleDebug
+            cp app/build/outputs/apk/debug/app-debug.apk "$out"
+            echo "::warning::Clé de signature absente : APK signée avec une clé de débogage (voir docs/VERIFIER-UNE-RELEASE.md)."
+          fi
+          ls -la "$GITHUB_WORKSPACE/dist"
       - uses: actions/upload-artifact@v4
         with:
           name: android

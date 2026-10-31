@@ -8,6 +8,9 @@ name: Release
 #   vinx-X.Y.Z-macos-arm64.tar.gz     vinx-node (genèse, clés), guides
 #   vinx-X.Y.Z-android.apk           portefeuille mobile (android.yml)
 #   SHA256SUMS
+# Chaque fichier reçoit une attestation de provenance GitHub (Sigstore) : elle
+# prouve qu'il a été compilé par ce workflow, depuis ce dépôt et cette
+# étiquette. Vérification : docs/VERIFIER-UNE-RELEASE.md.
 # Voir docs/DEPLOYER-UN-VALIDATEUR.md.
 on:
   push:
@@ -118,11 +121,17 @@ jobs:
     name: Android
     needs: version
     uses: ./.github/workflows/android.yml
+    # Clé de signature fixe de l'APK, si elle est configurée (voir android.yml).
+    secrets: inherit
 
   publish:
     name: Publication
     needs: [version, linux, poste, android]
     runs-on: ubuntu-22.04
+    permissions:
+      contents: write
+      id-token: write
+      attestations: write
     env:
       VERSION: ${{ needs.version.outputs.version }}
       GH_TOKEN: ${{ github.token }}
@@ -131,15 +140,23 @@ jobs:
         with:
           path: dist
           merge-multiple: true
+      - name: Sommes de contrôle
+        working-directory: dist
+        run: sha256sum vinx-* >SHA256SUMS
+      - name: Attestation de provenance
+        uses: actions/attest-build-provenance@v2
+        with:
+          subject-path: |
+            dist/vinx-*
+            dist/SHA256SUMS
       - name: Publie la release
         working-directory: dist
         # La release peut déjà exister si elle a été créée depuis l'interface
         # GitHub : on y ajoute alors les fichiers.
         run: |
-          sha256sum vinx-* >SHA256SUMS
           if ! gh release view "$GITHUB_REF_NAME" --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1; then
             gh release create "$GITHUB_REF_NAME" --repo "$GITHUB_REPOSITORY" \
               --title "VinX Ledger $VERSION" \
-              --notes "Installation et mise à jour : DEPLOYER-UN-VALIDATEUR.md, inclus dans les archives."
+              --notes "Installation et mise à jour : DEPLOYER-UN-VALIDATEUR.md, inclus dans les archives. Vérifier l'authenticité des fichiers : docs/VERIFIER-UNE-RELEASE.md."
           fi
           gh release upload "$GITHUB_REF_NAME" --repo "$GITHUB_REPOSITORY" --clobber vinx-* SHA256SUMS

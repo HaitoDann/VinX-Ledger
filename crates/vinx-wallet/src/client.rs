@@ -135,6 +135,33 @@ impl Client {
         amount(&v, "recommended_fee")
     }
 
+    /// Prochain nonce d'une adresse et présence de sa clé publique, en tenant
+    /// compte de ses transactions encore en attente : plusieurs envois
+    /// rapprochés reçoivent des nonces consécutifs. `None` : compte inexistant.
+    pub fn next_nonce(&self, address: &Address) -> Result<Option<(u64, bool)>> {
+        let Some(account) = self.account(address)? else {
+            return Ok(None);
+        };
+        let history = self
+            .get_json(&format!("/accounts/{address}/transactions?limit=1"))?
+            .unwrap_or(Value::Null);
+        let me = address.to_string();
+        let pending = history
+            .pointer("/transactions")
+            .and_then(Value::as_array)
+            .map(|a| {
+                a.iter()
+                    .filter(|t| t.pointer("/status").and_then(Value::as_str) == Some("en attente"))
+                    .filter(|t| t.pointer("/sender").and_then(Value::as_str) == Some(me.as_str()))
+                    .filter_map(|t| t.pointer("/nonce").and_then(Value::as_u64))
+                    .max()
+            })
+            .unwrap_or_default();
+        let last = pending.unwrap_or(0).max(account.nonce);
+        let nonce = last.checked_add(1).ok_or_else(|| anyhow!("nonce épuisé"))?;
+        Ok(Some((nonce, account.has_key || pending.is_some())))
+    }
+
     pub fn account(&self, address: &Address) -> Result<Option<AccountInfo>> {
         let Some(v) = self.request("GET", &format!("/accounts/{address}"), None)? else {
             return Ok(None);

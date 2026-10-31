@@ -47,6 +47,9 @@ tar xzf vinx-$V-linux-x86_64.tar.gz && mv vinx-$V-linux-x86_64 vinx
 install vinx/vinx-node vinx/vinx-wallet /usr/local/bin/
 ```
 
+Pour prouver que l'archive vient bien du dépôt (attestation de provenance,
+depuis la 0.27) : [`VERIFIER-UNE-RELEASE.md`](./VERIFIER-UNE-RELEASE.md).
+
 🖥️ **Sur le poste Windows** : télécharge le `.zip` depuis la page de la
 release, décompresse-le (par exemple dans `C:\vinx`) et ouvre PowerShell dans
 ce dossier. Les commandes s'écrivent `.\vinx-wallet.exe …` et le mot de passe
