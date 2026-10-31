@@ -9,7 +9,7 @@
 import init, { phrase, seed, account_address, sign, to_units, valid_address, qr_svg, scan_qr }
   from "./pkg/vinx_mobile.js";
 
-const VERSION = "0.20.1";
+const VERSION = "0.21.0";
 const VAULT = "vinx.vault";
 const DEFAULT_NODE = "https://vinx-ledger.vinxlabs.fr";
 const PBKDF2_ROUNDS = 600000;
@@ -230,6 +230,9 @@ async function send() {
   }
   if (total > balance) throw new Error(`solde insuffisant : il faut ${fmt(total)} VINX frais compris`);
   const after = balance - total;
+  // Protocole 6 : réserve du compte et de ses objets (jetons acceptés, mandats, règles).
+  const locked = BigInt(account.reserve || "0");
+  if (locked > 0n && after < locked) throw new Error(`il doit rester au moins ${fmt(locked)} VINX : réserve de ce compte et de ses ${account.objects} objet(s)`);
   if (after !== 0n && after < reserve) throw new Error(`il doit rester au moins ${fmt(reserve)} VINX sur le compte, ou rien du tout`);
   const ok = await dialog("Confirmer l'envoi", `<dl>
     <dt>À</dt><dd class="mono">${esc(to)}</dd><dt>Trouvé par</dt><dd>${esc(how)}</dd>
@@ -259,6 +262,12 @@ async function accept() {
   const [fees, status, { nonce, includeKey, account }] = await Promise.all([get("/fees"), get("/status"), nextNonce(from)]);
   if ((account.assets || []).some((t) => t.symbol === symbol)) throw new Error(`ce compte a déjà accepté ${symbol}`);
   const fee = BigInt(fees.recommended_fee);
+  const per = status.protocol_version >= 6 ? BigInt(status.params.object_reserve || "0") : 0n;
+  if (per > 0n) {
+    const objects = BigInt(account.objects || 0) + 1n;
+    const need = per * objects + BigInt(status.params.min_reserve);
+    if (BigInt(account.balance) - fee < need) throw new Error(`accepter un jeton immobilise ${fmt(per)} VINX : il faut garder ${fmt(need)} VINX sur ce compte`);
+  }
   const p = asset.powers;
   const powers = [p.mint && "émettre de nouvelles unités", p.freeze && "geler ton solde", p.clawback && "reprendre des unités sur ton compte"].filter(Boolean);
   const ok = await dialog(`Accepter ${symbol}`, `<dl>

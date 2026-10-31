@@ -14,7 +14,7 @@ use vinx_crypto::{Address, PublicKey};
 pub const LEGACY_GENESIS_TREASURY: Amount = 100_000_000 * UNITS_PER_VINX;
 
 /// Version du protocole d'une genèse standard.
-pub const GENESIS_PROTOCOL: u32 = 5;
+pub const GENESIS_PROTOCOL: u32 = 6;
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Genesis {
@@ -160,6 +160,7 @@ impl Genesis {
             policies: Default::default(),
             mandates: Default::default(),
             assets: Default::default(),
+            reserves: Default::default(),
             emission: Emission {
                 start: self.genesis_time,
                 budget: self.emission_budget,

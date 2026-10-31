@@ -12,6 +12,7 @@ use crate::policy::{Policies, Policy, PolicyError};
 use crate::registry::{
     Deal, MAX_DEAL_DURATION, NAME_GRACE, NAME_PERIOD, NameRecord, Registry, valid_name,
 };
+use crate::reserve::{Owned, Reserves};
 use crate::table::{Row, Table};
 use crate::validators::{ValidatorChange, ValidatorError, ValidatorSet, validators_hash};
 use borsh::{BorshDeserialize, BorshSerialize};
@@ -26,7 +27,7 @@ use vinx_crypto::{Address, Domain, Hash, PublicKey, hash_tagged_parts, merkle_ro
 
 /// Dernière version du protocole que ce code sait exécuter. Un nœud plus
 /// ancien qu'une mise à jour activée s'arrête au lieu de diverger.
-pub const SUPPORTED_PROTOCOL: u32 = 5;
+pub const SUPPORTED_PROTOCOL: u32 = 6;
 
 #[derive(Clone, Debug, PartialEq, Eq, BorshSerialize, BorshDeserialize)]
 pub struct AdminSet {
@@ -64,12 +65,18 @@ pub struct State {
     pub mandates: Mandates,
     /// Actifs natifs et soldes (protocole 5).
     pub assets: Assets,
+    /// Réserve par objet (protocole 6).
+    pub reserves: Reserves,
 }
 
 #[derive(Debug, Error, PartialEq, Eq)]
 pub enum TxError {
     #[error("{0}")]
     Asset(AssetError),
+    #[error(
+        "solde insuffisant pour la réserve des objets du compte (jetons acceptés, mandats, règles)"
+    )]
+    ObjectReserve,
     #[error(
         "type de transaction pas encore actif sur ce réseau (mise à jour du protocole requise)"
     )]
@@ -227,6 +234,46 @@ struct Globals {
     policies: Policies,
     mandates: Mandates,
     assets: Assets,
+    reserves: Reserves,
+}
+
+/// [`Globals`] des versions 0.15 à 0.20, sans réserve par objet.
+#[derive(BorshDeserialize)]
+struct GlobalsV5 {
+    chain_id: String,
+    protocol_version: u32,
+    height: u64,
+    escrow: Escrow,
+    admin: AdminSet,
+    validators: ValidatorSet,
+    params: Params,
+    upgrade: Option<PendingUpgrade>,
+    registry: Registry,
+    emission: Emission,
+    policies: Policies,
+    mandates: Mandates,
+    assets: Assets,
+}
+
+impl From<GlobalsV5> for Globals {
+    fn from(g: GlobalsV5) -> Self {
+        Self {
+            chain_id: g.chain_id,
+            protocol_version: g.protocol_version,
+            height: g.height,
+            escrow: g.escrow,
+            admin: g.admin,
+            validators: g.validators,
+            params: g.params,
+            upgrade: g.upgrade,
+            registry: g.registry,
+            emission: g.emission,
+            policies: g.policies,
+            mandates: g.mandates,
+            assets: g.assets,
+            reserves: Reserves::default(),
+        }
+    }
 }
 
 /// [`Globals`] des versions 0.13 et 0.14, sans actifs.
@@ -262,6 +309,7 @@ impl From<GlobalsV4M> for Globals {
             policies: g.policies,
             mandates: g.mandates,
             assets: Assets::default(),
+            reserves: Reserves::default(),
         }
     }
 }
@@ -298,6 +346,7 @@ impl From<GlobalsV4> for Globals {
             policies: g.policies,
             mandates: Mandates::default(),
             assets: Assets::default(),
+            reserves: Reserves::default(),
         }
     }
 }
@@ -333,6 +382,7 @@ impl From<GlobalsV3> for Globals {
             policies: Policies::default(),
             mandates: Mandates::default(),
             assets: Assets::default(),
+            reserves: Reserves::default(),
         }
     }
 }
@@ -367,6 +417,7 @@ impl From<GlobalsV2> for Globals {
             policies: Policies::default(),
             mandates: Mandates::default(),
             assets: Assets::default(),
+            reserves: Reserves::default(),
         }
     }
 }
@@ -400,6 +451,7 @@ impl From<LegacyGlobals> for Globals {
             policies: Policies::default(),
             mandates: Mandates::default(),
             assets: Assets::default(),
+            reserves: Reserves::default(),
         }
     }
 }
@@ -421,6 +473,7 @@ impl State {
             policies: self.policies.clone(),
             mandates: self.mandates.clone(),
             assets: self.assets.clone(),
+            reserves: self.reserves.clone(),
         })
     }
 
@@ -446,6 +499,10 @@ impl State {
             assets: Assets {
                 fee: self.assets.fee,
                 ..Assets::default()
+            },
+            reserves: Reserves {
+                per_object: self.reserves.per_object,
+                ..Reserves::default()
             },
         })
     }
@@ -473,6 +530,7 @@ impl State {
         out.extend(rows(&mut self.assets.holdings));
         out.extend(rows(&mut self.assets.deals));
         out.extend(rows(&mut self.assets.mandates));
+        out.extend(rows(&mut self.reserves.owned));
         out
     }
 
@@ -498,6 +556,7 @@ impl State {
             t if t == <Holding as Row>::TAG => load(&mut self.assets.holdings, key, value),
             t if t == <AssetDeal as Row>::TAG => load(&mut self.assets.deals, key, value),
             t if t == <AssetMandate as Row>::TAG => load(&mut self.assets.mandates, key, value),
+            t if t == <Owned as Row>::TAG => load(&mut self.reserves.owned, key, value),
             _ => None,
         }
     }
@@ -512,11 +571,13 @@ impl State {
         self.assets.holdings.mark_all_dirty();
         self.assets.deals.mark_all_dirty();
         self.assets.mandates.mark_all_dirty();
+        self.reserves.owned.mark_all_dirty();
     }
 
     /// Reconstitue un état à partir de [`Self::globals_bytes`] et des comptes.
     pub fn from_parts(globals: &[u8], accounts: Accounts) -> Option<Self> {
         let g: Globals = vinx_core::decode(globals)
+            .or_else(|_| vinx_core::decode::<GlobalsV5>(globals).map(Globals::from))
             .or_else(|_| vinx_core::decode::<GlobalsV4M>(globals).map(Globals::from))
             .or_else(|_| vinx_core::decode::<GlobalsV4>(globals).map(Globals::from))
             .or_else(|_| vinx_core::decode::<GlobalsV3>(globals).map(Globals::from))
@@ -540,6 +601,7 @@ impl State {
             policies: g.policies,
             mandates: g.mandates,
             assets: g.assets,
+            reserves: g.reserves,
         })
     }
 
@@ -597,6 +659,10 @@ impl State {
                 a.deals.root(),
                 a.mandates.root(),
             )));
+        }
+        if self.protocol_version >= 6 {
+            let r = &self.reserves;
+            globals.extend_from_slice(&encode(&(r.per_object, r.owned.root())));
         }
         hash_tagged_parts(
             Domain::State,
@@ -813,6 +879,7 @@ impl State {
                 if left != 0 && left < self.params.min_reserve {
                     return Err(TxError::BelowReserve);
                 }
+                self.check_object_reserve(*payer, left)?;
                 mandate_write = Some(((*payer, tx.sender), Some(mandate)));
             }
             TxBody::CreateAsset {
@@ -1197,6 +1264,46 @@ impl State {
                 return Err(TxError::BelowReserve);
             }
         }
+        // Protocole 6 : objets créés ou supprimés, et réserve de l'émetteur.
+        let mut deltas: std::collections::BTreeMap<Address, i64> = Default::default();
+        if self.protocol_version >= 6 {
+            assets.owner_deltas(&self.assets, &mut deltas);
+            let mut bump = |who: Address, before: bool, after: bool| {
+                let d = i64::from(after).saturating_sub(i64::from(before));
+                if d != 0 {
+                    let e = deltas.entry(who).or_insert(0);
+                    *e = e.saturating_add(d);
+                }
+            };
+            if let Some((key, m)) = &mandate_write {
+                bump(key.0, self.mandates.contains_key(key), m.is_some());
+            }
+            if let Some((key, m)) = &asset_mandate_write {
+                bump(key.1, self.assets.mandates.contains_key(key), m.is_some());
+            }
+            if let Some(p) = &set_policy {
+                bump(
+                    tx.sender,
+                    self.policies.contains_key(&tx.sender),
+                    p.is_some(),
+                );
+            }
+            // L'émetteur ne peut ni créer d'objet, ni dépenser au-delà des
+            // frais, en passant sous sa réserve ; payer des frais reste
+            // toujours permis, ne serait-ce que pour supprimer des objets.
+            let before_count = self.reserves.count(&tx.sender);
+            let delta = deltas.get(&tx.sender).copied().unwrap_or(0);
+            let after_count = u32::try_from(i64::from(before_count).saturating_add(delta).max(0))
+                .unwrap_or(u32::MAX);
+            let before = self.balance(&tx.sender);
+            let after = changes.get(&self.accounts, tx.sender).balance;
+            let own_fee = if fee_payer == tx.sender { tx.fee } else { 0 };
+            let spent = before.saturating_sub(after) > own_fee;
+            let required = self.reserves.required(after_count, self.params.min_reserve);
+            if after < required && (after_count > before_count || spent) {
+                return Err(TxError::ObjectReserve);
+            }
+        }
         let pot = if fee_to_pot {
             self.emission
                 .pot
@@ -1207,6 +1314,7 @@ impl State {
         };
         changes.commit(&mut self.accounts);
         assets.commit(&mut self.assets);
+        self.reserves.apply(&deltas);
         match asset_deal_write {
             Some((id, Some(d))) => self.assets.deals.insert(id, d),
             Some((id, None)) => {
@@ -1312,6 +1420,42 @@ impl State {
             .spend_unapproved(self.registry.now / 86_400, spend)
             .map_err(TxError::Policy)?;
         Ok(Some(updated))
+    }
+
+    /// Protocole 6 : `who`, qui ne garde que `left`, couvre-t-il sa réserve ?
+    fn check_object_reserve(&self, who: Address, left: Amount) -> Result<(), TxError> {
+        if self.protocol_version < 6 {
+            return Ok(());
+        }
+        let required = self
+            .reserves
+            .required(self.reserves.count(&who), self.params.min_reserve);
+        if left < required {
+            return Err(TxError::ObjectReserve);
+        }
+        Ok(())
+    }
+
+    /// Recompte les objets de chaque compte à partir des tables : à
+    /// l'activation du protocole 6, pour les objets créés avant.
+    fn recount_objects(&mut self) {
+        let mut deltas: std::collections::BTreeMap<Address, i64> = Default::default();
+        let mut add = |who: Address| {
+            let e = deltas.entry(who).or_insert(0);
+            *e = e.saturating_add(1);
+        };
+        self.assets
+            .holdings
+            .iter()
+            .for_each(|((_, who), _)| add(*who));
+        self.mandates.iter().for_each(|((payer, _), _)| add(*payer));
+        self.assets
+            .mandates
+            .iter()
+            .for_each(|((_, payer, _), _)| add(*payer));
+        self.policies.iter().for_each(|(who, _)| add(*who));
+        self.reserves.owned = Table::new();
+        self.reserves.apply(&deltas);
     }
 
     fn asset(&self, symbol: &str) -> Result<Asset, TxError> {
@@ -1458,6 +1602,15 @@ impl State {
                 self.registry.name_fee = *value;
             }
             AdminAction::SetParam {
+                param: ParamId::ObjectReserve,
+                value,
+            } => {
+                if self.protocol_version < 6 {
+                    return Err(TxError::NotYetActive);
+                }
+                self.reserves.per_object = *value;
+            }
+            AdminAction::SetParam {
                 param: ParamId::AssetFee,
                 value,
             } => {
@@ -1518,8 +1671,12 @@ impl State {
         self.validators.advance_to(height);
         if let Some(up) = &self.upgrade {
             if up.activation_height <= height {
+                let before = self.protocol_version;
                 self.protocol_version = up.version;
                 self.upgrade = None;
+                if before < 6 && self.protocol_version >= 6 {
+                    self.recount_objects();
+                }
             }
         }
     }

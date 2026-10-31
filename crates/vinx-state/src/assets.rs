@@ -250,6 +250,21 @@ impl AssetChanges {
         Ok(())
     }
 
+    /// Jetons acceptés ou retirés par cette transaction : +1 ou −1 par
+    /// compte (objets de la réserve, protocole 6).
+    pub fn owner_deltas(&self, base: &Assets, out: &mut BTreeMap<Address, i64>) {
+        for (key, h) in &self.holdings {
+            let before = base.holdings.contains_key(key);
+            let delta = match (before, h.is_some()) {
+                (false, true) => 1,
+                (true, false) => -1,
+                _ => continue,
+            };
+            let e = out.entry(key.1).or_insert(0);
+            *e = e.saturating_add(delta);
+        }
+    }
+
     pub fn commit(self, base: &mut Assets) {
         for (symbol, asset) in self.assets {
             base.assets.insert(symbol, asset);
