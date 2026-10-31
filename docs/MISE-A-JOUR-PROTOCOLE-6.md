@@ -52,8 +52,10 @@ s'arrêtera à la hauteur d'activation.
 Lire la hauteur actuelle (tableau de bord), et y ajouter **au moins 17 280**
 (environ 24 h ; prendre 18 000 pour avoir de la marge).
 
-Dans le **cockpit 0.21.0**, onglet Actions → « Mise à jour du protocole » :
-version **6**, la hauteur calculée. Signer avec deux clés admin, envoyer.
+Dans le **cockpit**, onglet **Gouvernance** (0.26 et plus ; onglet Actions
+avant) : le tableau « Préparation des nœuds » doit montrer tous les nœuds
+prêts ; « Hauteur conseillée » remplit la hauteur (actuelle + 18 000) et
+affiche la date d'activation estimée. Signer avec deux clés admin, envoyer.
 
 L'onglet Gouvernance du tableau de bord affiche alors la mise à jour
 programmée et sa hauteur.
