@@ -115,3 +115,11 @@ liste les preuves d'équivoque : il reste vide).
 Limite : toutes les machines partagent un serveur et un réseau local. Ces
 résultats ne disent rien de la latence entre sites distants ni d'une coupure
 d'Internet entre opérateurs : à refaire quand les validateurs seront répartis.
+
+## Rejoués automatiquement
+
+Depuis le lot S2, les exercices 1 à 4 sont aussi rejoués par la CI à chaque
+modification du code, sur quatre validateurs locaux
+(`crates/vinx-node/tests/network.rs` et `sync.rs`) : une régression qui
+empêcherait la chaîne de survivre à ces pannes bloque la fusion. Les refaire
+sur le vrai réseau reste utile après un changement d'infrastructure.

@@ -1,0 +1,37 @@
+# Fuzzing long (cargo-fuzz, libFuzzer) : hors de l'espace de travail, compilé
+# avec la chaîne nightly. Lancé chaque nuit par .github/workflows/fuzz.yml.
+#   cargo +nightly fuzz run net_message -- -max_total_time=600
+# Voir docs/DEVELOPPEURS.md, section « Fuzzing ».
+[package]
+name = "vinx-fuzz"
+version = "0.0.0"
+edition = "2024"
+publish = false
+
+[package.metadata]
+cargo-fuzz = true
+
+[dependencies]
+libfuzzer-sys = "0.4"
+borsh = { version = "1", features = ["derive"] }
+vinx-core = { path = "../crates/vinx-core" }
+vinx-crypto = { path = "../crates/vinx-crypto" }
+vinx-state = { path = "../crates/vinx-state" }
+vinx-consensus = { path = "../crates/vinx-consensus" }
+vinx-node = { path = "../crates/vinx-node" }
+
+[[bin]]
+name = "net_message"
+path = "fuzz_targets/net_message.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "transaction"
+path = "fuzz_targets/transaction.rs"
+test = false
+doc = false
+bench = false
+
+[workspace]

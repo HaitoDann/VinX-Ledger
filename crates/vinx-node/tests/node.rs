@@ -320,3 +320,171 @@ fn a_data_dir_cannot_be_reused_with_another_genesis() {
     drop(node::open(devnet().genesis, dir.path()).unwrap());
     assert!(node::open(devnet().genesis, dir.path()).is_err());
 }
+
+/// Requête brute : corps quelconque, pas forcément du JSON.
+async fn raw(shared: &SharedRef, method: &str, uri: &str, body: Vec<u8>) -> StatusCode {
+    let request = Request::builder()
+        .method(method)
+        .uri(uri)
+        .header("content-type", "application/json")
+        .body(Body::from(body))
+        .unwrap();
+    api::router(shared.clone())
+        .oneshot(request)
+        .await
+        .unwrap()
+        .status()
+}
+
+/// Fuzzing de l'API publique : des milliers de requêtes absurdes (corps
+/// aléatoires, transactions mutées, chemins et paramètres extrêmes) ne font
+/// jamais planter le nœud et n'obtiennent jamais d'erreur interne (500).
+#[tokio::test(flavor = "multi_thread")]
+async fn the_public_api_survives_garbage() {
+    let d = devnet();
+    let dir = tempfile::tempdir().unwrap();
+    let shared = node::open(d.genesis.clone(), dir.path()).unwrap();
+    // Générateur pseudo-aléatoire déterministe : un échec se rejoue à l'identique.
+    let mut seed: u64 = 0x5EED_CAFE;
+    let mut next = move || {
+        seed ^= seed << 13;
+        seed ^= seed >> 7;
+        seed ^= seed << 17;
+        seed
+    };
+    let alice = KeyPair::generate();
+    let valid = encode(
+        &Transaction {
+            chain_id: CHAIN.into(),
+            sender: Address::from_public_key(&alice.public_key()),
+            nonce: 1,
+            fee: VINX / 1000,
+            body: TxBody::Transfer {
+                to: Address::treasury(),
+                amount: VINX,
+                memo: None,
+            },
+        }
+        .sign(&alice, true),
+    );
+    let weird = [
+        "",
+        "0",
+        "-1",
+        "18446744073709551615",
+        "99999999999999999999999",
+        "%00",
+        "..",
+        "vinx1",
+        "VINX1QQQQ",
+        "zz",
+        "%F0%9F%92%A5",
+        "a/b",
+        "EURV",
+        "%2e%2e%2fetc",
+    ];
+    for i in 0..3_000u64 {
+        let r = next();
+        let w = |k: u64| weird[(k % weird.len() as u64) as usize];
+        let (method, uri, body): (&str, String, Vec<u8>) = match i % 6 {
+            // Corps aléatoires sur les deux points d'envoi.
+            0 => {
+                let len = (r % 300) as usize;
+                let bytes = (0..len).map(|_| next() as u8).collect();
+                let path = if r & 1 == 0 {
+                    "/transactions"
+                } else {
+                    "/admin-transactions"
+                };
+                ("POST", path.into(), bytes)
+            }
+            // Transaction valide mutée, encodée en hexadécimal.
+            1 => {
+                let mut tx = valid.clone();
+                for _ in 0..1 + r % 4 {
+                    let at = (next() as usize) % tx.len();
+                    tx[at] ^= next() as u8;
+                }
+                tx.truncate(tx.len() - (r % 3) as usize);
+                let body = json!({ "tx": hex::encode(tx) }).to_string().into_bytes();
+                ("POST", "/transactions".into(), body)
+            }
+            // JSON de forme inattendue.
+            2 => {
+                let body = match r % 4 {
+                    0 => json!({ "tx": w(r >> 8) }),
+                    1 => json!({ "tx": 42 }),
+                    2 => json!([1, 2, 3]),
+                    _ => json!({ "tx": "ab".repeat((r % 5_000) as usize) }),
+                };
+                (
+                    "POST",
+                    "/transactions".into(),
+                    body.to_string().into_bytes(),
+                )
+            }
+            // Chemins à paramètre.
+            3 => {
+                let routes = [
+                    "accounts",
+                    "names",
+                    "deals",
+                    "assets",
+                    "transactions",
+                    "blocks",
+                    "attestations",
+                ];
+                let route = routes[(r % routes.len() as u64) as usize];
+                ("GET", format!("/{route}/{}", w(r >> 8)), Vec::new())
+            }
+            // Pagination extrême.
+            4 => {
+                let uri = match r % 4 {
+                    0 => format!("/blocks?before={}&limit={}", w(r >> 8), w(r >> 16)),
+                    1 => format!(
+                        "/assets/EURV/holders?limit={}&offset={}",
+                        w(r >> 8),
+                        w(r >> 16)
+                    ),
+                    2 => format!(
+                        "/assets/EURV/transactions?before={}&limit={}",
+                        w(r >> 8),
+                        w(r >> 16)
+                    ),
+                    _ => format!("/accounts/{}/transactions?limit={}", w(r >> 8), w(r >> 16)),
+                };
+                ("GET", uri, Vec::new())
+            }
+            // Routes de lecture sans paramètre, avec une méthode inattendue.
+            _ => {
+                let routes = [
+                    "/status",
+                    "/governance",
+                    "/fees",
+                    "/mempool",
+                    "/validators",
+                    "/openapi.json",
+                    "/escrow",
+                ];
+                let m = if r & 1 == 0 { "GET" } else { "DELETE" };
+                (
+                    m,
+                    routes[(r % routes.len() as u64) as usize].into(),
+                    Vec::new(),
+                )
+            }
+        };
+        if !uri.starts_with('/') || uri.contains(' ') {
+            continue;
+        }
+        let Ok(parsed) = uri.parse::<axum::http::Uri>() else {
+            continue;
+        };
+        let status = raw(&shared, method, &parsed.to_string(), body).await;
+        assert!(
+            !status.is_server_error(),
+            "{method} {uri} : erreur interne {status}"
+        );
+    }
+    assert!(node::lock(&shared).chain.state.check_invariant().is_ok());
+}
