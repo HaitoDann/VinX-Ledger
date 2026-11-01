@@ -154,6 +154,8 @@ référence pour toute nouvelle proposition.
 | **0.26** | Logiciel, lot I4 | Cockpit : onglet Gouvernance (à faire, compte à rebours de la mise à jour, préparation des nœuds, programmation guidée) ; `supported_protocol` dans `/status` |
 | **0.27** | Sécurité, lot S1 | Attestations de provenance des releases, clé fixe de l'APK, contrôle des dépendances (cargo-deny), nonces consécutifs en ligne de commande |
 | — | Robustesse, lot S2 | Exercices de panne rejoués en CI (quorum perdu puis rétabli, arrêt brutal de tout le réseau), fuzzing des jetons et de l'API à chaque PR, fuzzing long nocturne (cargo-fuzz) |
+| **0.28** | Réseau, lot 3 | VinX Consensus (document de référence), charte des validateurs, candidature, spécification du protocole 7 (projet), nœud public Copper (`--node-name`) |
+| À venir | Protocole 7 | Registre des validateurs nommés, diversité, caution et sanction, présence et récompenses, mise à l'écart, délai des actions admin (`docs/PROTOCOLE-7.md`) |
 | Protocole 5 | Règles | Jetons et titres, réserve par objet |
 | Protocole 7 | Règles | Canaux de paiement |
 | En parallèle | Hors chaîne | Pilote VinX Ping (premier subnet), conception des subnets |

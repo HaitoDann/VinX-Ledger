@@ -127,6 +127,10 @@ enum Command {
         /// `{ "01…clé…": "Validateur-3", … }`.
         #[arg(long)]
         validator_names: Option<PathBuf>,
+        /// Nom public de ce nœud, affiché par l'explorateur et le tableau de
+        /// bord (par exemple « Copper » pour le nœud public).
+        #[arg(long)]
+        node_name: Option<String>,
     },
 }
 
@@ -353,6 +357,7 @@ async fn main() -> Result<()> {
             mempool_size,
             rate_limit,
             validator_names,
+            node_name,
         } => {
             let genesis = GenesisFile::load(genesis)?;
             let keypair = match key {
@@ -371,6 +376,11 @@ async fn main() -> Result<()> {
                 s.retention_ms =
                     (!*archive).then(|| block_retention_hours.saturating_mul(3_600_000));
                 s.mempool.set_capacity(*mempool_size);
+                s.node_name = node_name
+                    .as_deref()
+                    .map(str::trim)
+                    .filter(|n| !n.is_empty())
+                    .map(|n| n.chars().take(32).collect());
                 if let Some(path) = validator_names {
                     s.names = load_names(path)?;
                     info!(noms = s.names.len(), "noms de validateurs chargés");

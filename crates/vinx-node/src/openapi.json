@@ -132,6 +132,12 @@
            "type": "integer",
            "example": 6,
            "description": "Version de protocole la plus récente que ce nœud sait exécuter : une mise à jour vers une version plus haute l'arrêterait."
+          },
+          "node_name": {
+           "type": "string",
+           "nullable": true,
+           "example": "Copper",
+           "description": "Nom public du nœud (`--node-name`), ou `null`."
           }
          }
         }

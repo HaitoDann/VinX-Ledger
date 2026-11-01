@@ -514,10 +514,28 @@ async fn halts_without_quorum_then_survives_a_full_crash() {
         *n = Some(launch(i));
     }
     let target = before + 3;
-    wait_until("reprise après l'arrêt brutal de tous", || {
-        nodes.iter().flatten().all(|n| n.height() >= target)
-    })
-    .await;
+    for _ in 0..1_200 {
+        if nodes.iter().flatten().all(|n| n.height() >= target) {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    }
+    // En cas d'échec, l'état de chaque nœud.
+    let report: Vec<String> = nodes
+        .iter()
+        .flatten()
+        .map(|n| {
+            let s = node::lock(&n.shared);
+            format!(
+                "hauteur {} (attendu {target}), round du dernier bloc {}",
+                s.chain.state.height, s.metrics.last_round
+            )
+        })
+        .collect();
+    assert!(
+        nodes.iter().flatten().all(|n| n.height() >= target),
+        "pas de reprise après l'arrêt brutal de tous : {report:?}"
+    );
 
     // Même chaîne partout, aucune preuve d'équivoque, invariants respectés.
     let reference = nodes[0].as_ref().unwrap().block_hash(target);

@@ -48,6 +48,17 @@ impl SignGuard {
         }
     }
 
+    /// Dernier round où l'on a signé quelque chose à cette hauteur : après un
+    /// redémarrage, le consensus reprend au round suivant, sans quoi le garde
+    /// bloquerait ses votes dans les rounds déjà joués.
+    pub fn last_round(&self, height: u64) -> Option<u32> {
+        self.signed
+            .range((height, 0, Step::Proposal)..)
+            .take_while(|((h, _, _), _)| *h == height)
+            .map(|((_, r, _), _)| *r)
+            .max()
+    }
+
     /// Oublie les hauteurs déjà finalisées, pour borner la taille du garde.
     pub fn prune_below(&mut self, height: u64) {
         self.signed.retain(|(h, _, _), _| *h >= height);

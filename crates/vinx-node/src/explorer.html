@@ -546,7 +546,7 @@ async function route() {
   await run();
   // L'accueil se met à jour seul, sans charger le nœud : toutes les 10 s.
   if (page === home) timer = setInterval(run, 5000);
-  get("/status").then((s) => { $("chain").textContent = s.chain_id; $("height").textContent = `bloc ${fr(s.height)}`; $("height").className = "pill ok"; })
+  get("/status").then((s) => { $("chain").textContent = (s.node_name ? s.node_name + " · " : "") + s.chain_id; $("height").textContent = `bloc ${fr(s.height)}`; $("height").className = "pill ok"; })
     .catch(() => { $("height").textContent = "hors ligne"; $("height").className = "pill bad"; });
   window.scrollTo(0, 0);
 }

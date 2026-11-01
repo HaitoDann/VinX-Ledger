@@ -21,7 +21,7 @@ use tracing::{debug, error, info, warn};
 use vinx_consensus::guard::Step;
 use vinx_consensus::{Action, BlockValidator, Engine, Evidence, SignGuard, SignedVote, Timeout};
 use vinx_core::Account;
-use vinx_core::{Block, CommitCertificate, SignedAdminTransaction, SignedTransaction};
+use vinx_core::{Block, CommitCertificate, SignedAdminTransaction, SignedTransaction, VoteKind};
 use vinx_crypto::KeyPair;
 use vinx_crypto::{Address, PublicKey};
 use vinx_state::Genesis;
@@ -44,6 +44,8 @@ pub struct Shared {
     pub metrics: Metrics,
     /// Noms lisibles des validateurs (`--validator-names`), pour l'affichage.
     pub names: BTreeMap<PublicKey, String>,
+    /// Nom public de ce nœud (`--node-name`), par exemple « Copper ».
+    pub node_name: Option<String>,
     /// Dernières transactions refusées par l'API de ce nœud, la plus récente en tête.
     pub rejects: VecDeque<Reject>,
     /// Dernières transactions (`/transactions/recent`), calculées pour une hauteur.
@@ -229,6 +231,7 @@ pub fn open(genesis: Genesis, data_dir: &Path) -> Result<SharedRef> {
             ..Metrics::default()
         },
         names: BTreeMap::new(),
+        node_name: None,
         rejects: VecDeque::new(),
         recent_txs: None,
     }));
@@ -443,6 +446,25 @@ impl Runner {
             self.me,
             s.chain.state.params.clone(),
         );
+        // Reprise en cours de hauteur (redémarrage) : rounds déjà joués et
+        // verrou d'avant l'arrêt.
+        if let Some(last) = s.guard.last_round(height) {
+            let lock = match s.store.load_lock() {
+                Ok(Some((h, round, block))) if h == height => Some((round, block)),
+                Ok(_) => None,
+                Err(e) => {
+                    warn!("verrou de consensus illisible : {e:#}");
+                    None
+                }
+            };
+            info!(
+                height,
+                round = last.saturating_add(1),
+                verrou = lock.is_some(),
+                "reprise du consensus"
+            );
+            self.engine.restore(lock, last.saturating_add(1));
+        }
         self.build = None;
         self.own.clear();
         self.queue.clear();
@@ -518,6 +540,13 @@ impl Runner {
                         continue;
                     }
                     s.store.save_guard(&s.guard)?;
+                    // Verrou : le bloc sur lequel on s'engage, gardé sur
+                    // disque pour être rétabli après un redémarrage.
+                    if vote.kind == VoteKind::Precommit {
+                        if let Some(block) = vote.block_hash.and_then(|h| self.engine.block(&h)) {
+                            s.store.save_lock(vote.height, vote.round, block)?;
+                        }
+                    }
                     let height = vote.height;
                     let signed = SignedVote::new(vote, me, key);
                     s.metrics
