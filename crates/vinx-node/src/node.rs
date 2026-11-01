@@ -44,6 +44,8 @@ pub struct Shared {
     pub metrics: Metrics,
     /// Noms lisibles des validateurs (`--validator-names`), pour l'affichage.
     pub names: BTreeMap<PublicKey, String>,
+    /// Nom public de ce nœud (`--node-name`), par exemple « Copper ».
+    pub node_name: Option<String>,
     /// Dernières transactions refusées par l'API de ce nœud, la plus récente en tête.
     pub rejects: VecDeque<Reject>,
     /// Dernières transactions (`/transactions/recent`), calculées pour une hauteur.
@@ -229,6 +231,7 @@ pub fn open(genesis: Genesis, data_dir: &Path) -> Result<SharedRef> {
             ..Metrics::default()
         },
         names: BTreeMap::new(),
+        node_name: None,
         rejects: VecDeque::new(),
         recent_txs: None,
     }));

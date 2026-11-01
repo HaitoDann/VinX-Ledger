@@ -11,7 +11,7 @@
 #       public, voir docs/NOEUD-PUBLIC.md). Il ne vote jamais.
 #
 #   sudo ./install-validator.sh start genesis.json [--archive] [--mempool-size N]
-#       [--validator-names noms.json] [--peer ADRESSE]... [--allow IDENTIFIANT]...
+#       [--validator-names noms.json] [--node-name NOM] [--peer ADRESSE]... [--allow IDENTIFIANT]...
 #       --allow : accepte un nœud qui se connecte à celui-ci (nœud public).
 #       Installe la genèse, les options et le service, démarre le nœud et
 #       vérifie qu'il répond. Relancer la commande remplace les options.
@@ -124,6 +124,10 @@ start() {
                 [ -f "${2:-}" ] || die "--validator-names attend un fichier JSON existant"
                 install -m 644 "$2" "$ETC/validator-names.json"
                 options+=(--validator-names "$ETC/validator-names.json"); shift 2 ;;
+            --node-name)
+                # Sans espace : le nom est repris tel quel dans la ligne de commande du service.
+                [[ "${2:-}" =~ ^[A-Za-z0-9-]{1,32}$ ]] || die "--node-name attend un nom de 1 à 32 lettres, chiffres ou tirets (par exemple Copper)"
+                options+=(--node-name "$2"); shift 2 ;;
             --mempool-size)
                 [[ "${2:-}" =~ ^[0-9]+$ ]] || die "--mempool-size attend un nombre de transactions"
                 options+=(--mempool-size "$2"); shift 2 ;;

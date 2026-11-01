@@ -546,6 +546,7 @@ async fn status(State(shared): State<SharedRef>) -> ApiResult {
     Ok(Json(json!({
         "chain_id": st.chain_id,
         "node_version": env!("CARGO_PKG_VERSION"),
+        "node_name": s.node_name,
         "protocol_version": st.protocol_version,
         "supported_protocol": vinx_state::state::SUPPORTED_PROTOCOL,
         "height": st.height,

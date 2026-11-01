@@ -69,6 +69,8 @@ compte à créer : tes clés restent sur ton ordinateur.
 | Voir ce qui se passe sur le réseau | [L'explorateur](https://vinx-ledger.vinxlabs.fr/explorer) : blocs, transactions, comptes, jetons, noms |
 | Créer un jeton | [Jetons](./docs/JETONS.md) |
 | Comprendre où va le projet | [Feuille de route](./docs/FEUILLE-DE-ROUTE.md) |
+| Comprendre le fonctionnement du réseau | [VinX Consensus](./docs/VINX-CONSENSUS.md) |
+| Devenir validateur | [Charte des validateurs](./docs/CHARTE-DES-VALIDATEURS.md), [candidature](./docs/CANDIDATURE-VALIDATEUR.md) |
 | Faire tourner un validateur | [Déployer un validateur](./docs/DEPLOYER-UN-VALIDATEUR.md), [Exploitation](./docs/EXPLOITATION.md) |
 | Ouvrir un nœud public | [Nœud public](./docs/NOEUD-PUBLIC.md) |
 | Lancer le testnet 2 | [Testnet 2](./docs/TESTNET-2.md) |

@@ -84,10 +84,13 @@ tableau de bord) avant de passer au suivant.
 Dans le conteneur, avec l'adresse réseau des validateurs (au moins deux, si possible) :
 
 ```bash
-./install-validator.sh start /root/genesis.json \
+./install-validator.sh start /root/genesis.json --node-name Copper \
   --peer /ip4/IP-VALIDATEUR-1/tcp/26656/p2p/ID-VALIDATEUR-1 \
   --peer /ip4/IP-VALIDATEUR-2/tcp/26656/p2p/ID-VALIDATEUR-2
 ```
+
+`--node-name Copper` affiche le nom du nœud public dans l'explorateur et le
+tableau de bord (« Copper · vinx-testnet-2 »).
 
 Le script attend que le nœud réponde et affiche son statut. Vérifie que la hauteur
 rattrape celle des validateurs :

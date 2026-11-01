@@ -363,7 +363,7 @@ async function refreshOverview() {
 }
 
 function header(status, blocks) {
-  $("chain").textContent = status.chain_id;
+  $("chain").textContent = (status.node_name ? status.node_name + " · " : "") + status.chain_id;
   const role = $("role");
   if (status.validator_index === null) { role.textContent = "observateur"; role.className = "pill"; }
   else { role.textContent = `validateur n° ${status.validator_index + 1}`; role.className = "pill ok"; }
