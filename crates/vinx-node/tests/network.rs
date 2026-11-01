@@ -528,8 +528,7 @@ async fn halts_without_quorum_then_survives_a_full_crash() {
             let s = node::lock(&n.shared);
             format!(
                 "hauteur {} (attendu {target}), round du dernier bloc {}",
-                s.chain.state.height,
-                s.metrics.last_round
+                s.chain.state.height, s.metrics.last_round
             )
         })
         .collect();
