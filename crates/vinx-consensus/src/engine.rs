@@ -103,6 +103,8 @@ pub struct Engine {
     l36_done: BTreeSet<u32>,
     /// Rounds où nous avons déjà proposé.
     proposed: BTreeSet<u32>,
+    /// Premier round joué par [`Engine::start`] (0, sauf reprise).
+    first_round: u32,
 }
 
 impl Engine {
@@ -135,7 +137,29 @@ impl Engine {
             precommit_timeout_set: BTreeSet::new(),
             l36_done: BTreeSet::new(),
             proposed: BTreeSet::new(),
+            first_round: 0,
         }
+    }
+
+    /// Reprise après un redémarrage en cours de hauteur : le verrou d'avant
+    /// l'arrêt (round et bloc du dernier precommit non nil) est rétabli, et le
+    /// consensus reprend à `first_round`, après les rounds déjà joués.
+    /// Sans verrou, un validateur redémarré pourrait voter pour un autre bloc
+    /// que celui sur lequel il s'était engagé (règle de verrouillage de
+    /// Tendermint).
+    pub fn restore(&mut self, lock: Option<(u32, Block)>, first_round: u32) {
+        if let Some((round, block)) = lock {
+            let hash = block.hash();
+            self.locked = Some((round, hash));
+            self.valid = Some((round, hash));
+            self.blocks.insert(hash, block);
+        }
+        self.first_round = first_round;
+    }
+
+    /// Bloc reçu ou construit, par son empreinte.
+    pub fn block(&self, hash: &Hash) -> Option<&Block> {
+        self.blocks.get(hash)
     }
 
     pub fn height(&self) -> u64 {
@@ -150,10 +174,10 @@ impl Engine {
         self.decided
     }
 
-    /// Démarre le round 0.
+    /// Démarre le round 0, ou le round de reprise ([`Engine::restore`]).
     pub fn start(&mut self, v: &mut impl BlockValidator) -> Vec<Action> {
         let mut out = Vec::new();
-        self.start_round(0, &mut out);
+        self.start_round(self.first_round, &mut out);
         self.process(v, &mut out);
         out
     }

@@ -56,6 +56,7 @@ const GLOBALS: &str = "globals";
 
 const LEGACY_STATE: &str = "state";
 const GUARD: &str = "guard";
+const LOCK: &str = "consensus_lock";
 const GENESIS_ROOT: &str = "genesis_root";
 
 pub struct Store {
@@ -516,6 +517,17 @@ impl Store {
 
     pub fn load_guard(&self) -> Result<SignGuard> {
         Ok(self.meta(GUARD)?.unwrap_or_default())
+    }
+
+    /// Verrou de consensus : `(hauteur, round, bloc)` du dernier precommit non
+    /// nil, pour le rétablir après un redémarrage.
+    pub fn load_lock(&self) -> Result<Option<(u64, u32, Block)>> {
+        self.meta(LOCK)
+    }
+
+    /// Persiste le verrou. À appeler **avant** d'envoyer le precommit.
+    pub fn save_lock(&self, height: u64, round: u32, block: &Block) -> Result<()> {
+        self.put_meta(LOCK, &(height, round, block))
     }
 
     /// Persiste le garde. À appeler **avant** d'envoyer la signature autorisée.

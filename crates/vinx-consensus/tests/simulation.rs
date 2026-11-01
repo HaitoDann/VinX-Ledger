@@ -603,3 +603,42 @@ fn invalid_block_is_never_decided() {
     }
     assert!(!e.is_decided());
 }
+
+/// Reprise après un redémarrage : le verrou d'avant l'arrêt est respecté (vote
+/// nil pour un autre bloc), le consensus reprend au round demandé, et comme
+/// proposeur le validateur re-propose le bloc verrouillé.
+#[test]
+fn a_restarted_validator_keeps_its_lock() {
+    let keys: Vec<KeyPair> = (0..4).map(|_| KeyPair::generate()).collect();
+    let validators: Vec<_> = keys.iter().map(KeyPair::public_key).collect();
+    let locked = block(1, 1);
+    let locked_hash = locked.hash();
+
+    // Round 2 : proposeur (1 + 2) mod 4 = 3, pas nous (indice 0).
+    let mut e = Engine::new(CHAIN, 1, validators.clone(), Some(0), Params::default());
+    e.restore(Some((0, locked.clone())), 2);
+    e.start(&mut AcceptAll);
+    assert_eq!(e.round(), 2);
+    let other = block(1, 3);
+    let actions = e.on_proposal(proposal(2, other).sign(&keys[3]), &mut AcceptAll);
+    let prevote = actions.iter().find_map(|a| match a {
+        Action::Vote(v) if v.kind == vinx_core::VoteKind::Prevote => Some(v.block_hash),
+        _ => None,
+    });
+    assert_eq!(
+        prevote,
+        Some(None),
+        "verrouillé : vote nil pour un autre bloc"
+    );
+
+    // Round 3 : nous sommes proposeur ((1 + 3) mod 4 = 0) : on re-propose le
+    // bloc verrouillé, avec son round de verrou.
+    let mut e = Engine::new(CHAIN, 1, validators, Some(0), Params::default());
+    e.restore(Some((0, locked)), 3);
+    let actions = e.start(&mut AcceptAll);
+    let proposed = actions.iter().find_map(|a| match a {
+        Action::Propose(p) => Some((p.block.hash(), p.pol_round)),
+        _ => None,
+    });
+    assert_eq!(proposed, Some((locked_hash, Some(0))));
+}
