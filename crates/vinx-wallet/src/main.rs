@@ -95,6 +95,9 @@ enum Command {
     /// Actifs natifs : jetons créés par les utilisateurs (protocole 5).
     #[command(subcommand)]
     Asset(AssetCommand),
+    /// Opérations d'un validateur sur sa fiche et sa caution (protocole 7).
+    #[command(subcommand)]
+    Validator(ValidatorCommand),
     /// Vérifie que de futurs validateurs sont prêts, avant de les ajouter.
     ///
     /// `--node` désigne un nœud du réseau actuel (la référence) ; chaque
@@ -302,6 +305,28 @@ enum NameCommand {
         name: String,
         #[arg(long)]
         to: Address,
+    },
+}
+
+#[derive(Subcommand)]
+enum ValidatorCommand {
+    /// Dépose ou complète la caution, depuis l'adresse de la clé du validateur.
+    Bond {
+        /// Fichier de clé du validateur.
+        #[arg(long)]
+        key: PathBuf,
+        /// Montant en VINX.
+        #[arg(long)]
+        amount: String,
+    },
+    /// Met à jour le site et le contact publics du validateur.
+    Info {
+        #[arg(long)]
+        key: PathBuf,
+        #[arg(long, default_value = "")]
+        website: String,
+        #[arg(long, default_value = "")]
+        contact: String,
     },
 }
 
@@ -591,6 +616,25 @@ enum ActionArg {
         #[arg(long)]
         key: String,
     },
+    /// Ajoute un validateur nommé (protocole 7) : il doit avoir déposé sa caution.
+    AddNamedValidator {
+        #[arg(long)]
+        key: String,
+        #[command(flatten)]
+        identity: IdentityArgs,
+    },
+    /// Corrige le nom, l'opérateur ou le pays d'un validateur (protocole 7).
+    SetValidatorIdentity {
+        #[arg(long)]
+        key: String,
+        #[command(flatten)]
+        identity: IdentityArgs,
+    },
+    /// Annule une action admin en attente (protocole 7), par son identifiant.
+    CancelPending {
+        #[arg(long)]
+        id: String,
+    },
     /// Retire un validateur.
     RemoveValidator {
         #[arg(long)]
@@ -617,6 +661,41 @@ enum ActionArg {
         #[arg(long)]
         height: u64,
     },
+}
+
+#[derive(Args)]
+struct IdentityArgs {
+    /// Nom public (Cinnamon, Amber…), unique et jamais réattribué.
+    #[arg(long)]
+    name: String,
+    /// Entreprise, association ou personne qui opère le nœud.
+    #[arg(long)]
+    operator: String,
+    /// Code pays en deux lettres (FR).
+    #[arg(long, default_value = "FR")]
+    country: String,
+}
+
+impl IdentityArgs {
+    fn identity(&self) -> Result<vinx_core::ValidatorIdentity> {
+        let c = self.country.trim().to_ascii_uppercase();
+        let country: [u8; 2] = c
+            .as_bytes()
+            .try_into()
+            .map_err(|_| anyhow!("pays : deux lettres, par exemple FR"))?;
+        let identity = vinx_core::ValidatorIdentity {
+            name: self.name.trim().to_owned(),
+            operator: self.operator.trim().to_owned(),
+            country,
+        };
+        if !identity.is_valid() {
+            bail!(
+                "identité invalide : nom de 3 à 24 caractères (lettres, chiffres, tiret, espace), \
+                 opérateur de 1 à 64 octets, pays en deux lettres"
+            );
+        }
+        Ok(identity)
+    }
 }
 
 #[derive(Args)]
@@ -648,6 +727,20 @@ fn action(arg: ActionArg) -> Result<AdminAction> {
         },
         ActionArg::AddValidator { key } => AdminAction::AddValidator {
             key: key_from_hex(&key)?,
+        },
+        ActionArg::AddNamedValidator { key, identity } => AdminAction::AddNamedValidator {
+            key: key_from_hex(&key)?,
+            identity: identity.identity()?,
+        },
+        ActionArg::SetValidatorIdentity { key, identity } => AdminAction::SetValidatorIdentity {
+            key: key_from_hex(&key)?,
+            identity: identity.identity()?,
+        },
+        ActionArg::CancelPending { id } => AdminAction::CancelPending {
+            id: hex::decode(id.trim())
+                .ok()
+                .and_then(|b| <[u8; 32]>::try_from(b).ok())
+                .ok_or_else(|| anyhow!("identifiant invalide : 64 caractères hexadécimaux"))?,
         },
         ActionArg::RemoveValidator { key } => AdminAction::RemoveValidator {
             key: key_from_hex(&key)?,
@@ -1093,6 +1186,30 @@ fn main() -> Result<()> {
                     submit(&key, vinx_core::TxBody::TransferName { name, to })?;
                 }
             }
+        }
+        Command::Validator(cmd) => {
+            let (key, body) = match cmd {
+                ValidatorCommand::Bond { key, amount } => {
+                    let kp = load_key(&key, pwf)?;
+                    let body = vinx_core::TxBody::DepositBond {
+                        key: kp.public_key(),
+                        amount: parse_vinx(&amount)?,
+                    };
+                    (kp, body)
+                }
+                ValidatorCommand::Info {
+                    key,
+                    website,
+                    contact,
+                } => (
+                    load_key(&key, pwf)?,
+                    vinx_core::TxBody::UpdateValidatorInfo { website, contact },
+                ),
+            };
+            println!(
+                "transaction {}",
+                ops::submit(&client, &key, None, body, None)?
+            );
         }
         Command::Asset(cmd) => {
             let send = |key: &Path, body: vinx_core::TxBody| -> Result<()> {

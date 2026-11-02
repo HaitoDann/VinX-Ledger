@@ -13,6 +13,10 @@ use crate::registry::{
     Deal, MAX_DEAL_DURATION, NAME_GRACE, NAME_PERIOD, NameRecord, Registry, valid_name,
 };
 use crate::reserve::{Owned, Reserves};
+use crate::staking::{
+    BOND_GRACE, Bond, NameOwner, PendingAdmin, Staking, StakingError, ValidatorRecord,
+    ValidatorStatus, name_key,
+};
 use crate::table::{Row, Table};
 use crate::validators::{ValidatorChange, ValidatorError, ValidatorSet, validators_hash};
 use borsh::{BorshDeserialize, BorshSerialize};
@@ -27,7 +31,7 @@ use vinx_crypto::{Address, Domain, Hash, PublicKey, hash_tagged_parts, merkle_ro
 
 /// Dernière version du protocole que ce code sait exécuter. Un nœud plus
 /// ancien qu'une mise à jour activée s'arrête au lieu de diverger.
-pub const SUPPORTED_PROTOCOL: u32 = 6;
+pub const SUPPORTED_PROTOCOL: u32 = 7;
 
 #[derive(Clone, Debug, PartialEq, Eq, BorshSerialize, BorshDeserialize)]
 pub struct AdminSet {
@@ -67,10 +71,14 @@ pub struct State {
     pub assets: Assets,
     /// Réserve par objet (protocole 6).
     pub reserves: Reserves,
+    /// Validateurs nommés, cautions, actions admin en attente (protocole 7).
+    pub staking: Staking,
 }
 
 #[derive(Debug, Error, PartialEq, Eq)]
 pub enum TxError {
+    #[error("{0}")]
+    Staking(StakingError),
     #[error("{0}")]
     Asset(AssetError),
     #[error(
@@ -235,6 +243,48 @@ struct Globals {
     mandates: Mandates,
     assets: Assets,
     reserves: Reserves,
+    staking: Staking,
+}
+
+/// [`Globals`] des versions 0.21 à 0.28, sans validateurs nommés.
+#[derive(BorshDeserialize)]
+struct GlobalsV6 {
+    chain_id: String,
+    protocol_version: u32,
+    height: u64,
+    escrow: Escrow,
+    admin: AdminSet,
+    validators: ValidatorSet,
+    params: Params,
+    upgrade: Option<PendingUpgrade>,
+    registry: Registry,
+    emission: Emission,
+    policies: Policies,
+    mandates: Mandates,
+    assets: Assets,
+    reserves: Reserves,
+}
+
+impl From<GlobalsV6> for Globals {
+    fn from(g: GlobalsV6) -> Self {
+        Self {
+            chain_id: g.chain_id,
+            protocol_version: g.protocol_version,
+            height: g.height,
+            escrow: g.escrow,
+            admin: g.admin,
+            validators: g.validators,
+            params: g.params,
+            upgrade: g.upgrade,
+            registry: g.registry,
+            emission: g.emission,
+            policies: g.policies,
+            mandates: g.mandates,
+            assets: g.assets,
+            reserves: g.reserves,
+            staking: Staking::default(),
+        }
+    }
 }
 
 /// [`Globals`] des versions 0.15 à 0.20, sans réserve par objet.
@@ -272,6 +322,7 @@ impl From<GlobalsV5> for Globals {
             mandates: g.mandates,
             assets: g.assets,
             reserves: Reserves::default(),
+            staking: Staking::default(),
         }
     }
 }
@@ -310,6 +361,7 @@ impl From<GlobalsV4M> for Globals {
             mandates: g.mandates,
             assets: Assets::default(),
             reserves: Reserves::default(),
+            staking: Staking::default(),
         }
     }
 }
@@ -347,6 +399,7 @@ impl From<GlobalsV4> for Globals {
             mandates: Mandates::default(),
             assets: Assets::default(),
             reserves: Reserves::default(),
+            staking: Staking::default(),
         }
     }
 }
@@ -383,6 +436,7 @@ impl From<GlobalsV3> for Globals {
             mandates: Mandates::default(),
             assets: Assets::default(),
             reserves: Reserves::default(),
+            staking: Staking::default(),
         }
     }
 }
@@ -418,6 +472,7 @@ impl From<GlobalsV2> for Globals {
             mandates: Mandates::default(),
             assets: Assets::default(),
             reserves: Reserves::default(),
+            staking: Staking::default(),
         }
     }
 }
@@ -452,6 +507,7 @@ impl From<LegacyGlobals> for Globals {
             mandates: Mandates::default(),
             assets: Assets::default(),
             reserves: Reserves::default(),
+            staking: Staking::default(),
         }
     }
 }
@@ -474,6 +530,7 @@ impl State {
             mandates: self.mandates.clone(),
             assets: self.assets.clone(),
             reserves: self.reserves.clone(),
+            staking: self.staking.clone(),
         })
     }
 
@@ -504,6 +561,10 @@ impl State {
                 per_object: self.reserves.per_object,
                 ..Reserves::default()
             },
+            staking: Staking {
+                params: self.staking.params.clone(),
+                ..Staking::default()
+            },
         })
     }
 
@@ -531,6 +592,10 @@ impl State {
         out.extend(rows(&mut self.assets.deals));
         out.extend(rows(&mut self.assets.mandates));
         out.extend(rows(&mut self.reserves.owned));
+        out.extend(rows(&mut self.staking.records));
+        out.extend(rows(&mut self.staking.names));
+        out.extend(rows(&mut self.staking.bonds));
+        out.extend(rows(&mut self.staking.pending));
         out
     }
 
@@ -557,6 +622,10 @@ impl State {
             t if t == <AssetDeal as Row>::TAG => load(&mut self.assets.deals, key, value),
             t if t == <AssetMandate as Row>::TAG => load(&mut self.assets.mandates, key, value),
             t if t == <Owned as Row>::TAG => load(&mut self.reserves.owned, key, value),
+            t if t == <ValidatorRecord as Row>::TAG => load(&mut self.staking.records, key, value),
+            t if t == <NameOwner as Row>::TAG => load(&mut self.staking.names, key, value),
+            t if t == <Bond as Row>::TAG => load(&mut self.staking.bonds, key, value),
+            t if t == <PendingAdmin as Row>::TAG => load(&mut self.staking.pending, key, value),
             _ => None,
         }
     }
@@ -572,11 +641,16 @@ impl State {
         self.assets.deals.mark_all_dirty();
         self.assets.mandates.mark_all_dirty();
         self.reserves.owned.mark_all_dirty();
+        self.staking.records.mark_all_dirty();
+        self.staking.names.mark_all_dirty();
+        self.staking.bonds.mark_all_dirty();
+        self.staking.pending.mark_all_dirty();
     }
 
     /// Reconstitue un état à partir de [`Self::globals_bytes`] et des comptes.
     pub fn from_parts(globals: &[u8], accounts: Accounts) -> Option<Self> {
         let g: Globals = vinx_core::decode(globals)
+            .or_else(|_| vinx_core::decode::<GlobalsV6>(globals).map(Globals::from))
             .or_else(|_| vinx_core::decode::<GlobalsV5>(globals).map(Globals::from))
             .or_else(|_| vinx_core::decode::<GlobalsV4M>(globals).map(Globals::from))
             .or_else(|_| vinx_core::decode::<GlobalsV4>(globals).map(Globals::from))
@@ -602,6 +676,7 @@ impl State {
             mandates: g.mandates,
             assets: g.assets,
             reserves: g.reserves,
+            staking: g.staking,
         })
     }
 
@@ -612,6 +687,7 @@ impl State {
             .total_balance()
             .checked_add(self.escrow.total())
             .and_then(|t| t.checked_add(self.registry.locked()))
+            .and_then(|t| t.checked_add(self.staking.bonds.locked()))
             .and_then(|t| t.checked_add(u128::from(self.emission.pot)))
             .and_then(|t| t.checked_add(u128::from(self.emission.remaining())));
         if total == Some(u128::from(TOTAL_SUPPLY)) {
@@ -663,6 +739,16 @@ impl State {
         if self.protocol_version >= 6 {
             let r = &self.reserves;
             globals.extend_from_slice(&encode(&(r.per_object, r.owned.root())));
+        }
+        if self.protocol_version >= 7 {
+            let k = &self.staking;
+            globals.extend_from_slice(&encode(&(
+                &k.params,
+                k.records.root(),
+                k.names.root(),
+                k.bonds.root(),
+                k.pending.root(),
+            )));
         }
         hash_tagged_parts(
             Domain::State,
@@ -794,6 +880,8 @@ impl State {
         let mut set_policy = None;
         let mut assets = AssetChanges::default();
         let mut asset_deal_write: Option<(Hash, Option<AssetDeal>)> = None;
+        let mut bond_write: Option<(PublicKey, Bond)> = None;
+        let mut record_write: Option<(PublicKey, ValidatorRecord)> = None;
         let mut asset_mandate_write: Option<((String, Address, Address), Option<AssetMandate>)> =
             None;
         match body {
@@ -814,6 +902,52 @@ impl State {
             }
             // L'empreinte n'est que dans le bloc : rien à changer dans l'état.
             TxBody::Attest { .. } => {}
+            TxBody::DepositBond { key, amount } => {
+                if Address::from_public_key(key) != tx.sender {
+                    return Err(TxError::Staking(StakingError::NotValidatorAddress));
+                }
+                if *amount == 0 {
+                    return Err(TxError::ZeroAmount);
+                }
+                if self
+                    .staking
+                    .records
+                    .get(key)
+                    .is_some_and(|r| r.status == ValidatorStatus::Banned)
+                {
+                    return Err(TxError::Staking(StakingError::Banned));
+                }
+                changes.debit(&self.accounts, tx.sender, *amount)?;
+                let amount = self
+                    .staking
+                    .bond(key)
+                    .checked_add(*amount)
+                    .ok_or(TxError::Overflow)?;
+                bond_write = Some((key.clone(), Bond { amount }));
+            }
+            TxBody::UpdateValidatorInfo { website, contact } => {
+                if website.len() > vinx_core::MAX_VALIDATOR_INFO
+                    || contact.len() > vinx_core::MAX_VALIDATOR_INFO
+                {
+                    return Err(TxError::Staking(StakingError::InfoTooLong));
+                }
+                let key = self
+                    .staking
+                    .key_of(&tx.sender)
+                    .ok_or(TxError::Staking(StakingError::UnknownValidator))?;
+                let mut record = self
+                    .staking
+                    .records
+                    .get(&key)
+                    .cloned()
+                    .ok_or(TxError::Staking(StakingError::UnknownValidator))?;
+                if record.status == ValidatorStatus::Banned {
+                    return Err(TxError::Staking(StakingError::Banned));
+                }
+                record.website = website.clone();
+                record.contact = contact.clone();
+                record_write = Some((key, record));
+            }
             TxBody::SetPolicy { policy } => {
                 let keep = crate::policy::validate(policy).map_err(TxError::Policy)?;
                 set_policy = Some(keep.map(|()| Policy {
@@ -1315,6 +1449,12 @@ impl State {
         changes.commit(&mut self.accounts);
         assets.commit(&mut self.assets);
         self.reserves.apply(&deltas);
+        if let Some((key, bond)) = bond_write {
+            self.staking.bonds.insert(key, bond);
+        }
+        if let Some((key, record)) = record_write {
+            self.staking.records.insert(key, record);
+        }
         match asset_deal_write {
             Some((id, Some(d))) => self.assets.deals.insert(id, d),
             Some((id, None)) => {
@@ -1555,8 +1695,54 @@ impl State {
         satx.verify_approvals(&self.admin.signers)
             .map_err(|_| TxError::Unauthorized)?;
 
+        if self.protocol_version >= 7 && tx.action.is_delayed() {
+            // Protocole 7 : vérifiée maintenant, exécutée après le délai.
+            let mut probe = self.clone();
+            probe.exec_admin(&tx.action, ctx)?;
+            let executes_at = ctx
+                .now
+                .checked_add(self.staking.params.admin_delay)
+                .ok_or(TxError::Overflow)?;
+            self.staking.pending.insert(
+                satx.id(),
+                PendingAdmin {
+                    action: tx.action.clone(),
+                    queued_at: ctx.height,
+                    executes_at,
+                },
+            );
+        } else {
+            self.exec_admin(&tx.action, ctx)?;
+        }
+        self.admin.nonce = tx.nonce;
+        Ok(())
+    }
+
+    /// Exécute les actions admin en attente dont l'échéance est atteinte, dans
+    /// l'ordre de leur échéance. Une action devenue impossible (trésorerie
+    /// vidée, nom pris entre-temps…) est abandonnée sans effet.
+    fn run_pending_admin(&mut self, ctx: Ctx) {
+        let mut due: Vec<(u64, u64, Hash, AdminAction)> = self
+            .staking
+            .pending
+            .iter()
+            .filter(|(_, p)| p.executes_at <= ctx.now)
+            .map(|(id, p)| (p.executes_at, p.queued_at, *id, p.action.clone()))
+            .collect();
+        due.sort_by_key(|a| (a.0, a.1, a.2));
+        for (_, _, id, action) in due {
+            self.staking.pending.remove(&id);
+            let mut probe = self.clone();
+            if probe.exec_admin(&action, ctx).is_ok() {
+                *self = probe;
+            }
+        }
+    }
+
+    /// Effet d'une action admin, une fois autorisée (et son délai écoulé).
+    fn exec_admin(&mut self, action: &AdminAction, ctx: Ctx) -> Result<(), TxError> {
         let treasury = Address::treasury();
-        match &tx.action {
+        match action {
             AdminAction::EscrowRelease { amount } => {
                 self.escrow
                     .check_release(*amount, ctx.now)
@@ -1587,10 +1773,22 @@ impl State {
                 changes.commit(&mut self.accounts);
             }
             AdminAction::AddValidator { key } => {
+                if self.protocol_version >= 7 {
+                    return Err(TxError::Staking(StakingError::Obsolete));
+                }
                 self.schedule_validator(ValidatorChange::Add(key.clone()), ctx)?;
             }
             AdminAction::RemoveValidator { key } => {
                 self.schedule_validator(ValidatorChange::Remove(key.clone()), ctx)?;
+                if self.protocol_version >= 7 {
+                    if let Some(mut record) = self.staking.records.get(key).cloned() {
+                        let unlock_at = ctx
+                            .now
+                            .saturating_add(self.staking.params.bond_unlock_delay);
+                        record.status = ValidatorStatus::Leaving { unlock_at };
+                        self.staking.records.insert(key.clone(), record);
+                    }
+                }
             }
             AdminAction::SetParam {
                 param: ParamId::NameFee,
@@ -1618,6 +1816,28 @@ impl State {
                     return Err(TxError::NotYetActive);
                 }
                 self.assets.fee = *value;
+            }
+            AdminAction::SetParam { param, value } if param.is_staking() => {
+                self.require(7)?;
+                let p = &mut self.staking.params;
+                let ok = match param {
+                    ParamId::MinAvailability | ParamId::VoteShare => *value <= 10_000,
+                    ParamId::Diversity => *value <= 1,
+                    _ => *value > 0,
+                };
+                if !ok {
+                    return Err(TxError::InvalidParam);
+                }
+                match param {
+                    ParamId::ValidatorBond => p.validator_bond = *value,
+                    ParamId::MinAvailability => p.min_availability = *value,
+                    ParamId::VoteShare => p.vote_share = *value,
+                    ParamId::AbsenceBlocks => p.absence_blocks = *value,
+                    ParamId::JailMinBlocks => p.jail_min_blocks = *value,
+                    ParamId::BondUnlockDelay => p.bond_unlock_delay = *value,
+                    ParamId::AdminDelay => p.admin_delay = *value,
+                    _ => p.diversity = *value,
+                }
             }
             AdminAction::SetParam { param, value } => {
                 let may_be_zero = matches!(param, ParamId::MinFee | ParamId::MinReserve);
@@ -1652,9 +1872,178 @@ impl State {
                     activation_height: *activation_height,
                 });
             }
+            AdminAction::AddNamedValidator { key, identity } => {
+                self.require(7)?;
+                self.add_named_validator(key, identity, ctx)?;
+            }
+            AdminAction::SetValidatorIdentity { key, identity } => {
+                self.require(7)?;
+                self.set_validator_identity(key, identity)?;
+            }
+            AdminAction::CancelPending { id } => {
+                self.require(7)?;
+                self.staking
+                    .pending
+                    .remove(id)
+                    .ok_or(TxError::Staking(StakingError::UnknownPending))?;
+            }
         }
-        self.admin.nonce = tx.nonce;
         Ok(())
+    }
+
+    fn require(&self, version: u32) -> Result<(), TxError> {
+        if self.protocol_version < version {
+            return Err(TxError::NotYetActive);
+        }
+        Ok(())
+    }
+
+    /// Opérateur déclaré d'un validateur (vide sans fiche).
+    fn operator_of(&self, key: &PublicKey) -> String {
+        self.staking
+            .records
+            .get(key)
+            .map(|r| r.identity.operator.clone())
+            .unwrap_or_default()
+    }
+
+    /// Protocole 7 : entrée d'un validateur, avec sa fiche et sa caution.
+    fn add_named_validator(
+        &mut self,
+        key: &PublicKey,
+        identity: &vinx_core::ValidatorIdentity,
+        ctx: Ctx,
+    ) -> Result<(), TxError> {
+        if !identity.is_valid() {
+            return Err(TxError::Staking(StakingError::InvalidIdentity));
+        }
+        let previous = self.staking.records.get(key).cloned();
+        if previous
+            .as_ref()
+            .is_some_and(|r| r.status == ValidatorStatus::Banned)
+        {
+            return Err(TxError::Staking(StakingError::Banned));
+        }
+        if !self.staking.name_available(&identity.name, key) {
+            return Err(TxError::Staking(StakingError::NameTaken));
+        }
+        // Un validateur qui revient garde son nom : un nom n'est jamais réattribué.
+        if previous
+            .as_ref()
+            .is_some_and(|r| name_key(&r.identity.name) != name_key(&identity.name))
+        {
+            return Err(TxError::Staking(StakingError::NameTaken));
+        }
+        if self.staking.bond(key) < self.staking.params.validator_bond {
+            return Err(TxError::Staking(StakingError::BondTooLow));
+        }
+        let change = ValidatorChange::Add(key.clone());
+        self.validators.check(&change).map_err(TxError::Validator)?;
+        let mut set = self.validators.at_height(u64::MAX);
+        set.push(key.clone());
+        let ok = self.staking.diversity_ok(&set, |k| {
+            if k == key {
+                identity.operator.clone()
+            } else {
+                self.operator_of(k)
+            }
+        });
+        if !ok {
+            return Err(TxError::Staking(StakingError::Diversity));
+        }
+        self.schedule_validator(change, ctx)?;
+        let (website, contact) = previous.map(|r| (r.website, r.contact)).unwrap_or_default();
+        self.staking
+            .names
+            .insert(name_key(&identity.name), NameOwner { key: key.clone() });
+        self.staking.records.insert(
+            key.clone(),
+            ValidatorRecord {
+                identity: identity.clone(),
+                website,
+                contact,
+                status: ValidatorStatus::Active,
+                joined_at: ctx.height.saturating_add(2),
+                grace_until: 0,
+            },
+        );
+        Ok(())
+    }
+
+    /// Protocole 7 : correction de l'identité d'un validateur. L'ancien nom
+    /// reste réservé à ce validateur.
+    fn set_validator_identity(
+        &mut self,
+        key: &PublicKey,
+        identity: &vinx_core::ValidatorIdentity,
+    ) -> Result<(), TxError> {
+        if !identity.is_valid() {
+            return Err(TxError::Staking(StakingError::InvalidIdentity));
+        }
+        let mut record = self
+            .staking
+            .records
+            .get(key)
+            .cloned()
+            .ok_or(TxError::Staking(StakingError::UnknownValidator))?;
+        if !self.staking.name_available(&identity.name, key) {
+            return Err(TxError::Staking(StakingError::NameTaken));
+        }
+        if record.status == ValidatorStatus::Active {
+            let set = self.validators.at_height(u64::MAX);
+            let ok = self.staking.diversity_ok(&set, |k| {
+                if k == key {
+                    identity.operator.clone()
+                } else {
+                    self.operator_of(k)
+                }
+            });
+            if !ok {
+                return Err(TxError::Staking(StakingError::Diversity));
+            }
+        }
+        record.identity = identity.clone();
+        self.staking
+            .names
+            .insert(name_key(&identity.name), NameOwner { key: key.clone() });
+        self.staking.records.insert(key.clone(), record);
+        Ok(())
+    }
+
+    /// Fiches provisoires des validateurs en place, à l'activation du
+    /// protocole 7 : « validateur-N », opérateur « VinX Labs », pays « FR »,
+    /// et 30 jours pour déposer la caution. La gouvernance les renomme ensuite.
+    fn bootstrap_validator_records(&mut self, height: u64, now: u64) {
+        let active = self.validators.active.clone();
+        for (i, key) in active.iter().enumerate() {
+            if self.staking.records.contains_key(key) {
+                continue;
+            }
+            let mut n = i.saturating_add(1);
+            let mut name = format!("validateur-{n}");
+            while self.staking.names.contains_key(&name_key(&name)) {
+                n = n.saturating_add(1);
+                name = format!("validateur-{n}");
+            }
+            self.staking
+                .names
+                .insert(name_key(&name), NameOwner { key: key.clone() });
+            self.staking.records.insert(
+                key.clone(),
+                ValidatorRecord {
+                    identity: vinx_core::ValidatorIdentity {
+                        name,
+                        operator: "VinX Labs".into(),
+                        country: *b"FR",
+                    },
+                    website: String::new(),
+                    contact: String::new(),
+                    status: ValidatorStatus::Active,
+                    joined_at: height,
+                    grace_until: now.saturating_add(BOND_GRACE),
+                },
+            );
+        }
     }
 
     fn schedule_validator(&mut self, change: ValidatorChange, ctx: Ctx) -> Result<(), TxError> {
@@ -1667,7 +2056,7 @@ impl State {
     // ── Blocs ───────────────────────────────────────────────────────────────
 
     /// Changements qui prennent effet au début du bloc `height`.
-    fn begin_block(&mut self, height: u64) {
+    fn begin_block(&mut self, height: u64, now: u64) {
         self.validators.advance_to(height);
         if let Some(up) = &self.upgrade {
             if up.activation_height <= height {
@@ -1676,6 +2065,9 @@ impl State {
                 self.upgrade = None;
                 if before < 6 && self.protocol_version >= 6 {
                     self.recount_objects();
+                }
+                if before < 7 && self.protocol_version >= 7 {
+                    self.bootstrap_validator_records(height, now);
                 }
             }
         }
@@ -1748,11 +2140,14 @@ impl State {
         // ne fait plus que les retrouver.
         crate::sigcache::preverify(self, txs);
         let mut next = self.clone();
-        next.begin_block(height);
+        next.begin_block(height, ctx.now);
         if next.protocol_version > SUPPORTED_PROTOCOL {
             return Err(BlockError::WrongVersion);
         }
         next.registry.now = ctx.now;
+        if next.protocol_version >= 7 {
+            next.run_pending_admin(ctx);
+        }
         for (index, satx) in admin_txs.iter().enumerate() {
             next.apply_admin(satx, ctx)
                 .map_err(|error| BlockError::InvalidAdminTx { index, error })?;

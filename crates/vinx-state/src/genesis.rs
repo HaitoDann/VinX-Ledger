@@ -161,6 +161,7 @@ impl Genesis {
             mandates: Default::default(),
             assets: Default::default(),
             reserves: Default::default(),
+            staking: Default::default(),
             emission: Emission {
                 start: self.genesis_time,
                 budget: self.emission_budget,

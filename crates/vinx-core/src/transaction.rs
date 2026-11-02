@@ -184,7 +184,22 @@ pub enum TxBody {
         amount: Amount,
         memo: Option<Vec<u8>>,
     } = 0x1C,
+    // Protocole 7 (docs/PROTOCOLE-7.md).
+    /// Dépose (ou complète) la caution du validateur `key`, depuis l'adresse
+    /// de cette clé.
+    DepositBond {
+        key: PublicKey,
+        amount: Amount,
+    } = 0x1D,
+    /// Le validateur met à jour son site et son contact.
+    UpdateValidatorInfo {
+        website: String,
+        contact: String,
+    } = 0x1E,
 }
+
+/// Longueur maximale du site et du contact d'un validateur, en octets.
+pub const MAX_VALIDATOR_INFO: usize = 96;
 
 /// Pouvoirs de l'émetteur d'un actif, choisis à la création. Ils peuvent
 /// ensuite être abandonnés, jamais ajoutés.
@@ -259,6 +274,7 @@ impl TxBody {
             | TxBody::GrantAssetMandate { .. }
             | TxBody::RevokeAssetMandate { .. }
             | TxBody::CollectAsset { .. } => 5,
+            TxBody::DepositBond { .. } | TxBody::UpdateValidatorInfo { .. } => 7,
             _ => 2,
         }
     }

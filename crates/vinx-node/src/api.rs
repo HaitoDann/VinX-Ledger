@@ -429,6 +429,39 @@ async fn governance(State(shared): State<SharedRef>) -> ApiResult {
             "version": u.version,
             "activation_height": u.activation_height,
         })),
+        // Protocole 7 : paramètres des validateurs et actions admin en attente.
+        "staking": (st.protocol_version >= 7).then(|| {
+            let p = &st.staking.params;
+            json!({
+                "validator_bond": amount_to_string(p.validator_bond),
+                "min_availability": p.min_availability,
+                "vote_share": p.vote_share,
+                "absence_blocks": p.absence_blocks,
+                "jail_min_blocks": p.jail_min_blocks,
+                "bond_unlock_delay": p.bond_unlock_delay,
+                "admin_delay": p.admin_delay,
+                "diversity": p.diversity,
+            })
+        }),
+        "pending_admin": st.staking.pending.iter().map(|(id, p)| {
+            let satx = vinx_core::SignedAdminTransaction {
+                tx: vinx_core::AdminTransaction {
+                    chain_id: st.chain_id.clone(),
+                    nonce: 0,
+                    action: p.action.clone(),
+                },
+                approvals: Vec::new(),
+            };
+            let mut v = admin_json(&satx);
+            if let Some(o) = v.as_object_mut() {
+                o.insert("id".into(), json!(hash_to_hex(id)));
+                o.remove("nonce");
+                o.remove("approvals");
+                o.insert("queued_at".into(), json!(p.queued_at));
+                o.insert("executes_at".into(), json!(p.executes_at));
+            }
+            v
+        }).collect::<Vec<_>>(),
         "treasury": {
             "address": vinx_crypto::Address::treasury().to_string(),
             "balance": amount_to_string(st.balance(&vinx_crypto::Address::treasury())),
@@ -1237,6 +1270,16 @@ fn tx_json(stx: &SignedTransaction) -> Value {
             "kind": "horodatage",
             "digest": hex::encode(digest),
         }),
+        TxBody::DepositBond { key, amount } => json!({
+            "kind": "caution de validateur",
+            "key": key_to_hex(key),
+            "amount": amount_to_string(*amount),
+        }),
+        TxBody::UpdateValidatorInfo { website, contact } => json!({
+            "kind": "fiche de validateur",
+            "website": website,
+            "contact": contact,
+        }),
         TxBody::SetPolicy { policy } => json!({
             "kind": "règles du compte",
             "policy": policy_json(policy),
@@ -1428,6 +1471,15 @@ fn policy_json(p: &vinx_core::PolicyConfig) -> Value {
     })
 }
 
+/// Identité publique d'un validateur (protocole 7).
+pub fn identity_json(identity: &vinx_core::ValidatorIdentity) -> Value {
+    json!({
+        "name": identity.name,
+        "operator": identity.operator,
+        "country": String::from_utf8_lossy(&identity.country),
+    })
+}
+
 /// Action admin lisible.
 fn admin_json(satx: &SignedAdminTransaction) -> Value {
     let (kind, detail) = match &satx.tx.action {
@@ -1469,6 +1521,18 @@ fn admin_json(satx: &SignedAdminTransaction) -> Value {
             "mise à jour du protocole",
             json!({ "version": version, "activation_height": activation_height }),
         ),
+        AdminAction::AddNamedValidator { key, identity } => (
+            "ajout de validateur",
+            json!({ "key": key_to_hex(key), "identity": identity_json(identity) }),
+        ),
+        AdminAction::SetValidatorIdentity { key, identity } => (
+            "identité de validateur",
+            json!({ "key": key_to_hex(key), "identity": identity_json(identity) }),
+        ),
+        AdminAction::CancelPending { id } => (
+            "annulation d'action en attente",
+            json!({ "id": hash_to_hex(id) }),
+        ),
     };
     json!({
         "id": hash_to_hex(&satx.id()),
@@ -1495,6 +1559,14 @@ pub fn param_name(p: ParamId) -> &'static str {
         ParamId::NameFee => "name_fee",
         ParamId::AssetFee => "asset_fee",
         ParamId::ObjectReserve => "object_reserve",
+        ParamId::ValidatorBond => "validator_bond",
+        ParamId::MinAvailability => "min_availability",
+        ParamId::VoteShare => "vote_share",
+        ParamId::AbsenceBlocks => "absence_blocks",
+        ParamId::JailMinBlocks => "jail_min_blocks",
+        ParamId::BondUnlockDelay => "bond_unlock_delay",
+        ParamId::AdminDelay => "admin_delay",
+        ParamId::Diversity => "diversity",
     }
 }
 
@@ -1511,10 +1583,41 @@ fn validator_labels(s: &crate::node::Shared, index: usize, key: &PublicKey) -> S
 
 /// Validateur : clé et nom lisible éventuel.
 fn validator_json(s: &crate::node::Shared, index: usize, key: &PublicKey) -> Value {
+    let st = &s.chain.state;
     json!({
         "index": index,
         "key": key_to_hex(key),
         "name": s.name_of(key),
+        "record": st.staking.records.get(key).map(|r| record_json(st, key, r)),
+    })
+}
+
+/// Fiche publique d'un validateur et sa caution (protocole 7).
+fn record_json(
+    st: &vinx_state::State,
+    key: &PublicKey,
+    r: &vinx_state::staking::ValidatorRecord,
+) -> Value {
+    use vinx_state::staking::ValidatorStatus as S;
+    let (status, detail) = match r.status {
+        S::Active => ("actif", Value::Null),
+        S::Jailed { since } => ("mis à l'écart", json!({ "since": since })),
+        S::Leaving { unlock_at } => ("sortant", json!({ "unlock_at": unlock_at })),
+        S::Left => ("sorti", Value::Null),
+        S::Banned => ("exclu", Value::Null),
+    };
+    json!({
+        "key": key_to_hex(key),
+        "address": vinx_crypto::Address::from_public_key(key).to_string(),
+        "identity": identity_json(&r.identity),
+        "website": r.website,
+        "contact": r.contact,
+        "status": status,
+        "status_detail": detail,
+        "joined_at": r.joined_at,
+        "grace_until": (r.grace_until > 0).then_some(r.grace_until),
+        "bond": amount_to_string(st.staking.bond(key)),
+        "bond_required": amount_to_string(st.staking.params.validator_bond),
     })
 }
 
@@ -1544,9 +1647,17 @@ async fn validators(State(shared): State<SharedRef>) -> ApiResult {
             v
         })
         .collect();
+    // Toutes les fiches, y compris des validateurs sortis ou exclus.
+    let registry: Vec<Value> = st
+        .staking
+        .records
+        .iter()
+        .map(|(k, r)| record_json(st, k, r))
+        .collect();
     Ok(Json(json!({
         "window_blocks": s.metrics.activity.blocks.len(),
         "validators": items,
+        "registry": registry,
     })))
 }
 

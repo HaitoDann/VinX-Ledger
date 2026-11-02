@@ -51,6 +51,62 @@ pub enum AdminAction {
         version: u32,
         activation_height: u64,
     } = 0x08,
+    // Protocole 7 (docs/PROTOCOLE-7.md).
+    /// Ajoute un validateur avec sa fiche publique ; remplace `AddValidator`.
+    AddNamedValidator {
+        key: PublicKey,
+        identity: ValidatorIdentity,
+    } = 0x09,
+    /// Corrige le nom, l'opérateur ou le pays d'un validateur.
+    SetValidatorIdentity {
+        key: PublicKey,
+        identity: ValidatorIdentity,
+    } = 0x0A,
+    /// Annule une action admin en attente (identifiant de sa transaction).
+    CancelPending {
+        id: Hash,
+    } = 0x0B,
+}
+
+/// Identité publique d'un validateur, fixée par la gouvernance (protocole 7).
+#[derive(Clone, Debug, PartialEq, Eq, BorshSerialize, BorshDeserialize)]
+pub struct ValidatorIdentity {
+    /// 3 à 24 caractères `A-Z a-z 0-9 - espace`, unique sans tenir compte
+    /// des majuscules, jamais réattribué.
+    pub name: String,
+    /// Entreprise, association ou personne qui opère le nœud : 1 à 64 octets.
+    pub operator: String,
+    /// Code pays ISO 3166-1 alpha-2, en majuscules (« FR »).
+    pub country: [u8; 2],
+}
+
+impl ValidatorIdentity {
+    pub fn is_valid(&self) -> bool {
+        let n = self.name.as_str();
+        let name_ok = (3..=24).contains(&n.len())
+            && n.bytes()
+                .all(|b| b.is_ascii_alphanumeric() || b == b'-' || b == b' ')
+            && !n.starts_with(' ')
+            && !n.ends_with(' ');
+        let op = self.operator.trim();
+        name_ok
+            && !op.is_empty()
+            && self.operator.len() <= 64
+            && self.country.iter().all(u8::is_ascii_uppercase)
+    }
+}
+
+impl AdminAction {
+    /// Action exécutée après le délai des actions admin (protocole 7) ; les
+    /// autres prennent effet dans le bloc qui les inclut.
+    pub fn is_delayed(&self) -> bool {
+        !matches!(
+            self,
+            AdminAction::EscrowRelease { .. }
+                | AdminAction::ScheduleUpgrade { .. }
+                | AdminAction::CancelPending { .. }
+        )
+    }
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, BorshSerialize, BorshDeserialize)]

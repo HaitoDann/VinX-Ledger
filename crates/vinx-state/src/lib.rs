@@ -11,6 +11,7 @@ pub mod registry;
 pub mod reserve;
 pub mod sigcache;
 pub mod smt;
+pub mod staking;
 pub mod state;
 pub mod table;
 pub mod validators;

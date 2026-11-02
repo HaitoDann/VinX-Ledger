@@ -10,15 +10,16 @@ pub mod transaction;
 
 pub use account::Account;
 pub use admin::{
-    ADMIN_SIGNERS, ADMIN_THRESHOLD, AdminAction, AdminTransaction, Approval, SignedAdminTransaction,
+    ADMIN_SIGNERS, ADMIN_THRESHOLD, AdminAction, AdminTransaction, Approval,
+    SignedAdminTransaction, ValidatorIdentity,
 };
 pub use amount::{Amount, TOTAL_SUPPLY, UNITS_PER_VINX};
 pub use block::{Block, BlockHeader};
 pub use consensus::{CommitCertificate, Vote, VoteKind, quorum};
 pub use params::{ParamId, Params};
 pub use transaction::{
-    AssetPowers, MAX_BATCH_PAYMENTS, MAX_MANDATE_PERIOD, MAX_POLICY_SIGNERS, MIN_MANDATE_PERIOD,
-    Payment, PolicyConfig, SignedTransaction, Transaction, TxBody, deal_id,
+    AssetPowers, MAX_BATCH_PAYMENTS, MAX_MANDATE_PERIOD, MAX_POLICY_SIGNERS, MAX_VALIDATOR_INFO,
+    MIN_MANDATE_PERIOD, Payment, PolicyConfig, SignedTransaction, Transaction, TxBody, deal_id,
 };
 pub use vinx_crypto::{Address, Hash, PublicKey, Signature};
 

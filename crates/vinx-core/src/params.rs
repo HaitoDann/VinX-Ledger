@@ -63,6 +63,40 @@ pub enum ParamId {
     AssetFee = 0x0C,
     /// Protocole 6 : réserve immobilisée par objet possédé, tenue hors de [`Params`].
     ObjectReserve = 0x0D,
+    // Protocole 7 (docs/PROTOCOLE-7.md §8), tenus hors de [`Params`].
+    /// Caution exigée d'un validateur, en unités.
+    ValidatorBond = 0x0E,
+    /// Disponibilité minimale pour être récompensé, en dix-millièmes.
+    MinAvailability = 0x0F,
+    /// Part du pot d'époque versée au prorata des signatures, en dix-millièmes.
+    VoteShare = 0x10,
+    /// Blocs consécutifs sans signature avant la mise à l'écart.
+    AbsenceBlocks = 0x11,
+    /// Blocs minimaux entre la mise à l'écart et le retour.
+    JailMinBlocks = 0x12,
+    /// Délai de restitution de la caution après le départ, en secondes.
+    BondUnlockDelay = 0x13,
+    /// Délai d'exécution des actions admin, en secondes.
+    AdminDelay = 0x14,
+    /// Règle de diversité des opérateurs : 0 (désactivée) ou 1.
+    Diversity = 0x15,
+}
+
+impl ParamId {
+    /// Paramètres du protocole 7, tenus dans la table des validateurs.
+    pub fn is_staking(self) -> bool {
+        matches!(
+            self,
+            ParamId::ValidatorBond
+                | ParamId::MinAvailability
+                | ParamId::VoteShare
+                | ParamId::AbsenceBlocks
+                | ParamId::JailMinBlocks
+                | ParamId::BondUnlockDelay
+                | ParamId::AdminDelay
+                | ParamId::Diversity
+        )
+    }
 }
 
 impl Params {
@@ -71,6 +105,14 @@ impl Params {
     pub fn set(&mut self, id: ParamId, value: u64) {
         let slot = match id {
             ParamId::NameFee | ParamId::AssetFee | ParamId::ObjectReserve => return,
+            ParamId::ValidatorBond
+            | ParamId::MinAvailability
+            | ParamId::VoteShare
+            | ParamId::AbsenceBlocks
+            | ParamId::JailMinBlocks
+            | ParamId::BondUnlockDelay
+            | ParamId::AdminDelay
+            | ParamId::Diversity => return,
             ParamId::MinFee => &mut self.min_fee,
             ParamId::MinReserve => &mut self.min_reserve,
             ParamId::MaxMemoBytes => &mut self.max_memo_bytes,
@@ -95,7 +137,8 @@ mod tests {
         assert_eq!(crate::encode(&ParamId::MinFee), [0x01]);
         assert_eq!(crate::encode(&ParamId::MinBlockInterval), [0x0A]);
         assert!(crate::decode::<ParamId>(&[0x00]).is_err());
-        assert!(crate::decode::<ParamId>(&[0x0E]).is_err());
+        assert_eq!(crate::encode(&ParamId::Diversity), [0x15]);
+        assert!(crate::decode::<ParamId>(&[0x16]).is_err());
     }
 
     #[test]

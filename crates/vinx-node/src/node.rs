@@ -128,8 +128,16 @@ impl Shared {
     }
 
     /// Nom lisible d'un validateur, s'il en a un.
+    /// Nom d'un validateur : sa fiche dans la chaîne (protocole 7), sinon le
+    /// fichier local `--validator-names`.
     pub fn name_of(&self, key: &PublicKey) -> Option<&str> {
-        self.names.get(key).map(String::as_str)
+        self.chain
+            .state
+            .staking
+            .records
+            .get(key)
+            .map(|r| r.identity.name.as_str())
+            .or_else(|| self.names.get(key).map(String::as_str))
     }
 
     pub fn record_reject(&mut self, sender: Option<String>, reason: String) {

@@ -229,6 +229,27 @@ fn describe(action: &AdminAction) -> Value {
             "version": version,
             "activation_height": activation_height,
         }),
+        AdminAction::AddNamedValidator { key, identity } => json!({
+            "kind": "add-named-validator",
+            "label": "Ajout de validateur",
+            "key": key_to_hex(key),
+            "name": identity.name,
+            "operator": identity.operator,
+            "country": String::from_utf8_lossy(&identity.country),
+        }),
+        AdminAction::SetValidatorIdentity { key, identity } => json!({
+            "kind": "set-validator-identity",
+            "label": "Identité de validateur",
+            "key": key_to_hex(key),
+            "name": identity.name,
+            "operator": identity.operator,
+            "country": String::from_utf8_lossy(&identity.country),
+        }),
+        AdminAction::CancelPending { id } => json!({
+            "kind": "cancel-pending",
+            "label": "Annulation d'une action en attente",
+            "id": hex::encode(id),
+        }),
     }
 }
 
