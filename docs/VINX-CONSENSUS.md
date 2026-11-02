@@ -94,6 +94,13 @@ pas même une mise à jour du protocole, ne peut en créer davantage (SPEC §4.3
 À mesure que l'émission décroît, les frais prennent le relais : les validateurs
 sont payés par l'usage du réseau.
 
+**Réseau principal** ([ADR 0003](./adr/0003-reserve-et-gouvernance.md)) : les
+900 M ne seront plus une trésorerie libérée par la gouvernance, mais une
+**réserve gérée par le protocole**. Aucune clé ne la contrôle. Elle verse au
+plus 5 M VINX par mois et 100 000 VINX par demande, et seulement aux demandes
+approuvées par les validateurs **puis** par les détenteurs de VINX. Les
+changements de paramètres, proposés par la gouvernance, sont eux aussi votés.
+
 ## 4. La gouvernance
 
 La gouvernance est une **multisignature de 3 clés admin, 2 signatures
