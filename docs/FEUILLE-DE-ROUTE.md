@@ -156,6 +156,7 @@ référence pour toute nouvelle proposition.
 | — | Robustesse, lot S2 | Exercices de panne rejoués en CI (quorum perdu puis rétabli, arrêt brutal de tout le réseau), fuzzing des jetons et de l'API à chaque PR, fuzzing long nocturne (cargo-fuzz) |
 | **0.28** | Réseau, lot 3 | VinX Consensus (document de référence), charte des validateurs, candidature, spécification du protocole 7 (projet), nœud public Copper (`--node-name`) |
 | À venir | Protocole 7 | Registre des validateurs nommés, diversité, caution et sanction, présence et récompenses, mise à l'écart, délai des actions admin (`docs/PROTOCOLE-7.md`) |
+| Avant le réseau principal | Gouvernance votée | Réserve de 900 M gérée par le protocole (5 M par mois au plus, 100 000 par demande), dépenses et paramètres votés par les validateurs et les détenteurs (`docs/adr/0003-reserve-et-gouvernance.md`) |
 | Protocole 5 | Règles | Jetons et titres, réserve par objet |
 | Protocole 7 | Règles | Canaux de paiement |
 | En parallèle | Hors chaîne | Pilote VinX Ping (premier subnet), conception des subnets |

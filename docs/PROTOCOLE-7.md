@@ -1,9 +1,9 @@
 # Protocole 7 : validateurs nommés, caution, présence, délai admin
 
-**Statut : projet, à valider avant tout code.** Une fois activées, ces règles
-sont définitives (une règle de protocole ne se retire pas). Les valeurs en gras
-sont paramétrables par la gouvernance (`SetParam`), sauf mention contraire.
-Les choix encore ouverts sont listés au §9.
+**Statut : validé le 2026-11-02** (décisions au §9). Une fois activées, ces
+règles sont définitives (une règle de protocole ne se retire pas). Les valeurs
+en gras sont paramétrables par la gouvernance (`SetParam`), sauf mention
+contraire.
 
 Contexte : [`VINX-CONSENSUS.md`](./VINX-CONSENSUS.md) et la
 [charte des validateurs](./CHARTE-DES-VALIDATEURS.md).
@@ -147,15 +147,20 @@ d'époque (17 280 blocs), pour chaque validateur actif pendant l'époque :
 | `0x14` | `admin_delay` | 172 800 | secondes |
 | `0x15` | `diversity` | 0 | 0 ou 1 |
 
-## 9. Choix encore ouverts
+## 9. Décisions (2026-11-02)
 
-| Question | Proposition |
+| Question | Décision |
 |---|---|
-| Partage du pot entre signatures et propositions | 50 / 50 (`vote_share`) |
-| `TreasuryTransfer` soumis au délai de 48 h ? | Oui, par transparence. Cela retarde aussi les paiements courants de la trésorerie, comme le robinet des testeurs |
-| Caution des 4 validateurs existants à l'activation | Délai de grâce de 30 jours pour déposer, sans récompense tant qu'elle n'est pas déposée |
-| Validateur mis à l'écart : récompense de l'époque ? | Aucune pour l'époque de la mise à l'écart |
-| Signaler les preuves | Automatique par tout nœud ; récompense au signaleur ? Proposition : non (les frais restent à sa charge), pour éviter les incitations perverses |
+| Partage du pot entre signatures et propositions | 50 / 50 (`vote_share` = 5 000) |
+| `TreasuryTransfer` soumis au délai de 48 h | Oui (y compris le robinet du testnet) |
+| Caution des 4 validateurs existants à l'activation | Délai de grâce de 30 jours pour la déposer, sans récompense tant qu'elle ne l'est pas |
+| Validateur mis à l'écart : récompense de l'époque | Aucune pour l'époque de la mise à l'écart |
+| Récompense au signaleur d'une preuve | Non : les frais restent à sa charge |
+
+Sur le réseau principal, l'escrow et la trésorerie seront remplacés par une
+réserve gérée par le protocole et une gouvernance votée
+([ADR 0003](./adr/0003-reserve-et-gouvernance.md)). Le protocole 7 ne touche
+pas à l'escrow du testnet.
 
 ## 10. Mise en œuvre prévue
 
