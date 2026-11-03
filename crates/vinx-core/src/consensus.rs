@@ -2,7 +2,7 @@
 
 use crate::{CoreError, encode};
 use borsh::{BorshDeserialize, BorshSerialize};
-use vinx_crypto::{Domain, Hash, KeyPair, PublicKey, Signature, tagged};
+use vinx_crypto::{Domain, Hash, KeyPair, PublicKey, Signature, hash_tagged, tagged};
 
 /// Quorum pour `n` validateurs : `⌊2n/3⌋ + 1`.
 pub fn quorum(n: usize) -> usize {
@@ -48,6 +48,17 @@ pub struct CommitCertificate {
 }
 
 impl CommitCertificate {
+    /// `H("vinx/commit" ‖ borsh(certificat))`, engagé dans `tx_root` du bloc
+    /// suivant (protocole 7).
+    pub fn hash(&self) -> Hash {
+        hash_tagged(Domain::Commit, &encode(self))
+    }
+
+    /// Indices des signataires.
+    pub fn signers(&self) -> impl Iterator<Item = u16> + '_ {
+        self.signatures.iter().map(|(i, _)| *i)
+    }
+
     /// Vérifie que le certificat porte les precommits d'un quorum de `validators`
     /// pour ce bloc.
     pub fn verify(&self, chain_id: &str, validators: &[PublicKey]) -> Result<(), CoreError> {

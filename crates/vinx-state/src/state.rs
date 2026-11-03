@@ -21,11 +21,13 @@ use crate::table::{Row, Table};
 use crate::validators::{ValidatorChange, ValidatorError, ValidatorSet, validators_hash};
 use borsh::{BorshDeserialize, BorshSerialize};
 use std::collections::BTreeMap;
+use std::collections::BTreeSet;
 use thiserror::Error;
 use vinx_core::params::MIN_UPGRADE_DELAY;
 use vinx_core::{
-    ADMIN_SIGNERS, Account, AdminAction, Amount, Block, ParamId, Params, SignedAdminTransaction,
-    SignedTransaction, TOTAL_SUPPLY, TxBody, deal_id, encode,
+    ADMIN_SIGNERS, Account, AdminAction, Amount, Block, CommitCertificate, LAST_COMMIT_PROTOCOL,
+    ParamId, Params, SignedAdminTransaction, SignedTransaction, TOTAL_SUPPLY, TxBody, deal_id,
+    encode,
 };
 use vinx_crypto::{Address, Domain, Hash, PublicKey, hash_tagged_parts, merkle_root};
 
@@ -177,6 +179,8 @@ pub enum BlockError {
     UnknownProposer,
     #[error("invariant de supply violé")]
     InvariantViolated,
+    #[error("certificat du bloc précédent (last_commit) absent, en trop ou invalide")]
+    BadLastCommit,
 }
 
 /// Contexte du bloc en cours d'application.
@@ -563,6 +567,7 @@ impl State {
             },
             staking: Staking {
                 params: self.staking.params.clone(),
+                presence: self.staking.presence.clone(),
                 ..Staking::default()
             },
         })
@@ -744,6 +749,7 @@ impl State {
             let k = &self.staking;
             globals.extend_from_slice(&encode(&(
                 &k.params,
+                &k.presence,
                 k.records.root(),
                 k.names.root(),
                 k.bonds.root(),
@@ -759,6 +765,15 @@ impl State {
     /// Validateurs de la hauteur `height`.
     pub fn validators_at(&self, height: u64) -> Vec<PublicKey> {
         self.validators.at_height(height)
+    }
+
+    /// Version du protocole qui s'appliquera au bloc `height` (mise à jour
+    /// programmée comprise).
+    pub fn version_at(&self, height: u64) -> u32 {
+        match &self.upgrade {
+            Some(up) if up.activation_height <= height => up.version,
+            _ => self.protocol_version,
+        }
     }
 
     /// `validators_hash` attendu dans l'en-tête du bloc `self.height`.
@@ -882,6 +897,7 @@ impl State {
         let mut asset_deal_write: Option<(Hash, Option<AssetDeal>)> = None;
         let mut bond_write: Option<(PublicKey, Bond)> = None;
         let mut record_write: Option<(PublicKey, ValidatorRecord)> = None;
+        let mut validator_effect: Option<ValidatorEffect> = None;
         let mut asset_mandate_write: Option<((String, Address, Address), Option<AssetMandate>)> =
             None;
         match body {
@@ -947,6 +963,13 @@ impl State {
                 record.website = website.clone();
                 record.contact = contact.clone();
                 record_write = Some((key, record));
+            }
+            TxBody::Unjail | TxBody::LeaveValidators | TxBody::WithdrawBond => {
+                let effect = self.validator_tx(body, tx.sender, now)?;
+                if effect.refund > 0 {
+                    changes.credit(&self.accounts, tx.sender, effect.refund)?;
+                }
+                validator_effect = Some(effect);
             }
             TxBody::SetPolicy { policy } => {
                 let keep = crate::policy::validate(policy).map_err(TxError::Policy)?;
@@ -1455,6 +1478,24 @@ impl State {
         if let Some((key, record)) = record_write {
             self.staking.records.insert(key, record);
         }
+        if let Some(effect) = validator_effect {
+            let height = self.height.saturating_add(1);
+            if let Some(change) = effect.change {
+                let effective = height.saturating_add(2);
+                self.validators.schedule(change, effective);
+            }
+            if effect.refund > 0 {
+                self.staking.bonds.remove(&effect.key);
+            }
+            if effect.reset_presence {
+                if let Some(p) = self.staking.presence.get_mut(&effect.key) {
+                    p.missed_in_row = 0;
+                }
+            }
+            if let Some(record) = effect.record {
+                self.staking.records.insert(effect.key, record);
+            }
+        }
         match asset_deal_write {
             Some((id, Some(d))) => self.assets.deals.insert(id, d),
             Some((id, None)) => {
@@ -1779,14 +1820,34 @@ impl State {
                 self.schedule_validator(ValidatorChange::Add(key.clone()), ctx)?;
             }
             AdminAction::RemoveValidator { key } => {
-                self.schedule_validator(ValidatorChange::Remove(key.clone()), ctx)?;
-                if self.protocol_version >= 7 {
-                    if let Some(mut record) = self.staking.records.get(key).cloned() {
+                let record = if self.protocol_version >= 7 {
+                    self.staking.records.get(key).cloned()
+                } else {
+                    None
+                };
+                match record {
+                    Some(mut record) => {
+                        match record.status {
+                            ValidatorStatus::Banned => {
+                                return Err(TxError::Staking(StakingError::Banned));
+                            }
+                            ValidatorStatus::Leaving { .. } | ValidatorStatus::Left => {
+                                return Err(TxError::Staking(StakingError::AlreadyLeft));
+                            }
+                            // Déjà hors de l'ensemble : seulement le départ.
+                            ValidatorStatus::Jailed { .. } => {}
+                            ValidatorStatus::Active => {
+                                self.schedule_validator(ValidatorChange::Remove(key.clone()), ctx)?;
+                            }
+                        }
                         let unlock_at = ctx
                             .now
                             .saturating_add(self.staking.params.bond_unlock_delay);
                         record.status = ValidatorStatus::Leaving { unlock_at };
                         self.staking.records.insert(key.clone(), record);
+                    }
+                    None => {
+                        self.schedule_validator(ValidatorChange::Remove(key.clone()), ctx)?;
                     }
                 }
             }
@@ -2010,6 +2071,167 @@ impl State {
         Ok(())
     }
 
+    /// Protocole 7 : effet de `Unjail`, `LeaveValidators` ou `WithdrawBond`
+    /// envoyée par `sender`, calculé sans rien modifier.
+    fn validator_tx(
+        &self,
+        body: &TxBody,
+        sender: Address,
+        now: u64,
+    ) -> Result<ValidatorEffect, TxError> {
+        let err = |e| Err(TxError::Staking(e));
+        let height = self.height.saturating_add(1);
+        let params = &self.staking.params;
+        if let TxBody::WithdrawBond = body {
+            // Une caution sans fiche (jamais entrée) est libre ; sinon il faut
+            // être sorti et que le délai soit écoulé.
+            let key = self
+                .staking
+                .bonds
+                .iter()
+                .map(|(k, _)| k)
+                .find(|k| Address::from_public_key(k) == sender)
+                .cloned()
+                .ok_or(TxError::Staking(StakingError::NoBond))?;
+            let refund = self.staking.bond(&key);
+            if refund == 0 {
+                return err(StakingError::NoBond);
+            }
+            let record = match self.staking.records.get(&key).cloned() {
+                None => None,
+                Some(mut r) => match r.status {
+                    ValidatorStatus::Leaving { unlock_at } if unlock_at <= now => {
+                        r.status = ValidatorStatus::Left;
+                        Some(r)
+                    }
+                    ValidatorStatus::Banned => return err(StakingError::Banned),
+                    _ => return err(StakingError::BondLocked),
+                },
+            };
+            return Ok(ValidatorEffect {
+                key,
+                record,
+                change: None,
+                refund,
+                reset_presence: false,
+            });
+        }
+        let key = self
+            .staking
+            .key_of(&sender)
+            .ok_or(TxError::Staking(StakingError::UnknownValidator))?;
+        let mut record = self
+            .staking
+            .records
+            .get(&key)
+            .cloned()
+            .ok_or(TxError::Staking(StakingError::UnknownValidator))?;
+        if record.status == ValidatorStatus::Banned {
+            return err(StakingError::Banned);
+        }
+        let mut change = None;
+        match body {
+            TxBody::Unjail => {
+                let ValidatorStatus::Jailed { since } = record.status else {
+                    return err(StakingError::NotJailed);
+                };
+                if height < since.saturating_add(params.jail_min_blocks) {
+                    return err(StakingError::JailTooRecent);
+                }
+                if self.staking.bond(&key) < params.validator_bond {
+                    return err(StakingError::BondTooLow);
+                }
+                let add = ValidatorChange::Add(key.clone());
+                self.validators.check(&add).map_err(TxError::Validator)?;
+                let mut set = self.validators.at_height(u64::MAX);
+                set.push(key.clone());
+                if !self.staking.diversity_ok(&set, |k| self.operator_of(k)) {
+                    return err(StakingError::Diversity);
+                }
+                change = Some(add);
+                record.status = ValidatorStatus::Active;
+            }
+            TxBody::LeaveValidators => {
+                match record.status {
+                    ValidatorStatus::Leaving { .. } | ValidatorStatus::Left => {
+                        return err(StakingError::AlreadyLeft);
+                    }
+                    ValidatorStatus::Active
+                        if self.validators.at_height(u64::MAX).contains(&key) =>
+                    {
+                        let remove = ValidatorChange::Remove(key.clone());
+                        self.validators.check(&remove).map_err(TxError::Validator)?;
+                        change = Some(remove);
+                    }
+                    _ => {}
+                }
+                record.status = ValidatorStatus::Leaving {
+                    unlock_at: now.saturating_add(params.bond_unlock_delay),
+                };
+            }
+            _ => return Err(TxError::NotYetActive),
+        }
+        Ok(ValidatorEffect {
+            key,
+            record: Some(record),
+            change,
+            refund: 0,
+            reset_presence: true,
+        })
+    }
+
+    /// Protocole 7 : compte la présence du bloc précédent d'après son
+    /// certificat, et met à l'écart les validateurs absents depuis
+    /// `absence_blocks` blocs. `set` est l'ensemble du bloc certifié.
+    fn record_presence(&mut self, set: &[PublicKey], cert: &CommitCertificate, ctx: Ctx) {
+        let signers: BTreeSet<u16> = cert.signers().collect();
+        let absence = self.staking.params.absence_blocks;
+        for (i, key) in set.iter().enumerate() {
+            let signed = u16::try_from(i).is_ok_and(|i| signers.contains(&i));
+            let p = self.staking.presence.entry(key.clone()).or_default();
+            p.expected = p.expected.saturating_add(1);
+            if signed {
+                p.signed = p.signed.saturating_add(1);
+                p.missed_in_row = 0;
+            } else {
+                p.missed_in_row = p.missed_in_row.saturating_add(1);
+            }
+            if !signed && absence > 0 && p.missed_in_row >= absence {
+                self.jail(key, ctx);
+            }
+        }
+    }
+
+    /// Mise à l'écart : fiche `Jailed`, retrait de l'ensemble à `H + 2`.
+    /// Rien si le validateur n'est pas actif, ou si l'ensemble deviendrait vide.
+    fn jail(&mut self, key: &PublicKey, ctx: Ctx) {
+        let Some(mut record) = self.staking.records.get(key).cloned() else {
+            return;
+        };
+        if record.status != ValidatorStatus::Active
+            || self
+                .schedule_validator(ValidatorChange::Remove(key.clone()), ctx)
+                .is_err()
+        {
+            return;
+        }
+        record.status = ValidatorStatus::Jailed { since: ctx.height };
+        self.staking.records.insert(key.clone(), record);
+        if let Some(p) = self.staking.presence.get_mut(key) {
+            p.jailed_this_epoch = true;
+        }
+    }
+
+    /// Protocole 7 : un validateur peut-il être récompensé ? Fiche active,
+    /// et caution suffisante sauf pendant le délai de grâce.
+    fn reward_ok(&self, key: &PublicKey, now: u64) -> bool {
+        self.staking.records.get(key).is_some_and(|r| {
+            r.status == ValidatorStatus::Active
+                && (self.staking.bond(key) >= self.staking.params.validator_bond
+                    || now < r.grace_until)
+        })
+    }
+
     /// Fiches provisoires des validateurs en place, à l'activation du
     /// protocole 7 : « validateur-N », opérateur « VinX Labs », pays « FR »,
     /// et 30 jours pour déposer la caution. La gouvernance les renomme ensuite.
@@ -2089,8 +2311,32 @@ impl State {
         if height.checked_rem(epoch) != Some(0) {
             return Ok(());
         }
+        let shares = if self.protocol_version >= 7 {
+            let min = self.staking.params.min_availability;
+            let eligible: Vec<(PublicKey, u64)> = self
+                .staking
+                .presence
+                .iter()
+                .filter(|(k, p)| !p.jailed_this_epoch && p.meets(min) && self.reward_ok(k, now))
+                .map(|(k, p)| (k.clone(), p.signed))
+                .collect();
+            let shares =
+                self.emission
+                    .close_epoch_v7(now, &eligible, self.staking.params.vote_share);
+            // Nouvelle époque : compteurs à zéro, sauf les absences consécutives.
+            let projected = self.validators.at_height(u64::MAX);
+            self.staking.presence.retain(|k, _| projected.contains(k));
+            for p in self.staking.presence.values_mut() {
+                p.signed = 0;
+                p.expected = 0;
+                p.jailed_this_epoch = false;
+            }
+            shares
+        } else {
+            self.emission.close_epoch(now)
+        };
         let mut changes = Changes::default();
-        for (key, share) in self.emission.close_epoch(now) {
+        for (key, share) in shares {
             changes
                 .credit(&self.accounts, Address::from_public_key(&key), share)
                 .map_err(|_| BlockError::InvariantViolated)?;
@@ -2125,9 +2371,38 @@ impl State {
         admin_txs: &[SignedAdminTransaction],
         txs: &[SignedTransaction],
     ) -> Result<State, BlockError> {
+        self.execute_block(height, timestamp_ms, proposer, None, admin_txs, txs)
+    }
+
+    /// Comme [`Self::execute_by`], avec le certificat du bloc précédent
+    /// (`last_commit`, protocole 7) : il est vérifié contre l'ensemble de
+    /// validateurs de la hauteur `height − 1` et, avec un proposeur, sert à
+    /// compter la présence et à mettre à l'écart les absents.
+    pub fn execute_block(
+        &self,
+        height: u64,
+        timestamp_ms: u64,
+        proposer: Option<u16>,
+        last_commit: Option<&CommitCertificate>,
+        admin_txs: &[SignedAdminTransaction],
+        txs: &[SignedTransaction],
+    ) -> Result<State, BlockError> {
         if self.height.checked_add(1) != Some(height) {
             return Err(BlockError::WrongHeight);
         }
+        // Ensemble du bloc certifié : celui de l'état avant ce bloc.
+        let certified_set = match last_commit {
+            Some(cert) => {
+                if self.height == 0 || cert.height != self.height {
+                    return Err(BlockError::BadLastCommit);
+                }
+                let set = self.validators_at(self.height);
+                cert.verify(&self.chain_id, &set)
+                    .map_err(|_| BlockError::BadLastCommit)?;
+                Some(set)
+            }
+            None => None,
+        };
         let count = admin_txs.len().saturating_add(txs.len());
         if u64::try_from(count).map_or(true, |c| c > self.params.max_block_txs) {
             return Err(BlockError::TooManyTxs);
@@ -2147,6 +2422,14 @@ impl State {
         next.registry.now = ctx.now;
         if next.protocol_version >= 7 {
             next.run_pending_admin(ctx);
+        }
+        if let (Some(cert), Some(set)) = (last_commit, &certified_set) {
+            if next.protocol_version < LAST_COMMIT_PROTOCOL {
+                return Err(BlockError::BadLastCommit);
+            }
+            if proposer.is_some() {
+                next.record_presence(set, cert, ctx);
+            }
         }
         for (index, satx) in admin_txs.iter().enumerate() {
             next.apply_admin(satx, ctx)
@@ -2179,10 +2462,19 @@ impl State {
         if block.compute_tx_root() != h.tx_root {
             return Err(BlockError::TxRootMismatch);
         }
-        let next = self.execute_by(
+        // Protocole 7 : chaque bloc après le premier porte le certificat de
+        // son parent (le lien `prev_hash` est vérifié par le consensus).
+        let wants_commit = h.protocol_version >= LAST_COMMIT_PROTOCOL && h.height > 1;
+        match &block.last_commit {
+            Some(cert) if wants_commit && cert.block_hash == h.prev_hash => {}
+            None if !wants_commit => {}
+            _ => return Err(BlockError::BadLastCommit),
+        }
+        let next = self.execute_block(
             h.height,
             h.timestamp,
             Some(h.proposer),
+            block.last_commit.as_ref(),
             &block.admin_txs,
             &block.txs,
         )?;
@@ -2198,6 +2490,19 @@ impl State {
         *self = next;
         Ok(())
     }
+}
+
+/// Effet différé d'une transaction de validateur (protocole 7).
+struct ValidatorEffect {
+    key: PublicKey,
+    /// Fiche à réécrire ; `None` pour une caution sans fiche.
+    record: Option<ValidatorRecord>,
+    /// Entrée ou sortie de l'ensemble, à `H + 2`.
+    change: Option<ValidatorChange>,
+    /// Caution restituée (créditée à l'émetteur, ligne supprimée).
+    refund: Amount,
+    /// Remet à zéro le compteur d'absences consécutives.
+    reset_presence: bool,
 }
 
 /// Écriture dans le registre, différée comme celles des comptes.

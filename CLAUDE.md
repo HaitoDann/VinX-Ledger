@@ -175,35 +175,34 @@ sont terminés et testés ensemble.
 - Vérifié : tests `vinx-state/tests/staking.rs`, et essai réel de mise à
   jour 6 → 7 sur devnet.
 
-### P7b : à faire (conception retenue)
+### P7b : fait (branche `claude/wizardly-gauss-2u386c`, commit « Protocole 7, lot P7b »)
 
-- **Format de bloc versionné** :
-  - pour `protocol_version >= 7`, le `Block` porte en plus `last_commit`, le
-    certificat du bloc précédent avec **toutes** les signatures reçues ;
-  - encodage borsh manuel : champ ajouté en fin de bloc seulement si
-    `v >= 7`, pour que les anciens blocs restent lisibles ;
-  - `last_commit` est engagé dans `tx_root` (son empreinte s'ajoute à la
-    liste quand `v >= 7`) ;
-  - vérifié dans `apply_block` : hauteur `h - 1`, `block_hash == prev_hash`,
-    signatures des validateurs de `h - 1`, quorum.
-- **Exécution** : `execute_by` doit recevoir les signataires pour compter la
-  présence (proposeur dans `chain.rs` et vérification). Le nœud remplit
-  `last_commit` à la construction du bloc, à partir du certificat stocké.
-- **Présence et récompenses** :
-  - par époque, compteurs signés / attendus par validateur ;
-  - éligible si `signés / attendus ≥ min_availability` (9 700) ;
-  - pot partagé entre les éligibles : `vote_share` (50 %) au prorata des
-    signatures, le reste au prorata des propositions ;
-  - rien pour un validateur mis à l'écart pendant l'époque, ni sans caution
-    suffisante après la grâce ;
-  - sans éligible, le pot est conservé.
-- **Mise à l'écart** :
-  - absent de `last_commit` pendant `absence_blocks` (1 000) d'affilée :
-    `Jailed`, retiré à `H + 2`, jamais si l'ensemble deviendrait vide ;
-  - `Unjail` (tx) après `jail_min_blocks`, avec une caution suffisante.
-- **Départ** : `LeaveValidators` (tx), puis `WithdrawBond` après
-  `bond_unlock_delay`. `RemoveValidator` d'un validateur mis à l'écart :
-  seulement passer en `Leaving`.
+- `vinx-core` : `Block.last_commit: Option<CommitCertificate>`, encodage
+  borsh manuel (écrit seulement si `header.protocol_version >= 7`,
+  `LAST_COMMIT_PROTOCOL`) ; `block_tx_root` ajoute `CommitCertificate::hash`
+  (domaine `vinx/commit`) quand `v >= 7`.
+- `vinx-state` :
+  - `execute_block(h, ts, proposer, last_commit, …)` (`execute_by` passe
+    `None`) : certificat vérifié contre `validators_at(h - 1)` ;
+    `apply_block` l'exige si `v >= 7 && h > 1`, avec
+    `block_hash == prev_hash`, et le refuse sinon (`BadLastCommit`) ;
+  - `Staking.presence` (`Presence` : signés, attendus, absences d'affilée,
+    mis à l'écart pendant l'époque), dans `state_root` et les globales
+    légères ;
+  - mise à l'écart à `absence_blocks`, récompenses `close_epoch_v7`
+    (`vote_share`, `min_availability`, caution ou grâce) ;
+  - transactions `Unjail` (0x1F), `LeaveValidators` (0x20),
+    `WithdrawBond` (0x21) ; `RemoveValidator` d'un mis à l'écart : `Leaving`
+    seulement.
+- `vinx-node` : `Chain.last_commit` (certificat du dernier bloc, chargé au
+  démarrage, complété par les precommits tardifs `add_late_precommit`),
+  mis dans le bloc construit.
+- CLI : `vinx-wallet validator unjail|leave|withdraw`.
+- Tests : `vinx-state/tests/presence.rs`.
+- Limites connues : un proposeur peut omettre des signatures (présence
+  sous-estimée d'un validateur, sans pouvoir en inventer) ; les precommits
+  tardifs reçus avant un redémarrage sont perdus. Pas encore d'essai
+  multi-nœuds ni de mise à jour 6 → 7 réelle avec ce lot.
 
 ### P7c : à faire
 

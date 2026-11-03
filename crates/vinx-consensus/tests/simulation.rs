@@ -43,6 +43,7 @@ impl Rng {
 }
 
 #[derive(Clone)]
+#[allow(clippy::large_enum_variant)] // code de test
 enum Msg {
     Proposal(SignedProposal),
     Vote(SignedVote),
@@ -228,6 +229,7 @@ impl Sim {
             },
             admin_txs: vec![],
             txs: vec![],
+            last_commit: None,
         }
     }
 
@@ -492,6 +494,7 @@ fn block(height: u64, proposer: u16) -> Block {
         },
         admin_txs: vec![],
         txs: vec![],
+        last_commit: None,
     }
 }
 

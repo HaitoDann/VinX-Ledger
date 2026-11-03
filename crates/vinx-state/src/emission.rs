@@ -99,16 +99,72 @@ impl Emission {
         }
     }
 
-    /// Clôt l'époque à l'instant `now` : émet ce qui est dû, et renvoie la part
-    /// de chaque validateur (cagnotte au prorata des blocs proposés). Le reliquat
-    /// d'arrondi reste dans la cagnotte. Les compteurs repartent de zéro.
-    pub fn close_epoch(&mut self, now: u64) -> Vec<(PublicKey, Amount)> {
+    /// Verse dans la cagnotte l'émission due à l'instant `now`.
+    fn emit_due(&mut self, now: u64) {
         let due = self
             .target(now)
             .saturating_sub(self.emitted)
             .min(self.remaining());
         self.emitted = self.emitted.saturating_add(due);
         self.pot = self.pot.saturating_add(due);
+    }
+
+    /// Protocole 7 (docs/PROTOCOLE-7.md §5) : clôt l'époque et partage la
+    /// cagnotte entre les seuls `eligible` (clé, blocs signés) : `vote_share`
+    /// dix-millièmes au prorata des signatures, le reste au prorata des blocs
+    /// proposés. Sans éligible, la cagnotte est conservée. Les reliquats
+    /// d'arrondi y restent aussi.
+    pub fn close_epoch_v7(
+        &mut self,
+        now: u64,
+        eligible: &[(PublicKey, u64)],
+        vote_share: u64,
+    ) -> Vec<(PublicKey, Amount)> {
+        self.emit_due(now);
+        let proposed = std::mem::take(&mut self.proposed);
+        let proposed_by = |key: &PublicKey| {
+            proposed
+                .iter()
+                .find(|(k, _)| k == key)
+                .map_or(0, |(_, n)| *n)
+        };
+        let pot = u128::from(self.pot);
+        let vote_pot = pot.saturating_mul(u128::from(vote_share.min(10_000))) / 10_000;
+        let block_pot = pot.saturating_sub(vote_pot);
+        let signed_total: u128 = eligible.iter().map(|(_, n)| u128::from(*n)).sum();
+        let proposed_total: u128 = eligible
+            .iter()
+            .map(|(k, _)| u128::from(proposed_by(k)))
+            .sum();
+        let part = |pot: u128, n: u64, total: u128| {
+            pot.saturating_mul(u128::from(n))
+                .checked_div(total)
+                .unwrap_or(0)
+        };
+        let mut paid: Amount = 0;
+        let shares: Vec<(PublicKey, Amount)> = eligible
+            .iter()
+            .map(|(key, signed)| {
+                let share = part(vote_pot, *signed, signed_total).saturating_add(part(
+                    block_pot,
+                    proposed_by(key),
+                    proposed_total,
+                ));
+                let share = Amount::try_from(share).unwrap_or(0);
+                paid = paid.saturating_add(share);
+                (key.clone(), share)
+            })
+            .filter(|(_, share)| *share > 0)
+            .collect();
+        self.pot = self.pot.saturating_sub(paid);
+        shares
+    }
+
+    /// Clôt l'époque à l'instant `now` : émet ce qui est dû, et renvoie la part
+    /// de chaque validateur (cagnotte au prorata des blocs proposés). Le reliquat
+    /// d'arrondi reste dans la cagnotte. Les compteurs repartent de zéro.
+    pub fn close_epoch(&mut self, now: u64) -> Vec<(PublicKey, Amount)> {
+        self.emit_due(now);
         let blocks: u128 = self.proposed.iter().map(|(_, n)| u128::from(*n)).sum();
         let proposed = std::mem::take(&mut self.proposed);
         if blocks == 0 {
@@ -205,6 +261,35 @@ mod tests {
         let later = now + 86_400;
         assert!(e.close_epoch(later).is_empty());
         assert_eq!(e.emitted, e.target(later));
+    }
+
+    #[test]
+    fn v7_shares_go_to_the_eligible_only() {
+        let mut e = emission();
+        e.pot = 10_000;
+        let keys: Vec<PublicKey> = (0..3).map(|_| KeyPair::generate().public_key()).collect();
+        // a propose 3 blocs, b 1, c 4 (mais c n'est pas éligible).
+        for _ in 0..3 {
+            e.record(&keys[0]);
+        }
+        e.record(&keys[1]);
+        for _ in 0..4 {
+            e.record(&keys[2]);
+        }
+        let now = e.start; // aucune émission due : seule la cagnotte compte
+        let eligible = [(keys[0].clone(), 100), (keys[1].clone(), 300)];
+        let shares = e.close_epoch_v7(now, &eligible, 5_000);
+        // Votes : 5 000 × 1/4 et 3/4 ; blocs : 5 000 × 3/4 et 1/4.
+        assert_eq!(
+            shares,
+            vec![(keys[0].clone(), 5_000), (keys[1].clone(), 5_000)]
+        );
+        assert_eq!(e.pot, 0);
+        assert!(e.proposed.is_empty());
+        // Sans éligible : la cagnotte attend.
+        e.pot = 777;
+        assert!(e.close_epoch_v7(now, &[], 5_000).is_empty());
+        assert_eq!(e.pot, 777);
     }
 
     #[test]

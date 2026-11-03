@@ -132,9 +132,33 @@ impl Row for PendingAdmin {
     const TAG: u8 = 13;
 }
 
+/// Présence d'un validateur, mesurée par `last_commit` (protocole 7, §5).
+#[derive(Clone, Debug, Default, PartialEq, Eq, BorshSerialize, BorshDeserialize)]
+pub struct Presence {
+    /// Blocs de l'époque que le validateur a signés.
+    pub signed: u64,
+    /// Blocs de l'époque où il faisait partie de l'ensemble.
+    pub expected: u64,
+    /// Blocs consécutifs sans sa signature (survit au changement d'époque).
+    pub missed_in_row: u64,
+    /// Mis à l'écart pendant l'époque : aucune récompense.
+    pub jailed_this_epoch: bool,
+}
+
+impl Presence {
+    /// Disponibilité suffisante : `signés / attendus ≥ min / 10 000`.
+    pub fn meets(&self, min_availability: u64) -> bool {
+        self.expected > 0
+            && u128::from(self.signed).saturating_mul(10_000)
+                >= u128::from(self.expected).saturating_mul(u128::from(min_availability))
+    }
+}
+
 #[derive(Clone, Debug, Default, PartialEq, Eq, BorshSerialize, BorshDeserialize)]
 pub struct Staking {
     pub params: StakingParams,
+    /// Présence de l'époque en cours, par validateur.
+    pub presence: std::collections::BTreeMap<PublicKey, Presence>,
     pub records: Table<PublicKey, ValidatorRecord>,
     pub names: Table<String, NameOwner>,
     pub bonds: Table<PublicKey, Bond>,
@@ -168,6 +192,16 @@ pub enum StakingError {
     UnknownPending,
     #[error("action remplacée au protocole 7 (utiliser AddNamedValidator)")]
     Obsolete,
+    #[error("ce validateur n'est pas mis à l'écart")]
+    NotJailed,
+    #[error("trop tôt : le délai minimal après la mise à l'écart n'est pas écoulé")]
+    JailTooRecent,
+    #[error("ce validateur a déjà quitté l'ensemble")]
+    AlreadyLeft,
+    #[error("caution pas encore restituable (validateur actif ou délai non écoulé)")]
+    BondLocked,
+    #[error("aucune caution à restituer")]
+    NoBond,
 }
 
 /// Forme comparable d'un nom : minuscules.

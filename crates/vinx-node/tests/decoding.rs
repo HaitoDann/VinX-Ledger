@@ -87,6 +87,7 @@ fn samples() -> Vec<Vec<u8>> {
         },
         admin_txs: vec![admin.clone()],
         txs: vec![tx.clone()],
+        last_commit: None,
     };
     let vote = Vote {
         chain_id: "vinx-fuzz".into(),

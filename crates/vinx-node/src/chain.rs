@@ -2,9 +2,11 @@
 
 use vinx_consensus::{HeaderError, check_header_link};
 use vinx_core::params::MAX_CLOCK_DRIFT_MS;
-use vinx_core::{Block, BlockHeader, SignedAdminTransaction, SignedTransaction};
+use vinx_core::{
+    Block, BlockHeader, CommitCertificate, LAST_COMMIT_PROTOCOL, SignedAdminTransaction,
+    SignedTransaction, block_tx_root,
+};
 use vinx_crypto::Hash;
-use vinx_state::state::tx_root;
 use vinx_state::{BlockError, State};
 
 #[derive(Debug, PartialEq, Eq)]
@@ -20,6 +22,9 @@ pub struct Chain {
     /// Racine d'état de la genèse : `prev_hash` du bloc 1 (SPEC §12).
     pub genesis_root: Hash,
     pub genesis_time_ms: u64,
+    /// Certificat du dernier bloc, complété des precommits reçus après la
+    /// décision : c'est le `last_commit` du prochain bloc (protocole 7).
+    pub last_commit: Option<CommitCertificate>,
 }
 
 impl Chain {
@@ -33,6 +38,41 @@ impl Chain {
         self.last
             .as_ref()
             .map_or(self.genesis_time_ms, |h| h.timestamp)
+    }
+
+    /// Ajoute au certificat du dernier bloc un precommit arrivé après la
+    /// décision. Renvoie `true` s'il était nouveau et valide.
+    pub fn add_late_precommit(
+        &mut self,
+        vote: &vinx_core::Vote,
+        validator: u16,
+        signature: &vinx_crypto::Signature,
+    ) -> bool {
+        let Some(cert) = &mut self.last_commit else {
+            return false;
+        };
+        if vote.kind != vinx_core::VoteKind::Precommit
+            || vote.chain_id != self.state.chain_id
+            || vote.height != cert.height
+            || vote.round != cert.round
+            || vote.block_hash != Some(cert.block_hash)
+        {
+            return false;
+        }
+        let Err(at) = cert
+            .signatures
+            .binary_search_by_key(&validator, |(i, _)| *i)
+        else {
+            return false;
+        };
+        let set = self.state.validators_at(cert.height);
+        let valid = set
+            .get(usize::from(validator))
+            .is_some_and(|key| key.verify(&vote.signing_message(), signature).is_ok());
+        if valid {
+            cert.signatures.insert(at, (validator, signature.clone()));
+        }
+        valid
     }
 
     pub fn next_height(&self) -> u64 {
@@ -88,6 +128,9 @@ impl Chain {
         }
         let mut txs = Vec::new();
         if let Ok(mut work) = self.state.execute(height, timestamp_ms, &admin, &[]) {
+            // `apply_tx` prend la hauteur du bloc en cours à `height + 1` :
+            // on la ramène à celle du parent, comme pendant `execute`.
+            work.height = self.state.height;
             let limit = usize::try_from(work.params.max_block_txs)
                 .unwrap_or(usize::MAX)
                 .saturating_sub(admin.len());
@@ -119,10 +162,21 @@ impl Chain {
                 }
             }
         }
+        // Protocole 7 : le bloc porte le certificat de son parent.
+        let last_commit = (height > 1 && self.state.version_at(height) >= LAST_COMMIT_PROTOCOL)
+            .then(|| self.last_commit.clone())
+            .flatten();
         // `execute` ne peut pas échouer ici : chaque transaction a été appliquée avec succès.
         let next = self
             .state
-            .execute_by(height, timestamp_ms, Some(proposer), &admin, &txs)
+            .execute_block(
+                height,
+                timestamp_ms,
+                Some(proposer),
+                last_commit.as_ref(),
+                &admin,
+                &txs,
+            )
             .unwrap_or_else(|_| self.state.clone());
         Block {
             header: BlockHeader {
@@ -131,19 +185,21 @@ impl Chain {
                 height,
                 timestamp: timestamp_ms,
                 prev_hash: self.parent_hash(),
-                tx_root: tx_root(&admin, &txs),
+                tx_root: block_tx_root(next.protocol_version, &admin, &txs, last_commit.as_ref()),
                 state_root: next.state_root(),
                 validators_hash: next.next_validators_hash(),
                 proposer,
             },
             admin_txs: admin,
             txs,
+            last_commit,
         }
     }
 
     /// Adopte un bloc finalisé, dont l'état résultant a déjà été calculé.
-    pub fn advance(&mut self, block: &Block, next: State) {
+    pub fn advance(&mut self, block: &Block, cert: &CommitCertificate, next: State) {
         self.state = next;
         self.last = Some(block.header.clone());
+        self.last_commit = Some(cert.clone());
     }
 }

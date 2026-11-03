@@ -196,6 +196,15 @@ pub enum TxBody {
         website: String,
         contact: String,
     } = 0x1E,
+    /// Le validateur mis à l'écart demande à revenir dans l'ensemble, depuis
+    /// l'adresse de sa clé, au plus tôt `jail_min_blocks` après la mise à
+    /// l'écart et avec une caution suffisante.
+    Unjail = 0x1F,
+    /// Le validateur quitte l'ensemble, depuis l'adresse de sa clé ; sa
+    /// caution est restituable après `bond_unlock_delay`.
+    LeaveValidators = 0x20,
+    /// Récupère la caution d'un validateur sorti, une fois le délai écoulé.
+    WithdrawBond = 0x21,
 }
 
 /// Longueur maximale du site et du contact d'un validateur, en octets.
@@ -274,7 +283,11 @@ impl TxBody {
             | TxBody::GrantAssetMandate { .. }
             | TxBody::RevokeAssetMandate { .. }
             | TxBody::CollectAsset { .. } => 5,
-            TxBody::DepositBond { .. } | TxBody::UpdateValidatorInfo { .. } => 7,
+            TxBody::DepositBond { .. }
+            | TxBody::UpdateValidatorInfo { .. }
+            | TxBody::Unjail
+            | TxBody::LeaveValidators
+            | TxBody::WithdrawBond => 7,
             _ => 2,
         }
     }
@@ -447,6 +460,9 @@ mod tests {
         assert_eq!(codes, [0x01, 0x02, 0x03]);
         assert!(decode::<TxBody>(&[0x00, 1]).is_err());
         assert!(decode::<TxBody>(&[0x1D, 1]).is_err());
+        assert_eq!(encode(&TxBody::Unjail), [0x1F]);
+        assert_eq!(encode(&TxBody::WithdrawBond), [0x21]);
+        assert!(decode::<TxBody>(&[0x22]).is_err());
     }
 
     #[test]

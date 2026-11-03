@@ -736,6 +736,7 @@ mod tests {
             },
             admin_txs: vec![],
             txs: vec![],
+            last_commit: None,
         };
         let cert = CommitCertificate {
             height: 1,
@@ -799,6 +800,7 @@ mod tests {
             },
             admin_txs: vec![],
             txs: vec![],
+            last_commit: None,
         };
         let cert = CommitCertificate {
             height: 1,
@@ -875,6 +877,7 @@ mod tests {
             },
             admin_txs: vec![],
             txs,
+            last_commit: None,
         };
         let cert = CommitCertificate {
             height: 1,

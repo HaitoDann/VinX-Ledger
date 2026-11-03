@@ -28,6 +28,7 @@ pub enum Domain {
     TxApproval,
     TxSponsor,
     TableKey,
+    Commit,
 }
 
 impl Domain {
@@ -52,6 +53,7 @@ impl Domain {
             Domain::TxApproval => "vinx/tx/approval",
             Domain::TxSponsor => "vinx/tx/sponsor",
             Domain::TableKey => "vinx/table/key",
+            Domain::Commit => "vinx/commit",
         }
     }
 }

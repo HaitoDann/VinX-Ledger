@@ -1280,6 +1280,9 @@ fn tx_json(stx: &SignedTransaction) -> Value {
             "website": website,
             "contact": contact,
         }),
+        TxBody::Unjail => json!({ "kind": "retour de validateur" }),
+        TxBody::LeaveValidators => json!({ "kind": "départ de validateur" }),
+        TxBody::WithdrawBond => json!({ "kind": "restitution de caution" }),
         TxBody::SetPolicy { policy } => json!({
             "kind": "règles du compte",
             "policy": policy_json(policy),

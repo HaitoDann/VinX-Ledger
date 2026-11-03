@@ -217,6 +217,10 @@ pub fn open(genesis: Genesis, data_dir: &Path) -> Result<SharedRef> {
                 .header,
         ),
     };
+    let last_commit = match state.height {
+        0 => None,
+        h => store.certificate(h)?,
+    };
     let guard = store.load_guard()?;
     let mempool = Mempool::new(&state);
     let shared = Arc::new(Mutex::new(Shared {
@@ -225,6 +229,7 @@ pub fn open(genesis: Genesis, data_dir: &Path) -> Result<SharedRef> {
             last,
             genesis_root,
             genesis_time_ms,
+            last_commit,
         },
         mempool,
         store,
@@ -322,7 +327,7 @@ fn commit(
         .map(SignedAdminTransaction::id)
         .chain(block.txs.iter().map(SignedTransaction::id))
         .collect();
-    s.chain.advance(block, next);
+    s.chain.advance(block, cert, next);
     s.mempool.reset(&s.chain.state, &included);
     s.guard.prune_below(block.header.height.saturating_add(1));
     s.store.save_guard(&s.guard)?;
@@ -652,6 +657,15 @@ impl Runner {
                         return;
                     }
                     if height < self.engine.height() {
+                        // Precommit tardif du dernier bloc : il compte pour la
+                        // présence (last_commit du prochain bloc, protocole 7).
+                        if let NetMessage::Vote(v) = &consensus {
+                            lock(&self.shared).chain.add_late_precommit(
+                                &v.vote,
+                                v.validator,
+                                &v.signature,
+                            );
+                        }
                         return;
                     }
                     let s = lock(&self.shared);
@@ -814,7 +828,7 @@ impl Runner {
         }
         s.store
             .install_snapshot(&d.info.block, &d.info.cert, &mut state)?;
-        s.chain.advance(&d.info.block, state);
+        s.chain.advance(&d.info.block, &d.info.cert, state);
         s.mempool.reset(&s.chain.state, &BTreeSet::new());
         s.metrics.snapshots_installed = s.metrics.snapshots_installed.saturating_add(1);
         s.refresh_snapshot()?;

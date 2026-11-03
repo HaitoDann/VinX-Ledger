@@ -328,6 +328,21 @@ enum ValidatorCommand {
         #[arg(long, default_value = "")]
         contact: String,
     },
+    /// Demande le retour dans l'ensemble après une mise à l'écart.
+    Unjail {
+        #[arg(long)]
+        key: PathBuf,
+    },
+    /// Quitte l'ensemble de validateurs (caution restituable après le délai).
+    Leave {
+        #[arg(long)]
+        key: PathBuf,
+    },
+    /// Récupère la caution, une fois le délai de restitution écoulé.
+    Withdraw {
+        #[arg(long)]
+        key: PathBuf,
+    },
 }
 
 /// `Eurv.vinx` → `eurv`.
@@ -1205,6 +1220,15 @@ fn main() -> Result<()> {
                     load_key(&key, pwf)?,
                     vinx_core::TxBody::UpdateValidatorInfo { website, contact },
                 ),
+                ValidatorCommand::Unjail { key } => {
+                    (load_key(&key, pwf)?, vinx_core::TxBody::Unjail)
+                }
+                ValidatorCommand::Leave { key } => {
+                    (load_key(&key, pwf)?, vinx_core::TxBody::LeaveValidators)
+                }
+                ValidatorCommand::Withdraw { key } => {
+                    (load_key(&key, pwf)?, vinx_core::TxBody::WithdrawBond)
+                }
             };
             println!(
                 "transaction {}",

@@ -14,7 +14,7 @@ pub use admin::{
     SignedAdminTransaction, ValidatorIdentity,
 };
 pub use amount::{Amount, TOTAL_SUPPLY, UNITS_PER_VINX};
-pub use block::{Block, BlockHeader};
+pub use block::{Block, BlockHeader, LAST_COMMIT_PROTOCOL, block_tx_root};
 pub use consensus::{CommitCertificate, Vote, VoteKind, quorum};
 pub use params::{ParamId, Params};
 pub use transaction::{

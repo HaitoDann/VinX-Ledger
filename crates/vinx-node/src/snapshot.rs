@@ -176,6 +176,7 @@ mod tests {
             },
             admin_txs: vec![],
             txs: vec![],
+            last_commit: None,
         };
         let vote = Vote {
             chain_id: "vinx-snap".into(),

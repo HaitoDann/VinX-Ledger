@@ -1,8 +1,13 @@
 //! Blocs (SPEC §6).
 
-use crate::{SignedAdminTransaction, SignedTransaction, encode};
+use crate::{CommitCertificate, SignedAdminTransaction, SignedTransaction, encode};
 use borsh::{BorshDeserialize, BorshSerialize};
+use std::io::{Read, Write};
 use vinx_crypto::{Domain, Hash, hash_tagged, merkle_root};
+
+/// Version du protocole à partir de laquelle un bloc porte `last_commit`
+/// (docs/PROTOCOLE-7.md §5).
+pub const LAST_COMMIT_PROTOCOL: u32 = 7;
 
 #[derive(Clone, Debug, PartialEq, Eq, BorshSerialize, BorshDeserialize)]
 pub struct BlockHeader {
@@ -22,11 +27,69 @@ pub struct BlockHeader {
     pub proposer: u16,
 }
 
-#[derive(Clone, Debug, PartialEq, Eq, BorshSerialize, BorshDeserialize)]
+/// Bloc. L'encodage borsh est manuel : `last_commit` n'est écrit qu'à partir
+/// du protocole 7 (selon `header.protocol_version`), pour que les blocs plus
+/// anciens gardent exactement leur encodage d'origine.
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Block {
     pub header: BlockHeader,
     pub admin_txs: Vec<SignedAdminTransaction>,
     pub txs: Vec<SignedTransaction>,
+    /// Protocole 7 : certificat du bloc précédent, avec toutes les signatures
+    /// reçues par le proposeur. `None` au bloc 1 et avant le protocole 7.
+    pub last_commit: Option<CommitCertificate>,
+}
+
+impl BorshSerialize for Block {
+    fn serialize<W: Write>(&self, writer: &mut W) -> std::io::Result<()> {
+        self.header.serialize(writer)?;
+        self.admin_txs.serialize(writer)?;
+        self.txs.serialize(writer)?;
+        if self.header.protocol_version >= LAST_COMMIT_PROTOCOL {
+            self.last_commit.serialize(writer)?;
+        }
+        Ok(())
+    }
+}
+
+impl BorshDeserialize for Block {
+    fn deserialize_reader<R: Read>(reader: &mut R) -> std::io::Result<Self> {
+        let header = BlockHeader::deserialize_reader(reader)?;
+        let admin_txs = Vec::deserialize_reader(reader)?;
+        let txs = Vec::deserialize_reader(reader)?;
+        let last_commit = if header.protocol_version >= LAST_COMMIT_PROTOCOL {
+            Option::deserialize_reader(reader)?
+        } else {
+            None
+        };
+        Ok(Self {
+            header,
+            admin_txs,
+            txs,
+            last_commit,
+        })
+    }
+}
+
+/// Racine des transactions : Merkle des `admin_tx_id`, des `tx_id` puis, à
+/// partir du protocole 7, de l'empreinte de `last_commit`.
+pub fn block_tx_root(
+    protocol_version: u32,
+    admin_txs: &[SignedAdminTransaction],
+    txs: &[SignedTransaction],
+    last_commit: Option<&CommitCertificate>,
+) -> Hash {
+    let mut ids: Vec<Hash> = admin_txs
+        .iter()
+        .map(SignedAdminTransaction::id)
+        .chain(txs.iter().map(SignedTransaction::id))
+        .collect();
+    if protocol_version >= LAST_COMMIT_PROTOCOL {
+        if let Some(cert) = last_commit {
+            ids.push(cert.hash());
+        }
+    }
+    merkle_root(&ids)
 }
 
 impl BlockHeader {
@@ -43,13 +106,12 @@ impl Block {
 
     /// Racine des transactions du bloc, à comparer à `header.tx_root`.
     pub fn compute_tx_root(&self) -> Hash {
-        let ids: Vec<Hash> = self
-            .admin_txs
-            .iter()
-            .map(SignedAdminTransaction::id)
-            .chain(self.txs.iter().map(SignedTransaction::id))
-            .collect();
-        merkle_root(&ids)
+        block_tx_root(
+            self.header.protocol_version,
+            &self.admin_txs,
+            &self.txs,
+            self.last_commit.as_ref(),
+        )
     }
 
     /// Taille encodée, à comparer à `max_block_bytes`.
@@ -97,6 +159,7 @@ mod tests {
             },
             admin_txs: vec![admin],
             txs: vec![tx],
+            last_commit: None,
         };
         b.header.tx_root = b.compute_tx_root();
         b
@@ -121,5 +184,32 @@ mod tests {
         let mut swapped = b.clone();
         swapped.txs.clear();
         assert_ne!(swapped.compute_tx_root(), b.header.tx_root);
+    }
+
+    #[test]
+    fn last_commit_is_encoded_from_protocol_7_only() {
+        let mut b = block();
+        let old = encode(&b);
+        let cert = CommitCertificate {
+            height: 0,
+            round: 1,
+            block_hash: [3; 32],
+            signatures: vec![],
+        };
+        // Avant le protocole 7 : encodage d'origine, le champ est ignoré.
+        b.last_commit = Some(cert.clone());
+        assert_eq!(encode(&b), old);
+        assert_eq!(b.compute_tx_root(), b.header.tx_root);
+        assert_eq!(decode::<Block>(&old).unwrap().last_commit, None);
+        // À partir du protocole 7 : écrit, relu, et engagé dans `tx_root`.
+        b.header.protocol_version = 7;
+        let bytes = encode(&b);
+        assert_eq!(bytes.len(), old.len() + encode(&Some(cert.clone())).len());
+        assert_eq!(decode::<Block>(&bytes).unwrap(), b);
+        assert_ne!(b.compute_tx_root(), b.header.tx_root);
+        let ids = [b.admin_txs[0].id(), b.txs[0].id(), cert.hash()];
+        assert_eq!(b.compute_tx_root(), merkle_root(&ids));
+        b.last_commit = None;
+        assert_eq!(decode::<Block>(&encode(&b)).unwrap(), b);
     }
 }
