@@ -42,6 +42,9 @@ pub struct Genesis {
     /// Protocole 7 : caution de chaque validateur, prise sur la trésorerie.
     /// Sous la caution exigée, le validateur a 30 jours de grâce.
     pub validator_bond: Amount,
+    /// Protocole 7 : caution exigée de chaque validateur (`validator_bond`
+    /// des paramètres). `None` : la valeur par défaut, 10 000 VINX.
+    pub required_bond: Option<Amount>,
 }
 
 #[derive(Debug, Error, PartialEq, Eq)]
@@ -88,6 +91,7 @@ impl Genesis {
             epoch_blocks: DEFAULT_EPOCH_BLOCKS,
             identities: Vec::new(),
             validator_bond: 0,
+            required_bond: None,
         })
     }
 
@@ -163,6 +167,7 @@ impl Genesis {
                 &self.validators,
                 &self.identities,
                 self.validator_bond,
+                self.required_bond,
                 self.genesis_time,
             )?;
             let n = Amount::try_from(self.validators.len()).unwrap_or(Amount::MAX);
@@ -173,7 +178,10 @@ impl Genesis {
             treasury_balance = treasury_balance
                 .checked_sub(bonds)
                 .ok_or(GenesisError::BondsTooLarge)?;
-        } else if !self.identities.is_empty() || self.validator_bond > 0 {
+        } else if !self.identities.is_empty()
+            || self.validator_bond > 0
+            || self.required_bond.is_some()
+        {
             return Err(GenesisError::InvalidIdentities);
         }
         let treasury = Account {
@@ -218,12 +226,16 @@ fn genesis_staking(
     validators: &[PublicKey],
     identities: &[ValidatorIdentity],
     bond: Amount,
+    required_bond: Option<Amount>,
     genesis_time: u64,
 ) -> Result<Staking, GenesisError> {
     if !identities.is_empty() && identities.len() != validators.len() {
         return Err(GenesisError::InvalidIdentities);
     }
     let mut staking = Staking::default();
+    if let Some(required) = required_bond {
+        staking.params.validator_bond = required;
+    }
     let grace_until = if bond >= staking.params.validator_bond {
         0
     } else {
@@ -372,6 +384,36 @@ mod tests {
         let mut big = g;
         big.validator_bond = 1_000_000 * UNITS_PER_VINX;
         assert_eq!(big.into_state(), Err(GenesisError::BondsTooLarge));
+    }
+
+    #[test]
+    fn required_bond_can_be_set_at_genesis() {
+        // Pré-production : pas de robinet, caution exigée basse, un validateur.
+        let mut g = standard();
+        g.validators.truncate(1);
+        g.required_bond = Some(1_000 * UNITS_PER_VINX);
+        let s = g.clone().into_state().unwrap();
+        assert_eq!(s.staking.params.validator_bond, 1_000 * UNITS_PER_VINX);
+        assert_eq!(s.accounts[&Address::treasury()].balance, 0);
+        let r = s.staking.records.get(&g.validators[0]).unwrap();
+        assert_eq!(
+            r.grace_until,
+            1_800_000_000 + BOND_GRACE,
+            "caution à déposer"
+        );
+        // Une caution de genèse au niveau exigé : pas de délai de grâce.
+        let mut g = g.with_faucet(1_000 * UNITS_PER_VINX).unwrap();
+        g.validator_bond = 1_000 * UNITS_PER_VINX;
+        let s = g.clone().into_state().unwrap();
+        assert_eq!(
+            s.staking.records.get(&g.validators[0]).unwrap().grace_until,
+            0
+        );
+        assert_eq!(s.check_invariant(), Ok(()));
+        // Réservé au protocole 7.
+        g.protocol_version = 6;
+        g.validator_bond = 0;
+        assert_eq!(g.into_state(), Err(GenesisError::InvalidIdentities));
     }
 
     #[test]

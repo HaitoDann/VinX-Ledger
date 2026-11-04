@@ -32,6 +32,9 @@ pub struct GenesisFile {
     /// trésorerie.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub validator_bond: Option<String>,
+    /// Protocole 7 : caution exigée de chaque validateur, en unités.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub required_bond: Option<String>,
 }
 
 #[derive(Debug, Serialize, Deserialize)]
@@ -114,6 +117,7 @@ impl GenesisFile {
                 })
                 .collect(),
             validator_bond: (g.validator_bond > 0).then(|| amount_to_string(g.validator_bond)),
+            required_bond: g.required_bond.map(amount_to_string),
             emission: (g.emission_budget > 0).then(|| EmissionFile {
                 budget: amount_to_string(g.emission_budget),
                 epoch_blocks: g.epoch_blocks,
@@ -177,7 +181,13 @@ impl GenesisFile {
             Some(b) => amount_from_str(b)?,
             None => 0,
         };
+        let required_bond = self
+            .required_bond
+            .as_deref()
+            .map(amount_from_str)
+            .transpose()?;
         Ok(Genesis {
+            required_bond,
             identities,
             validator_bond,
             emission_budget,

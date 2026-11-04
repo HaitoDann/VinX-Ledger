@@ -64,6 +64,10 @@ enum Command {
         /// avec 30 jours de grâce).
         #[arg(long)]
         validator_bond: Option<String>,
+        /// Protocole 7 : caution exigée de chaque validateur, en VINX
+        /// (par défaut 10 000). Exemple de pré-production : `--required-bond 1000`.
+        #[arg(long)]
+        required_bond: Option<String>,
     },
     /// Écrit la genèse d'un réseau à partir des clés publiques de ses participants.
     ///
@@ -105,6 +109,10 @@ enum Command {
         /// avec 30 jours de grâce).
         #[arg(long)]
         validator_bond: Option<String>,
+        /// Protocole 7 : caution exigée de chaque validateur, en VINX
+        /// (par défaut 10 000). Exemple de pré-production : `--required-bond 1000`.
+        #[arg(long)]
+        required_bond: Option<String>,
         #[arg(long)]
         out: PathBuf,
     },
@@ -217,14 +225,15 @@ fn with_staking(
     protocol: u32,
     identities: &[String],
     bond: Option<&str>,
+    required: Option<&str>,
 ) -> Result<Genesis> {
     if !(1..=vinx_state::state::SUPPORTED_PROTOCOL).contains(&protocol) {
         bail!("--protocol : version {protocol} inconnue");
     }
     genesis.protocol_version = protocol;
     if protocol < 7 {
-        if !identities.is_empty() || bond.is_some() {
-            bail!("--identity et --validator-bond demandent le protocole 7");
+        if !identities.is_empty() || bond.is_some() || required.is_some() {
+            bail!("--identity, --validator-bond et --required-bond demandent le protocole 7");
         }
         return Ok(genesis);
     }
@@ -233,7 +242,10 @@ fn with_staking(
         .map(|text| parse_identity(text))
         .collect::<Result<_>>()?;
     let n = vinx_core::Amount::try_from(genesis.validators.len()).unwrap_or(vinx_core::Amount::MAX);
-    let default = vinx_state::staking::DEFAULT_VALIDATOR_BOND;
+    genesis.required_bond = required.map(vinx_wallet_amount).transpose()?;
+    let default = genesis
+        .required_bond
+        .unwrap_or(vinx_state::staking::DEFAULT_VALIDATOR_BOND);
     genesis.validator_bond = match bond {
         Some(b) => vinx_wallet_amount(b)?,
         None if default.saturating_mul(n) <= genesis.treasury_balance => default,
@@ -337,6 +349,7 @@ async fn main() -> Result<()> {
             protocol,
             identities,
             validator_bond,
+            required_bond,
         } => {
             let pw = pw()?;
             if *count == 0 {
@@ -367,7 +380,13 @@ async fn main() -> Result<()> {
             )
             .context("horodatage de genèse invalide")?;
             let genesis = with_test_options(genesis, *escrow_period, Some(faucet), *epoch_blocks)?;
-            let genesis = with_staking(genesis, *protocol, identities, validator_bond.as_deref())?;
+            let genesis = with_staking(
+                genesis,
+                *protocol,
+                identities,
+                validator_bond.as_deref(),
+                required_bond.as_deref(),
+            )?;
             genesis
                 .clone()
                 .into_state()
@@ -400,6 +419,7 @@ async fn main() -> Result<()> {
             protocol,
             identities,
             validator_bond,
+            required_bond,
             out,
         } => {
             let admins = admins
@@ -418,7 +438,13 @@ async fn main() -> Result<()> {
                 .context("horodatage de genèse invalide")?;
             let genesis =
                 with_test_options(genesis, *escrow_period, faucet.as_deref(), *epoch_blocks)?;
-            let genesis = with_staking(genesis, *protocol, identities, validator_bond.as_deref())?;
+            let genesis = with_staking(
+                genesis,
+                *protocol,
+                identities,
+                validator_bond.as_deref(),
+                required_bond.as_deref(),
+            )?;
             // Vérifie toutes les règles (doublons, supply) avant d'écrire.
             genesis
                 .clone()
