@@ -154,6 +154,23 @@ impl Presence {
     }
 }
 
+/// Preuve d'équivoque déjà sanctionnée, par identifiant : une faute n'est
+/// punie qu'une fois.
+#[derive(Clone, Debug, PartialEq, Eq, BorshSerialize, BorshDeserialize)]
+pub struct Slashed {
+    pub key: PublicKey,
+    /// Hauteur de la faute.
+    pub height: u64,
+    /// Hauteur du bloc qui a appliqué la sanction.
+    pub at: u64,
+    /// Caution confisquée.
+    pub amount: Amount,
+}
+
+impl Row for Slashed {
+    const TAG: u8 = 14;
+}
+
 #[derive(Clone, Debug, Default, PartialEq, Eq, BorshSerialize, BorshDeserialize)]
 pub struct Staking {
     pub params: StakingParams,
@@ -163,6 +180,8 @@ pub struct Staking {
     pub names: Table<String, NameOwner>,
     pub bonds: Table<PublicKey, Bond>,
     pub pending: Table<Hash, PendingAdmin>,
+    /// Preuves d'équivoque sanctionnées (protocole 7).
+    pub slashed: Table<Hash, Slashed>,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, thiserror::Error)]
@@ -202,6 +221,12 @@ pub enum StakingError {
     BondLocked,
     #[error("aucune caution à restituer")]
     NoBond,
+    #[error("preuve d'équivoque invalide pour ce validateur")]
+    BadEvidence,
+    #[error("cette faute a déjà été sanctionnée")]
+    AlreadySlashed,
+    #[error("preuve antérieure à l'entrée du validateur, ou postérieure au bloc")]
+    EvidenceOutOfRange,
 }
 
 /// Forme comparable d'un nom : minuscules.

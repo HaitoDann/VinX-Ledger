@@ -46,6 +46,7 @@ td .mono, td.mono, td.nowrap { word-break: normal; white-space: nowrap; }
     <a href="#/" data-view="accueil">Accueil</a>
     <a href="#/blocs" data-view="blocs">Blocs</a>
     <a href="#/jetons" data-view="jetons">Jetons</a>
+    <a href="#/validateurs" data-view="validateurs">Validateurs</a>
     <a href="/" data-view="noeud">Nœud</a>
     <a href="/docs">API</a>
   </nav>
@@ -466,6 +467,40 @@ async function token(arg) {
   return head + stats + `<div class="home-grid">${trust}${chart || howTo}</div>` + `<div class="home-grid">${bars}${chart ? howTo : ""}</div>` + holderTable + history;
 }
 
+/* Protocole 7 : fiches publiques, caution, présence de l'époque, sanctions. */
+async function validatorsPage() {
+  const [v, gov] = await Promise.all([get("/validators"), get("/governance")]);
+  const reg = v.registry || [];
+  if (!reg.length) return `<section class="card"><h2>Validateurs</h2><p class="muted">Ce réseau n'a pas encore de fiches de validateurs (protocole 7).</p></section>`;
+  const pct = (x) => x == null ? "—" : (x / 100).toLocaleString("fr-FR", { maximumFractionDigits: 2 }) + " %";
+  const badge = { "actif": "ok", "mis à l'écart": "warn", "sortant": "warn", "sorti": "", "exclu": "bad" };
+  const rows = reg.map((r) => {
+    const p = r.epoch_presence;
+    const low = p && p.availability != null && p.availability < p.min_availability;
+    let bondOk = true; try { bondOk = BigInt(r.bond) >= BigInt(r.bond_required); } catch (_) {}
+    const site = r.website ? `<a href="${esc(/^https?:\/\//.test(r.website) ? r.website : "https://" + r.website)}" rel="noopener nofollow" target="_blank">${esc(r.website)}</a>` : "";
+    const detail = r.status_detail?.since != null ? ` depuis le bloc ${fr(r.status_detail.since)}`
+      : r.status_detail?.unlock_at ? ` (caution libre le ${day(r.status_detail.unlock_at)})` : "";
+    return `<tr><td><span class="rank">${initials(r.identity.name)}</span><b>${esc(r.identity.name)}</b><br><span class="muted">${esc(r.identity.operator)} · ${esc(r.identity.country)}</span></td>
+      <td><span class="pill ${badge[r.status] ?? ""}">${esc(r.status)}</span>${esc(detail)}</td>
+      <td class="amount">${vinx(r.bond)}${bondOk ? "" : `<br><span class="muted">exigée : ${vinx(r.bond_required)}${r.grace_until ? `, grâce jusqu'au ${day(r.grace_until)}` : ""}</span>`}</td>
+      <td class="num">${p ? `<span class="${low ? "bad" : ""}">${pct(p.availability)}</span><br><span class="muted">${fr(p.signed)} / ${fr(p.expected)} blocs</span>` : "—"}</td>
+      <td class="num">${p ? fr(p.missed_in_row) + " / " + fr(p.absence_limit) : "—"}</td>
+      <td>${site}${r.contact ? `<br><span class="muted">${esc(r.contact)}</span>` : ""}<br><a class="mono" href="#/adresse/${esc(r.address)}">${short(r.address)}</a></td></tr>`;
+  }).join("");
+  const k = gov.staking || {};
+  const slashed = gov.slashed || [];
+  const names = Object.fromEntries(reg.map((r) => [r.key, r.identity.name]));
+  return `<section class="card"><h2>Validateurs <span class="sub">${fr(reg.length)} fiche(s) · présence de l'époque en cours</span></h2><div class="scroll"><table>
+      <thead><tr><th>Validateur</th><th>Statut</th><th class="amount">Caution</th><th class="num">Présence</th><th class="num">Absences d'affilée</th><th>Contact</th></tr></thead>
+      <tbody>${rows}</tbody></table></div>
+      <p class="muted">Récompensé si la présence atteint ${pct(k.min_availability)} et que la caution est déposée. Mis à l'écart après ${fr(k.absence_blocks ?? 0)} blocs sans signature.</p></section>
+    <section class="card"><h2>Sanctions <span class="sub">double signature prouvée : caution confisquée, exclusion définitive</span></h2>
+      ${slashed.length ? `<div class="scroll"><table><thead><tr><th>Validateur</th><th class="num">Faute au bloc</th><th class="num">Sanction au bloc</th><th class="amount">Caution confisquée</th></tr></thead><tbody>
+        ${slashed.map((x) => `<tr><td>${esc(names[x.key] || short(x.key))}</td><td class="num">${blockLink(x.height)}</td><td class="num">${blockLink(x.at)}</td><td class="amount">${vinx(x.amount)}</td></tr>`).join("")}
+      </tbody></table></div>` : `<p class="muted">Aucune sanction.</p>`}</section>`;
+}
+
 async function name(n) {
   const r = await get(`/names/${encodeURIComponent(n)}`);
   return `<section class="card"><h1>${esc(r.name)}</h1><dl>
@@ -515,9 +550,9 @@ $("searchForm").addEventListener("submit", async (e) => {
 let timer = null, seenHeight = null;
 async function route() {
   const [, view = "", arg = ""] = (location.hash.slice(1) || "/").split("/");
-  const pages = { "": home, blocs: blockList, bloc: block, tx, adresse: account, jetons: tokens, jeton: token, nom: name };
+  const pages = { "": home, blocs: blockList, bloc: block, tx, adresse: account, jetons: tokens, jeton: token, nom: name, validateurs: validatorsPage };
   const page = pages[view] || home;
-  const navView = { "": "accueil", blocs: "blocs", bloc: "blocs", jetons: "jetons", jeton: "jetons" }[view];
+  const navView = { "": "accueil", blocs: "blocs", bloc: "blocs", jetons: "jetons", jeton: "jetons", validateurs: "validateurs" }[view];
   document.querySelectorAll("nav a").forEach((a) => a.classList.toggle("active", a.dataset.view === navView));
   $("hero").classList.toggle("compact", page !== home);
   clearInterval(timer);

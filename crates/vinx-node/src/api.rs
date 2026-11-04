@@ -443,6 +443,13 @@ async fn governance(State(shared): State<SharedRef>) -> ApiResult {
                 "diversity": p.diversity,
             })
         }),
+        "slashed": st.staking.slashed.iter().map(|(id, x)| json!({
+            "evidence_id": hash_to_hex(id),
+            "key": key_to_hex(&x.key),
+            "height": x.height,
+            "at": x.at,
+            "amount": amount_to_string(x.amount),
+        })).collect::<Vec<_>>(),
         "pending_admin": st.staking.pending.iter().map(|(id, p)| {
             let satx = vinx_core::SignedAdminTransaction {
                 tx: vinx_core::AdminTransaction {
@@ -1283,6 +1290,11 @@ fn tx_json(stx: &SignedTransaction) -> Value {
         TxBody::Unjail => json!({ "kind": "retour de validateur" }),
         TxBody::LeaveValidators => json!({ "kind": "départ de validateur" }),
         TxBody::WithdrawBond => json!({ "kind": "restitution de caution" }),
+        TxBody::ReportEquivocation { key, evidence } => json!({
+            "kind": "signalement de double signature",
+            "key": key_to_hex(key),
+            "evidence_bytes": evidence.len(),
+        }),
         TxBody::SetPolicy { policy } => json!({
             "kind": "règles du compte",
             "policy": policy_json(policy),
@@ -1621,6 +1633,18 @@ fn record_json(
         "grace_until": (r.grace_until > 0).then_some(r.grace_until),
         "bond": amount_to_string(st.staking.bond(key)),
         "bond_required": amount_to_string(st.staking.params.validator_bond),
+        // Protocole 7 : présence de l'époque en cours, mesurée par last_commit.
+        "epoch_presence": st.staking.presence.get(key).map(|p| json!({
+            "signed": p.signed,
+            "expected": p.expected,
+            "availability": u128::from(p.signed)
+                .saturating_mul(10_000)
+                .checked_div(u128::from(p.expected)),
+            "min_availability": st.staking.params.min_availability,
+            "missed_in_row": p.missed_in_row,
+            "absence_limit": st.staking.params.absence_blocks,
+            "jailed_this_epoch": p.jailed_this_epoch,
+        })),
     })
 }
 

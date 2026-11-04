@@ -204,25 +204,36 @@ sont terminés et testés ensemble.
   tardifs reçus avant un redémarrage sont perdus. Pas encore d'essai
   multi-nœuds ni de mise à jour 6 → 7 réelle avec ce lot.
 
-### P7c : à faire
+### P7c : fait (branche `claude/wizardly-gauss-2u386c`, commit « Protocole 7, lot P7c »)
 
-- `ReportEquivocation { evidence }` : preuve vérifiée par la clé seule (voir
-  `vinx-consensus/src/evidence.rs`). Effet :
-  - caution confisquée à 100 % et partagée à parts égales entre les autres
-    validateurs actifs, le reliquat allant au pot ;
-  - statut `Banned`, retrait à `H + 2` ;
-  - identifiant de la preuve conservé pour ne sanctionner qu'une fois ;
-  - acceptée aussi pendant le délai de restitution.
-
-  Les nœuds soumettent la preuve d'eux-mêmes.
-- Interfaces : explorateur (fiches, caution, présence), cockpit (actions en
-  attente, annulation, propositions de validateur nommé), portefeuille.
-- Fuzzing des nouvelles transactions ; tests multi-nœuds à 4 puis
-  7 validateurs ; essai complet de mise à jour 6 → 7 avec pannes.
-- Passer `GENESIS_PROTOCOL` à 7 avec fiches et cautions dans la genèse, en
-  adaptant les tests.
-- Puis : PR unique, release, guide `docs/MISE-A-JOUR-PROTOCOLE-7.md`, et
-  ensuite seulement le testnet.
+- `ReportEquivocation { key, evidence }` (0x22, preuve en borsh) :
+  `Evidence::verify_key` (clé seule), hauteur entre `joined_at` et le bloc ;
+  caution partagée à parts égales entre les autres validateurs actifs,
+  reliquat au pot ; `Banned`, retrait à `H + 2` ; table `Slashed` (TAG 14,
+  dans `state_root`) ; acceptée pendant `Leaving`. `vinx-state` dépend de
+  `vinx-consensus`.
+- Le nœud validateur soumet la sanction de lui-même (`report_equivocation`
+  dans `node.rs`) quand il enregistre une nouvelle preuve.
+- **`GENESIS_PROTOCOL = 7`** : `Genesis.identities` et `validator_bond`
+  (cautions prises sur la trésorerie) ; `vinx-node genesis|devnet
+  --protocol --identity --validator-bond` ; fichier de genèse
+  `validator_identities`, `validator_bond`. Les tests qui supposent le
+  protocole 6 le fixent explicitement (`Net::current()`, `node.rs`,
+  `sync.rs`, `wallet.rs`, réseau qui grandit par `AddValidator`) ;
+  `Net::genesis7()` pour une genèse au 7.
+- API : `epoch_presence` dans les fiches, `slashed` dans `/governance`.
+  Explorateur : onglet Validateurs. Cockpit : actions en attente avec
+  annulation, ajout de validateur nommé.
+- Tests : `presence.rs` (sanction), `network.rs` (4 validateurs au
+  protocole 7 avec panne et rattrapage, 7 validateurs avec présence).
+  Fuzzing : la cible `transaction` envoie aussi les octets comme preuve
+  (compilée, pas lancée faute de nightly dans la session).
+- Version 0.29.0. Guide : `docs/TESTNET-3.md` (nouvelle chaîne au
+  protocole 7, au lieu d'une mise à jour du testnet 2).
+- Pas fait : actions de validateur dans le portefeuille de bureau (CLI
+  seulement) ; essai réel sur un devnet multi-machines.
+- Question ouverte : signatures omises par un proposeur (voir la réponse
+  proposée à Haito ; non tranchée).
 
 ## 8. Après le protocole 7 (feuille de route)
 

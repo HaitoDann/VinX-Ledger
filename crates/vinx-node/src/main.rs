@@ -51,6 +51,19 @@ enum Command {
         /// Durée d'une époque d'émission, en blocs (17 280 ≈ 24 h).
         #[arg(long)]
         epoch_blocks: Option<u64>,
+        /// Version du protocole de la genèse (7 par défaut ; 6 pour l'ancien
+        /// modèle, sans fiches ni cautions).
+        #[arg(long, default_value_t = vinx_state::genesis::GENESIS_PROTOCOL)]
+        protocol: u32,
+        /// Protocole 7 : identité d'un validateur, « Nom,Opérateur,FR », dans
+        /// l'ordre des validateurs (répétable ; sinon « validateur-N »).
+        #[arg(long = "identity", num_args = 1)]
+        identities: Vec<String>,
+        /// Protocole 7 : caution de chaque validateur, en VINX, prise sur la
+        /// trésorerie (par défaut : 10 000 si le robinet le permet, sinon 0
+        /// avec 30 jours de grâce).
+        #[arg(long)]
+        validator_bond: Option<String>,
     },
     /// Écrit la genèse d'un réseau à partir des clés publiques de ses participants.
     ///
@@ -79,6 +92,19 @@ enum Command {
         /// Durée d'une époque d'émission, en blocs (17 280 ≈ 24 h).
         #[arg(long)]
         epoch_blocks: Option<u64>,
+        /// Version du protocole de la genèse (7 par défaut ; 6 pour l'ancien
+        /// modèle, sans fiches ni cautions).
+        #[arg(long, default_value_t = vinx_state::genesis::GENESIS_PROTOCOL)]
+        protocol: u32,
+        /// Protocole 7 : identité d'un validateur, « Nom,Opérateur,FR », dans
+        /// l'ordre des validateurs (répétable ; sinon « validateur-N »).
+        #[arg(long = "identity", num_args = 1)]
+        identities: Vec<String>,
+        /// Protocole 7 : caution de chaque validateur, en VINX, prise sur la
+        /// trésorerie (par défaut : 10 000 si le robinet le permet, sinon 0
+        /// avec 30 jours de grâce).
+        #[arg(long)]
+        validator_bond: Option<String>,
         #[arg(long)]
         out: PathBuf,
     },
@@ -185,6 +211,58 @@ fn with_test_options(
     Ok(genesis)
 }
 
+/// Version du protocole, et pour le protocole 7 identités et cautions.
+fn with_staking(
+    mut genesis: Genesis,
+    protocol: u32,
+    identities: &[String],
+    bond: Option<&str>,
+) -> Result<Genesis> {
+    if !(1..=vinx_state::state::SUPPORTED_PROTOCOL).contains(&protocol) {
+        bail!("--protocol : version {protocol} inconnue");
+    }
+    genesis.protocol_version = protocol;
+    if protocol < 7 {
+        if !identities.is_empty() || bond.is_some() {
+            bail!("--identity et --validator-bond demandent le protocole 7");
+        }
+        return Ok(genesis);
+    }
+    genesis.identities = identities
+        .iter()
+        .map(|text| parse_identity(text))
+        .collect::<Result<_>>()?;
+    let n = vinx_core::Amount::try_from(genesis.validators.len()).unwrap_or(vinx_core::Amount::MAX);
+    let default = vinx_state::staking::DEFAULT_VALIDATOR_BOND;
+    genesis.validator_bond = match bond {
+        Some(b) => vinx_wallet_amount(b)?,
+        None if default.saturating_mul(n) <= genesis.treasury_balance => default,
+        None => 0,
+    };
+    Ok(genesis)
+}
+
+/// « Nom,Opérateur,FR » en identité de validateur.
+fn parse_identity(text: &str) -> Result<vinx_core::ValidatorIdentity> {
+    let parts: Vec<&str> = text.split(',').map(str::trim).collect();
+    let [name, operator, country] = parts.as_slice() else {
+        bail!("--identity attend « Nom,Opérateur,PAYS » : « {text} »");
+    };
+    let country: [u8; 2] = country
+        .as_bytes()
+        .try_into()
+        .map_err(|_| anyhow::anyhow!("pays en deux lettres attendu : « {country} »"))?;
+    let identity = vinx_core::ValidatorIdentity {
+        name: (*name).to_owned(),
+        operator: (*operator).to_owned(),
+        country,
+    };
+    if !identity.is_valid() {
+        bail!("identité de validateur invalide : « {text} »");
+    }
+    Ok(identity)
+}
+
 fn is_test_chain(chain_id: &str) -> bool {
     ["testnet", "devnet"].iter().any(|t| chain_id.contains(t))
 }
@@ -256,6 +334,9 @@ async fn main() -> Result<()> {
             escrow_period,
             faucet,
             epoch_blocks,
+            protocol,
+            identities,
+            validator_bond,
         } => {
             let pw = pw()?;
             if *count == 0 {
@@ -286,6 +367,11 @@ async fn main() -> Result<()> {
             )
             .context("horodatage de genèse invalide")?;
             let genesis = with_test_options(genesis, *escrow_period, Some(faucet), *epoch_blocks)?;
+            let genesis = with_staking(genesis, *protocol, identities, validator_bond.as_deref())?;
+            genesis
+                .clone()
+                .into_state()
+                .map_err(|e| anyhow::anyhow!("genèse invalide : {e}"))?;
             GenesisFile::save(&genesis, &dir.join("genesis.json"))?;
             for (i, a) in admins.iter().enumerate() {
                 describe(&format!("admin-{}", i.saturating_add(1)), a);
@@ -311,6 +397,9 @@ async fn main() -> Result<()> {
             escrow_period,
             faucet,
             epoch_blocks,
+            protocol,
+            identities,
+            validator_bond,
             out,
         } => {
             let admins = admins
@@ -329,6 +418,7 @@ async fn main() -> Result<()> {
                 .context("horodatage de genèse invalide")?;
             let genesis =
                 with_test_options(genesis, *escrow_period, faucet.as_deref(), *epoch_blocks)?;
+            let genesis = with_staking(genesis, *protocol, identities, validator_bond.as_deref())?;
             // Vérifie toutes les règles (doublons, supply) avant d'écrire.
             genesis
                 .clone()

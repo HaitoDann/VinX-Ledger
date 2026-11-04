@@ -142,6 +142,8 @@ async fn new_nodes_join_by_snapshot_or_from_an_archive() {
     .unwrap()
     .with_faucet(1_000 * UNITS_PER_VINX)
     .unwrap();
+    // Paiements de la trésorerie immédiats : protocole 6 (48 h de délai au 7).
+    genesis.protocol_version = 6;
     genesis.params.min_block_interval_ms = 100;
     // Époques courtes : l'instantané d'état transporte aussi l'émission.
     genesis.epoch_blocks = 4;

@@ -119,6 +119,11 @@ impl Mempool {
         out
     }
 
+    /// Compte tel qu'il serait après les transactions en attente.
+    pub fn pending_account(&self, address: &vinx_crypto::Address) -> Option<vinx_core::Account> {
+        self.pending.account(address).cloned()
+    }
+
     pub fn admin_txs(&self) -> &[SignedAdminTransaction] {
         &self.admin
     }

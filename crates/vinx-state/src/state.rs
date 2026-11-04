@@ -14,7 +14,7 @@ use crate::registry::{
 };
 use crate::reserve::{Owned, Reserves};
 use crate::staking::{
-    BOND_GRACE, Bond, NameOwner, PendingAdmin, Staking, StakingError, ValidatorRecord,
+    BOND_GRACE, Bond, NameOwner, PendingAdmin, Slashed, Staking, StakingError, ValidatorRecord,
     ValidatorStatus, name_key,
 };
 use crate::table::{Row, Table};
@@ -601,6 +601,7 @@ impl State {
         out.extend(rows(&mut self.staking.names));
         out.extend(rows(&mut self.staking.bonds));
         out.extend(rows(&mut self.staking.pending));
+        out.extend(rows(&mut self.staking.slashed));
         out
     }
 
@@ -631,6 +632,7 @@ impl State {
             t if t == <NameOwner as Row>::TAG => load(&mut self.staking.names, key, value),
             t if t == <Bond as Row>::TAG => load(&mut self.staking.bonds, key, value),
             t if t == <PendingAdmin as Row>::TAG => load(&mut self.staking.pending, key, value),
+            t if t == <Slashed as Row>::TAG => load(&mut self.staking.slashed, key, value),
             _ => None,
         }
     }
@@ -650,6 +652,7 @@ impl State {
         self.staking.names.mark_all_dirty();
         self.staking.bonds.mark_all_dirty();
         self.staking.pending.mark_all_dirty();
+        self.staking.slashed.mark_all_dirty();
     }
 
     /// Reconstitue un état à partir de [`Self::globals_bytes`] et des comptes.
@@ -754,6 +757,7 @@ impl State {
                 k.names.root(),
                 k.bonds.root(),
                 k.pending.root(),
+                k.slashed.root(),
             )));
         }
         hash_tagged_parts(
@@ -898,6 +902,7 @@ impl State {
         let mut bond_write: Option<(PublicKey, Bond)> = None;
         let mut record_write: Option<(PublicKey, ValidatorRecord)> = None;
         let mut validator_effect: Option<ValidatorEffect> = None;
+        let mut slash: Option<SlashEffect> = None;
         let mut asset_mandate_write: Option<((String, Address, Address), Option<AssetMandate>)> =
             None;
         match body {
@@ -963,6 +968,13 @@ impl State {
                 record.website = website.clone();
                 record.contact = contact.clone();
                 record_write = Some((key, record));
+            }
+            TxBody::ReportEquivocation { key, evidence } => {
+                let effect = self.equivocation(key, evidence)?;
+                for (to, amount) in &effect.shares {
+                    changes.credit(&self.accounts, *to, *amount)?;
+                }
+                slash = Some(effect);
             }
             TxBody::Unjail | TxBody::LeaveValidators | TxBody::WithdrawBond => {
                 let effect = self.validator_tx(body, tx.sender, now)?;
@@ -1511,6 +1523,19 @@ impl State {
             None => {}
         }
         self.emission.pot = pot;
+        if let Some(effect) = slash {
+            let key = effect.slashed.key.clone();
+            self.emission.pot = self.emission.pot.saturating_add(effect.to_pot);
+            self.staking.bonds.remove(&key);
+            self.staking.presence.remove(&key);
+            if effect.remove {
+                let effective = self.height.saturating_add(3);
+                self.validators
+                    .schedule(ValidatorChange::Remove(key.clone()), effective);
+            }
+            self.staking.records.insert(key, effect.record);
+            self.staking.slashed.insert(effect.id, effect.slashed);
+        }
         match mandate_write {
             Some((key, Some(m))) => {
                 self.mandates.insert(key, m);
@@ -2071,6 +2096,74 @@ impl State {
         Ok(())
     }
 
+    /// Protocole 7 : sanction d'une double signature de `key` (§4), calculée
+    /// sans rien modifier. La preuve est vérifiée avec la seule clé.
+    fn equivocation(&self, key: &PublicKey, evidence: &[u8]) -> Result<SlashEffect, TxError> {
+        let err = |e| Err(TxError::Staking(e));
+        let Ok(evidence) = vinx_core::decode::<vinx_consensus::Evidence>(evidence) else {
+            return err(StakingError::BadEvidence);
+        };
+        if evidence.verify_key(&self.chain_id, key).is_err() {
+            return err(StakingError::BadEvidence);
+        }
+        let id = evidence.id();
+        if self.staking.slashed.contains_key(&id) {
+            return err(StakingError::AlreadySlashed);
+        }
+        let mut record = self
+            .staking
+            .records
+            .get(key)
+            .cloned()
+            .ok_or(TxError::Staking(StakingError::UnknownValidator))?;
+        match record.status {
+            ValidatorStatus::Banned => return err(StakingError::Banned),
+            ValidatorStatus::Left => return err(StakingError::AlreadyLeft),
+            _ => {}
+        }
+        let height = self.height.saturating_add(1);
+        if evidence.height() < record.joined_at || evidence.height() > height {
+            return err(StakingError::EvidenceOutOfRange);
+        }
+        // Caution partagée à parts égales entre les autres validateurs actifs.
+        let amount = self.staking.bond(key);
+        let others: Vec<PublicKey> = self
+            .validators_at(height)
+            .into_iter()
+            .filter(|k| k != key)
+            .collect();
+        let count = Amount::try_from(others.len()).unwrap_or(Amount::MAX);
+        let share = amount.checked_div(count).unwrap_or(0);
+        let shares: Vec<(Address, Amount)> = if share == 0 {
+            Vec::new()
+        } else {
+            others
+                .iter()
+                .map(|k| (Address::from_public_key(k), share))
+                .collect()
+        };
+        let paid = share.saturating_mul(Amount::try_from(shares.len()).unwrap_or(0));
+        let remove = self.validators.at_height(u64::MAX).contains(key)
+            && self
+                .validators
+                .check(&ValidatorChange::Remove(key.clone()))
+                .is_ok();
+        record.status = ValidatorStatus::Banned;
+        Ok(SlashEffect {
+            id,
+            slashed: Slashed {
+                key: key.clone(),
+                height: evidence.height(),
+                at: height,
+                amount,
+            },
+            record,
+            shares,
+            to_pot: amount.saturating_sub(paid),
+            remove,
+        })
+    }
+
     /// Protocole 7 : effet de `Unjail`, `LeaveValidators` ou `WithdrawBond`
     /// envoyée par `sender`, calculé sans rien modifier.
     fn validator_tx(
@@ -2490,6 +2583,19 @@ impl State {
         *self = next;
         Ok(())
     }
+}
+
+/// Effet différé d'une sanction d'équivoque (protocole 7).
+struct SlashEffect {
+    id: Hash,
+    slashed: Slashed,
+    record: ValidatorRecord,
+    /// Parts de la caution, créditées aux autres validateurs actifs.
+    shares: Vec<(Address, Amount)>,
+    /// Reliquat de la division, versé au pot.
+    to_pot: Amount,
+    /// Retrait de l'ensemble à `H + 2`.
+    remove: bool,
 }
 
 /// Effet différé d'une transaction de validateur (protocole 7).

@@ -312,8 +312,42 @@ fn parse_action(v: &Value) -> Result<AdminAction> {
                 .map_err(|_| anyhow!("version invalide"))?,
             activation_height: u64_field(v, "activation_height")?,
         },
+        "add-named-validator" => AdminAction::AddNamedValidator {
+            key: key_from_hex(str_field(v, "key")?)?,
+            identity: identity_field(v)?,
+        },
+        "set-validator-identity" => AdminAction::SetValidatorIdentity {
+            key: key_from_hex(str_field(v, "key")?)?,
+            identity: identity_field(v)?,
+        },
+        "cancel-pending" => {
+            let id = hex::decode(str_field(v, "id")?)
+                .ok()
+                .and_then(|b| <[u8; 32]>::try_from(b).ok())
+                .ok_or_else(|| anyhow!("identifiant d'action : 64 caractères hexadécimaux"))?;
+            AdminAction::CancelPending { id }
+        }
         other => bail!("action inconnue : {other}"),
     })
+}
+
+/// Identité de validateur (protocole 7) : `name`, `operator`, `country`.
+fn identity_field(v: &Value) -> Result<vinx_core::ValidatorIdentity> {
+    let country = str_field(v, "country")?.to_ascii_uppercase();
+    let identity = vinx_core::ValidatorIdentity {
+        name: str_field(v, "name")?.to_owned(),
+        operator: str_field(v, "operator")?.to_owned(),
+        country: country
+            .as_bytes()
+            .try_into()
+            .map_err(|_| anyhow!("pays : deux lettres (FR, BE…)"))?,
+    };
+    if !identity.is_valid() {
+        bail!(
+            "identité invalide : nom de 3 à 24 caractères (lettres, chiffres, tiret, espace), opérateur de 1 à 64 octets"
+        );
+    }
+    Ok(identity)
 }
 
 /// Propositions du dossier, avec leur état par rapport au nœud.

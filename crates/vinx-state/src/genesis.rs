@@ -2,10 +2,15 @@
 
 use crate::emission::{DEFAULT_EPOCH_BLOCKS, Emission, GENESIS_EMISSION};
 use crate::escrow::Escrow;
+use crate::staking::{
+    BOND_GRACE, Bond, NameOwner, Staking, ValidatorRecord, ValidatorStatus, name_key,
+};
 use crate::state::{AdminSet, State};
 use crate::validators::ValidatorSet;
 use thiserror::Error;
-use vinx_core::{ADMIN_SIGNERS, Account, Amount, Params, TOTAL_SUPPLY, UNITS_PER_VINX};
+use vinx_core::{
+    ADMIN_SIGNERS, Account, Amount, Params, TOTAL_SUPPLY, UNITS_PER_VINX, ValidatorIdentity,
+};
 use vinx_crypto::{Address, PublicKey};
 
 /// Solde de la trésorerie à la genèse des versions 0.1 à 0.9 : 100 000 000 VINX.
@@ -14,7 +19,7 @@ use vinx_crypto::{Address, PublicKey};
 pub const LEGACY_GENESIS_TREASURY: Amount = 100_000_000 * UNITS_PER_VINX;
 
 /// Version du protocole d'une genèse standard.
-pub const GENESIS_PROTOCOL: u32 = 6;
+pub const GENESIS_PROTOCOL: u32 = 7;
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Genesis {
@@ -31,6 +36,12 @@ pub struct Genesis {
     pub emission_budget: Amount,
     /// Durée d'une époque d'émission, en blocs.
     pub epoch_blocks: u64,
+    /// Protocole 7 : identité de chaque validateur, dans l'ordre de
+    /// `validators`. Vide : fiches provisoires « validateur-N », « VinX Labs ».
+    pub identities: Vec<ValidatorIdentity>,
+    /// Protocole 7 : caution de chaque validateur, prise sur la trésorerie.
+    /// Sous la caution exigée, le validateur a 30 jours de grâce.
+    pub validator_bond: Amount,
 }
 
 #[derive(Debug, Error, PartialEq, Eq)]
@@ -49,6 +60,10 @@ pub enum GenesisError {
     SupplyMismatch,
     #[error("robinet de testnet plus grand que la dernière tranche d'escrow")]
     FaucetTooLarge,
+    #[error("identités de validateurs invalides, en double ou en nombre incorrect")]
+    InvalidIdentities,
+    #[error("trésorerie insuffisante pour les cautions des validateurs")]
+    BondsTooLarge,
 }
 
 impl Genesis {
@@ -71,6 +86,8 @@ impl Genesis {
             params: Params::default(),
             emission_budget: GENESIS_EMISSION,
             epoch_blocks: DEFAULT_EPOCH_BLOCKS,
+            identities: Vec::new(),
+            validator_bond: 0,
         })
     }
 
@@ -139,8 +156,28 @@ impl Genesis {
         if total != Some(u128::from(TOTAL_SUPPLY)) {
             return Err(GenesisError::SupplyMismatch);
         }
+        let mut treasury_balance = self.treasury_balance;
+        let mut staking = Staking::default();
+        if self.protocol_version >= 7 {
+            staking = genesis_staking(
+                &self.validators,
+                &self.identities,
+                self.validator_bond,
+                self.genesis_time,
+            )?;
+            let n = Amount::try_from(self.validators.len()).unwrap_or(Amount::MAX);
+            let bonds = self
+                .validator_bond
+                .checked_mul(n)
+                .ok_or(GenesisError::BondsTooLarge)?;
+            treasury_balance = treasury_balance
+                .checked_sub(bonds)
+                .ok_or(GenesisError::BondsTooLarge)?;
+        } else if !self.identities.is_empty() || self.validator_bond > 0 {
+            return Err(GenesisError::InvalidIdentities);
+        }
         let treasury = Account {
-            balance: self.treasury_balance,
+            balance: treasury_balance,
             ..Account::default()
         };
         let state = State {
@@ -161,7 +198,7 @@ impl Genesis {
             mandates: Default::default(),
             assets: Default::default(),
             reserves: Default::default(),
-            staking: Default::default(),
+            staking,
             emission: Emission {
                 start: self.genesis_time,
                 budget: self.emission_budget,
@@ -174,6 +211,65 @@ impl Genesis {
             .map_err(|_| GenesisError::SupplyMismatch)?;
         Ok(state)
     }
+}
+
+/// Fiches et cautions des validateurs d'une genèse au protocole 7.
+fn genesis_staking(
+    validators: &[PublicKey],
+    identities: &[ValidatorIdentity],
+    bond: Amount,
+    genesis_time: u64,
+) -> Result<Staking, GenesisError> {
+    if !identities.is_empty() && identities.len() != validators.len() {
+        return Err(GenesisError::InvalidIdentities);
+    }
+    let mut staking = Staking::default();
+    let grace_until = if bond >= staking.params.validator_bond {
+        0
+    } else {
+        genesis_time.saturating_add(BOND_GRACE)
+    };
+    for (i, key) in validators.iter().enumerate() {
+        let identity = identities
+            .get(i)
+            .cloned()
+            .unwrap_or_else(|| ValidatorIdentity {
+                name: format!("validateur-{}", i.saturating_add(1)),
+                operator: "VinX Labs".into(),
+                country: *b"FR",
+            });
+        if !identity.is_valid() || staking.names.contains_key(&name_key(&identity.name)) {
+            return Err(GenesisError::InvalidIdentities);
+        }
+        staking
+            .names
+            .insert(name_key(&identity.name), NameOwner { key: key.clone() });
+        if bond > 0 {
+            staking.bonds.insert(key.clone(), Bond { amount: bond });
+        }
+        staking.records.insert(
+            key.clone(),
+            ValidatorRecord {
+                identity,
+                website: String::new(),
+                contact: String::new(),
+                status: ValidatorStatus::Active,
+                joined_at: 0,
+                grace_until,
+            },
+        );
+    }
+    let set = validators.to_vec();
+    if !staking.diversity_ok(&set, |k| {
+        staking
+            .records
+            .get(k)
+            .map(|r| r.identity.operator.clone())
+            .unwrap_or_default()
+    }) {
+        return Err(GenesisError::InvalidIdentities);
+    }
+    Ok(staking)
 }
 
 fn has_duplicates(keys: &[PublicKey]) -> bool {
@@ -231,6 +327,51 @@ mod tests {
             standard().with_faucet(8_000_000 * UNITS_PER_VINX),
             Err(GenesisError::FaucetTooLarge)
         );
+    }
+
+    #[test]
+    fn protocol_7_genesis_has_records_and_bonds() {
+        let bond = crate::staking::DEFAULT_VALIDATOR_BOND;
+        let mut g = standard().with_faucet(1_000_000 * UNITS_PER_VINX).unwrap();
+        g.validator_bond = bond;
+        g.identities = ["Cinnamon", "Amber", "Obsidian", "Pearl"]
+            .iter()
+            .map(|n| ValidatorIdentity {
+                name: (*n).into(),
+                operator: "VinX Labs".into(),
+                country: *b"FR",
+            })
+            .collect();
+        let s = g.clone().into_state().unwrap();
+        assert_eq!(s.staking.records.len(), 4);
+        assert_eq!(s.staking.bond(&g.validators[0]), bond);
+        let r = s.staking.records.get(&g.validators[1]).unwrap();
+        assert_eq!(r.identity.name, "Amber");
+        assert_eq!(r.grace_until, 0);
+        assert_eq!(
+            s.accounts[&Address::treasury()].balance,
+            1_000_000 * UNITS_PER_VINX - 4 * bond
+        );
+        assert_eq!(s.check_invariant(), Ok(()));
+
+        // Sans caution : fiches provisoires et délai de grâce.
+        let s = standard().into_state().unwrap();
+        let r = s.staking.records.get(&standard().validators[0]);
+        assert!(r.is_none(), "clés différentes à chaque appel");
+        assert_eq!(s.staking.records.len(), 4);
+        assert!(
+            s.staking
+                .records
+                .iter()
+                .all(|(_, r)| r.grace_until == 1_800_000_000 + BOND_GRACE)
+        );
+
+        let mut dup = g.clone();
+        dup.identities[1].name = "cinnamon".into();
+        assert_eq!(dup.into_state(), Err(GenesisError::InvalidIdentities));
+        let mut big = g;
+        big.validator_bond = 1_000_000 * UNITS_PER_VINX;
+        assert_eq!(big.into_state(), Err(GenesisError::BondsTooLarge));
     }
 
     #[test]

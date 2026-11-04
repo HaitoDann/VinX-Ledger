@@ -205,6 +205,13 @@ pub enum TxBody {
     LeaveValidators = 0x20,
     /// Récupère la caution d'un validateur sorti, une fois le délai écoulé.
     WithdrawBond = 0x21,
+    /// Signale une double signature du validateur `key` : `evidence` est la
+    /// preuve encodée en borsh (`vinx_consensus::Evidence`). Envoyable par
+    /// n'importe quel compte, qui paie les frais.
+    ReportEquivocation {
+        key: PublicKey,
+        evidence: Vec<u8>,
+    } = 0x22,
 }
 
 /// Longueur maximale du site et du contact d'un validateur, en octets.
@@ -287,7 +294,8 @@ impl TxBody {
             | TxBody::UpdateValidatorInfo { .. }
             | TxBody::Unjail
             | TxBody::LeaveValidators
-            | TxBody::WithdrawBond => 7,
+            | TxBody::WithdrawBond
+            | TxBody::ReportEquivocation { .. } => 7,
             _ => 2,
         }
     }
@@ -462,7 +470,7 @@ mod tests {
         assert!(decode::<TxBody>(&[0x1D, 1]).is_err());
         assert_eq!(encode(&TxBody::Unjail), [0x1F]);
         assert_eq!(encode(&TxBody::WithdrawBond), [0x21]);
-        assert!(decode::<TxBody>(&[0x22]).is_err());
+        assert!(decode::<TxBody>(&[0x23]).is_err());
     }
 
     #[test]

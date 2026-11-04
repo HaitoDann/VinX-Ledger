@@ -25,6 +25,22 @@ pub struct GenesisFile {
     /// Émission des validateurs (protocole 3). Absente des genèses plus anciennes.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub emission: Option<EmissionFile>,
+    /// Protocole 7 : identités des validateurs, dans l'ordre de `validators`.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub validator_identities: Vec<IdentityFile>,
+    /// Protocole 7 : caution de chaque validateur, en unités, prise sur la
+    /// trésorerie.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub validator_bond: Option<String>,
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct IdentityFile {
+    pub name: String,
+    pub operator: String,
+    /// Code pays en deux lettres majuscules.
+    pub country: String,
 }
 
 #[derive(Debug, Serialize, Deserialize)]
@@ -88,6 +104,16 @@ impl GenesisFile {
                     })
                     .collect(),
             },
+            validator_identities: g
+                .identities
+                .iter()
+                .map(|i| IdentityFile {
+                    name: i.name.clone(),
+                    operator: i.operator.clone(),
+                    country: String::from_utf8_lossy(&i.country).into_owned(),
+                })
+                .collect(),
+            validator_bond: (g.validator_bond > 0).then(|| amount_to_string(g.validator_bond)),
             emission: (g.emission_budget > 0).then(|| EmissionFile {
                 budget: amount_to_string(g.emission_budget),
                 epoch_blocks: g.epoch_blocks,
@@ -132,7 +158,28 @@ impl GenesisFile {
             Some(e) => (amount_from_str(&e.budget)?, e.epoch_blocks),
             None => (0, vinx_state::emission::DEFAULT_EPOCH_BLOCKS),
         };
+        let identities = self
+            .validator_identities
+            .iter()
+            .map(|i| {
+                Ok(vinx_core::ValidatorIdentity {
+                    name: i.name.clone(),
+                    operator: i.operator.clone(),
+                    country: i
+                        .country
+                        .as_bytes()
+                        .try_into()
+                        .map_err(|_| anyhow!("pays en deux lettres attendu : {}", i.country))?,
+                })
+            })
+            .collect::<Result<Vec<_>>>()?;
+        let validator_bond = match &self.validator_bond {
+            Some(b) => amount_from_str(b)?,
+            None => 0,
+        };
         Ok(Genesis {
+            identities,
+            validator_bond,
             emission_budget,
             epoch_blocks,
             chain_id: self.chain_id.clone(),

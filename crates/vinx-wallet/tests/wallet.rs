@@ -35,6 +35,8 @@ fn start_node(admins: &[KeyPair; 3], dir: &std::path::Path) -> String {
     .unwrap()
     .with_faucet(1_000 * VINX)
     .unwrap();
+    // Paiements de la trésorerie immédiats : protocole 6 (48 h de délai au 7).
+    genesis.protocol_version = 6;
     genesis.params.min_block_interval_ms = 50;
     let shared = node::open(genesis, dir).unwrap();
     let (url_tx, url_rx) = std::sync::mpsc::channel();

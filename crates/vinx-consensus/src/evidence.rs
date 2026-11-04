@@ -84,6 +84,18 @@ impl Evidence {
 
     /// Vérifie la preuve contre l'ensemble de validateurs de sa hauteur.
     pub fn verify(&self, chain_id: &str, validators: &[PublicKey]) -> Result<(), EvidenceError> {
+        let index = self
+            .validator(validators.len())
+            .ok_or(EvidenceError::UnknownValidator)?;
+        let key = validators
+            .get(usize::from(index))
+            .ok_or(EvidenceError::UnknownValidator)?;
+        self.verify_key(chain_id, key)
+    }
+
+    /// Vérifie la preuve avec la seule clé du validateur fautif, sans
+    /// l'ensemble de validateurs de la hauteur (protocole 7, sanction).
+    pub fn verify_key(&self, chain_id: &str, key: &PublicKey) -> Result<(), EvidenceError> {
         match self {
             Evidence::Votes(a, b) => {
                 let (va, vb) = (&a.vote, &b.vote);
@@ -99,9 +111,6 @@ impl Evidence {
                 if va.block_hash == vb.block_hash {
                     return Err(EvidenceError::SameContent);
                 }
-                let key = validators
-                    .get(usize::from(a.validator))
-                    .ok_or(EvidenceError::UnknownValidator)?;
                 if a.verify(key) && b.verify(key) {
                     Ok(())
                 } else {
@@ -120,9 +129,6 @@ impl Evidence {
                 if pa.block.hash() == pb.block.hash() && pa.pol_round == pb.pol_round {
                     return Err(EvidenceError::SameContent);
                 }
-                let key = proposer_index(pa.height, pa.round, validators.len())
-                    .and_then(|i| validators.get(usize::from(i)))
-                    .ok_or(EvidenceError::UnknownValidator)?;
                 if a.verify(key) && b.verify(key) {
                     Ok(())
                 } else {

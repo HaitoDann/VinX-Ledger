@@ -64,7 +64,8 @@ ValidatorRecord {
 
 ## 4. Sanction de la double signature
 
-- Nouvelle transaction `ReportEquivocation { evidence }`, envoyable par
+- Nouvelle transaction `ReportEquivocation { key, evidence }` (code `0x22`,
+  `evidence` : la preuve encodée en borsh), envoyable par
   n'importe quel compte, qui paie les frais. Les nœuds la créent d'eux-mêmes
   quand ils relèvent une preuve. La preuve est vérifiée avec la seule clé du
   validateur (SPEC §7.5) ; elle doit concerner une hauteur où il était actif.
@@ -162,7 +163,18 @@ réserve gérée par le protocole et une gouvernance votée
 ([ADR 0003](./adr/0003-reserve-et-gouvernance.md)). Le protocole 7 ne touche
 pas à l'escrow du testnet.
 
-## 10. Mise en œuvre prévue
+## 10. Genèse au protocole 7
+
+Une genèse au protocole 7 (`vinx-node genesis --protocol 7`, la valeur par
+défaut depuis la 0.29) contient directement :
+
+- la fiche de chaque validateur (`--identity "Nom,Opérateur,PAYS"`, sinon
+  « validateur-N ») ;
+- sa caution (`--validator-bond`, par défaut 10 000 VINX si le robinet le
+  permet), prise sur la trésorerie. Sans caution suffisante, le validateur a
+  30 jours de grâce.
+
+## 11. Mise en œuvre prévue
 
 1. Validation de ce document (règles et valeurs).
 2. Code, tests unitaires et tests multi-nœuds : mise à l'écart, sanction,

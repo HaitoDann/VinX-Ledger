@@ -25,10 +25,25 @@ impl Net {
         Self::with(Genesis::legacy)
     }
 
-    /// Réseau d'une genèse standard (dernier protocole), avec un robinet de 7 M.
+    /// Réseau d'une genèse standard au protocole 6, avec un robinet de 7 M :
+    /// les tests du protocole 7 y passent par une vraie mise à jour.
     pub fn current() -> Self {
         Self::with(|c, t, a, v| {
-            Genesis::standard(c, t, a, v).map(|g| g.with_faucet(7_000_000 * VINX).unwrap())
+            Genesis::standard(c, t, a, v).map(|g| Genesis {
+                protocol_version: 6,
+                ..g.with_faucet(7_000_000 * VINX).unwrap()
+            })
+        })
+    }
+
+    /// Réseau d'une genèse au protocole 7 : fiches « validateur-N » et
+    /// cautions de 10 000 VINX prises sur le robinet de 7 M.
+    pub fn genesis7() -> Self {
+        Self::with(|c, t, a, v| {
+            Genesis::standard(c, t, a, v).map(|g| Genesis {
+                validator_bond: vinx_state::staking::DEFAULT_VALIDATOR_BOND,
+                ..g.with_faucet(7_000_000 * VINX).unwrap()
+            })
         })
     }
 

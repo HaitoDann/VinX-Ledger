@@ -3566,7 +3566,7 @@ checksum = "0b928f33d975fc6ad9f86c8f283853ad26bdd5b10b7f1542aa2fa15e2289105a"
 
 [[package]]
 name = "vinx-consensus"
-version = "0.27.0"
+version = "0.28.0"
 dependencies = [
  "blake3",
  "borsh",
@@ -3577,7 +3577,7 @@ dependencies = [
 
 [[package]]
 name = "vinx-core"
-version = "0.27.0"
+version = "0.28.0"
 dependencies = [
  "borsh",
  "thiserror 2.0.21",
@@ -3586,7 +3586,7 @@ dependencies = [
 
 [[package]]
 name = "vinx-crypto"
-version = "0.27.0"
+version = "0.28.0"
 dependencies = [
  "bech32",
  "blake3",
@@ -3611,7 +3611,7 @@ dependencies = [
 
 [[package]]
 name = "vinx-keystore"
-version = "0.27.0"
+version = "0.28.0"
 dependencies = [
  "anyhow",
  "argon2",
@@ -3626,7 +3626,7 @@ dependencies = [
 
 [[package]]
 name = "vinx-node"
-version = "0.27.0"
+version = "0.28.0"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -3655,13 +3655,14 @@ dependencies = [
 
 [[package]]
 name = "vinx-state"
-version = "0.27.0"
+version = "0.28.0"
 dependencies = [
  "blake3",
  "borsh",
  "imbl",
  "rayon",
  "thiserror 2.0.21",
+ "vinx-consensus",
  "vinx-core",
  "vinx-crypto",
 ]

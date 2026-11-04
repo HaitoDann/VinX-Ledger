@@ -233,31 +233,42 @@ async fn four_validators_tolerate_a_crash_and_resync() {
     .await;
 
     // 3. Une transaction soumise au nœud 1 est relayée et finalisée partout.
+    // (Protocole 7 : la trésorerie attend 48 h ; le validateur 1 paie avec ses
+    // récompenses.)
     let alice = Address::from_public_key(&KeyPair::generate().public_key());
-    let tx = AdminTransaction {
+    let payer = Address::from_public_key(&validators[0].public_key());
+    let amount = genesis.params.min_reserve;
+    wait_until("récompenses du validateur 1", || {
+        node::lock(&nodes[0].as_ref().unwrap().shared)
+            .chain
+            .state
+            .balance(&payer)
+            >= 2 * amount
+    })
+    .await;
+    let tx = vinx_core::Transaction {
         chain_id: CHAIN.into(),
+        sender: payer,
         nonce: 1,
-        action: AdminAction::TreasuryTransfer {
+        fee: genesis.params.min_fee,
+        body: vinx_core::TxBody::Transfer {
             to: alice,
-            amount: 7 * UNITS_PER_VINX,
+            amount,
             memo: None,
         },
-    };
-    let tx = SignedAdminTransaction {
-        approvals: vec![tx.approve(0, &admins[0]), tx.approve(1, &admins[1])],
-        tx,
-    };
+    }
+    .sign(&validators[0], true);
     {
         let n1 = nodes[0].as_ref().unwrap();
         let mut s = node::lock(&n1.shared);
-        s.mempool.add_admin(tx.clone()).unwrap();
-        s.broadcast(NetMessage::AdminTx(tx));
+        s.mempool.add(tx.clone()).unwrap();
+        s.broadcast(NetMessage::Tx(tx));
     }
     wait_until("transaction finalisée partout", || {
         nodes
             .iter()
             .flatten()
-            .all(|n| node::lock(&n.shared).chain.state.balance(&alice) == 7 * UNITS_PER_VINX)
+            .all(|n| node::lock(&n.shared).chain.state.balance(&alice) == amount)
     })
     .await;
 
@@ -278,10 +289,17 @@ async fn four_validators_tolerate_a_crash_and_resync() {
         n4.block_hash(target),
         nodes[0].as_ref().unwrap().block_hash(target)
     );
-    assert_eq!(
-        node::lock(&n4.shared).chain.state.balance(&alice),
-        7 * UNITS_PER_VINX
-    );
+    assert_eq!(node::lock(&n4.shared).chain.state.balance(&alice), amount);
+    // Protocole 7 : chaque bloc après le premier porte le certificat de son
+    // parent, et la présence est comptée.
+    {
+        let s = node::lock(&n4.shared);
+        assert_eq!(s.chain.state.protocol_version, 7);
+        let block = s.store.block(target).unwrap().unwrap();
+        let cert = block.last_commit.expect("last_commit");
+        assert_eq!(cert.block_hash, block.header.prev_hash);
+        assert!(!s.chain.state.staking.presence.is_empty());
+    }
 
     // 5. Un intrus hors de la liste autorisée ne reçoit rien.
     let intruder = spec(root.path(), 9);
@@ -341,6 +359,68 @@ async fn blocks_are_finalized_in_the_first_round() {
     }
 }
 
+/// Protocole 7 dès la genèse, 7 validateurs : chaque bloc porte le
+/// certificat de son parent, complété des precommits arrivés après la
+/// décision, et la présence de tous est comptée.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn seven_validators_record_presence() {
+    let root = tempfile::tempdir().unwrap();
+    let k = || KeyPair::generate().public_key();
+    let validators: Vec<KeyPair> = (0..7).map(|_| KeyPair::generate()).collect();
+    let mut genesis = Genesis::standard(
+        CHAIN,
+        node::now_ms() / 1000,
+        [k(), k(), k()],
+        validators.iter().map(KeyPair::public_key).collect(),
+    )
+    .unwrap();
+    assert_eq!(genesis.protocol_version, 7);
+    genesis.params.min_block_interval_ms = 500;
+    genesis.params.timeout_propose_ms = 2_000;
+    genesis.params.timeout_vote_ms = 1_000;
+    let specs: Vec<Spec> = (0..7).map(|i| spec(root.path(), i)).collect();
+    let nodes: Vec<Running> = (0..7)
+        .map(|i| {
+            let others: Vec<&Spec> = specs
+                .iter()
+                .enumerate()
+                .filter(|(j, _)| *j != i)
+                .map(|(_, s)| s)
+                .collect();
+            start(&genesis, &specs[i], &others, Some(validators[i].clone()))
+        })
+        .collect();
+    wait_until("hauteur 10", || nodes.iter().all(|n| n.height() >= 10)).await;
+    {
+        let s = node::lock(&nodes[0].shared);
+        let mut complete = 0;
+        for h in 3..=10 {
+            let block = s.store.block(h).unwrap().unwrap();
+            let cert = block.last_commit.expect("last_commit");
+            assert_eq!(cert.height, h - 1);
+            assert!(cert.signatures.len() >= 5, "quorum de 7 : 5");
+            if cert.signatures.len() == 7 {
+                complete += 1;
+            }
+        }
+        assert!(
+            complete >= 4,
+            "precommits tardifs non ajoutés : {complete}/8"
+        );
+        let st = &s.chain.state;
+        assert_eq!(st.staking.records.len(), 7);
+        assert!(st.staking.presence.values().all(|p| p.expected > 0));
+        assert!(st.check_invariant().is_ok());
+    }
+    let reference = nodes[0].block_hash(10);
+    for n in &nodes {
+        assert_eq!(n.block_hash(10), reference);
+    }
+    for n in nodes {
+        n.stop().await;
+    }
+}
+
 /// Scénario d'un testnet qui grandit : un validateur, puis trois nœuds démarrés
 /// avec leur clé, ajoutés d'un coup par la multisig. Ils doivent se mettre à
 /// voter sans redémarrage, et la chaîne doit ensuite tolérer une panne.
@@ -364,6 +444,8 @@ async fn one_validator_grows_to_four_without_restart() {
         vec![validators[0].public_key()],
     )
     .unwrap();
+    // `AddValidator` : chemin du protocole 6 (remplacé au protocole 7).
+    genesis.protocol_version = 6;
     genesis.params.min_block_interval_ms = 300;
     genesis.params.timeout_propose_ms = 1_500;
     genesis.params.timeout_vote_ms = 800;

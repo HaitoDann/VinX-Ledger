@@ -397,8 +397,15 @@ struct Download {
 /// Délai sans réponse après lequel un téléchargement d'instantané est abandonné.
 const DOWNLOAD_TIMEOUT: Duration = Duration::from_secs(30);
 
-/// Enregistre une preuve d'équivoque, alerte et, si elle vient de nous, la diffuse.
-fn record_evidence(s: &Shared, evidence: &Evidence, broadcast: bool) {
+/// Enregistre une preuve d'équivoque, alerte et, si elle vient de nous, la
+/// diffuse. À partir du protocole 7, un validateur (`reporter`) soumet aussi
+/// la sanction (`ReportEquivocation`) depuis son adresse.
+fn record_evidence(
+    s: &mut Shared,
+    evidence: &Evidence,
+    broadcast: bool,
+    reporter: Option<&KeyPair>,
+) {
     match s.store.record_evidence(evidence) {
         Ok(true) => {
             let validators = s.chain.state.validators_at(evidence.height());
@@ -419,9 +426,41 @@ fn record_evidence(s: &Shared, evidence: &Evidence, broadcast: bool) {
             if broadcast {
                 s.broadcast(NetMessage::Evidence(Box::new(evidence.clone())));
             }
+            let guilty = index.and_then(|i| validators.get(usize::from(i))).cloned();
+            if let (Some(kp), Some(guilty)) = (reporter, guilty) {
+                if s.chain.state.protocol_version >= 7 && kp.public_key() != guilty {
+                    report_equivocation(s, kp, guilty, evidence);
+                }
+            }
         }
         Ok(false) => {}
         Err(e) => warn!("preuve d'équivoque non enregistrée : {e}"),
+    }
+}
+
+/// Soumet la sanction d'une équivoque, signée par `kp` (frais minimaux).
+fn report_equivocation(s: &mut Shared, kp: &KeyPair, guilty: PublicKey, evidence: &Evidence) {
+    let sender = vinx_crypto::Address::from_public_key(&kp.public_key());
+    let account = s.mempool.pending_account(&sender);
+    let nonce = account.as_ref().map_or(0, |a| a.nonce).saturating_add(1);
+    let first = account.as_ref().is_none_or(|a| a.key.is_none());
+    let tx = vinx_core::Transaction {
+        chain_id: s.chain.state.chain_id.clone(),
+        sender,
+        nonce,
+        fee: s.chain.state.params.min_fee,
+        body: vinx_core::TxBody::ReportEquivocation {
+            key: guilty,
+            evidence: vinx_core::encode(evidence),
+        },
+    }
+    .sign(kp, first);
+    match s.mempool.add(tx.clone()) {
+        Ok(id) => {
+            info!(tx = %hex::encode(id), "sanction de l'équivoque soumise");
+            s.broadcast(NetMessage::Tx(tx));
+        }
+        Err(e) => warn!("sanction de l'équivoque non soumise : {e:?}"),
     }
 }
 
@@ -572,8 +611,8 @@ impl Runner {
                         .extend(self.engine.on_vote(signed, &mut Checker(&s.chain)));
                 }
                 Action::Equivocation(evidence) => {
-                    let s = lock(&self.shared);
-                    record_evidence(&s, &evidence, true);
+                    let mut s = lock(&self.shared);
+                    record_evidence(&mut s, &evidence, true, self.key.as_ref());
                 }
                 Action::ScheduleTimeout { timeout, after_ms } => {
                     let tx = self.timeouts.clone();
@@ -635,14 +674,14 @@ impl Runner {
                     let _ = lock(&self.shared).mempool.add_admin(tx);
                 }
                 NetMessage::Evidence(evidence) => {
-                    let s = lock(&self.shared);
+                    let mut s = lock(&self.shared);
                     let validators = s.chain.state.validators_at(evidence.height());
                     if evidence
                         .verify(&s.chain.state.chain_id, &validators)
                         .is_ok()
                     {
                         // Déjà relayée par gossip : pas de nouvelle diffusion.
-                        record_evidence(&s, &evidence, false);
+                        record_evidence(&mut s, &evidence, false, self.key.as_ref());
                     }
                 }
                 consensus => {

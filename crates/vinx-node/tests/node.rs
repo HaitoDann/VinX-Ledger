@@ -54,6 +54,8 @@ fn devnet() -> Devnet {
     .with_faucet(1_000 * VINX)
     .unwrap();
     // Blocs rapprochés pour un test rapide.
+    // Paiements de la trésorerie immédiats : protocole 6 (48 h de délai au 7).
+    genesis.protocol_version = 6;
     genesis.params.min_block_interval_ms = 50;
     genesis.params.timeout_propose_ms = 300;
     genesis.params.timeout_vote_ms = 300;

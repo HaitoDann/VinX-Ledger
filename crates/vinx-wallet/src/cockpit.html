@@ -107,6 +107,13 @@
       </table></div>
       <div class="note muted">Seuls les nœuds suivis (onglet Réseau) sont vérifiés : ajoute chaque validateur pour un contrôle complet. Les nœuds antérieurs à la 0.26 ne publient pas leur protocole maximal.</div>
     </section>
+    <section class="card" id="g-pending-card" hidden>
+      <h2>Actions admin en attente <span class="sub">protocole 7 : exécutées après le délai, annulables d'ici là</span></h2>
+      <div class="scroll"><table>
+        <thead><tr><th>Action</th><th>Détail</th><th>Incluse au bloc</th><th>Exécution</th><th></th></tr></thead>
+        <tbody id="g-pending"></tbody>
+      </table></div>
+    </section>
     <section class="card narrow">
       <h2>Programmer une mise à jour du protocole</h2>
       <p class="sub">Procédure : installer d'abord la nouvelle version sur <b>tous</b> les nœuds, vérifier le tableau ci-dessus, puis programmer l'activation au moins 17 280 blocs (environ 24 h) plus tard. Un nœud resté sur l'ancienne version s'arrête à la hauteur d'activation.</p>
@@ -162,6 +169,14 @@
         <h2>Ajouter un validateur</h2>
         <label>Clé publique du nouveau validateur (affichée par <span class="mono">prepare</span>)</label>
         <input id="av-key" class="mono" placeholder="01…">
+        <div id="av-identity" hidden>
+          <div class="row">
+            <div><label for="av-name">Nom public (unique, définitif)</label><input id="av-name" maxlength="24" placeholder="Saffron"></div>
+            <div><label for="av-operator">Opérateur</label><input id="av-operator" maxlength="64" placeholder="VinX Labs"></div>
+            <div style="flex:0 0 90px"><label for="av-country">Pays</label><input id="av-country" maxlength="2" placeholder="FR"></div>
+          </div>
+          <div class="note muted">Protocole 7 : la caution du validateur doit être déposée avant (<span class="mono">vinx-wallet validator bond</span>), et l'ajout s'exécute après le délai admin.</div>
+        </div>
         <label>Contrôle avant ajout : URL de l'API du nouveau nœud (facultatif)</label>
         <input id="av-url" class="mono" placeholder="http://127.0.0.1:18545">
         <div class="note" id="av-check"></div>
@@ -588,7 +603,11 @@ async function proposeAdd() {
   if (!/^01[0-9a-f]{64}$/.test(key)) return toast("Clé publique attendue : 01 suivi de 64 caractères hexadécimaux", true);
   const n = gov.validators.active.length;
   if (gov.validators.active.includes(key)) return toast("Ce validateur est déjà dans l'ensemble", true);
-  await propose({ kind: "add-validator", key }, "Ajouter un validateur",
+  const named = status.protocol_version >= 7;
+  const name = $("av-name").value.trim(), operator = $("av-operator").value.trim(), country = $("av-country").value.trim().toUpperCase();
+  if (named && (!name || !operator || !/^[A-Z]{2}$/.test(country))) return toast("Protocole 7 : nom, opérateur et pays (deux lettres) sont exigés", true);
+  const action = named ? { kind: "add-named-validator", key, name, operator, country } : { kind: "add-validator", key };
+  await propose(action, named ? `Ajouter le validateur ${name}` : "Ajouter un validateur",
     `<p class="mono">${esc(key)}</p><p>Avant : ${toleranceText(n)}.<br>Après : ${toleranceText(n + 1)}.</p>
      <p class="sub">Le nœud doit déjà tourner avec cette clé et suivre la chaîne : il votera deux blocs après l'inclusion.
      S'il n'est pas prêt, le réseau perd de la marge.${n + 1 === 2 || n + 1 === 3 ? ' <strong class="warn">À 2 ou 3 validateurs, une absence bloque la chaîne : ajoute les suivants sans attendre.</strong>' : ""}</p>`);
@@ -620,6 +639,12 @@ async function proposeUpgrade() {
     `<p>Passage à la version <strong>${esc(version)}</strong> à la hauteur <strong>${fr(h)}</strong>, vers le ${esc(etaDate(Number(h) - status.height))}.</p>
      ${late.length ? `<p class="bad">Pas prêts : ${late.map((n) => esc(n.name)).join(", ")}.</p>` : ""}
      <p class="warn">Tout nœud qui n'aura pas la nouvelle version s'arrêtera à cette hauteur.</p>`, { danger: true });
+}
+
+/* Protocole 7 : annulation d'une action admin en attente. */
+async function proposeCancel(id, label) {
+  await propose({ kind: "cancel-pending", id }, "Annuler une action en attente",
+    `<p>${esc(label)}</p><p class="mono sub">${esc(id)}</p><p>L'action ne sera pas exécutée si l'annulation est incluse avant son échéance.</p>`, { danger: true });
 }
 
 /* ---------- Gouvernance ---------- */
@@ -691,6 +716,17 @@ async function refreshGovernance() {
     const verdict = sp === null ? '<span class="muted">inconnu</span>' : sp >= target ? `<span class="ok">✓ protocole ${target}</span>` : `<span class="bad">✗ protocole ${target}</span>`;
     return `<tr><td>${esc(n.name)}</td><td class="mono">${esc(n.status.node_version || "—")}</td><td>${sp ?? "—"}</td><td>${fr(n.status.height)}</td><td>${verdict}</td></tr>`;
   }).join("") : `<tr><td colspan="5" class="muted">Aucun nœud suivi : ajoute-les dans l'onglet Réseau.</td></tr>`;
+
+  /* Actions en attente (protocole 7) */
+  const pend = gov.pending_admin || [];
+  $("g-pending-card").hidden = status.protocol_version < 7;
+  $("av-identity").hidden = status.protocol_version < 7;
+  $("g-pending").innerHTML = pend.length ? pend.map((p) => {
+    const at = new Date(p.executes_at * 1000).toLocaleString("fr-FR", { dateStyle: "medium", timeStyle: "short" });
+    const label = esc(p.label || p.kind || "action");
+    return `<tr><td>${label}</td><td>${esc(Object.entries(p.detail || {}).map(([k, v]) => `${k} : ${typeof v === "object" ? JSON.stringify(v) : v}`).join(" · "))}</td>
+      <td>${fr(p.queued_at)}</td><td>${esc(at)}</td><td><button class="danger" onclick='proposeCancel(${JSON.stringify(p.id)}, ${JSON.stringify(p.label || p.kind || "action")})'>Annuler…</button></td></tr>`;
+  }).join("") : `<tr><td colspan="5" class="muted">Aucune action en attente.</td></tr>`;
 
   if (!$("up-version").value) $("up-version").value = up ? up.version : status.protocol_version + 1;
   upgradeHelp();

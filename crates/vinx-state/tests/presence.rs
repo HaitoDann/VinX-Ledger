@@ -9,7 +9,8 @@
 )]
 
 //! Protocole 7, lot P7b : `last_commit`, présence, récompenses, mise à
-//! l'écart, retour et départ (docs/PROTOCOLE-7.md §§5–6).
+//! l'écart, retour et départ (docs/PROTOCOLE-7.md §§5–6) ; lot P7c : sanction
+//! de la double signature (§4).
 
 mod common;
 
@@ -377,4 +378,171 @@ fn apply_block_requires_the_parent_certificate() {
     // L'encodage relit le certificat.
     let bytes = vinx_core::encode(&block);
     assert_eq!(vinx_core::decode::<Block>(&bytes).unwrap(), block);
+}
+
+// ── P7c : sanction de la double signature (§4) ──────────────────────────────
+
+/// Preuve : deux precommits contradictoires du validateur `g` à la hauteur `h`.
+fn double_vote(net: &Net, g: usize, h: u64) -> Vec<u8> {
+    use vinx_consensus::{Evidence, SignedVote};
+    let vote = |hash: [u8; 32]| Vote {
+        chain_id: CHAIN.into(),
+        kind: VoteKind::Precommit,
+        height: h,
+        round: 0,
+        block_hash: Some(hash),
+    };
+    let kp = &net.validators[g];
+    let ev = Evidence::Votes(
+        SignedVote::new(vote([1; 32]), g as u16, kp),
+        SignedVote::new(vote([2; 32]), g as u16, kp),
+    );
+    vinx_core::encode(&ev)
+}
+
+fn report(net: &Net, reporter: usize, g: usize, evidence: Vec<u8>) -> SignedTransaction {
+    vtx(
+        net,
+        reporter,
+        TxBody::ReportEquivocation {
+            key: vkey(net, g),
+            evidence,
+        },
+    )
+}
+
+#[test]
+fn equivocation_confiscates_the_bond_and_bans() {
+    let mut net = net7();
+    let key2 = vkey(&net, 2);
+    let bond = vtx(
+        &net,
+        2,
+        TxBody::DepositBond {
+            key: key2.clone(),
+            amount: DEFAULT_VALIDATOR_BOND + 1,
+        },
+    );
+    step(&mut net, T0, &[0, 1, 2, 3], &[bond]).unwrap();
+    let h = net.state.height;
+    let before: Vec<u64> = (0..4)
+        .map(|g| net.state.balance(&addr(&net.validators[g])))
+        .collect();
+    let pot = net.state.emission.pot;
+
+    // Preuve d'un autre validateur, ou falsifiée : refusée.
+    let wrong = vtx(
+        &net,
+        0,
+        TxBody::ReportEquivocation {
+            key: vkey(&net, 1),
+            evidence: double_vote(&net, 2, h),
+        },
+    );
+    assert_eq!(
+        tx_err(step(&mut net, T0, &[0, 1, 2, 3], &[wrong])),
+        TxError::Staking(StakingError::BadEvidence)
+    );
+    let garbage = report(&net, 0, 2, vec![1, 2, 3]);
+    assert_eq!(
+        tx_err(step(&mut net, T0, &[0, 1, 2, 3], &[garbage])),
+        TxError::Staking(StakingError::BadEvidence)
+    );
+
+    let evidence = double_vote(&net, 2, h);
+    let tx = report(&net, 0, 2, evidence.clone());
+    step(&mut net, T0, &[0, 1, 2, 3], &[tx]).unwrap();
+    let at = net.state.height;
+    assert_eq!(status(&net, 2), ValidatorStatus::Banned);
+    assert_eq!(net.state.staking.bond(&key2), 0);
+    assert!(!net.state.validators_at(at + 2).contains(&key2));
+    // 10 000 VINX + 1 unité, en trois parts égales ; le reliquat au pot.
+    let share = (DEFAULT_VALIDATOR_BOND + 1) / 3;
+    let fee = VINX / 1000;
+    let after: Vec<u64> = (0..4)
+        .map(|g| net.state.balance(&addr(&net.validators[g])))
+        .collect();
+    assert_eq!(
+        after[0],
+        before[0] + share - fee,
+        "le signaleur paie les frais"
+    );
+    assert_eq!(after[1], before[1] + share);
+    assert_eq!(after[3], before[3] + share);
+    assert_eq!(after[2], before[2]);
+    assert_eq!(
+        net.state.emission.pot,
+        pot + fee + (DEFAULT_VALIDATOR_BOND + 1 - 3 * share)
+    );
+    assert!(net.state.check_invariant().is_ok());
+
+    // Une seule sanction par faute, et plus aucun retour possible.
+    let again = report(&net, 1, 2, evidence);
+    assert_eq!(
+        tx_err(step(&mut net, T0, &[0, 1, 3], &[again])),
+        TxError::Staking(StakingError::AlreadySlashed)
+    );
+    let bond = vtx(
+        &net,
+        2,
+        TxBody::DepositBond {
+            key: key2.clone(),
+            amount: VINX,
+        },
+    );
+    assert_eq!(
+        tx_err(step(&mut net, T0, &[0, 1, 3], &[bond])),
+        TxError::Staking(StakingError::Banned)
+    );
+}
+
+#[test]
+fn equivocation_is_punished_during_the_unlock_delay() {
+    let mut net = net7();
+    let key1 = vkey(&net, 1);
+    let bond = vtx(
+        &net,
+        1,
+        TxBody::DepositBond {
+            key: key1.clone(),
+            amount: DEFAULT_VALIDATOR_BOND,
+        },
+    );
+    step(&mut net, T0, &[0, 1, 2, 3], &[bond]).unwrap();
+    let h = net.state.height;
+    let leave = vtx(&net, 1, TxBody::LeaveValidators);
+    step(&mut net, T0, &[0, 1, 2, 3], &[leave]).unwrap();
+    step(&mut net, T0, &[0, 2, 3], &[]).unwrap();
+    step(&mut net, T0, &[0, 2, 3], &[]).unwrap();
+    assert!(matches!(status(&net, 1), ValidatorStatus::Leaving { .. }));
+    let tx = report(&net, 3, 1, double_vote(&net, 1, h));
+    step(&mut net, T0, &[0, 2, 3], &[tx]).unwrap();
+    assert_eq!(status(&net, 1), ValidatorStatus::Banned);
+    assert_eq!(net.state.staking.bond(&key1), 0);
+    assert_eq!(net.state.staking.slashed.len(), 1);
+    // La caution n'est plus restituable.
+    let w = vtx(&net, 1, TxBody::WithdrawBond);
+    let unlock = T0 + net.state.staking.params.bond_unlock_delay;
+    assert_eq!(
+        tx_err(step(&mut net, unlock, &[0, 2, 3], &[w])),
+        TxError::Staking(StakingError::NoBond)
+    );
+    assert!(net.state.check_invariant().is_ok());
+}
+
+#[test]
+fn evidence_before_the_validator_joined_is_refused() {
+    let mut net = net7();
+    let joined = net
+        .state
+        .staking
+        .records
+        .get(&vkey(&net, 3))
+        .unwrap()
+        .joined_at;
+    let tx = report(&net, 0, 3, double_vote(&net, 3, joined - 1));
+    assert_eq!(
+        tx_err(step(&mut net, T0, &[0, 1, 2, 3], &[tx])),
+        TxError::Staking(StakingError::EvidenceOutOfRange)
+    );
 }
