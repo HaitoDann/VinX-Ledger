@@ -235,6 +235,18 @@ sont terminés et testés ensemble.
 - Question ouverte : signatures omises par un proposeur (voir la réponse
   proposée à Haito ; non tranchée).
 
+### Après P7c
+
+- Fait : `--required-bond` (caution exigée fixée à la genèse, champ
+  `required_bond` du fichier de genèse), pour la pré-production.
+- Décidé avec Haito : pas de release ni de testnet 3 maintenant ; une seule
+  grosse mise à jour (protocoles 7 et 8), puis une **pré-production** au
+  modèle réserve, sans robinet ni premine, démarrée par un validateur.
+- Protocole 8 (réserve et gouvernance votée) : spécification **en
+  brouillon**, `docs/PROTOCOLE-8.md`, décisions au §10 à faire valider.
+- En attente de décision : correction des signatures omises (détection
+  seule ou détection et rattrapage au bloc suivant).
+
 ## 8. Après le protocole 7 (feuille de route)
 
 - Politique et module de gouvernance du réseau principal (ADR 0003).
