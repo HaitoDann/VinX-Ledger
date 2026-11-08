@@ -177,6 +177,7 @@ mod tests {
             admin_txs: vec![],
             txs: vec![],
             last_commit: None,
+            late_signatures: Vec::new(),
         };
         let vote = Vote {
             chain_id: "vinx-snap".into(),

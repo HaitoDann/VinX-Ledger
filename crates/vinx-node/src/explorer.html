@@ -487,15 +487,16 @@ async function validatorsPage() {
       <td class="amount">${vinx(r.bond)}${bondOk ? "" : `<br><span class="muted">exigée : ${vinx(r.bond_required)}${r.grace_until ? `, grâce jusqu'au ${day(r.grace_until)}` : ""}</span>`}</td>
       <td class="num">${p ? `<span class="${low ? "bad" : ""}">${pct(p.availability)}</span><br><span class="muted">${fr(p.signed)} / ${fr(p.expected)} blocs</span>` : "—"}</td>
       <td class="num">${p ? fr(p.missed_in_row) + " / " + fr(p.absence_limit) : "—"}</td>
+      <td class="num">${p ? fr(p.omitted_as_proposer ?? 0) : "—"}</td>
       <td>${site}${r.contact ? `<br><span class="muted">${esc(r.contact)}</span>` : ""}<br><a class="mono" href="#/adresse/${esc(r.address)}">${short(r.address)}</a></td></tr>`;
   }).join("");
   const k = gov.staking || {};
   const slashed = gov.slashed || [];
   const names = Object.fromEntries(reg.map((r) => [r.key, r.identity.name]));
   return `<section class="card"><h2>Validateurs <span class="sub">${fr(reg.length)} fiche(s) · présence de l'époque en cours</span></h2><div class="scroll"><table>
-      <thead><tr><th>Validateur</th><th>Statut</th><th class="amount">Caution</th><th class="num">Présence</th><th class="num">Absences d'affilée</th><th>Contact</th></tr></thead>
+      <thead><tr><th>Validateur</th><th>Statut</th><th class="amount">Caution</th><th class="num">Présence</th><th class="num">Absences d'affilée</th><th class="num" title="Comme proposeur : signatures absentes de ses blocs, rattrapées par le proposeur suivant">Omissions</th><th>Contact</th></tr></thead>
       <tbody>${rows}</tbody></table></div>
-      <p class="muted">Récompensé si la présence atteint ${pct(k.min_availability)} et que la caution est déposée. Mis à l'écart après ${fr(k.absence_blocks ?? 0)} blocs sans signature.</p></section>
+      <p class="muted">Récompensé si la présence atteint ${pct(k.min_availability)} et que la caution est déposée. Mis à l'écart après ${fr(k.absence_blocks ?? 0)} blocs sans signature. Omissions : signatures qu'un proposeur n'a pas mises dans ses blocs et que le suivant a rattrapées ; quelques-unes sont normales (réseau lent), un nombre élevé face aux autres est suspect.</p></section>
     <section class="card"><h2>Sanctions <span class="sub">double signature prouvée : caution confisquée, exclusion définitive</span></h2>
       ${slashed.length ? `<div class="scroll"><table><thead><tr><th>Validateur</th><th class="num">Faute au bloc</th><th class="num">Sanction au bloc</th><th class="amount">Caution confisquée</th></tr></thead><tbody>
         ${slashed.map((x) => `<tr><td>${esc(names[x.key] || short(x.key))}</td><td class="num">${blockLink(x.height)}</td><td class="num">${blockLink(x.at)}</td><td class="amount">${vinx(x.amount)}</td></tr>`).join("")}

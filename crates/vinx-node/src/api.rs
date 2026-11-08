@@ -1796,6 +1796,8 @@ fn record_json(
             "missed_in_row": p.missed_in_row,
             "absence_limit": st.staking.params.absence_blocks,
             "jailed_this_epoch": p.jailed_this_epoch,
+            // Comme proposeur : signatures omises, rattrapées par le suivant.
+            "omitted_as_proposer": p.omitted,
         })),
     })
 }

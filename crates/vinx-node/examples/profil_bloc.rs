@@ -110,6 +110,7 @@ fn main() {
         admin_txs: vec![],
         txs: txs.clone(),
         last_commit: None,
+        late_signatures: Vec::new(),
     };
     let cert = vinx_core::CommitCertificate {
         height: 1,

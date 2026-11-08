@@ -230,6 +230,7 @@ pub fn open(genesis: Genesis, data_dir: &Path) -> Result<SharedRef> {
             genesis_root,
             genesis_time_ms,
             last_commit,
+            older_commit: None,
         },
         mempool,
         store,

@@ -25,6 +25,9 @@ pub struct Chain {
     /// Certificat du dernier bloc, complété des precommits reçus après la
     /// décision : c'est le `last_commit` du prochain bloc (protocole 7).
     pub last_commit: Option<CommitCertificate>,
+    /// Certificat de l'avant-dernier bloc, complété de même : ses signatures
+    /// absentes du bloc précédent sont rattrapées par le prochain bloc.
+    pub older_commit: Option<CommitCertificate>,
 }
 
 impl Chain {
@@ -48,24 +51,38 @@ impl Chain {
         validator: u16,
         signature: &vinx_crypto::Signature,
     ) -> bool {
-        let Some(cert) = &mut self.last_commit else {
-            return false;
-        };
-        if vote.kind != vinx_core::VoteKind::Precommit
-            || vote.chain_id != self.state.chain_id
-            || vote.height != cert.height
-            || vote.round != cert.round
-            || vote.block_hash != Some(cert.block_hash)
-        {
+        if vote.kind != vinx_core::VoteKind::Precommit || vote.chain_id != self.state.chain_id {
             return false;
         }
+        let matches = |c: &Option<CommitCertificate>| {
+            c.as_ref().is_some_and(|c| {
+                vote.height == c.height
+                    && vote.round == c.round
+                    && vote.block_hash == Some(c.block_hash)
+            })
+        };
+        // Ensemble de la hauteur votée : l'actuel pour le dernier bloc, celui
+        // conservé par l'état pour l'avant-dernier.
+        let (cert, set) = if matches(&self.last_commit) {
+            let set = self.state.validators_at(vote.height);
+            (&mut self.last_commit, set)
+        } else if matches(&self.older_commit) {
+            match &self.state.staking.recent {
+                Some(r) if r.height == vote.height => (&mut self.older_commit, r.set.clone()),
+                _ => return false,
+            }
+        } else {
+            return false;
+        };
+        let Some(cert) = cert else {
+            return false;
+        };
         let Err(at) = cert
             .signatures
             .binary_search_by_key(&validator, |(i, _)| *i)
         else {
             return false;
         };
-        let set = self.state.validators_at(cert.height);
         let valid = set
             .get(usize::from(validator))
             .is_some_and(|key| key.verify(&vote.signing_message(), signature).is_ok());
@@ -166,6 +183,19 @@ impl Chain {
         let last_commit = (height > 1 && self.state.version_at(height) >= LAST_COMMIT_PROTOCOL)
             .then(|| self.last_commit.clone())
             .flatten();
+        // Et les precommits de l'avant-dernier bloc que le précédent n'avait pas.
+        let late = match (&last_commit, &self.state.staking.recent, &self.older_commit) {
+            (Some(_), Some(r), Some(o))
+                if r.height == o.height && r.round == o.round && r.block_hash == o.block_hash =>
+            {
+                o.signatures
+                    .iter()
+                    .filter(|(i, _)| !r.signers.contains(i))
+                    .cloned()
+                    .collect()
+            }
+            _ => Vec::new(),
+        };
         // `execute` ne peut pas échouer ici : chaque transaction a été appliquée avec succès.
         let next = self
             .state
@@ -174,6 +204,7 @@ impl Chain {
                 timestamp_ms,
                 Some(proposer),
                 last_commit.as_ref(),
+                &late,
                 &admin,
                 &txs,
             )
@@ -185,7 +216,13 @@ impl Chain {
                 height,
                 timestamp: timestamp_ms,
                 prev_hash: self.parent_hash(),
-                tx_root: block_tx_root(next.protocol_version, &admin, &txs, last_commit.as_ref()),
+                tx_root: block_tx_root(
+                    next.protocol_version,
+                    &admin,
+                    &txs,
+                    last_commit.as_ref(),
+                    &late,
+                ),
                 state_root: next.state_root(),
                 validators_hash: next.next_validators_hash(),
                 proposer,
@@ -193,6 +230,7 @@ impl Chain {
             admin_txs: admin,
             txs,
             last_commit,
+            late_signatures: late,
         }
     }
 
@@ -200,6 +238,6 @@ impl Chain {
     pub fn advance(&mut self, block: &Block, cert: &CommitCertificate, next: State) {
         self.state = next;
         self.last = Some(block.header.clone());
-        self.last_commit = Some(cert.clone());
+        self.older_commit = self.last_commit.replace(cert.clone());
     }
 }

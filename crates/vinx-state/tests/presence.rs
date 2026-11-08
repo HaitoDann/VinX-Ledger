@@ -91,9 +91,9 @@ fn step(
     let c = cert(net, who);
     let h = net.state.height + 1;
     let n = net.state.validators_at(h).len() as u64;
-    let next = net
-        .state
-        .execute_block(h, at * 1000, Some((h % n) as u16), Some(&c), &[], txs)?;
+    let next =
+        net.state
+            .execute_block(h, at * 1000, Some((h % n) as u16), Some(&c), &[], &[], txs)?;
     net.state = next;
     Ok(())
 }
@@ -140,7 +140,7 @@ fn presence_is_counted_from_last_commit() {
     let h = net.state.height + 1;
     assert_eq!(
         net.state
-            .execute_block(h, T0 * 1000, Some(0), Some(&c), &[], &[])
+            .execute_block(h, T0 * 1000, Some(0), Some(&c), &[], &[], &[])
             .map(|_| ()),
         Err(BlockError::BadLastCommit)
     );
@@ -331,7 +331,7 @@ fn apply_block_requires_the_parent_certificate() {
     let h = net.state.height + 1;
     let next = net
         .state
-        .execute_block(h, T0 * 1000, Some(0), Some(&c), &[], &[])
+        .execute_block(h, T0 * 1000, Some(0), Some(&c), &[], &[], &[])
         .unwrap();
     let block = Block {
         header: BlockHeader {
@@ -340,7 +340,7 @@ fn apply_block_requires_the_parent_certificate() {
             height: h,
             timestamp: T0 * 1000,
             prev_hash: c.block_hash,
-            tx_root: block_tx_root(7, &[], &[], Some(&c)),
+            tx_root: block_tx_root(7, &[], &[], Some(&c), &[]),
             state_root: next.state_root(),
             validators_hash: next.next_validators_hash(),
             proposer: 0,
@@ -348,6 +348,7 @@ fn apply_block_requires_the_parent_certificate() {
         admin_txs: vec![],
         txs: vec![],
         last_commit: Some(c.clone()),
+        late_signatures: Vec::new(),
     };
     let mut s = net.state.clone();
     s.apply_block(&block).unwrap();
@@ -545,4 +546,168 @@ fn evidence_before_the_validator_joined_is_refused() {
         tx_err(step(&mut net, T0, &[0, 1, 2, 3], &[tx])),
         TxError::Staking(StakingError::EvidenceOutOfRange)
     );
+}
+
+// ── Signatures omises : rattrapage au bloc suivant et détection (§5) ────────
+
+/// Precommits rattrapés de la hauteur certifiée par le dernier bloc.
+fn late(net: &Net, who: &[usize]) -> Vec<(u16, vinx_crypto::Signature)> {
+    let r = net
+        .state
+        .staking
+        .recent
+        .as_ref()
+        .expect("certificat récent");
+    let vote = Vote {
+        chain_id: CHAIN.into(),
+        kind: VoteKind::Precommit,
+        height: r.height,
+        round: r.round,
+        block_hash: Some(r.block_hash),
+    };
+    who.iter()
+        .map(|&g| {
+            let kp = &net.validators[g];
+            let i = r.set.iter().position(|k| *k == kp.public_key()).unwrap();
+            (i as u16, vote.sign(kp))
+        })
+        .collect()
+}
+
+/// Comme [`step`], avec des signatures rattrapées.
+fn step_late(
+    net: &mut Net,
+    who: &[usize],
+    late_sigs: &[(u16, vinx_crypto::Signature)],
+) -> Result<(), BlockError> {
+    let c = cert(net, who);
+    let h = net.state.height + 1;
+    let n = net.state.validators_at(h).len() as u64;
+    let next = net.state.execute_block(
+        h,
+        T0 * 1000,
+        Some((h % n) as u16),
+        Some(&c),
+        late_sigs,
+        &[],
+        &[],
+    )?;
+    net.state = next;
+    Ok(())
+}
+
+#[test]
+fn an_omitted_signature_is_recovered_by_the_next_block() {
+    let mut net = net7();
+    step(&mut net, T0, &[0, 1, 2, 3], &[]).unwrap();
+    // Le proposeur de ce bloc omet le validateur 3.
+    step(&mut net, T0, &[0, 1, 2], &[]).unwrap();
+    let carrier = net
+        .state
+        .staking
+        .recent
+        .as_ref()
+        .unwrap()
+        .carried_by
+        .clone()
+        .unwrap();
+    let key3 = vkey(&net, 3);
+    let before = net.state.staking.presence[&key3].clone();
+    assert_eq!(before.missed_in_row, 1);
+    // Le suivant rattrape la signature.
+    let sigs = late(&net, &[3]);
+    step_late(&mut net, &[0, 1, 2, 3], &sigs).unwrap();
+    let p = &net.state.staking.presence[&key3];
+    assert_eq!(
+        p.signed,
+        before.signed + 2,
+        "rattrapée, et signée au bloc suivant"
+    );
+    assert_eq!(p.expected, before.expected + 1);
+    assert_eq!(p.missed_in_row, 0);
+    assert_eq!(
+        net.state.staking.presence[&carrier].omitted, 1,
+        "omission notée"
+    );
+    assert!(net.state.check_invariant().is_ok());
+}
+
+#[test]
+fn invalid_recovered_signatures_are_refused() {
+    let mut net = net7();
+    step(&mut net, T0, &[0, 1, 2, 3], &[]).unwrap();
+    step(&mut net, T0, &[0, 1, 2], &[]).unwrap();
+    // Déjà dans le certificat.
+    let dup = late(&net, &[0]);
+    assert_eq!(
+        step_late(&mut net, &[0, 1, 2], &dup),
+        Err(BlockError::BadLastCommit)
+    );
+    // Signature d'un autre bloc.
+    let mut wrong = late(&net, &[3]);
+    wrong[0].1 = net.validators[3].sign(b"autre chose");
+    assert_eq!(
+        step_late(&mut net, &[0, 1, 2], &wrong),
+        Err(BlockError::BadLastCommit)
+    );
+    // Rattrapée une fois : plus ensuite.
+    let ok = late(&net, &[3]);
+    step_late(&mut net, &[0, 1, 2, 3], &ok).unwrap();
+    assert_eq!(
+        step_late(&mut net, &[0, 1, 2, 3], &ok),
+        Err(BlockError::BadLastCommit)
+    );
+}
+
+#[test]
+fn a_proposer_omitting_a_victim_no_longer_costs_its_reward() {
+    let mut net = net7();
+    // Une omission au tout dernier bloc d'une époque n'est pas rattrapable
+    // (l'époque est close) : négligeable sur une époque longue.
+    net.state.emission.epoch_blocks = 1_000;
+    let t = T0 + 86_400;
+    let victim = vkey(&net, 3);
+    let attacker = vkey(&net, 0);
+    let before = net.state.balance(&addr(&net.validators[3]));
+    // Le validateur 0 omet toujours le validateur 3 dans ses blocs ; le
+    // proposeur suivant, honnête, rattrape la signature.
+    loop {
+        let h = net.state.height + 1;
+        let proposer = net.state.validators_at(h)[(h % 4) as usize].clone();
+        let previous_was_attacker = net
+            .state
+            .staking
+            .recent
+            .as_ref()
+            .and_then(|r| r.carried_by.clone())
+            == Some(attacker.clone());
+        let sigs = if previous_was_attacker {
+            late(&net, &[3])
+        } else {
+            Vec::new()
+        };
+        let who: &[usize] = if proposer == attacker {
+            &[0, 1, 2]
+        } else {
+            &[0, 1, 2, 3]
+        };
+        let c = cert(&net, who);
+        net.state = net
+            .state
+            .execute_block(h, t * 1000, Some((h % 4) as u16), Some(&c), &sigs, &[], &[])
+            .unwrap();
+        if net.state.height % 1_000 == 0 {
+            break;
+        }
+    }
+    assert!(
+        net.state.balance(&addr(&net.validators[3])) > before,
+        "la victime reste récompensée"
+    );
+    // Sans rattrapage, il aurait perdu environ 25 % de sa présence.
+    assert!(
+        net.state.staking.presence[&victim].expected == 0,
+        "nouvelle époque"
+    );
+    assert!(net.state.check_invariant().is_ok());
 }

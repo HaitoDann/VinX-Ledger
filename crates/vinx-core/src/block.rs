@@ -3,6 +3,7 @@
 use crate::{CommitCertificate, SignedAdminTransaction, SignedTransaction, encode};
 use borsh::{BorshDeserialize, BorshSerialize};
 use std::io::{Read, Write};
+use vinx_crypto::Signature;
 use vinx_crypto::{Domain, Hash, hash_tagged, merkle_root};
 
 /// Version du protocole à partir de laquelle un bloc porte `last_commit`
@@ -38,6 +39,10 @@ pub struct Block {
     /// Protocole 7 : certificat du bloc précédent, avec toutes les signatures
     /// reçues par le proposeur. `None` au bloc 1 et avant le protocole 7.
     pub last_commit: Option<CommitCertificate>,
+    /// Protocole 7 : precommits du bloc `h - 2` absents du `last_commit` du
+    /// bloc précédent (indice dans l'ensemble de `h - 2`, signature). Le
+    /// proposeur suivant répare ainsi une omission (docs/PROTOCOLE-7.md §5).
+    pub late_signatures: Vec<(u16, Signature)>,
 }
 
 impl BorshSerialize for Block {
@@ -47,6 +52,7 @@ impl BorshSerialize for Block {
         self.txs.serialize(writer)?;
         if self.header.protocol_version >= LAST_COMMIT_PROTOCOL {
             self.last_commit.serialize(writer)?;
+            self.late_signatures.serialize(writer)?;
         }
         Ok(())
     }
@@ -57,27 +63,33 @@ impl BorshDeserialize for Block {
         let header = BlockHeader::deserialize_reader(reader)?;
         let admin_txs = Vec::deserialize_reader(reader)?;
         let txs = Vec::deserialize_reader(reader)?;
-        let last_commit = if header.protocol_version >= LAST_COMMIT_PROTOCOL {
-            Option::deserialize_reader(reader)?
+        let (last_commit, late_signatures) = if header.protocol_version >= LAST_COMMIT_PROTOCOL {
+            (
+                Option::deserialize_reader(reader)?,
+                Vec::deserialize_reader(reader)?,
+            )
         } else {
-            None
+            (None, Vec::new())
         };
         Ok(Self {
             header,
             admin_txs,
             txs,
             last_commit,
+            late_signatures,
         })
     }
 }
 
 /// Racine des transactions : Merkle des `admin_tx_id`, des `tx_id` puis, à
-/// partir du protocole 7, de l'empreinte de `last_commit`.
+/// partir du protocole 7, de l'empreinte de `last_commit` et de celle des
+/// signatures rattrapées (s'il y en a).
 pub fn block_tx_root(
     protocol_version: u32,
     admin_txs: &[SignedAdminTransaction],
     txs: &[SignedTransaction],
     last_commit: Option<&CommitCertificate>,
+    late_signatures: &[(u16, Signature)],
 ) -> Hash {
     let mut ids: Vec<Hash> = admin_txs
         .iter()
@@ -87,6 +99,12 @@ pub fn block_tx_root(
     if protocol_version >= LAST_COMMIT_PROTOCOL {
         if let Some(cert) = last_commit {
             ids.push(cert.hash());
+        }
+        if !late_signatures.is_empty() {
+            ids.push(hash_tagged(
+                Domain::Commit,
+                &encode(&late_signatures.to_vec()),
+            ));
         }
     }
     merkle_root(&ids)
@@ -111,6 +129,7 @@ impl Block {
             &self.admin_txs,
             &self.txs,
             self.last_commit.as_ref(),
+            &self.late_signatures,
         )
     }
 
@@ -160,6 +179,7 @@ mod tests {
             admin_txs: vec![admin],
             txs: vec![tx],
             last_commit: None,
+            late_signatures: Vec::new(),
         };
         b.header.tx_root = b.compute_tx_root();
         b
@@ -204,12 +224,22 @@ mod tests {
         // À partir du protocole 7 : écrit, relu, et engagé dans `tx_root`.
         b.header.protocol_version = 7;
         let bytes = encode(&b);
-        assert_eq!(bytes.len(), old.len() + encode(&Some(cert.clone())).len());
+        assert_eq!(
+            bytes.len(),
+            old.len() + encode(&Some(cert.clone())).len() + 4,
+            "certificat et liste vide de signatures rattrapées"
+        );
         assert_eq!(decode::<Block>(&bytes).unwrap(), b);
         assert_ne!(b.compute_tx_root(), b.header.tx_root);
         let ids = [b.admin_txs[0].id(), b.txs[0].id(), cert.hash()];
         assert_eq!(b.compute_tx_root(), merkle_root(&ids));
         b.last_commit = None;
         assert_eq!(decode::<Block>(&encode(&b)).unwrap(), b);
+        // Signatures rattrapées : encodées et engagées dans `tx_root`.
+        let kp = KeyPair::generate();
+        b.late_signatures = vec![(2, kp.sign(b"x"))];
+        assert_eq!(decode::<Block>(&encode(&b)).unwrap(), b);
+        let before = block_tx_root(7, &b.admin_txs, &b.txs, None, &[]);
+        assert_ne!(b.compute_tx_root(), before);
     }
 }

@@ -143,6 +143,26 @@ pub struct Presence {
     pub missed_in_row: u64,
     /// Mis à l'écart pendant l'époque : aucune récompense.
     pub jailed_this_epoch: bool,
+    /// Comme proposeur, pendant l'époque : signatures absentes de son
+    /// `last_commit` et rattrapées par le proposeur suivant. Un nombre élevé
+    /// face aux autres proposeurs signale des omissions volontaires.
+    pub omitted: u64,
+}
+
+/// Dernier certificat porté par un bloc, pour vérifier les signatures
+/// rattrapées par le bloc suivant (protocole 7, §5).
+#[derive(Clone, Debug, PartialEq, Eq, BorshSerialize, BorshDeserialize)]
+pub struct RecentCommit {
+    /// Hauteur certifiée.
+    pub height: u64,
+    pub round: u32,
+    pub block_hash: Hash,
+    /// Ensemble de validateurs de cette hauteur.
+    pub set: Vec<PublicKey>,
+    /// Indices déjà comptés (certificat et rattrapages).
+    pub signers: Vec<u16>,
+    /// Proposeur du bloc qui portait ce certificat.
+    pub carried_by: Option<PublicKey>,
 }
 
 impl Presence {
@@ -176,6 +196,8 @@ pub struct Staking {
     pub params: StakingParams,
     /// Présence de l'époque en cours, par validateur.
     pub presence: std::collections::BTreeMap<PublicKey, Presence>,
+    /// Certificat porté par le dernier bloc (signatures rattrapables).
+    pub recent: Option<RecentCommit>,
     pub records: Table<PublicKey, ValidatorRecord>,
     pub names: Table<String, NameOwner>,
     pub bonds: Table<PublicKey, Bond>,

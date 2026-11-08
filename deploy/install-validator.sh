@@ -247,8 +247,8 @@ reset_chain() {
     local genesis="${1:-}"
     [ -n "$genesis" ] && [ -f "$genesis" ] || die "usage : reset-chain nouvelle-genesis.json"
     [ -f "$ETC/vinx-node.env" ] || die "aucun nœud installé ici : utilise prepare puis start"
-    grep -Eq '"chain_id": *"[^"]*(testnet|devnet)' "$genesis" ||
-        die "reset-chain est réservé aux réseaux de test (chain_id contenant testnet ou devnet)"
+    grep -Eq '"chain_id": *"[^"]*(testnet|devnet|preprod)' "$genesis" ||
+        die "reset-chain est réservé aux réseaux de test (chain_id contenant testnet, devnet ou preprod)"
     if cmp -s "$genesis" "$ETC/genesis.json"; then
         echo "cette genèse est déjà installée"
         return 0

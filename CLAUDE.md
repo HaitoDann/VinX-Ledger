@@ -244,8 +244,21 @@ sont terminés et testés ensemble.
   grosse mise à jour (protocoles 7 et 8), puis une **pré-production** au
   modèle réserve, **en conditions réelles** (aucune durée raccourcie), sans
   robinet ni premine, démarrée par un validateur.
-- En attente de décision : correction des signatures omises (détection
-  seule ou détection et rattrapage au bloc suivant).
+- **Signatures omises : fait** (décidé le 2026-11-08, dans le protocole 7) :
+  - rattrapage : `Block.late_signatures` (precommits de `h - 2` absents du
+    `last_commit` précédent), encodés après `last_commit` et engagés dans
+    `tx_root` ; vérifiés contre `Staking.recent` (`RecentCommit`, dans
+    `state_root`) ; le nœud garde `Chain.older_commit` et y ajoute les
+    precommits tardifs ;
+  - détection : `Presence.omitted` (par époque, au proposeur fautif), API
+    `omitted_as_proposer`, colonne de l'explorateur, alerte du cockpit ;
+  - limite : une omission au dernier bloc d'une époque n'est pas rattrapable.
+- Portefeuille de bureau : onglet Réserve (demande, vote des détenteurs).
+- Guide : `docs/PREPROD.md` (préprod `vinx-preprod-1`, Cinnamon seul puis
+  les trois autres) ; `install-validator.sh reset-chain` accepte « preprod ».
+- Attention : chaque changement du format de l'état (non publié) change la
+  racine de genèse ; une base créée par un binaire antérieur est refusée
+  (« appartient à une autre genèse »). Normal tant que rien n'est publié.
 
 ### Protocole 8 : codé (réserve du protocole, gouvernance votée)
 
@@ -273,8 +286,8 @@ Spécification validée : `docs/PROTOCOLE-8.md` (décisions au §10).
   propose-param`.
 - Tests : `vinx-state/tests/governance.rs` (dont le déroulé de la
   pré-production), `network.rs` (`reserve_model_network_runs_without_premine`).
-- Pas fait : demandes et votes dans le portefeuille de bureau et mobile
-  (CLI seulement) ; répétition multi-machines.
+- Pas fait : demandes et votes dans le portefeuille mobile ; répétition
+  multi-machines.
 
 ## 8. Après le protocole 7 (feuille de route)
 

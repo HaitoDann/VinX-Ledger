@@ -100,6 +100,7 @@ header select { width: auto; min-width: 180px; }
         <a href="#deals" data-view="deals">Séquestres</a>
         <a href="#stamp" data-view="stamp">Horodatage</a>
         <a href="#mandates" data-view="mandates">Mandats</a>
+        <a href="#reserve" data-view="reserve">Réserve</a>
         <a href="#contacts" data-view="contacts">Contacts</a>
         <a href="#settings" data-view="settings">Réglages</a>
       </div>
@@ -317,6 +318,27 @@ header select { width: auto; min-width: 180px; }
     <label for="verifyId">Identifiant de la transaction (facultatif : seulement pour les horodatages faits avant le protocole 4)</label><input id="verifyId" class="mono" autocomplete="off">
     <div class="actions"><button id="verifyBtn">Vérifier</button></div>
     <div class="found" id="verifyOut"></div>
+  </div>
+</main>
+
+<main id="reserve" class="view">
+  <div class="card">
+    <h2>Réserve du protocole</h2>
+    <p class="sub">Aucune clé ne contrôle la réserve : chaque sortie est demandée publiquement, votée par les validateurs puis par les détenteurs, et plafonnée chaque mois.</p>
+    <div id="reserveInfo" class="muted">Chargement…</div>
+  </div>
+  <div class="card">
+    <h2>Demandes et propositions</h2>
+    <div class="scroll" id="reserveTable"></div>
+    <p class="note muted">Voter bloque les VINX choisis jusqu'à la clôture du vote, puis ils reviennent automatiquement.</p>
+  </div>
+  <div class="card narrow">
+    <h2>Déposer une demande</h2>
+    <label for="rqTo">Bénéficiaire (adresse, nom .vinx ou contact)</label><input id="rqTo" autocomplete="off">
+    <label for="rqAmount">Montant (VINX, 100 000 au plus)</label><input id="rqAmount" inputmode="decimal">
+    <label for="rqTitle">Objet (96 caractères au plus)</label><input id="rqTitle" maxlength="96">
+    <label for="rqUrl">Lien vers le descriptif public (facultatif)</label><input id="rqUrl" maxlength="200">
+    <div class="actions"><button class="primary" id="rqBtn">Vérifier avant d'envoyer</button></div>
   </div>
 </main>
 
@@ -607,6 +629,7 @@ function show(view) {
   $("moreTabs").classList.toggle("active", !!$("moreTabs").querySelector(`a[data-view="${view}"]`));
   if (open && location.hash !== "#" + view) history.replaceState(null, "", "#" + view);
   if (view === "locked") setTimeout(() => $("unlockPw").focus(), 50);
+  if (view === "reserve") loadReserve();
 }
 document.querySelectorAll("#tabs a").forEach((a) => a.addEventListener("click", (e) => { e.preventDefault(); show(a.dataset.view); }));
 document.querySelectorAll("[data-go]").forEach((b) => b.addEventListener("click", () => show(b.dataset.go)));
@@ -1243,6 +1266,44 @@ $("stampFile").onchange = async () => {
   $("stampHash").textContent = "SHA-256 : " + stampDigest;
   $("stampBtn").disabled = false;
 };
+/* ----- Réserve du protocole (protocole 8) ----- */
+async function loadReserve() {
+  let r;
+  try { r = await api("/api/reserve"); } catch (e) { $("reserveInfo").textContent = e.message; return; }
+  if (!r.enabled) {
+    $("reserveInfo").textContent = "Ce réseau n'a pas de réserve du protocole (modèle escrow).";
+    $("reserveTable").innerHTML = ""; $("rqBtn").disabled = true; return;
+  }
+  $("rqBtn").disabled = false;
+  const v = (u) => esc(vinx(u)) + " VINX";
+  $("reserveInfo").innerHTML = `<dl class="breakdown"><dt>Solde</dt><dd>${v(r.balance)}</dd>
+    <dt>Versé ce mois</dt><dd>${v(r.spent_this_month)} sur ${v(r.monthly_cap)}</dd>
+    <dt>Caution d'une demande</dt><dd>${v(r.params.proposal_deposit)}</dd>
+    <dt>Votes</dt><dd>validateurs ${r.params.validator_vote_days} jours, puis détenteurs ${r.params.holder_vote_days} jours</dd></dl>`;
+  const rows = r.proposals.map((p) => {
+    const k = p.proposal;
+    const what = k.type === "dépense" ? `<b>${esc(k.title)}</b><br><span class="sub">${v(k.amount)} → <span class="mono">${esc(short(k.beneficiary))}</span></span>`
+      : `<b>${esc(k.type)}</b><br><span class="mono sub">${esc(k.param)} = ${esc(k.value)}</span>`;
+    const vote = p.phase === "vote des détenteurs"
+      ? `<input class="rvAmt" data-id="${esc(p.id)}" inputmode="decimal" placeholder="VINX" style="width:110px">
+         <button class="rvYes" data-id="${esc(p.id)}">Pour</button> <button class="rvNo" data-id="${esc(p.id)}">Contre</button>`
+      : "";
+    return `<tr><td>${what}</td><td>${esc(p.phase)}${p.ends_at ? `<br><span class="sub">jusqu'au ${new Date(p.ends_at * 1000).toLocaleDateString("fr-FR")}</span>` : ""}</td>
+      <td class="num">${v(p.holders.yes)} pour<br>${v(p.holders.no)} contre</td><td>${vote}</td></tr>`;
+  }).join("");
+  $("reserveTable").innerHTML = rows ? `<table><thead><tr><th>Objet</th><th>Étape</th><th class="num">Détenteurs</th><th></th></tr></thead><tbody>${rows}</tbody></table>`
+    : `<p class="muted">Aucune demande pour l'instant.</p>`;
+  const voteOn = (id, approve) => {
+    const amount = document.querySelector(`.rvAmt[data-id="${id}"]`).value.trim();
+    if (!amount) return toast("Indique combien de VINX bloquer pour ce vote.", true);
+    operate({ action: "reserve-vote", proposal: id, approve, amount }, approve ? "Voter pour" : "Voter contre", loadReserve);
+  };
+  document.querySelectorAll(".rvYes").forEach((b) => b.onclick = () => voteOn(b.dataset.id, true));
+  document.querySelectorAll(".rvNo").forEach((b) => b.onclick = () => voteOn(b.dataset.id, false));
+}
+$("rqBtn").onclick = () => operate({ action: "reserve-request", to: $("rqTo").value.trim(), amount: $("rqAmount").value.trim(),
+  title: $("rqTitle").value.trim(), url: $("rqUrl").value.trim() }, "Déposer une demande à la réserve",
+  () => { ["rqTo", "rqAmount", "rqTitle", "rqUrl"].forEach((i) => { $(i).value = ""; }); loadReserve(); });
 $("stampBtn").onclick = () => operate({ action: "timestamp", hash: stampDigest, name: $("stampFile").files[0]?.name || "" }, "Horodater ce fichier",
   () => { $("stampFile").value = ""; $("stampHash").textContent = ""; $("stampBtn").disabled = true; });
 $("verifyBtn").onclick = async () => {

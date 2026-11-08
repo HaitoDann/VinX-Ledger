@@ -681,6 +681,10 @@ async function refreshGovernance() {
   if (ready.length) todo.push(["ok", `${ready.length} proposition(s) prête(s) à envoyer`, "#propositions"]);
   if (toSign.length) todo.push(["warn", `${toSign.length} proposition(s) à signer`, "#propositions"]);
   if (keys.admins.length < 2) todo.push(["warn", `${keys.admins.length} clé admin sur ce poste : il en faut deux, ou faire signer l'autre signataire (export / import)`, "#propositions"]);
+  // Protocole 7 : un proposeur qui omet beaucoup plus de signatures que les autres.
+  const reg = (await node("/validators").catch(() => ({ registry: [] }))).registry || [];
+  const om = reg.map((r) => [r.identity?.name || "?", r.epoch_presence?.omitted_as_proposer ?? 0]).sort((a, b) => b[1] - a[1]);
+  if (om.length > 1 && om[0][1] >= 20 && om[0][1] > 3 * Math.max(1, om[1][1])) todo.push(["bad", `${esc(om[0][0])} a omis ${om[0][1]} signature(s) dans ses blocs cette époque, bien plus que les autres (${om[1][1]} au plus) : omissions volontaires possibles. Vérifie son réseau avant d'envisager son retrait.`, ""]);
   const down = govNodes.filter((n) => !n.ok);
   if (down.length) todo.push(["bad", `${down.length} nœud(s) suivi(s) injoignable(s) : ${down.map((n) => esc(n.name)).join(", ")}`, "#reseau"]);
   if (up) {

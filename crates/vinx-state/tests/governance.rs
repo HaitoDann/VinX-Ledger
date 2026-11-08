@@ -490,7 +490,7 @@ fn preprod_bootstrap_from_one_validator() {
     };
     net.state = net
         .state
-        .execute_block(17_280, day_end * 1000, Some(0), Some(&cert), &[], &[])
+        .execute_block(17_280, day_end * 1000, Some(0), Some(&cert), &[], &[], &[])
         .unwrap();
     let earned = net.state.balance(&cinnamon);
     assert!(

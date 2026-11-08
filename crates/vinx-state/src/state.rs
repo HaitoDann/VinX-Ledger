@@ -18,8 +18,8 @@ use crate::registry::{
 };
 use crate::reserve::{Owned, Reserves};
 use crate::staking::{
-    BOND_GRACE, Bond, NameOwner, PendingAdmin, Slashed, Staking, StakingError, ValidatorRecord,
-    ValidatorStatus, name_key,
+    BOND_GRACE, Bond, NameOwner, PendingAdmin, RecentCommit, Slashed, Staking, StakingError,
+    ValidatorRecord, ValidatorStatus, name_key,
 };
 use crate::table::{Row, Table};
 use crate::validators::{ValidatorChange, ValidatorError, ValidatorSet, validators_hash};
@@ -589,6 +589,7 @@ impl State {
             staking: Staking {
                 params: self.staking.params.clone(),
                 presence: self.staking.presence.clone(),
+                recent: self.staking.recent.clone(),
                 ..Staking::default()
             },
             governance: Governance {
@@ -788,6 +789,7 @@ impl State {
             globals.extend_from_slice(&encode(&(
                 &k.params,
                 &k.presence,
+                &k.recent,
                 k.records.root(),
                 k.names.root(),
                 k.bonds.root(),
@@ -2704,6 +2706,83 @@ impl State {
         }
     }
 
+    /// Vérifie les precommits rattrapés de `self.height − 1` contre le
+    /// certificat porté par le dernier bloc, et renvoie les clés des
+    /// signataires. Indices strictement croissants, absents du certificat.
+    fn check_late_signatures(
+        &self,
+        late: &[(u16, vinx_crypto::Signature)],
+    ) -> Result<Vec<PublicKey>, BlockError> {
+        if late.is_empty() {
+            return Ok(Vec::new());
+        }
+        let recent = self
+            .staking
+            .recent
+            .as_ref()
+            .ok_or(BlockError::BadLastCommit)?;
+        if self.height.checked_sub(1) != Some(recent.height) {
+            return Err(BlockError::BadLastCommit);
+        }
+        let message = vinx_core::Vote {
+            chain_id: self.chain_id.clone(),
+            kind: vinx_core::VoteKind::Precommit,
+            height: recent.height,
+            round: recent.round,
+            block_hash: Some(recent.block_hash),
+        }
+        .signing_message();
+        let mut previous: Option<u16> = None;
+        let mut keys = Vec::new();
+        for (index, signature) in late {
+            if previous.is_some_and(|p| *index <= p) || recent.signers.contains(index) {
+                return Err(BlockError::BadLastCommit);
+            }
+            previous = Some(*index);
+            let key = recent
+                .set
+                .get(usize::from(*index))
+                .ok_or(BlockError::BadLastCommit)?;
+            key.verify(&message, signature)
+                .map_err(|_| BlockError::BadLastCommit)?;
+            keys.push(key.clone());
+        }
+        Ok(keys)
+    }
+
+    /// Compte les signatures rattrapées : présence du signataire, et omission
+    /// du proposeur qui ne les avait pas mises. `cert` et `set` : le
+    /// certificat du bloc précédent, déjà compté.
+    fn record_late(&mut self, keys: &[PublicKey], cert: &CommitCertificate, set: &[PublicKey]) {
+        if keys.is_empty() {
+            return;
+        }
+        let signed_last: BTreeSet<PublicKey> = cert
+            .signers()
+            .filter_map(|i| set.get(usize::from(i)).cloned())
+            .collect();
+        let carrier = self
+            .staking
+            .recent
+            .as_ref()
+            .and_then(|r| r.carried_by.clone());
+        for key in keys {
+            let p = self.staking.presence.entry(key.clone()).or_default();
+            p.signed = p.signed.saturating_add(1).min(p.expected);
+            // L'absence d'affilée ne compte plus que le bloc précédent, s'il
+            // manque aussi.
+            p.missed_in_row = if signed_last.contains(key) {
+                0
+            } else {
+                p.missed_in_row.min(1)
+            };
+            if let Some(c) = &carrier {
+                let q = self.staking.presence.entry(c.clone()).or_default();
+                q.omitted = q.omitted.saturating_add(1);
+            }
+        }
+    }
+
     /// Mise à l'écart : fiche `Jailed`, retrait de l'ensemble à `H + 2`.
     /// Rien si le validateur n'est pas actif, ou si l'ensemble deviendrait vide.
     fn jail(&mut self, key: &PublicKey, ctx: Ctx) {
@@ -2832,7 +2911,10 @@ impl State {
                 p.signed = 0;
                 p.expected = 0;
                 p.jailed_this_epoch = false;
+                p.omitted = 0;
             }
+            // Pas de rattrapage d'une époque close sur la suivante.
+            self.staking.recent = None;
             shares
         } else {
             self.emission.close_epoch(now)
@@ -2873,19 +2955,23 @@ impl State {
         admin_txs: &[SignedAdminTransaction],
         txs: &[SignedTransaction],
     ) -> Result<State, BlockError> {
-        self.execute_block(height, timestamp_ms, proposer, None, admin_txs, txs)
+        self.execute_block(height, timestamp_ms, proposer, None, &[], admin_txs, txs)
     }
 
     /// Comme [`Self::execute_by`], avec le certificat du bloc précédent
     /// (`last_commit`, protocole 7) : il est vérifié contre l'ensemble de
     /// validateurs de la hauteur `height − 1` et, avec un proposeur, sert à
-    /// compter la présence et à mettre à l'écart les absents.
+    /// compter la présence et à mettre à l'écart les absents. `late` : les
+    /// precommits de `height − 2` rattrapés (absents du certificat porté par
+    /// le bloc précédent).
+    #[allow(clippy::too_many_arguments)]
     pub fn execute_block(
         &self,
         height: u64,
         timestamp_ms: u64,
         proposer: Option<u16>,
         last_commit: Option<&CommitCertificate>,
+        late: &[(u16, vinx_crypto::Signature)],
         admin_txs: &[SignedAdminTransaction],
         txs: &[SignedTransaction],
     ) -> Result<State, BlockError> {
@@ -2905,6 +2991,7 @@ impl State {
             }
             None => None,
         };
+        let late_keys = self.check_late_signatures(late)?;
         let count = admin_txs.len().saturating_add(txs.len());
         if u64::try_from(count).map_or(true, |c| c > self.params.max_block_txs) {
             return Err(BlockError::TooManyTxs);
@@ -2932,9 +3019,20 @@ impl State {
             if next.protocol_version < LAST_COMMIT_PROTOCOL {
                 return Err(BlockError::BadLastCommit);
             }
-            if proposer.is_some() {
+            if let Some(index) = proposer {
                 next.record_presence(set, cert, ctx);
+                next.record_late(&late_keys, cert, set);
+                next.staking.recent = Some(RecentCommit {
+                    height: cert.height,
+                    round: cert.round,
+                    block_hash: cert.block_hash,
+                    set: set.clone(),
+                    signers: cert.signers().collect(),
+                    carried_by: next.validators_at(height).get(usize::from(index)).cloned(),
+                });
             }
+        } else if !late.is_empty() {
+            return Err(BlockError::BadLastCommit);
         }
         for (index, satx) in admin_txs.iter().enumerate() {
             next.apply_admin(satx, ctx)
@@ -2980,6 +3078,7 @@ impl State {
             h.timestamp,
             Some(h.proposer),
             block.last_commit.as_ref(),
+            &block.late_signatures,
             &block.admin_txs,
             &block.txs,
         )?;

@@ -469,6 +469,7 @@ fn apply_block_checks_header_commitments() {
         admin_txs: vec![],
         txs,
         last_commit: None,
+        late_signatures: Vec::new(),
     };
     let mut bad_root = block.clone();
     bad_root.header.state_root = [9; 32];

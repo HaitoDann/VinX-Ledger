@@ -89,6 +89,23 @@ avec les signatures, vérifiées comme un certificat. C'est un changement du
 format des blocs, actif à partir de la hauteur d'activation. Le proposeur doit
 y mettre tous les precommits reçus, et au moins un quorum.
 
+**Signatures omises** (décidé le 2026-11-08). Un proposeur pourrait retirer
+des signatures de `last_commit` pour faire baisser la présence d'un
+concurrent ; on ne peut pas le punir automatiquement, car un réseau lent
+laisse la même trace. Deux parades :
+
+- **Rattrapage** : chaque bloc porte aussi `late_signatures`, les precommits
+  de `H − 1` absents du `last_commit` du bloc précédent. Le proposeur
+  suivant, un autre validateur, répare ainsi l'omission ; il faudrait deux
+  proposeurs malveillants consécutifs, à chaque fois. Une signature rattrapée
+  compte comme signée ; l'absence d'affilée ne garde que le bloc précédent
+  s'il manque aussi. Seule exception, négligeable : une omission au dernier
+  bloc d'une époque n'est pas rattrapable.
+- **Détection** : chaque signature rattrapée est notée au proposeur qui
+  l'avait omise (`omitted`, par époque). L'explorateur l'affiche et le
+  cockpit alerte quand un proposeur en omet beaucoup plus que les autres. La
+  décision (retrait) reste à la gouvernance.
+
 **Récompenses** (remplace le partage de SPEC §4.4, étape 2). À chaque fin
 d'époque (17 280 blocs), pour chaque validateur actif pendant l'époque :
 

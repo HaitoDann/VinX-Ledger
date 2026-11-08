@@ -343,6 +343,15 @@ struct Operation {
     freeze: bool,
     #[serde(default)]
     clawback: bool,
+    /// Réserve (protocole 8) : titre et lien d'une demande, proposition votée.
+    #[serde(default)]
+    title: String,
+    #[serde(default)]
+    url: String,
+    #[serde(default)]
+    proposal: String,
+    #[serde(default)]
+    approve: bool,
 }
 
 /// Pouvoirs d'un émetteur, en clair.
@@ -600,6 +609,82 @@ fn plan(app: &App, op: &Operation) -> Result<Plan> {
                 TxBody::ReleaseDeal { id }
             } else {
                 TxBody::RefundDeal { id }
+            }
+        }
+        "reserve-request" | "reserve-vote" => {
+            let reserve = client.get_json("/reserve")?.unwrap_or_default();
+            if protocol < 8 || at(&reserve, "/enabled") != &Value::Bool(true) {
+                bail!("ce réseau n'a pas de réserve du protocole (modèle réserve, protocole 8)");
+            }
+            if op.action == "reserve-request" {
+                let amount = parse_vinx(&op.amount)?;
+                if amount == 0 || amount > vinx_core::MAX_SPEND {
+                    bail!("montant : de 0,000000001 à 100 000 VINX par demande");
+                }
+                let title = op.title.trim().to_owned();
+                if title.is_empty() || title.len() > vinx_core::MAX_SPEND_TITLE {
+                    bail!("titre : 1 à 96 octets");
+                }
+                let url = op.url.trim().to_owned();
+                if url.len() > vinx_core::MAX_SPEND_URL {
+                    bail!("lien : 200 octets au plus");
+                }
+                let (to, how) = resolve(app, &client, &op.to)?;
+                let deposit = units(at(&reserve, "/params/proposal_deposit"))?;
+                spent = deposit;
+                lines.push(("Bénéficiaire".into(), format!("{to} ({how})")));
+                lines.push((
+                    "Montant demandé".into(),
+                    format!("{} VINX", format_vinx(amount)),
+                ));
+                lines.push(("Objet".into(), title.clone()));
+                lines.push(("Caution".into(), format!("{} VINX", format_vinx(deposit))));
+                warnings.push(
+                    "La caution est rendue si les validateurs approuvent la demande (7 jours), \
+                     et versée à la réserve sinon. Les détenteurs votent ensuite pendant 14 jours."
+                        .into(),
+                );
+                TxBody::SubmitSpend {
+                    beneficiary: to,
+                    amount,
+                    title,
+                    url,
+                }
+            } else {
+                let id: [u8; 32] = hex::decode(op.proposal.trim())
+                    .ok()
+                    .and_then(|b| b.try_into().ok())
+                    .ok_or_else(|| anyhow!("identifiant de proposition invalide"))?;
+                let p = client
+                    .get_json(&format!("/proposals/{}", hex::encode(id)))?
+                    .ok_or_else(|| anyhow!("proposition inconnue"))?;
+                if at(&p, "/phase").as_str() != Some("vote des détenteurs") {
+                    bail!("cette proposition n'est pas au vote des détenteurs");
+                }
+                let amount = parse_vinx(&op.amount)?;
+                if amount == 0 {
+                    bail!("montant nul");
+                }
+                spent = amount;
+                lines.push((
+                    "Vote".into(),
+                    if op.approve { "pour" } else { "contre" }.into(),
+                ));
+                lines.push((
+                    "VINX bloqués".into(),
+                    format!("{} VINX", format_vinx(amount)),
+                ));
+                let ends = at(&p, "/ends_at").as_u64().unwrap_or(0);
+                warnings.push(format!(
+                    "Ces VINX restent bloqués jusqu'à la clôture du vote, dans {} jour(s), puis \
+                     reviennent automatiquement. Un vote se complète, dans le même sens seulement.",
+                    ends.saturating_sub(now_secs()).div_ceil(86_400)
+                ));
+                TxBody::VoteHolder {
+                    id,
+                    approve: op.approve,
+                    amount,
+                }
             }
         }
         "timestamp" => {
@@ -1700,6 +1785,15 @@ struct AssetQuery {
 
 /// Console émetteur : fiche d'un jeton, ses détenteurs et son historique.
 /// `holders` et `history` sont `null` sur un nœud antérieur à la 0.22.
+/// Réserve du protocole et propositions, telles que le nœud les publie.
+async fn get_reserve(State(app): State<Shared>) -> ApiResult {
+    blocking(move || {
+        let client = app.client()?;
+        Ok(client.get_json("/reserve")?.unwrap_or_default())
+    })
+    .await
+}
+
 async fn get_asset(
     State(app): State<Shared>,
     axum::extract::Query(q): axum::extract::Query<AssetQuery>,
@@ -2078,6 +2172,7 @@ fn router_with_kdf(dir: PathBuf, token: String, port: u16, kdf: Kdf) -> Router {
         .route("/api/preview", post(preview))
         .route("/api/execute", post(run))
         .route("/api/asset", get(get_asset))
+        .route("/api/reserve", get(get_reserve))
         .route("/api/distribute", post(distribute_route))
         .layer(axum::middleware::from_fn_with_state(shared.clone(), guard))
         .layer(axum::extract::DefaultBodyLimit::max(64 * 1024))

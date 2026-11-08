@@ -230,6 +230,7 @@ impl Sim {
             admin_txs: vec![],
             txs: vec![],
             last_commit: None,
+            late_signatures: Vec::new(),
         }
     }
 
@@ -495,6 +496,7 @@ fn block(height: u64, proposer: u16) -> Block {
         admin_txs: vec![],
         txs: vec![],
         last_commit: None,
+        late_signatures: Vec::new(),
     }
 }
 
