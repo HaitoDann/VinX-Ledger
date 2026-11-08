@@ -36,6 +36,21 @@ impl Net {
         })
     }
 
+    /// Réseau au modèle réserve (protocole 8) : pas de trésorerie ni de
+    /// robinet ; les comptes de test sont financés par [`Self::give`].
+    pub fn reserve() -> Self {
+        Self::with(|c, t, a, v| Genesis::standard(c, t, a, v)?.with_reserve().ok())
+    }
+
+    /// Tests du modèle réserve : verse `amount` à `to`, pris sur la réserve
+    /// (l'invariant reste juste).
+    pub fn give(&mut self, to: Address, amount: u64) {
+        self.state.governance.reserve -= amount;
+        let mut account = self.state.account(&to).cloned().unwrap_or_default();
+        account.balance += amount;
+        self.state.set_account_for_tests(to, account);
+    }
+
     /// Réseau d'une genèse au protocole 7 : fiches « validateur-N » et
     /// cautions de 10 000 VINX prises sur le robinet de 7 M.
     pub fn genesis7() -> Self {

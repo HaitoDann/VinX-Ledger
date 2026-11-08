@@ -5,7 +5,7 @@ use anyhow::{Result, bail};
 use vinx_core::ParamId;
 
 /// Tous les paramètres, dans l'ordre de la SPEC.
-pub const ALL: [(&str, ParamId); 21] = [
+pub const ALL: [(&str, ParamId); 24] = [
     ("min_fee", ParamId::MinFee),
     ("min_reserve", ParamId::MinReserve),
     ("max_memo_bytes", ParamId::MaxMemoBytes),
@@ -27,6 +27,9 @@ pub const ALL: [(&str, ParamId); 21] = [
     ("bond_unlock_delay", ParamId::BondUnlockDelay),
     ("admin_delay", ParamId::AdminDelay),
     ("diversity", ParamId::Diversity),
+    ("proposal_deposit", ParamId::ProposalDeposit),
+    ("holder_quorum", ParamId::HolderQuorum),
+    ("holder_quorum_min", ParamId::HolderQuorumMin),
 ];
 
 pub fn param_id(name: &str) -> Result<ParamId> {

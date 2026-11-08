@@ -212,7 +212,35 @@ pub enum TxBody {
         key: PublicKey,
         evidence: Vec<u8>,
     } = 0x22,
+    // Protocole 8, modèle réserve (docs/PROTOCOLE-8.md).
+    /// Demande de dépense de la réserve, avec caution.
+    SubmitSpend {
+        beneficiary: Address,
+        amount: Amount,
+        /// 1 à 96 octets.
+        title: String,
+        /// 0 à 200 octets : descriptif public.
+        url: String,
+    } = 0x23,
+    /// Vote d'un validateur actif sur une proposition (dépense ou paramètre).
+    VoteValidator {
+        id: Hash,
+        approve: bool,
+    } = 0x24,
+    /// Vote d'un détenteur : bloque `amount` VINX jusqu'à la clôture.
+    VoteHolder {
+        id: Hash,
+        approve: bool,
+        amount: Amount,
+    } = 0x25,
 }
+
+/// Plafond d'une demande de dépense de la réserve : 100 000 VINX.
+pub const MAX_SPEND: Amount = 100_000 * crate::UNITS_PER_VINX;
+/// Longueur maximale du titre d'une demande, en octets.
+pub const MAX_SPEND_TITLE: usize = 96;
+/// Longueur maximale du lien d'une demande, en octets.
+pub const MAX_SPEND_URL: usize = 200;
 
 /// Longueur maximale du site et du contact d'un validateur, en octets.
 pub const MAX_VALIDATOR_INFO: usize = 96;
@@ -296,6 +324,9 @@ impl TxBody {
             | TxBody::LeaveValidators
             | TxBody::WithdrawBond
             | TxBody::ReportEquivocation { .. } => 7,
+            TxBody::SubmitSpend { .. }
+            | TxBody::VoteValidator { .. }
+            | TxBody::VoteHolder { .. } => 8,
             _ => 2,
         }
     }
@@ -470,7 +501,7 @@ mod tests {
         assert!(decode::<TxBody>(&[0x1D, 1]).is_err());
         assert_eq!(encode(&TxBody::Unjail), [0x1F]);
         assert_eq!(encode(&TxBody::WithdrawBond), [0x21]);
-        assert!(decode::<TxBody>(&[0x23]).is_err());
+        assert!(decode::<TxBody>(&[0x26]).is_err());
     }
 
     #[test]

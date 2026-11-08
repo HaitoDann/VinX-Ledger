@@ -93,13 +93,14 @@ ensemble ; vérifier avec `grep '^version' Cargo.toml`.
     repli dans `from_parts` ;
   - lignes de table dans `take_dirty_rows`, `load_row` et
     `mark_all_rows_dirty`, avec une étiquette `Row::TAG` unique (déjà prises :
-    1 à 13) ;
+    1 à 16) ;
   - racine d'état (`state_root`) seulement à partir de la nouvelle version ;
   - invariant (`check_invariant`) si des unités sont bloquées
     (`Row::locked`).
-- **Garder les tests compatibles** : `GENESIS_PROTOCOL` vaut toujours 6. Les
-  tests du protocole 7 passent par une vraie mise à jour (voir
-  `crates/vinx-state/tests/staking.rs`, `net7()`).
+- **Garder les tests compatibles** : `GENESIS_PROTOCOL` vaut 8 ;
+  `Net::current()` fixe le protocole 6 pour les anciens tests, et les tests
+  du protocole 7 passent par une vraie mise à jour (`net7()`).
+  `Net::reserve()` et `Net::give()` pour le modèle réserve.
 - **Shell** : `pkill -x vinx-node` (jamais `pkill -f`, qui tue le shell) ;
   pas de `rm -rf *` ; en cas de disque plein, supprimer `target/debug`.
 - **Devnet accéléré** (`min_block_interval = 20`) : garder une **marge** sur
@@ -241,11 +242,39 @@ sont terminés et testés ensemble.
   `required_bond` du fichier de genèse), pour la pré-production.
 - Décidé avec Haito : pas de release ni de testnet 3 maintenant ; une seule
   grosse mise à jour (protocoles 7 et 8), puis une **pré-production** au
-  modèle réserve, sans robinet ni premine, démarrée par un validateur.
-- Protocole 8 (réserve et gouvernance votée) : spécification **en
-  brouillon**, `docs/PROTOCOLE-8.md`, décisions au §10 à faire valider.
+  modèle réserve, **en conditions réelles** (aucune durée raccourcie), sans
+  robinet ni premine, démarrée par un validateur.
 - En attente de décision : correction des signatures omises (détection
   seule ou détection et rattrapage au bloc suivant).
+
+### Protocole 8 : codé (réserve du protocole, gouvernance votée)
+
+Spécification validée : `docs/PROTOCOLE-8.md` (décisions au §10).
+
+- **`SUPPORTED_PROTOCOL = 8`, `GENESIS_PROTOCOL = 8`.** Le modèle est fixé à
+  la genèse : `Genesis::with_reserve()` / `vinx-node genesis|devnet --model
+  reserve` (champ `model` du fichier de genèse). Le modèle escrow reste
+  celui des testnets.
+- `vinx-state/src/governance.rs` : `Governance` (réserve, mois, file,
+  propositions ouvertes, `GovernanceParams`), `Proposal` (TAG 15, caution
+  dans l'invariant), `HolderLock` (TAG 16, dans l'invariant). Constantes :
+  `GENESIS_RESERVE`, `MONTHLY_CAP`, `MONTH`, `VALIDATOR_VOTE_PERIOD`,
+  `HOLDER_VOTE_PERIOD`, `MAX_HOLDER_VOTERS`.
+- Transactions `SubmitSpend` (0x23), `VoteValidator` (0x24), `VoteHolder`
+  (0x25) ; action admin `ProposeParam` (0x0C) ; paramètres
+  `ProposalDeposit` (0x16), `HolderQuorum` (0x17), `HolderQuorumMin` (0x18).
+  Au modèle réserve : `EscrowRelease`, `EscrowReturn`, `TreasuryTransfer` et
+  `SetParam` refusées ; urgence à 3 signatures (`EMERGENCY_UPGRADE_DELAY`).
+- `run_governance` au début de chaque bloc : mois, clôture des scrutins,
+  versements.
+- API `/reserve`, `/proposals/{id}` ; explorateur, onglet Réserve ; cockpit
+  (`propose-param` au modèle réserve) ; CLI `vinx-wallet reserve
+  show|proposal|request|vote`, `validator vote`, `admin propose
+  propose-param`.
+- Tests : `vinx-state/tests/governance.rs` (dont le déroulé de la
+  pré-production), `network.rs` (`reserve_model_network_runs_without_premine`).
+- Pas fait : demandes et votes dans le portefeuille de bureau et mobile
+  (CLI seulement) ; répétition multi-machines.
 
 ## 8. Après le protocole 7 (feuille de route)
 

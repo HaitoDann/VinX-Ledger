@@ -35,6 +35,10 @@ pub struct GenesisFile {
     /// Protocole 7 : caution exigée de chaque validateur, en unités.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub required_bond: Option<String>,
+    /// Protocole 8 : `"reserve"` pour le modèle réserve (réseau principal,
+    /// pré-production) ; absent : modèle escrow.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub model: Option<String>,
 }
 
 #[derive(Debug, Serialize, Deserialize)]
@@ -118,6 +122,7 @@ impl GenesisFile {
                 .collect(),
             validator_bond: (g.validator_bond > 0).then(|| amount_to_string(g.validator_bond)),
             required_bond: g.required_bond.map(amount_to_string),
+            model: g.reserve_model.then(|| "reserve".to_owned()),
             emission: (g.emission_budget > 0).then(|| EmissionFile {
                 budget: amount_to_string(g.emission_budget),
                 epoch_blocks: g.epoch_blocks,
@@ -186,7 +191,13 @@ impl GenesisFile {
             .as_deref()
             .map(amount_from_str)
             .transpose()?;
+        let reserve_model = match self.model.as_deref() {
+            None | Some("escrow") => false,
+            Some("reserve") => true,
+            Some(other) => return Err(anyhow!("modèle de genèse inconnu : {other}")),
+        };
         Ok(Genesis {
+            reserve_model,
             required_bond,
             identities,
             validator_bond,

@@ -294,7 +294,10 @@ async fn four_validators_tolerate_a_crash_and_resync() {
     // parent, et la présence est comptée.
     {
         let s = node::lock(&n4.shared);
-        assert_eq!(s.chain.state.protocol_version, 7);
+        assert_eq!(
+            s.chain.state.protocol_version,
+            vinx_state::genesis::GENESIS_PROTOCOL
+        );
         let block = s.store.block(target).unwrap().unwrap();
         let cert = block.last_commit.expect("last_commit");
         assert_eq!(cert.block_hash, block.header.prev_hash);
@@ -374,7 +377,10 @@ async fn seven_validators_record_presence() {
         validators.iter().map(KeyPair::public_key).collect(),
     )
     .unwrap();
-    assert_eq!(genesis.protocol_version, 7);
+    assert_eq!(
+        genesis.protocol_version,
+        vinx_state::genesis::GENESIS_PROTOCOL
+    );
     genesis.params.min_block_interval_ms = 500;
     genesis.params.timeout_propose_ms = 2_000;
     genesis.params.timeout_vote_ms = 1_000;
@@ -415,6 +421,65 @@ async fn seven_validators_record_presence() {
     let reference = nodes[0].block_hash(10);
     for n in &nodes {
         assert_eq!(n.block_hash(10), reference);
+    }
+    for n in nodes {
+        n.stop().await;
+    }
+}
+
+/// Modèle réserve (protocole 8, pré-production) : sans robinet ni
+/// trésorerie, la chaîne avance, les validateurs sont payés par l'émission et
+/// la réserve reste entière tant qu'aucune demande n'est votée.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn reserve_model_network_runs_without_premine() {
+    let root = tempfile::tempdir().unwrap();
+    let k = || KeyPair::generate().public_key();
+    let validators: Vec<KeyPair> = (0..4).map(|_| KeyPair::generate()).collect();
+    let mut genesis = Genesis::standard(
+        CHAIN,
+        node::now_ms() / 1000 - 1,
+        [k(), k(), k()],
+        validators.iter().map(KeyPair::public_key).collect(),
+    )
+    .unwrap()
+    .with_reserve()
+    .unwrap();
+    genesis.required_bond = Some(1_000 * UNITS_PER_VINX);
+    genesis.params.min_block_interval_ms = 200;
+    genesis.epoch_blocks = 2;
+    let specs: Vec<Spec> = (0..4).map(|i| spec(root.path(), i)).collect();
+    let nodes: Vec<Running> = (0..4)
+        .map(|i| {
+            let others: Vec<&Spec> = specs
+                .iter()
+                .enumerate()
+                .filter(|(j, _)| *j != i)
+                .map(|(_, s)| s)
+                .collect();
+            start(&genesis, &specs[i], &others, Some(validators[i].clone()))
+        })
+        .collect();
+    wait_until("hauteur 6", || nodes.iter().all(|n| n.height() >= 6)).await;
+    {
+        let s = node::lock(&nodes[0].shared);
+        let st = &s.chain.state;
+        assert!(st.governance.enabled);
+        assert_eq!(
+            st.governance.reserve,
+            vinx_state::governance::GENESIS_RESERVE
+        );
+        assert_eq!(st.balance(&Address::treasury()), 0);
+        assert_eq!(st.staking.params.validator_bond, 1_000 * UNITS_PER_VINX);
+        let paid: u64 = validators
+            .iter()
+            .map(|v| st.balance(&Address::from_public_key(&v.public_key())))
+            .sum();
+        assert!(paid > 0, "émission versée aux validateurs");
+        assert!(st.check_invariant().is_ok());
+    }
+    let reference = nodes[0].block_hash(6);
+    for n in &nodes {
+        assert_eq!(n.block_hash(6), reference);
     }
     for n in nodes {
         n.stop().await;

@@ -1352,6 +1352,63 @@
      }
     }
    }
+  },
+  "/reserve": {
+   "get": {
+    "tags": [
+     "Réseau"
+    ],
+    "summary": "Réserve du protocole",
+    "description": "Protocole 8, modèle réserve : solde de la réserve, plafond du mois, paramètres des votes et propositions (dépenses et paramètres) avec leurs votes. `enabled` est faux sur une chaîne au modèle escrow.",
+    "parameters": [],
+    "responses": {
+     "200": {
+      "description": "Succès",
+      "content": {
+       "application/json": {
+        "schema": {
+         "type": "object"
+        }
+       }
+      }
+     }
+    }
+   }
+  },
+  "/proposals/{id}": {
+   "get": {
+    "tags": [
+     "Réseau"
+    ],
+    "summary": "Proposition",
+    "description": "Une demande de dépense de la réserve ou une proposition de paramètre : étape, échéance, votes des validateurs et des détenteurs.",
+    "parameters": [
+     {
+      "name": "id",
+      "in": "path",
+      "required": true,
+      "description": "Identifiant (64 caractères hexadécimaux) : celui de la transaction de dépôt.",
+      "schema": {
+       "type": "string"
+      }
+     }
+    ],
+    "responses": {
+     "200": {
+      "description": "Succès",
+      "content": {
+       "application/json": {
+        "schema": {
+         "type": "object"
+        }
+       }
+      }
+     },
+     "404": {
+      "description": "Proposition inconnue"
+     }
+    }
+   }
   }
  },
  "components": {

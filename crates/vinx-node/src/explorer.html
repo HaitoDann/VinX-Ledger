@@ -47,6 +47,7 @@ td .mono, td.mono, td.nowrap { word-break: normal; white-space: nowrap; }
     <a href="#/blocs" data-view="blocs">Blocs</a>
     <a href="#/jetons" data-view="jetons">Jetons</a>
     <a href="#/validateurs" data-view="validateurs">Validateurs</a>
+    <a href="#/reserve" data-view="reserve">Réserve</a>
     <a href="/" data-view="noeud">Nœud</a>
     <a href="/docs">API</a>
   </nav>
@@ -501,6 +502,35 @@ async function validatorsPage() {
       </tbody></table></div>` : `<p class="muted">Aucune sanction.</p>`}</section>`;
 }
 
+/* Protocole 8 : réserve du protocole, demandes et votes. */
+async function reservePage() {
+  const r = await get("/reserve");
+  if (!r.enabled) return `<section class="card"><h2>Réserve</h2><p class="muted">Ce réseau utilise le modèle escrow : pas de réserve du protocole (protocole 8, modèle réserve).</p></section>`;
+  const pctOf = (a, b) => { try { return Number(BigInt(a) * 10000n / BigInt(b)) / 100; } catch (_) { return 0; } };
+  const used = pctOf(r.spent_this_month, r.monthly_cap);
+  const badge = { "vote des validateurs": "warn", "vote des détenteurs": "warn", "acceptée, en attente de versement": "ok", "versée": "ok", "appliquée": "ok", "refusée": "bad" };
+  const rows = r.proposals.map((p) => {
+    const k = p.proposal;
+    const what = k.type === "dépense"
+      ? `<b>${esc(k.title)}</b><br><span class="muted">${vinx(k.amount)} → <a class="mono" href="#/adresse/${esc(k.beneficiary)}">${short(k.beneficiary)}</a>${k.url ? ` · <a href="${esc(/^https?:\/\//.test(k.url) ? k.url : "https://" + k.url)}" rel="noopener nofollow" target="_blank">descriptif</a>` : ""}</span>`
+      : `<b>${esc(k.type)}</b><br><span class="mono">${esc(k.param)} = ${esc(k.value)}</span>`;
+    const v = p.validators, h = p.holders;
+    const ends = p.ends_at ? `<br><span class="muted">jusqu'au ${day(p.ends_at)}</span>` : (p.closed_at ? `<br><span class="muted">bloc ${fr(p.closed_at)}</span>` : "");
+    return `<tr><td>${what}</td><td><span class="pill ${badge[p.phase] ?? ""}">${esc(p.phase)}</span>${ends}</td>
+      <td class="num">${fr(v.approve)} pour · ${fr(v.reject)} contre<br><span class="muted">sur ${fr(v.electorate)}, il en faut plus des 2/3</span></td>
+      <td class="num">${vinx(h.yes)} pour<br>${vinx(h.no)} contre<br><span class="muted">${fr(h.voters)} votant(s)${h.quorum !== "0" ? ", quorum " + vinx(h.quorum) : ""}</span></td></tr>`;
+  }).join("");
+  return `<div class="stats">
+      ${stat("coin", "Réserve", `${fmt(r.balance).split(",")[0]} <small>VINX</small>`, [["Plafond mensuel", vinx(r.monthly_cap)], ["Par demande", vinx(r.max_per_request)], ["Versé ce mois", vinx(r.spent_this_month)], ["Reste ce mois", vinx(r.remaining_this_month)]],
+        `<div class="progress" title="${used} %"><span style="width:${Math.min(100, used)}%"></span></div>`)}
+      ${stat("layers", "Demandes", fr(r.proposals.length), [["Caution d'une demande", vinx(r.params.proposal_deposit)], ["Vote des validateurs", r.params.validator_vote_days + " jours"], ["Vote des détenteurs", r.params.holder_vote_days + " jours"], ["Quorum", (r.params.holder_quorum / 100).toLocaleString("fr-FR") + " % de la circulation, au moins " + vinx(r.params.holder_quorum_min)]])}
+    </div>
+    <section class="card"><h2>Demandes et propositions <span class="sub">aucune clé ne contrôle la réserve : chaque sortie est votée</span></h2>
+      ${rows ? `<div class="scroll"><table><thead><tr><th>Objet</th><th>Étape</th><th class="num">Validateurs</th><th class="num">Détenteurs</th></tr></thead><tbody>${rows}</tbody></table></div>`
+        : `<p class="muted">Aucune demande pour l'instant.</p>`}
+      <p class="muted">Déposer une demande : <span class="mono">vinx-wallet reserve request</span>. Voter comme détenteur : <span class="mono">vinx-wallet reserve vote</span> (les VINX sont bloqués jusqu'à la clôture).</p></section>`;
+}
+
 async function name(n) {
   const r = await get(`/names/${encodeURIComponent(n)}`);
   return `<section class="card"><h1>${esc(r.name)}</h1><dl>
@@ -550,9 +580,9 @@ $("searchForm").addEventListener("submit", async (e) => {
 let timer = null, seenHeight = null;
 async function route() {
   const [, view = "", arg = ""] = (location.hash.slice(1) || "/").split("/");
-  const pages = { "": home, blocs: blockList, bloc: block, tx, adresse: account, jetons: tokens, jeton: token, nom: name, validateurs: validatorsPage };
+  const pages = { "": home, blocs: blockList, bloc: block, tx, adresse: account, jetons: tokens, jeton: token, nom: name, validateurs: validatorsPage, reserve: reservePage };
   const page = pages[view] || home;
-  const navView = { "": "accueil", blocs: "blocs", bloc: "blocs", jetons: "jetons", jeton: "jetons", validateurs: "validateurs" }[view];
+  const navView = { "": "accueil", blocs: "blocs", bloc: "blocs", jetons: "jetons", jeton: "jetons", validateurs: "validateurs", reserve: "reserve" }[view];
   document.querySelectorAll("nav a").forEach((a) => a.classList.toggle("active", a.dataset.view === navView));
   $("hero").classList.toggle("compact", page !== home);
   clearInterval(timer);

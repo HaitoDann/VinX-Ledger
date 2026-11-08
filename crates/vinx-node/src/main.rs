@@ -68,6 +68,10 @@ enum Command {
         /// (par défaut 10 000). Exemple de pré-production : `--required-bond 1000`.
         #[arg(long)]
         required_bond: Option<String>,
+        /// Modèle de la chaîne : `escrow` (testnets) ou `reserve` (protocole 8 :
+        /// réserve du protocole, gouvernance votée, sans robinet ni trésorerie).
+        #[arg(long, default_value = "escrow")]
+        model: String,
     },
     /// Écrit la genèse d'un réseau à partir des clés publiques de ses participants.
     ///
@@ -113,6 +117,10 @@ enum Command {
         /// (par défaut 10 000). Exemple de pré-production : `--required-bond 1000`.
         #[arg(long)]
         required_bond: Option<String>,
+        /// Modèle de la chaîne : `escrow` (testnets) ou `reserve` (protocole 8 :
+        /// réserve du protocole, gouvernance votée, sans robinet ni trésorerie).
+        #[arg(long, default_value = "escrow")]
+        model: String,
         #[arg(long)]
         out: PathBuf,
     },
@@ -217,6 +225,25 @@ fn with_test_options(
         genesis.epoch_blocks = n;
     }
     Ok(genesis)
+}
+
+/// `escrow` ou `reserve` : vrai pour le modèle réserve.
+fn parse_model(model: &str) -> Result<bool> {
+    match model {
+        "escrow" => Ok(false),
+        "reserve" => Ok(true),
+        other => bail!("--model : « escrow » ou « reserve » attendu, pas « {other} »"),
+    }
+}
+
+/// Modèle réserve (protocole 8) : la réserve remplace l'escrow.
+fn with_model(genesis: Genesis, reserve: bool) -> Result<Genesis> {
+    if !reserve {
+        return Ok(genesis);
+    }
+    genesis
+        .with_reserve()
+        .map_err(|e| anyhow::anyhow!("modèle réserve : {e} (retirer --faucet et --escrow-period)"))
 }
 
 /// Version du protocole, et pour le protocole 7 identités et cautions.
@@ -350,6 +377,7 @@ async fn main() -> Result<()> {
             identities,
             validator_bond,
             required_bond,
+            model,
         } => {
             let pw = pw()?;
             if *count == 0 {
@@ -379,7 +407,11 @@ async fn main() -> Result<()> {
                 validators.iter().map(KeyPair::public_key).collect(),
             )
             .context("horodatage de genèse invalide")?;
-            let genesis = with_test_options(genesis, *escrow_period, Some(faucet), *epoch_blocks)?;
+            let reserve = parse_model(model)?;
+            // Modèle réserve : pas de robinet, quelle que soit la valeur par défaut.
+            let faucet = (!reserve).then_some(faucet.as_str());
+            let genesis = with_test_options(genesis, *escrow_period, faucet, *epoch_blocks)?;
+            let genesis = with_model(genesis, reserve)?;
             let genesis = with_staking(
                 genesis,
                 *protocol,
@@ -420,6 +452,7 @@ async fn main() -> Result<()> {
             identities,
             validator_bond,
             required_bond,
+            model,
             out,
         } => {
             let admins = admins
@@ -438,6 +471,7 @@ async fn main() -> Result<()> {
                 .context("horodatage de genèse invalide")?;
             let genesis =
                 with_test_options(genesis, *escrow_period, faucet.as_deref(), *epoch_blocks)?;
+            let genesis = with_model(genesis, parse_model(model)?)?;
             let genesis = with_staking(
                 genesis,
                 *protocol,

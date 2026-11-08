@@ -1,8 +1,8 @@
 # Protocole 8 : réserve du protocole et gouvernance votée
 
-**Statut : brouillon, à valider.** Ce document traduit en règles précises
-l'[ADR 0003](./adr/0003-reserve-et-gouvernance.md). Les points marqués
-**[À décider]** attendent une décision (récapitulés au §10).
+**Statut : validé le 2026-11-08** (décisions au §10), **codé** sur la
+branche de travail. Ce document traduit en règles précises
+l'[ADR 0003](./adr/0003-reserve-et-gouvernance.md).
 
 Le protocole 8 sera publié avec le protocole 7, dans la même grosse mise à
 jour, et éprouvé sur une **pré-production** qui part d'une genèse au nouveau
@@ -34,14 +34,12 @@ s'appliquent qu'aux chaînes au modèle réserve.
 - **Entrées** : cautions de demande non rendues (§3), et rien d'autre.
 - Ces trois montants sont des **constantes du protocole**, pas des
   paramètres : seule une nouvelle version du protocole peut les changer.
-  **[À décider : constantes ou paramètres votés]**. Recommandation :
-  constantes, car c'est ce qui rend le calendrier crédible.
 
 ## 3. Demande de dépense
 
 ### 3.1 Dépôt
 
-Transaction `SubmitSpend { beneficiary, amount, title, url }`, envoyable par
+Transaction `SubmitSpend { beneficiary, amount, title, url }` (code `0x23`), envoyable par
 n'importe quel compte :
 
 - `amount` entre 1 unité et 100 000 VINX ;
@@ -52,7 +50,7 @@ n'importe quel compte :
 
 ### 3.2 Vote des validateurs (7 jours)
 
-- Transaction `VoteSpend { id, approve }`, depuis l'adresse de la clé d'un
+- Transaction `VoteValidator { id, approve }` (code `0x24`), depuis l'adresse de la clé d'un
   validateur **actif**. Un validateur peut changer son vote pendant le
   scrutin.
 - La demande **passe** dès que les approbations dépassent les **2/3 des
@@ -62,25 +60,25 @@ n'importe quel compte :
 - Sinon elle est **rejetée** à la fin des 7 jours.
 - Caution : **rendue** si la demande passe ce premier vote, **versée à la
   réserve** sinon (le « soutien minimal » de l'ADR est donc l'accord des
-  validateurs). **[À décider]**
+  validateurs).
 
 ### 3.3 Vote des détenteurs (14 jours)
 
 - Ouvert dès que les validateurs ont approuvé.
-- Transaction `VoteHolders { id, choice, amount }`, `choice` = pour ou
-  contre : bloque `amount` VINX du compte jusqu'à la fin du scrutin. Une
+- Transaction `VoteHolder { id, approve, amount }` (code `0x25`) : bloque `amount` VINX du compte jusqu'à la fin du scrutin. Une
   adresse peut compléter son vote, dans le même sens seulement.
 - **Quorum** : les VINX bloqués pour la demande atteignent au moins
-  **10 % de la circulation** (`holder_quorum` = 1 000 dix-millièmes).
-- **Circulation** = supply − réserve − émission restante − cautions des
-  validateurs − cautions de demande − VINX bloqués dans les séquestres.
-  **[À décider : quorum minimal fixe en plus du pourcentage]** (voir §9).
+  **10 % de la circulation** (`holder_quorum` = 1 000 dix-millièmes), et au
+  moins **100 000 VINX** (`holder_quorum_min`). Il est fixé à l'ouverture du
+  vote des détenteurs.
+- **Circulation** = soldes des comptes + VINX bloqués aux votes. Sont donc
+  exclus : réserve, émission restante, pot d'époque, cautions (validateurs et
+  demandes), séquestres.
 - **Acceptée** si le quorum est atteint et que les voix pour dépassent les
   voix contre, au poids des VINX.
 - À la clôture, **tous les VINX bloqués sont rendus automatiquement** à leurs
   comptes, dans le bloc de clôture. Le coût du bloc est proportionnel au
   nombre de votants ; un plafond de **10 000 votants par demande** le borne.
-  **[À décider : rendu automatique ou retrait par transaction]**
 
 ### 3.4 Versement
 
@@ -101,10 +99,10 @@ Sur une chaîne au modèle réserve, à partir du protocole 8 :
 - **Gardées**, avec le délai de 48 h et l'annulation du protocole 7 :
   `ScheduleUpgrade`, `AddNamedValidator`, `RemoveValidator`,
   `SetValidatorIdentity`, `ReplaceSigner`, `CancelPending`.
-- **Urgence** : un correctif de sécurité doit pouvoir être programmé plus
-  vite que 17 280 blocs. Proposition : `ScheduleUpgrade` avec **les trois
-  signatures** autorise un préavis réduit à **720 blocs** (environ 1 h), et
-  son délai admin tombe à 1 h. **[À décider]**
+- **Urgence** : `ScheduleUpgrade` signée par **les trois signataires**
+  accepte un préavis réduit à **720 blocs** (environ 1 h) au lieu de 17 280.
+  Elle doit être publiée et justifiée dans les 7 jours (engagement, pas une
+  règle du protocole).
 
 ## 5. Paramètres votés
 
@@ -115,22 +113,23 @@ Sur une chaîne au modèle réserve, à partir du protocole 8 :
 | **Économiques** | `min_fee`, `min_reserve`, `object_reserve`, `name_fee`, `asset_fee`, `validator_bond`, `min_availability`, `vote_share`, `proposal_deposit`, `holder_quorum` | validateurs (plus des 2/3, 7 jours) **puis** détenteurs (quorum, majorité, 14 jours) |
 | **Techniques** | délais de consensus, `min_block_interval`, `max_block_txs`, `max_block_bytes`, `max_memo_bytes`, `absence_blocks`, `jail_min_blocks`, `bond_unlock_delay`, `diversity` | validateurs seuls (plus des 2/3, 7 jours) |
 
-- Un paramètre accepté s'applique **deux blocs** après la clôture.
-- `admin_delay` reste fixé par le protocole (48 h).
-- Les durées de scrutin (7 et 14 jours) sont des constantes ; un réseau de
-  pré-production peut les raccourcir à la genèse (§8).
+- Un paramètre accepté s'applique **dans le bloc** qui clôt le vote. Une
+  valeur invalide est refusée dès la proposition.
+- `admin_delay` est un paramètre technique (vote des validateurs).
+- Les durées de scrutin (7 et 14 jours) sont des constantes, identiques sur
+  tous les réseaux, pré-production comprise.
 
 ## 6. Données de l'état
 
-Nouvelles tables (étiquettes à partir de 15), dans `state_root` à partir du
-protocole 8 :
+`Governance` (dans les globales, et dans `state_root` à partir du
+protocole 8) : modèle, solde de la réserve, début du mois, versé dans le
+mois, paramètres, file des versements, propositions ouvertes. Tables :
 
-- `Reserve` : solde, début du mois en cours, dépensé dans le mois ;
 - `Proposal` (TAG 15) : type (dépense ou paramètre), auteur, contenu,
-  caution, phase, échéances, votes des validateurs, totaux pour et contre ;
-- `HolderLock` (TAG 16) : `(demande, adresse) → montant, sens`, compté dans
-  l'invariant ;
-- `SpendQueue` (TAG 17) : demandes acceptées en attente de versement.
+  caution (comptée dans l'invariant), étape, échéance, votes des
+  validateurs, totaux pour et contre, quorum ;
+- `HolderLock` (TAG 16) : `(proposition, adresse) → montant, sens`, compté
+  dans l'invariant.
 
 Invariant : `soldes + réserve + cautions + VINX bloqués aux votes + … = 10¹⁸
 unités`.
@@ -147,22 +146,19 @@ unités`.
 
 ## 8. Pré-production
 
-Genèse au protocole 8, modèle réserve :
+Genèse au protocole 8, modèle réserve, **en conditions réelles** : aucune
+durée ni règle raccourcie.
 
 ```
 vinx-node genesis --chain-id vinx-preprod-1 --model reserve \
   --admin … --admin … --admin … \
   --validator CLE-CINNAMON --identity "Cinnamon,VinX Labs,FR" \
   --required-bond 1000 \
-  --vote-periods 3600,7200 \
   --out genesis.json
 ```
 
 - Pas de robinet, trésorerie à 0, **aucune part réservée**.
-- `--vote-periods` (validateurs, détenteurs, en secondes) : réservé aux
-  chaînes `preprod`, `testnet` ou `devnet`, pour éprouver les scrutins en
-  quelques heures au lieu de 3 semaines. **[À décider]**
-- Déroulé :
+- Déroulé (rejoué par le test `preprod_bootstrap_from_one_validator`) :
   1. Cinnamon seul produit les blocs et reçoit toute l'émission (environ
      19 000 VINX par jour) ;
   2. il dépose sa caution de 1 000 VINX ;
@@ -191,17 +187,17 @@ vinx-node genesis --chain-id vinx-preprod-1 --model reserve \
 - **Juridique** : statut de la réserve et du vote, à faire valider (MiCA)
   avant la genèse du réseau principal.
 
-## 10. Décisions à prendre
+## 10. Décisions (2026-11-08)
 
-| Question | Proposition |
+| Question | Décision |
 |---|---|
-| Plafonds de la réserve (5 M par mois, 100 000 par demande) : constantes ou paramètres | Constantes |
+| Plafonds de la réserve (5 M par mois, 100 000 par demande) | Constantes du protocole |
 | `proposal_deposit` | 1 000 VINX |
 | Caution rendue si | Les validateurs approuvent |
-| Quorum des détenteurs | 10 % de la circulation, plus un minimum fixe à décider |
+| Quorum des détenteurs | 10 % de la circulation, au moins 100 000 VINX |
 | VINX bloqués au vote | Rendus automatiquement à la clôture, au plus 10 000 votants |
-| Urgence | 3 signatures sur 3 : préavis de 720 blocs, délai admin d'1 h |
-| Durées de scrutin raccourcies en pré-production | Oui, à la genèse, réservé aux chaînes non principales |
+| Urgence | 3 signatures sur 3 : préavis de 720 blocs |
+| Pré-production | Conditions réelles : aucune durée ni règle raccourcie |
 | Validateur bénéficiaire d'une demande | Ne vote pas et ne compte pas dans le total |
 
 ## 11. Mise en œuvre prévue

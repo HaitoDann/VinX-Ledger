@@ -245,6 +245,12 @@ fn describe(action: &AdminAction) -> Value {
             "operator": identity.operator,
             "country": String::from_utf8_lossy(&identity.country),
         }),
+        AdminAction::ProposeParam { param, value } => json!({
+            "kind": "propose-param",
+            "label": "Proposition de paramètre (vote)",
+            "param": params::param_name(*param),
+            "value": value,
+        }),
         AdminAction::CancelPending { id } => json!({
             "kind": "cancel-pending",
             "label": "Annulation d'une action en attente",
@@ -297,6 +303,10 @@ fn parse_action(v: &Value) -> Result<AdminAction> {
         },
         "remove-validator" => AdminAction::RemoveValidator {
             key: key_from_hex(str_field(v, "key")?)?,
+        },
+        "propose-param" => AdminAction::ProposeParam {
+            param: params::param_id(str_field(v, "param")?)?,
+            value: u64_field(v, "value")?,
         },
         "set-param" => AdminAction::SetParam {
             param: params::param_id(str_field(v, "param")?)?,

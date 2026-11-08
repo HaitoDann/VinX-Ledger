@@ -82,6 +82,8 @@ pub fn router_with_limit(shared: SharedRef, per_minute: u32) -> Router {
         .route("/fonts/{name}", get(font))
         .route("/metrics", get(metrics))
         .route("/governance", get(governance))
+        .route("/reserve", get(reserve))
+        .route("/proposals/{id}", get(proposal))
         .route("/blocks", get(recent_blocks))
         .route("/transactions/recent", get(recent_transactions))
         .route("/status", get(status))
@@ -383,6 +385,122 @@ async fn metrics(
 
 /// Tout ce qui relève de la gouvernance : multisig, validateurs, paramètres,
 /// mise à jour programmée, escrow et trésorerie.
+/// Une proposition de la réserve ou de paramètre (protocole 8), lisible.
+fn proposal_json(
+    st: &vinx_state::State,
+    id: &vinx_crypto::Hash,
+    p: &vinx_state::governance::Proposal,
+) -> Value {
+    use vinx_state::governance::{Governance, Phase, ProposalKind};
+    let (phase, until, at) = match p.phase {
+        Phase::Validators { ends_at } => ("vote des validateurs", Some(ends_at), None),
+        Phase::Holders { ends_at } => ("vote des détenteurs", Some(ends_at), None),
+        Phase::Queued => ("acceptée, en attente de versement", None, None),
+        Phase::Paid { at } => ("versée", None, Some(at)),
+        Phase::Applied { at } => ("appliquée", None, Some(at)),
+        Phase::Rejected { at } => ("refusée", None, Some(at)),
+    };
+    let kind = match &p.kind {
+        ProposalKind::Spend {
+            beneficiary,
+            amount,
+            title,
+            url,
+        } => json!({
+            "type": "dépense",
+            "beneficiary": beneficiary.to_string(),
+            "amount": amount_to_string(*amount),
+            "title": title,
+            "url": url,
+        }),
+        ProposalKind::Param { param, value } => json!({
+            "type": if param.is_economic() { "paramètre économique" } else { "paramètre technique" },
+            "param": param_name(*param),
+            "value": value,
+        }),
+    };
+    let active = st.validators_at(st.height.saturating_add(1));
+    let electorate = Governance::electorate(&p.kind, &active);
+    json!({
+        "id": hash_to_hex(id),
+        "proposal": kind,
+        "author": p.author.to_string(),
+        "deposit": amount_to_string(p.deposit),
+        "submitted_at": p.submitted_at,
+        "phase": phase,
+        "ends_at": until,
+        "closed_at": at,
+        "validators": {
+            "electorate": electorate.len(),
+            "approve": p.validator_votes.iter().filter(|(k, a)| *a && electorate.contains(k)).count(),
+            "reject": p.validator_votes.iter().filter(|(k, a)| !*a && electorate.contains(k)).count(),
+            "votes": p.validator_votes.iter().map(|(k, a)| json!({
+                "key": key_to_hex(k),
+                "name": st.staking.records.get(k).map(|r| r.identity.name.clone()),
+                "approve": a,
+            })).collect::<Vec<_>>(),
+        },
+        "holders": {
+            "yes": amount_to_string(p.yes),
+            "no": amount_to_string(p.no),
+            "voters": p.voters,
+            "quorum": amount_to_string(p.quorum),
+        },
+    })
+}
+
+/// Réserve du protocole, plafond du mois et propositions (protocole 8).
+async fn reserve(State(shared): State<SharedRef>) -> ApiResult {
+    let st = view(&shared);
+    let g = &st.governance;
+    use vinx_state::governance as gov;
+    let mut list: Vec<(u64, Value)> = g
+        .proposals
+        .iter()
+        .map(|(id, p)| (p.submitted_at, proposal_json(&st, id, p)))
+        .collect();
+    list.sort_by_key(|x| std::cmp::Reverse(x.0));
+    Ok(Json(json!({
+        "enabled": g.enabled,
+        "balance": amount_to_string(g.reserve),
+        "monthly_cap": amount_to_string(gov::MONTHLY_CAP),
+        "max_per_request": amount_to_string(vinx_core::MAX_SPEND),
+        "month_start": g.month_start,
+        "month_end": g.month_start.saturating_add(gov::MONTH),
+        "spent_this_month": amount_to_string(g.spent_this_month),
+        "remaining_this_month": amount_to_string(gov::MONTHLY_CAP.saturating_sub(g.spent_this_month)),
+        "circulation": st.circulation().to_string(),
+        "params": {
+            "proposal_deposit": amount_to_string(g.params.proposal_deposit),
+            "holder_quorum": g.params.holder_quorum,
+            "holder_quorum_min": amount_to_string(g.params.holder_quorum_min),
+            "validator_vote_days": gov::VALIDATOR_VOTE_PERIOD / 86_400,
+            "holder_vote_days": gov::HOLDER_VOTE_PERIOD / 86_400,
+        },
+        "queue": g.queue.iter().map(hash_to_hex).collect::<Vec<_>>(),
+        "proposals": list.into_iter().map(|(_, v)| v).take(200).collect::<Vec<_>>(),
+    })))
+}
+
+async fn proposal(State(shared): State<SharedRef>, Path(id): Path<String>) -> ApiResult {
+    let bytes = hex::decode(id.trim())
+        .ok()
+        .and_then(|b| <[u8; 32]>::try_from(b).ok())
+        .ok_or_else(|| {
+            error(
+                StatusCode::BAD_REQUEST,
+                "identifiant invalide : 64 caractères hexadécimaux",
+            )
+        })?;
+    let st = view(&shared);
+    let p = st
+        .governance
+        .proposals
+        .get(&bytes)
+        .ok_or_else(|| error(StatusCode::NOT_FOUND, "proposition inconnue"))?;
+    Ok(Json(proposal_json(&st, &bytes, p)))
+}
+
 async fn governance(State(shared): State<SharedRef>) -> ApiResult {
     let state = view(&shared);
     let st = &state;
@@ -1287,6 +1405,33 @@ fn tx_json(stx: &SignedTransaction) -> Value {
             "website": website,
             "contact": contact,
         }),
+        TxBody::SubmitSpend {
+            beneficiary,
+            amount,
+            title,
+            url,
+        } => json!({
+            "kind": "demande de dépense de la réserve",
+            "to": beneficiary.to_string(),
+            "amount": amount_to_string(*amount),
+            "title": title,
+            "url": url,
+        }),
+        TxBody::VoteValidator { id, approve } => json!({
+            "kind": "vote de validateur",
+            "proposal": hash_to_hex(id),
+            "approve": approve,
+        }),
+        TxBody::VoteHolder {
+            id,
+            approve,
+            amount,
+        } => json!({
+            "kind": "vote de détenteur",
+            "proposal": hash_to_hex(id),
+            "approve": approve,
+            "amount": amount_to_string(*amount),
+        }),
         TxBody::Unjail => json!({ "kind": "retour de validateur" }),
         TxBody::LeaveValidators => json!({ "kind": "départ de validateur" }),
         TxBody::WithdrawBond => json!({ "kind": "restitution de caution" }),
@@ -1521,6 +1666,10 @@ fn admin_json(satx: &SignedAdminTransaction) -> Value {
         AdminAction::RemoveValidator { key } => {
             ("retrait de validateur", json!({ "key": key_to_hex(key) }))
         }
+        AdminAction::ProposeParam { param, value } => (
+            "proposition de paramètre",
+            json!({ "param": param_name(*param), "value": value }),
+        ),
         AdminAction::SetParam { param, value } => (
             "paramètre",
             json!({ "param": param_name(*param), "value": value }),
@@ -1582,6 +1731,9 @@ pub fn param_name(p: ParamId) -> &'static str {
         ParamId::BondUnlockDelay => "bond_unlock_delay",
         ParamId::AdminDelay => "admin_delay",
         ParamId::Diversity => "diversity",
+        ParamId::ProposalDeposit => "proposal_deposit",
+        ParamId::HolderQuorum => "holder_quorum",
+        ParamId::HolderQuorumMin => "holder_quorum_min",
     }
 }
 

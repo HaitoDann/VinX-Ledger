@@ -98,6 +98,9 @@ enum Command {
     /// Opérations d'un validateur sur sa fiche et sa caution (protocole 7).
     #[command(subcommand)]
     Validator(ValidatorCommand),
+    /// Réserve du protocole et votes (protocole 8, modèle réserve).
+    #[command(subcommand)]
+    Reserve(ReserveCommand),
     /// Vérifie que de futurs validateurs sont prêts, avant de les ajouter.
     ///
     /// `--node` désigne un nœud du réseau actuel (la référence) ; chaque
@@ -309,7 +312,61 @@ enum NameCommand {
 }
 
 #[derive(Subcommand)]
+enum ReserveCommand {
+    /// Solde de la réserve, plafond du mois, propositions.
+    Show,
+    /// Une proposition et ses votes.
+    Proposal { id: String },
+    /// Dépose une demande de dépense (caution prélevée sur le compte).
+    Request {
+        #[arg(long)]
+        key: PathBuf,
+        #[arg(long)]
+        to: Address,
+        /// Montant en VINX (100 000 au plus).
+        #[arg(long)]
+        amount: String,
+        #[arg(long)]
+        title: String,
+        #[arg(long, default_value = "")]
+        url: String,
+    },
+    /// Vote de détenteur : bloque le montant jusqu'à la clôture du scrutin.
+    Vote {
+        #[arg(long)]
+        key: PathBuf,
+        /// Identifiant de la proposition.
+        #[arg(long)]
+        proposal: String,
+        /// VINX bloqués pour le vote.
+        #[arg(long)]
+        amount: String,
+        /// Vote contre (par défaut : pour).
+        #[arg(long)]
+        against: bool,
+    },
+}
+
+/// Identifiant hexadécimal de 32 octets.
+fn hash_arg(s: &str) -> Result<[u8; 32]> {
+    hex::decode(s.trim())
+        .ok()
+        .and_then(|b| <[u8; 32]>::try_from(b).ok())
+        .ok_or_else(|| anyhow!("identifiant invalide : 64 caractères hexadécimaux"))
+}
+
+#[derive(Subcommand)]
 enum ValidatorCommand {
+    /// Vote du validateur sur une proposition de la réserve ou de paramètre.
+    Vote {
+        #[arg(long)]
+        key: PathBuf,
+        #[arg(long)]
+        proposal: String,
+        /// Vote contre (par défaut : pour).
+        #[arg(long)]
+        against: bool,
+    },
     /// Dépose ou complète la caution, depuis l'adresse de la clé du validateur.
     Bond {
         /// Fichier de clé du validateur.
@@ -662,6 +719,14 @@ enum ActionArg {
         #[arg(long)]
         value: u64,
     },
+    /// Protocole 8, modèle réserve : propose un changement de paramètre, soumis
+    /// au vote des validateurs (et des détenteurs pour un paramètre économique).
+    ProposeParam {
+        #[arg(long)]
+        param: String,
+        #[arg(long)]
+        value: u64,
+    },
     /// Remplace un signataire admin.
     ReplaceSigner {
         #[arg(long)]
@@ -761,6 +826,10 @@ fn action(arg: ActionArg) -> Result<AdminAction> {
             key: key_from_hex(&key)?,
         },
         ActionArg::SetParam { param, value } => AdminAction::SetParam {
+            param: param_id(&param)?,
+            value,
+        },
+        ActionArg::ProposeParam { param, value } => AdminAction::ProposeParam {
             param: param_id(&param)?,
             value,
         },
@@ -1220,6 +1289,17 @@ fn main() -> Result<()> {
                     load_key(&key, pwf)?,
                     vinx_core::TxBody::UpdateValidatorInfo { website, contact },
                 ),
+                ValidatorCommand::Vote {
+                    key,
+                    proposal,
+                    against,
+                } => (
+                    load_key(&key, pwf)?,
+                    vinx_core::TxBody::VoteValidator {
+                        id: hash_arg(&proposal)?,
+                        approve: !against,
+                    },
+                ),
                 ValidatorCommand::Unjail { key } => {
                     (load_key(&key, pwf)?, vinx_core::TxBody::Unjail)
                 }
@@ -1234,6 +1314,55 @@ fn main() -> Result<()> {
                 "transaction {}",
                 ops::submit(&client, &key, None, body, None)?
             );
+        }
+        Command::Reserve(cmd) => {
+            let send = |key: &Path, body: vinx_core::TxBody| -> Result<()> {
+                println!(
+                    "transaction {}",
+                    ops::submit(&client, &load_key(key, pwf)?, None, body, None)?
+                );
+                Ok(())
+            };
+            match cmd {
+                ReserveCommand::Show => {
+                    let v = client.get_json("/reserve")?.unwrap_or_default();
+                    println!("{}", serde_json::to_string_pretty(&v)?);
+                }
+                ReserveCommand::Proposal { id } => {
+                    let v = client
+                        .get_json(&format!("/proposals/{}", hex::encode(hash_arg(&id)?)))?
+                        .ok_or_else(|| anyhow!("proposition introuvable"))?;
+                    println!("{}", serde_json::to_string_pretty(&v)?);
+                }
+                ReserveCommand::Request {
+                    key,
+                    to,
+                    amount,
+                    title,
+                    url,
+                } => send(
+                    &key,
+                    vinx_core::TxBody::SubmitSpend {
+                        beneficiary: to,
+                        amount: parse_vinx(&amount)?,
+                        title,
+                        url,
+                    },
+                )?,
+                ReserveCommand::Vote {
+                    key,
+                    proposal,
+                    amount,
+                    against,
+                } => send(
+                    &key,
+                    vinx_core::TxBody::VoteHolder {
+                        id: hash_arg(&proposal)?,
+                        approve: !against,
+                        amount: parse_vinx(&amount)?,
+                    },
+                )?,
+            }
         }
         Command::Asset(cmd) => {
             let send = |key: &Path, body: vinx_core::TxBody| -> Result<()> {

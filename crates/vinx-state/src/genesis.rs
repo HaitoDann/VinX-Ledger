@@ -19,7 +19,7 @@ use vinx_crypto::{Address, PublicKey};
 pub const LEGACY_GENESIS_TREASURY: Amount = 100_000_000 * UNITS_PER_VINX;
 
 /// Version du protocole d'une genèse standard.
-pub const GENESIS_PROTOCOL: u32 = 7;
+pub const GENESIS_PROTOCOL: u32 = 8;
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Genesis {
@@ -45,6 +45,10 @@ pub struct Genesis {
     /// Protocole 7 : caution exigée de chaque validateur (`validator_bond`
     /// des paramètres). `None` : la valeur par défaut, 10 000 VINX.
     pub required_bond: Option<Amount>,
+    /// Protocole 8 : modèle réserve (réseau principal, pré-production). Les
+    /// 900 M forment la réserve du protocole au lieu de l'escrow ; pas de
+    /// trésorerie ni de robinet.
+    pub reserve_model: bool,
 }
 
 #[derive(Debug, Error, PartialEq, Eq)]
@@ -67,6 +71,8 @@ pub enum GenesisError {
     InvalidIdentities,
     #[error("trésorerie insuffisante pour les cautions des validateurs")]
     BondsTooLarge,
+    #[error("modèle réserve : protocole 8 au moins, sans escrow, sans trésorerie ni robinet")]
+    InvalidReserveModel,
 }
 
 impl Genesis {
@@ -92,6 +98,7 @@ impl Genesis {
             identities: Vec::new(),
             validator_bond: 0,
             required_bond: None,
+            reserve_model: false,
         })
     }
 
@@ -131,6 +138,18 @@ impl Genesis {
         Ok(self)
     }
 
+    /// Modèle réserve (protocole 8) : les 900 M de l'escrow deviennent la
+    /// réserve du protocole. À appeler sur une genèse sans robinet.
+    pub fn with_reserve(mut self) -> Result<Self, GenesisError> {
+        if self.treasury_balance > 0 {
+            return Err(GenesisError::InvalidReserveModel);
+        }
+        self.escrow.tranches.clear();
+        self.protocol_version = self.protocol_version.max(8);
+        self.reserve_model = true;
+        Ok(self)
+    }
+
     /// Construit l'état initial, après vérification de toutes les règles.
     pub fn into_state(self) -> Result<State, GenesisError> {
         if self.chain_id.is_empty() {
@@ -154,8 +173,20 @@ impl Genesis {
         if self.escrow.period == 0 || !ordered {
             return Err(GenesisError::InvalidEscrow);
         }
+        let reserve = if self.reserve_model {
+            if self.protocol_version < 8
+                || self.treasury_balance > 0
+                || !self.escrow.tranches.is_empty()
+            {
+                return Err(GenesisError::InvalidReserveModel);
+            }
+            crate::governance::GENESIS_RESERVE
+        } else {
+            0
+        };
         let total = u128::from(self.treasury_balance)
-            .checked_add(self.escrow.total())
+            .checked_add(u128::from(reserve))
+            .and_then(|t| t.checked_add(self.escrow.total()))
             .and_then(|t| t.checked_add(u128::from(self.emission_budget)));
         if total != Some(u128::from(TOTAL_SUPPLY)) {
             return Err(GenesisError::SupplyMismatch);
@@ -207,6 +238,12 @@ impl Genesis {
             assets: Default::default(),
             reserves: Default::default(),
             staking,
+            governance: crate::governance::Governance {
+                enabled: self.reserve_model,
+                reserve,
+                month_start: self.genesis_time,
+                ..Default::default()
+            },
             emission: Emission {
                 start: self.genesis_time,
                 budget: self.emission_budget,
@@ -414,6 +451,23 @@ mod tests {
         g.protocol_version = 6;
         g.validator_bond = 0;
         assert_eq!(g.into_state(), Err(GenesisError::InvalidIdentities));
+    }
+
+    #[test]
+    fn reserve_model_genesis() {
+        let s = standard().with_reserve().unwrap().into_state().unwrap();
+        assert!(s.governance.enabled);
+        assert_eq!(s.governance.reserve, crate::governance::GENESIS_RESERVE);
+        assert!(s.escrow.tranches.is_empty());
+        assert_eq!(s.accounts[&Address::treasury()].balance, 0);
+        assert_eq!(s.protocol_version, 8);
+        assert_eq!(s.check_invariant(), Ok(()));
+        // Pas de robinet au modèle réserve.
+        let g = standard().with_faucet(UNITS_PER_VINX).unwrap();
+        assert_eq!(g.with_reserve(), Err(GenesisError::InvalidReserveModel));
+        let mut g = standard().with_reserve().unwrap();
+        g.protocol_version = 7;
+        assert_eq!(g.into_state(), Err(GenesisError::InvalidReserveModel));
     }
 
     #[test]

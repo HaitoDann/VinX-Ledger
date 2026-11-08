@@ -350,8 +350,12 @@ $("dlg-password").addEventListener("keydown", e => { if (e.key === "Enter") clos
 /* ---------- État partagé ---------- */
 let gov = null, status = null, keys = null;
 
+let reserveEnabled = false;
 async function loadCore() {
   [status, gov, keys] = await Promise.all([node("/status"), node("/governance"), api("/api/keys")]);
+  reserveEnabled = await node("/reserve").then((r) => !!r.enabled).catch(() => false);
+  // Modèle réserve : ni trésorerie ni escrow à la main de l'admin.
+  document.querySelectorAll("#tt-to, #tt-amount, #tt-memo").forEach((el) => { el.disabled = reserveEnabled; });
   $("chain").textContent = status.chain_id;
   const h = $("health");
   h.textContent = `hauteur ${fr(status.height)} · nonce admin ${gov.admin.nonce}`; h.className = "pill ok";
@@ -574,8 +578,10 @@ async function proposeParam(i) {
   if (v === null || v === undefined) return toast("Saisis une nouvelle valeur valide pour « " + p.label + " »", true);
   const r = p.check(v);
   const value = String(v);
-  await propose({ kind: "set-param", param: p.name, value }, "Changer un paramètre",
-    `<dl><dt>Paramètre</dt><dd>${p.label} <span class="mono muted">${p.name}</span></dd>
+  // Protocole 8, modèle réserve : l'admin propose, les validateurs (et les détenteurs) votent.
+  const voted = !!reserveEnabled;
+  await propose({ kind: voted ? "propose-param" : "set-param", param: p.name, value }, voted ? "Proposer un paramètre au vote" : "Changer un paramètre",
+    `${voted ? '<p class="note">Modèle réserve : la valeur sera <b>soumise au vote</b> des validateurs (7 jours), puis des détenteurs pour un paramètre économique (14 jours).</p>' : ""}<dl><dt>Paramètre</dt><dd>${p.label} <span class="mono muted">${p.name}</span></dd>
      <dt>Actuel</dt><dd>${fmtParam(p, gov.params[p.key])}</dd><dt>Nouveau</dt><dd><strong>${fmtParam(p, v)}</strong></dd></dl>
      ${r ? `<p class="${r[0]}">${r[1]}</p>` : ""}`, { danger: !!(r && r[0] === "bad") });
 }

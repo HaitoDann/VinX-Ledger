@@ -66,6 +66,12 @@ pub enum AdminAction {
     CancelPending {
         id: Hash,
     } = 0x0B,
+    /// Protocole 8, modèle réserve : propose un changement de paramètre,
+    /// soumis au vote (docs/PROTOCOLE-8.md §5). Remplace `SetParam`.
+    ProposeParam {
+        param: ParamId,
+        value: u64,
+    } = 0x0C,
 }
 
 /// Identité publique d'un validateur, fixée par la gouvernance (protocole 7).
@@ -105,6 +111,7 @@ impl AdminAction {
             AdminAction::EscrowRelease { .. }
                 | AdminAction::ScheduleUpgrade { .. }
                 | AdminAction::CancelPending { .. }
+                | AdminAction::ProposeParam { .. }
         )
     }
 }

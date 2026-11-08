@@ -80,9 +80,44 @@ pub enum ParamId {
     AdminDelay = 0x14,
     /// Règle de diversité des opérateurs : 0 (désactivée) ou 1.
     Diversity = 0x15,
+    // Protocole 8 (docs/PROTOCOLE-8.md), tenus hors de [`Params`].
+    /// Caution d'une demande de dépense de la réserve, en unités.
+    ProposalDeposit = 0x16,
+    /// Quorum du vote des détenteurs, en dix-millièmes de la circulation.
+    HolderQuorum = 0x17,
+    /// Quorum minimal du vote des détenteurs, en unités.
+    HolderQuorumMin = 0x18,
 }
 
 impl ParamId {
+    /// Paramètres du protocole 8, tenus avec la gouvernance.
+    pub fn is_governance(self) -> bool {
+        matches!(
+            self,
+            ParamId::ProposalDeposit | ParamId::HolderQuorum | ParamId::HolderQuorumMin
+        )
+    }
+
+    /// Protocole 8, modèle réserve : paramètre économique, voté par les
+    /// validateurs puis par les détenteurs. Les autres (techniques) sont
+    /// votés par les validateurs seuls.
+    pub fn is_economic(self) -> bool {
+        matches!(
+            self,
+            ParamId::MinFee
+                | ParamId::MinReserve
+                | ParamId::ObjectReserve
+                | ParamId::NameFee
+                | ParamId::AssetFee
+                | ParamId::ValidatorBond
+                | ParamId::MinAvailability
+                | ParamId::VoteShare
+                | ParamId::ProposalDeposit
+                | ParamId::HolderQuorum
+                | ParamId::HolderQuorumMin
+        )
+    }
+
     /// Paramètres du protocole 7, tenus dans la table des validateurs.
     pub fn is_staking(self) -> bool {
         matches!(
@@ -113,6 +148,7 @@ impl Params {
             | ParamId::BondUnlockDelay
             | ParamId::AdminDelay
             | ParamId::Diversity => return,
+            ParamId::ProposalDeposit | ParamId::HolderQuorum | ParamId::HolderQuorumMin => return,
             ParamId::MinFee => &mut self.min_fee,
             ParamId::MinReserve => &mut self.min_reserve,
             ParamId::MaxMemoBytes => &mut self.max_memo_bytes,
@@ -138,7 +174,8 @@ mod tests {
         assert_eq!(crate::encode(&ParamId::MinBlockInterval), [0x0A]);
         assert!(crate::decode::<ParamId>(&[0x00]).is_err());
         assert_eq!(crate::encode(&ParamId::Diversity), [0x15]);
-        assert!(crate::decode::<ParamId>(&[0x16]).is_err());
+        assert_eq!(crate::encode(&ParamId::HolderQuorumMin), [0x18]);
+        assert!(crate::decode::<ParamId>(&[0x19]).is_err());
     }
 
     #[test]

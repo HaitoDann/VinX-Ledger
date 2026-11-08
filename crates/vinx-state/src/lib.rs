@@ -5,6 +5,7 @@ pub mod assets;
 pub mod emission;
 pub mod escrow;
 pub mod genesis;
+pub mod governance;
 pub mod mandate;
 pub mod policy;
 pub mod registry;

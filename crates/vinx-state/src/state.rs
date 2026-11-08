@@ -7,6 +7,10 @@ use crate::assets::{
 };
 use crate::emission::Emission;
 use crate::escrow::{Escrow, EscrowError};
+use crate::governance::{
+    Governance, GovernanceError, HOLDER_VOTE_PERIOD, HolderLock, MAX_HOLDER_VOTERS, MONTH,
+    MONTHLY_CAP, Phase, Proposal, ProposalKind, VALIDATOR_VOTE_PERIOD,
+};
 use crate::mandate::{Mandate, MandateError, Mandates};
 use crate::policy::{Policies, Policy, PolicyError};
 use crate::registry::{
@@ -24,6 +28,10 @@ use std::collections::BTreeMap;
 use std::collections::BTreeSet;
 use thiserror::Error;
 use vinx_core::params::MIN_UPGRADE_DELAY;
+
+/// Protocole 8, modèle réserve : préavis minimal d'une mise à jour d'urgence
+/// signée par les trois signataires admin (environ 1 h à 5 s le bloc).
+pub const EMERGENCY_UPGRADE_DELAY: u64 = 720;
 use vinx_core::{
     ADMIN_SIGNERS, Account, AdminAction, Amount, Block, CommitCertificate, LAST_COMMIT_PROTOCOL,
     ParamId, Params, SignedAdminTransaction, SignedTransaction, TOTAL_SUPPLY, TxBody, deal_id,
@@ -33,7 +41,7 @@ use vinx_crypto::{Address, Domain, Hash, PublicKey, hash_tagged_parts, merkle_ro
 
 /// Dernière version du protocole que ce code sait exécuter. Un nœud plus
 /// ancien qu'une mise à jour activée s'arrête au lieu de diverger.
-pub const SUPPORTED_PROTOCOL: u32 = 7;
+pub const SUPPORTED_PROTOCOL: u32 = 8;
 
 #[derive(Clone, Debug, PartialEq, Eq, BorshSerialize, BorshDeserialize)]
 pub struct AdminSet {
@@ -75,12 +83,16 @@ pub struct State {
     pub reserves: Reserves,
     /// Validateurs nommés, cautions, actions admin en attente (protocole 7).
     pub staking: Staking,
+    /// Réserve du protocole et gouvernance votée (protocole 8, modèle réserve).
+    pub governance: Governance,
 }
 
 #[derive(Debug, Error, PartialEq, Eq)]
 pub enum TxError {
     #[error("{0}")]
     Staking(StakingError),
+    #[error("{0}")]
+    Governance(GovernanceError),
     #[error("{0}")]
     Asset(AssetError),
     #[error(
@@ -248,6 +260,7 @@ struct Globals {
     assets: Assets,
     reserves: Reserves,
     staking: Staking,
+    governance: Governance,
 }
 
 /// [`Globals`] des versions 0.21 à 0.28, sans validateurs nommés.
@@ -287,6 +300,7 @@ impl From<GlobalsV6> for Globals {
             assets: g.assets,
             reserves: g.reserves,
             staking: Staking::default(),
+            governance: Governance::default(),
         }
     }
 }
@@ -327,6 +341,7 @@ impl From<GlobalsV5> for Globals {
             assets: g.assets,
             reserves: Reserves::default(),
             staking: Staking::default(),
+            governance: Governance::default(),
         }
     }
 }
@@ -366,6 +381,7 @@ impl From<GlobalsV4M> for Globals {
             assets: Assets::default(),
             reserves: Reserves::default(),
             staking: Staking::default(),
+            governance: Governance::default(),
         }
     }
 }
@@ -404,6 +420,7 @@ impl From<GlobalsV4> for Globals {
             assets: Assets::default(),
             reserves: Reserves::default(),
             staking: Staking::default(),
+            governance: Governance::default(),
         }
     }
 }
@@ -441,6 +458,7 @@ impl From<GlobalsV3> for Globals {
             assets: Assets::default(),
             reserves: Reserves::default(),
             staking: Staking::default(),
+            governance: Governance::default(),
         }
     }
 }
@@ -477,6 +495,7 @@ impl From<GlobalsV2> for Globals {
             assets: Assets::default(),
             reserves: Reserves::default(),
             staking: Staking::default(),
+            governance: Governance::default(),
         }
     }
 }
@@ -512,6 +531,7 @@ impl From<LegacyGlobals> for Globals {
             assets: Assets::default(),
             reserves: Reserves::default(),
             staking: Staking::default(),
+            governance: Governance::default(),
         }
     }
 }
@@ -535,6 +555,7 @@ impl State {
             assets: self.assets.clone(),
             reserves: self.reserves.clone(),
             staking: self.staking.clone(),
+            governance: self.governance.clone(),
         })
     }
 
@@ -570,6 +591,11 @@ impl State {
                 presence: self.staking.presence.clone(),
                 ..Staking::default()
             },
+            governance: Governance {
+                proposals: Table::new(),
+                locks: Table::new(),
+                ..self.governance.clone()
+            },
         })
     }
 
@@ -602,6 +628,8 @@ impl State {
         out.extend(rows(&mut self.staking.bonds));
         out.extend(rows(&mut self.staking.pending));
         out.extend(rows(&mut self.staking.slashed));
+        out.extend(rows(&mut self.governance.proposals));
+        out.extend(rows(&mut self.governance.locks));
         out
     }
 
@@ -633,6 +661,8 @@ impl State {
             t if t == <Bond as Row>::TAG => load(&mut self.staking.bonds, key, value),
             t if t == <PendingAdmin as Row>::TAG => load(&mut self.staking.pending, key, value),
             t if t == <Slashed as Row>::TAG => load(&mut self.staking.slashed, key, value),
+            t if t == <Proposal as Row>::TAG => load(&mut self.governance.proposals, key, value),
+            t if t == <HolderLock as Row>::TAG => load(&mut self.governance.locks, key, value),
             _ => None,
         }
     }
@@ -653,6 +683,8 @@ impl State {
         self.staking.bonds.mark_all_dirty();
         self.staking.pending.mark_all_dirty();
         self.staking.slashed.mark_all_dirty();
+        self.governance.proposals.mark_all_dirty();
+        self.governance.locks.mark_all_dirty();
     }
 
     /// Reconstitue un état à partir de [`Self::globals_bytes`] et des comptes.
@@ -685,6 +717,7 @@ impl State {
             assets: g.assets,
             reserves: g.reserves,
             staking: g.staking,
+            governance: g.governance,
         })
     }
 
@@ -696,6 +729,8 @@ impl State {
             .checked_add(self.escrow.total())
             .and_then(|t| t.checked_add(self.registry.locked()))
             .and_then(|t| t.checked_add(self.staking.bonds.locked()))
+            .and_then(|t| t.checked_add(u128::from(self.governance.reserve)))
+            .and_then(|t| t.checked_add(self.governance.locked()))
             .and_then(|t| t.checked_add(u128::from(self.emission.pot)))
             .and_then(|t| t.checked_add(u128::from(self.emission.remaining())));
         if total == Some(u128::from(TOTAL_SUPPLY)) {
@@ -758,6 +793,20 @@ impl State {
                 k.bonds.root(),
                 k.pending.root(),
                 k.slashed.root(),
+            )));
+        }
+        if self.protocol_version >= 8 {
+            let g = &self.governance;
+            globals.extend_from_slice(&encode(&(
+                g.enabled,
+                g.reserve,
+                g.month_start,
+                g.spent_this_month,
+                &g.params,
+                &g.queue,
+                &g.open,
+                g.proposals.root(),
+                g.locks.root(),
             )));
         }
         hash_tagged_parts(
@@ -903,6 +952,8 @@ impl State {
         let mut record_write: Option<(PublicKey, ValidatorRecord)> = None;
         let mut validator_effect: Option<ValidatorEffect> = None;
         let mut slash: Option<SlashEffect> = None;
+        let mut proposal_write: Option<(Hash, Proposal)> = None;
+        let mut lock_write: Option<((Hash, Address), HolderLock)> = None;
         let mut asset_mandate_write: Option<((String, Address, Address), Option<AssetMandate>)> =
             None;
         match body {
@@ -968,6 +1019,120 @@ impl State {
                 record.website = website.clone();
                 record.contact = contact.clone();
                 record_write = Some((key, record));
+            }
+            TxBody::SubmitSpend {
+                beneficiary,
+                amount,
+                title,
+                url,
+            } => {
+                let g = &self.governance;
+                if !g.enabled {
+                    return Err(TxError::Governance(GovernanceError::NoReserve));
+                }
+                if *amount == 0 || *amount > vinx_core::MAX_SPEND {
+                    return Err(TxError::Governance(GovernanceError::BadAmount));
+                }
+                if title.is_empty()
+                    || title.len() > vinx_core::MAX_SPEND_TITLE
+                    || url.len() > vinx_core::MAX_SPEND_URL
+                {
+                    return Err(TxError::Governance(GovernanceError::BadText));
+                }
+                let deposit = g.params.proposal_deposit;
+                changes.debit(&self.accounts, tx.sender, deposit)?;
+                proposal_write = Some((
+                    stx.id(),
+                    Proposal {
+                        kind: ProposalKind::Spend {
+                            beneficiary: *beneficiary,
+                            amount: *amount,
+                            title: title.clone(),
+                            url: url.clone(),
+                        },
+                        author: tx.sender,
+                        deposit,
+                        submitted_at: self.height.saturating_add(1),
+                        phase: Phase::Validators {
+                            ends_at: now.saturating_add(VALIDATOR_VOTE_PERIOD),
+                        },
+                        validator_votes: Vec::new(),
+                        yes: 0,
+                        no: 0,
+                        voters: 0,
+                        quorum: 0,
+                    },
+                ));
+            }
+            TxBody::VoteValidator { id, approve } => {
+                let err = |e| Err(TxError::Governance(e));
+                if !self.governance.enabled {
+                    return err(GovernanceError::NoReserve);
+                }
+                let mut p = self
+                    .governance
+                    .proposals
+                    .get(id)
+                    .cloned()
+                    .ok_or(TxError::Governance(GovernanceError::UnknownProposal))?;
+                if !matches!(p.phase, Phase::Validators { ends_at } if now < ends_at) {
+                    return err(GovernanceError::WrongPhase);
+                }
+                let key = self
+                    .validators_at(self.height.saturating_add(1))
+                    .into_iter()
+                    .find(|k| Address::from_public_key(k) == tx.sender)
+                    .ok_or(TxError::Governance(GovernanceError::NotValidator))?;
+                if matches!(&p.kind, ProposalKind::Spend { beneficiary, .. } if *beneficiary == tx.sender)
+                {
+                    return err(GovernanceError::Beneficiary);
+                }
+                p.validator_votes.retain(|(k, _)| *k != key);
+                p.validator_votes.push((key, *approve));
+                proposal_write = Some((*id, p));
+            }
+            TxBody::VoteHolder {
+                id,
+                approve,
+                amount,
+            } => {
+                let err = |e| Err(TxError::Governance(e));
+                if !self.governance.enabled {
+                    return err(GovernanceError::NoReserve);
+                }
+                if *amount == 0 {
+                    return Err(TxError::ZeroAmount);
+                }
+                let mut p = self
+                    .governance
+                    .proposals
+                    .get(id)
+                    .cloned()
+                    .ok_or(TxError::Governance(GovernanceError::UnknownProposal))?;
+                if !matches!(p.phase, Phase::Holders { ends_at } if now < ends_at) {
+                    return err(GovernanceError::WrongPhase);
+                }
+                let lock_key = (*id, tx.sender);
+                let mut lock = match self.governance.locks.get(&lock_key) {
+                    Some(l) if l.approve != *approve => return err(GovernanceError::ChangedSide),
+                    Some(l) => l.clone(),
+                    None => {
+                        if p.voters >= MAX_HOLDER_VOTERS {
+                            return err(GovernanceError::TooManyVoters);
+                        }
+                        p.voters = p.voters.saturating_add(1);
+                        HolderLock {
+                            amount: 0,
+                            approve: *approve,
+                        }
+                    }
+                };
+                changes.debit(&self.accounts, tx.sender, *amount)?;
+                lock.amount = lock.amount.checked_add(*amount).ok_or(TxError::Overflow)?;
+                let side = if *approve { &mut p.yes } else { &mut p.no };
+                *side = side.checked_add(*amount).ok_or(TxError::Overflow)?;
+                proposal_write = Some((*id, p));
+                lock_write = Some((lock_key, lock));
             }
             TxBody::ReportEquivocation { key, evidence } => {
                 let effect = self.equivocation(key, evidence)?;
@@ -1523,6 +1688,15 @@ impl State {
             None => {}
         }
         self.emission.pot = pot;
+        if let Some((id, p)) = proposal_write {
+            if !self.governance.open.contains(&id) && matches!(p.phase, Phase::Validators { .. }) {
+                self.governance.open.push(id);
+            }
+            self.governance.proposals.insert(id, p);
+        }
+        if let Some((k, lock)) = lock_write {
+            self.governance.locks.insert(k, lock);
+        }
         if let Some(effect) = slash {
             let key = effect.slashed.key.clone();
             self.emission.pot = self.emission.pot.saturating_add(effect.to_pot);
@@ -1761,6 +1935,73 @@ impl State {
         satx.verify_approvals(&self.admin.signers)
             .map_err(|_| TxError::Unauthorized)?;
 
+        // Protocole 8, modèle réserve : l'admin ne dépense plus et ne fixe plus
+        // les paramètres ; il les propose au vote.
+        if self.protocol_version >= 8 && self.governance.enabled {
+            match &tx.action {
+                AdminAction::EscrowRelease { .. }
+                | AdminAction::EscrowReturn { .. }
+                | AdminAction::TreasuryTransfer { .. }
+                | AdminAction::SetParam { .. } => {
+                    return Err(TxError::Governance(GovernanceError::EscrowOnly));
+                }
+                AdminAction::ProposeParam { param, value } => {
+                    let mut probe = self.clone();
+                    probe.exec_admin(
+                        &AdminAction::SetParam {
+                            param: *param,
+                            value: *value,
+                        },
+                        ctx,
+                    )?;
+                    let id = satx.id();
+                    self.governance.proposals.insert(
+                        id,
+                        Proposal {
+                            kind: ProposalKind::Param {
+                                param: *param,
+                                value: *value,
+                            },
+                            author: Address::treasury(),
+                            deposit: 0,
+                            submitted_at: ctx.height,
+                            phase: Phase::Validators {
+                                ends_at: ctx.now.saturating_add(VALIDATOR_VOTE_PERIOD),
+                            },
+                            validator_votes: Vec::new(),
+                            yes: 0,
+                            no: 0,
+                            voters: 0,
+                            quorum: 0,
+                        },
+                    );
+                    self.governance.open.push(id);
+                    self.admin.nonce = tx.nonce;
+                    return Ok(());
+                }
+                // Urgence : les trois signatures autorisent un préavis réduit.
+                AdminAction::ScheduleUpgrade {
+                    version,
+                    activation_height,
+                } if satx.approvals.len() == ADMIN_SIGNERS => {
+                    let next_version = self.protocol_version.checked_add(1);
+                    let earliest = ctx.height.checked_add(EMERGENCY_UPGRADE_DELAY);
+                    if next_version != Some(*version)
+                        || earliest.is_none_or(|e| *activation_height < e)
+                    {
+                        return Err(TxError::InvalidUpgrade);
+                    }
+                    self.upgrade = Some(PendingUpgrade {
+                        version: *version,
+                        activation_height: *activation_height,
+                    });
+                    self.admin.nonce = tx.nonce;
+                    return Ok(());
+                }
+                _ => {}
+            }
+        }
+
         if self.protocol_version >= 7 && tx.action.is_delayed() {
             // Protocole 7 : vérifiée maintenant, exécutée après le délai.
             let mut probe = self.clone();
@@ -1902,6 +2143,21 @@ impl State {
                     return Err(TxError::NotYetActive);
                 }
                 self.assets.fee = *value;
+            }
+            AdminAction::SetParam { param, value } if param.is_governance() => {
+                self.require(8)?;
+                let p = &mut self.governance.params;
+                match param {
+                    ParamId::ProposalDeposit if *value > 0 => p.proposal_deposit = *value,
+                    ParamId::HolderQuorum if *value > 0 && *value <= 10_000 => {
+                        p.holder_quorum = *value;
+                    }
+                    ParamId::HolderQuorumMin => p.holder_quorum_min = *value,
+                    _ => return Err(TxError::InvalidParam),
+                }
+            }
+            AdminAction::ProposeParam { .. } => {
+                return Err(TxError::Governance(GovernanceError::NoReserve));
             }
             AdminAction::SetParam { param, value } if param.is_staking() => {
                 self.require(7)?;
@@ -2094,6 +2350,159 @@ impl State {
             .insert(name_key(&identity.name), NameOwner { key: key.clone() });
         self.staking.records.insert(key.clone(), record);
         Ok(())
+    }
+
+    /// Crédite un compte hors transaction (gouvernance, fin de scrutin).
+    fn credit_now(&mut self, to: Address, amount: Amount) {
+        if amount == 0 {
+            return;
+        }
+        let mut changes = Changes::default();
+        if changes.credit(&self.accounts, to, amount).is_ok() {
+            changes.commit(&mut self.accounts);
+        }
+    }
+
+    /// VINX en circulation, pour le quorum des détenteurs : soldes des comptes
+    /// et VINX bloqués aux votes. Exclus : réserve, émission restante, pot,
+    /// cautions, séquestres.
+    pub fn circulation(&self) -> u128 {
+        self.accounts
+            .total_balance()
+            .saturating_add(self.governance.locks.locked())
+    }
+
+    /// Applique un paramètre accepté par le vote. Faux s'il est devenu
+    /// invalide (l'état n'est alors pas modifié).
+    fn apply_voted_param(&mut self, param: ParamId, value: u64, ctx: Ctx) -> bool {
+        let mut probe = self.clone();
+        if probe
+            .exec_admin(&AdminAction::SetParam { param, value }, ctx)
+            .is_ok()
+        {
+            *self = probe;
+            true
+        } else {
+            false
+        }
+    }
+
+    /// Protocole 8, modèle réserve, au début de chaque bloc : mois de la
+    /// réserve, clôture des scrutins, versements dans la limite du mois.
+    fn run_governance(&mut self, ctx: Ctx) {
+        let start = self.governance.month_start;
+        if ctx.now >= start.saturating_add(MONTH) {
+            let months = ctx.now.saturating_sub(start) / MONTH;
+            self.governance.month_start = start.saturating_add(months.saturating_mul(MONTH));
+            self.governance.spent_this_month = 0;
+        }
+        let active = self.validators_at(ctx.height);
+        let at = ctx.height;
+        for id in self.governance.open.clone() {
+            let Some(mut p) = self.governance.proposals.get(&id).cloned() else {
+                self.governance.open.retain(|x| *x != id);
+                continue;
+            };
+            let mut closed = false;
+            match p.phase {
+                Phase::Validators { ends_at } => {
+                    let electorate = Governance::electorate(&p.kind, &active);
+                    if Governance::validators_approve(&p, &electorate) {
+                        // Caution rendue : la demande a le soutien des validateurs.
+                        let deposit = std::mem::take(&mut p.deposit);
+                        self.credit_now(p.author, deposit);
+                        match &p.kind {
+                            ProposalKind::Param { param, value } if !param.is_economic() => {
+                                let ok = self.apply_voted_param(*param, *value, ctx);
+                                p.phase = if ok {
+                                    Phase::Applied { at }
+                                } else {
+                                    Phase::Rejected { at }
+                                };
+                                closed = true;
+                            }
+                            _ => {
+                                p.quorum = self.governance.quorum_for(self.circulation());
+                                p.phase = Phase::Holders {
+                                    ends_at: ctx.now.saturating_add(HOLDER_VOTE_PERIOD),
+                                };
+                            }
+                        }
+                    } else if ctx.now >= ends_at {
+                        let deposit = std::mem::take(&mut p.deposit);
+                        self.governance.reserve = self.governance.reserve.saturating_add(deposit);
+                        p.phase = Phase::Rejected { at };
+                        closed = true;
+                    }
+                }
+                Phase::Holders { ends_at } if ctx.now >= ends_at => {
+                    // Les VINX bloqués reviennent à leurs comptes.
+                    let locks: Vec<(Address, Amount)> = self
+                        .governance
+                        .locks
+                        .iter()
+                        .filter(|((pid, _), _)| *pid == id)
+                        .map(|((_, a), l)| (*a, l.amount))
+                        .collect();
+                    for (who, amount) in locks {
+                        self.governance.locks.remove(&(id, who));
+                        self.credit_now(who, amount);
+                    }
+                    let turnout = p.yes.saturating_add(p.no);
+                    let accepted = turnout >= p.quorum && p.yes > p.no;
+                    p.phase = match (&p.kind, accepted) {
+                        (_, false) => Phase::Rejected { at },
+                        (ProposalKind::Spend { .. }, true) => {
+                            self.governance.queue.push(id);
+                            Phase::Queued
+                        }
+                        (ProposalKind::Param { param, value }, true) => {
+                            if self.apply_voted_param(*param, *value, ctx) {
+                                Phase::Applied { at }
+                            } else {
+                                Phase::Rejected { at }
+                            }
+                        }
+                    };
+                    closed = true;
+                }
+                Phase::Holders { .. } => {}
+                _ => closed = true,
+            }
+            if closed {
+                self.governance.open.retain(|x| *x != id);
+            }
+            self.governance.proposals.insert(id, p);
+        }
+        // Versements, dans l'ordre d'acceptation et la limite du mois.
+        while let Some(id) = self.governance.queue.first().copied() {
+            let Some(mut p) = self.governance.proposals.get(&id).cloned() else {
+                self.governance.queue.remove(0);
+                continue;
+            };
+            let ProposalKind::Spend {
+                beneficiary,
+                amount,
+                ..
+            } = p.kind
+            else {
+                self.governance.queue.remove(0);
+                continue;
+            };
+            let g = &self.governance;
+            let fits =
+                g.spent_this_month.saturating_add(amount) <= MONTHLY_CAP && g.reserve >= amount;
+            if !fits {
+                break;
+            }
+            self.governance.reserve = self.governance.reserve.saturating_sub(amount);
+            self.governance.spent_this_month =
+                self.governance.spent_this_month.saturating_add(amount);
+            self.credit_now(beneficiary, amount);
+            p.phase = Phase::Paid { at };
+            self.governance.proposals.insert(id, p);
+            self.governance.queue.remove(0);
+        }
     }
 
     /// Protocole 7 : sanction d'une double signature de `key` (§4), calculée
@@ -2515,6 +2924,9 @@ impl State {
         next.registry.now = ctx.now;
         if next.protocol_version >= 7 {
             next.run_pending_admin(ctx);
+        }
+        if next.protocol_version >= 8 && next.governance.enabled {
+            next.run_governance(ctx);
         }
         if let (Some(cert), Some(set)) = (last_commit, &certified_set) {
             if next.protocol_version < LAST_COMMIT_PROTOCOL {
